@@ -11,6 +11,9 @@ export interface ExecutionContext {
   readonly roleId: string;
   readonly permissions: ReadonlySet<string>;
   readonly correlationId: string;
+
+  hasPermission(permission: string): boolean;
+  assertPermission(permission: string): void;
 }
 
 export class ScopedExecutionContext implements ExecutionContext {

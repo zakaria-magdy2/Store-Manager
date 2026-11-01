@@ -23,6 +23,7 @@ export interface StoresTable {
 export interface UsersTable {
   id: string;
   tenant_id: string;
+  store_id: string | null;
   username: string;
   password_hash: string;
   full_name: string;
@@ -157,10 +158,22 @@ export interface OutboxEventsTable {
   created_at: Generated<string>;
 }
 
+export interface SessionsTable {
+  id: string;
+  tenant_id: string;
+  store_id: string | null;
+  user_id: string;
+  token_hash: string;
+  expires_at: string;
+  is_revoked: Generated<number>;
+  created_at: Generated<string>;
+}
+
 export interface RetailOSDatabase {
   tenants: TenantsTable;
   stores: StoresTable;
   users: UsersTable;
+  sessions: SessionsTable;
   accounts: AccountsTable;
   accounting_periods: AccountingPeriodsTable;
   journal_entries: JournalEntriesTable;

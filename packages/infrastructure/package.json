@@ -13,17 +13,18 @@
     "lint": "eslint src tests --max-warnings 0"
   },
   "dependencies": {
+    "@node-rs/argon2": "^2.2.2",
+    "@retailos/application": "workspace:*",
     "@retailos/core": "workspace:*",
     "@retailos/shared": "workspace:*",
-    "@retailos/application": "workspace:*",
-    "kysely": "^0.27.6",
-    "better-sqlite3": "^11.9.1"
+    "better-sqlite3": "^11.9.1",
+    "kysely": "^0.27.6"
   },
   "devDependencies": {
     "@retailos/tsconfig": "workspace:*",
     "@types/better-sqlite3": "^7.6.12",
+    "rimraf": "^6.0.1",
     "typescript": "^5.8.2",
-    "vitest": "^3.0.7",
-    "rimraf": "^6.0.1"
+    "vitest": "^3.0.7"
   }
 }

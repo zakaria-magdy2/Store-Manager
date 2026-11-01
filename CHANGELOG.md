@@ -4,6 +4,35 @@ All notable changes, architectural decisions, and milestones for this project wi
 
 ---
 
+## [Phase 2: Identity, RBAC, Multi-Tenancy & Store Assignment] - 2026-11-01
+
+### Implemented & Verified
+- **Core Domain Identity (`@retailos/core`)**:
+  - Implemented `Tenant`, `Store`, and `User` domain entities.
+  - Defined system roles: `OWNER`, `STORE_MANAGER`, `CASHIER`, `AUDITOR`.
+  - Implemented granular permissions map (`Permissions`) and role resolution (`getPermissionsForRole`).
+  - Enforced domain invariants (e.g. Cashier role strictly requires a store assignment).
+- **Security & Authentication Engine (`@retailos/infrastructure`)**:
+  - Implemented `Argon2PasswordHasher` leveraging native `@node-rs/argon2` with high-security parameters (memoryCost: 19MB, timeCost: 2, outputLen: 32).
+  - Implemented `CryptoTokenService` generating 256-bit cryptographically secure session tokens hashed with SHA-256 for secure storage.
+  - Added migration `002_identity_sessions` introducing `sessions` table and `store_id` reference on `users`.
+- **Multi-Tenant & Store Isolation**:
+  - Implemented `SqliteTenantRepository`, `SqliteStoreRepository`, `SqliteUserRepository`, and `SqliteSessionRepository`.
+  - Enforced strict tenant boundary: all lookups, inserts, and updates require matching caller `tenantId`.
+  - Implemented store authorization: Store Managers and Cashiers cannot access or assign users to stores outside their assigned store.
+- **Application Services (`@retailos/application`)**:
+  - `AuthService`: `login` with Argon2 verification, session token issuance, `validateSession` returning an immutable `ScopedExecutionContext`, and `logout` session revocation.
+  - `TenantService`: Multi-tenant tenant/store/user provisioning with permission verification.
+- **Shared Contracts (`@retailos/shared`)**:
+  - Added `TenantDTO`, `StoreDTO`, `UserDTO`, `AuthSessionDTO`.
+  - Added Zod validation schemas: `LoginSchema`, `CreateTenantSchema`, `CreateStoreSchema`, `CreateUserSchema`.
+- **Verification Results**:
+  - 20/20 Vitest tests passing (14 in `@retailos/core`, 6 in `@retailos/infrastructure`).
+  - Zero TypeScript compiler errors across all workspace packages.
+  - Zero ESLint warnings or errors across the entire codebase.
+
+---
+
 ## [Phase 1: Project Foundation & Core Domain] - 2026-11-01
 
 ### Implemented & Verified
