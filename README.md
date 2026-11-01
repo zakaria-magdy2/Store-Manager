@@ -46,6 +46,15 @@ This project is organized as a strict, high-performance monorepo powered by **pn
 
 ---
 
+## 📚 Documentation & Roadmap
+
+- 🗺️ **[Master Vision & Execution Roadmap (Phases 0–8)](docs/MASTER_ROADMAP_AND_VISION.md)**: Full product vision, completed work breakdown, and detailed blueprints for all upcoming phases.
+- 🧑‍💻 **[Developer Onboarding & Handover Guide](docs/DEVELOPER_HANDOVER_GUIDE.md)**: Architectural patterns, coding standards, repository cookbooks, and how to resume work.
+- 🏛️ **[Architecture Decisions (ADRs)](docs/architecture/ARCHITECTURE_DECISIONS.md)**: Formal records of all technical and architectural choices.
+- 📐 **[Master Architecture Blueprint v2.5](docs/architecture/retailos_architecture_blueprint.md)**: Comprehensive system blueprint.
+
+---
+
 ## 🚦 Getting Started
 
 ### Prerequisites
