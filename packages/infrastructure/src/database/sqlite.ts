@@ -55,18 +55,38 @@ export class SqliteDatabaseManager {
     });
   }
 
-  public close(): void {
-    if (this.rawDb) {
-      this.logger.info(`Closing SQLite database: ${this.options.filename}`);
-      try {
-        // Run checkpoint before closing to flush WAL into main DB
-        this.rawDb.pragma('wal_checkpoint(TRUNCATE)');
-      } catch (err) {
-        this.logger.warn(`Checkpoint on close returned non-fatal notice: ${String(err)}`);
-      }
-      this.rawDb.close();
-      this.rawDb = null;
-      this.kyselyDb = null;
+  /**
+   * Releases every native resource held by this manager.
+   *
+   * The Kysely instance owns the driver/pool that wraps the `better-sqlite3`
+   * handle, so it must be destroyed as well. Closing only the raw handle leaves
+   * pooled connections and native statements alive until garbage collection,
+   * which can crash the process when the Node environment is torn down (finalizers
+   * run against an already-disposed isolate). Always `await` this method.
+   */
+  public async close(): Promise<void> {
+    if (!this.rawDb) {
+      return;
+    }
+
+    this.logger.info(`Closing SQLite database: ${this.options.filename}`);
+    try {
+      // Run checkpoint before closing to flush WAL into main DB
+      this.rawDb.pragma('wal_checkpoint(TRUNCATE)');
+    } catch (err) {
+      this.logger.warn(`Checkpoint on close returned non-fatal notice: ${String(err)}`);
+    }
+
+    const kyselyDb = this.kyselyDb;
+    const rawDb = this.rawDb;
+    this.kyselyDb = null;
+    this.rawDb = null;
+
+    if (kyselyDb) {
+      // Kysely's destroy() closes the underlying better-sqlite3 handle.
+      await kyselyDb.destroy();
+    } else if (rawDb.open) {
+      rawDb.close();
     }
   }
 }

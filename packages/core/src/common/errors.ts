@@ -26,6 +26,14 @@ export class InsufficientStockError extends DomainError {
   }
 }
 
+export class InvalidCatalogError extends DomainError {
+  public readonly code = 'INVALID_CATALOG';
+}
+
+export class InvalidStockOperationError extends DomainError {
+  public readonly code = 'INVALID_STOCK_OPERATION';
+}
+
 export class PeriodClosedError extends DomainError {
   public readonly code = 'PERIOD_CLOSED';
   constructor(periodName: string) {

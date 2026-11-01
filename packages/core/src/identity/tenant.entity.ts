@@ -5,6 +5,7 @@ export interface TenantProps {
   code: string;
   currency: string;
   isActive: boolean;
+  allowNegativeStock: boolean;
 }
 
 export class Tenant extends Entity<TenantProps> {
@@ -18,6 +19,7 @@ export class Tenant extends Entity<TenantProps> {
     code: string;
     currency: string;
     isActive?: boolean;
+    allowNegativeStock?: boolean;
     createdAt?: Date;
     updatedAt?: Date;
   }): Tenant {
@@ -38,6 +40,7 @@ export class Tenant extends Entity<TenantProps> {
         code: params.code.trim().toUpperCase(),
         currency: params.currency.trim().toUpperCase(),
         isActive: params.isActive ?? true,
+        allowNegativeStock: params.allowNegativeStock ?? false,
       },
       params.createdAt,
       params.updatedAt,
@@ -58,6 +61,15 @@ export class Tenant extends Entity<TenantProps> {
 
   public get isActive(): boolean {
     return this.props.isActive;
+  }
+
+  public get allowNegativeStock(): boolean {
+    return this.props.allowNegativeStock;
+  }
+
+  public setNegativeStockPolicy(allow: boolean): void {
+    this.props.allowNegativeStock = allow;
+    this._updatedAt = new Date();
   }
 
   public activate(): void {

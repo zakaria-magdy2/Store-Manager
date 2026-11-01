@@ -76,8 +76,13 @@ export class TenantService {
     ctx.assertPermission(Permissions.USERS_MANAGE);
 
     // If caller has storeId (e.g. Store Manager), they can only create users inside their store
-    if (ctx.storeId && params.storeId && ctx.storeId !== params.storeId) {
+    if (ctx.storeId && params.storeId !== ctx.storeId) {
       throw new Error('UnauthorizedError: Store Manager cannot assign users to other stores');
+    }
+
+    // Prevent privilege escalation: only an OWNER may mint another OWNER.
+    if (ctx.roleId !== 'OWNER' && params.role === 'OWNER') {
+      throw new Error('UnauthorizedError: Only an OWNER can create another OWNER');
     }
 
     // Verify assigned store exists in this tenant if storeId is specified

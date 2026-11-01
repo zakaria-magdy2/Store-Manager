@@ -6,6 +6,7 @@ export interface TenantsTable {
   code: string;
   currency: string;
   is_active: Generated<number>; // SQLite stores booleans as 0/1
+  allow_negative_stock: Generated<number>;
   created_at: Generated<string>;
 }
 
@@ -169,6 +170,70 @@ export interface SessionsTable {
   created_at: Generated<string>;
 }
 
+export interface CategoriesTable {
+  id: string;
+  tenant_id: string;
+  parent_id: string | null;
+  name: string;
+  code: string;
+  is_active: Generated<number>;
+  created_at: Generated<string>;
+}
+
+export interface ProductsTable {
+  id: string;
+  tenant_id: string;
+  name: string;
+  sku: string;
+  barcode: string | null;
+  category_id: string | null;
+  has_variants: number;
+  is_active: Generated<number>;
+  created_at: Generated<string>;
+}
+
+export interface ProductVariantsTable {
+  id: string;
+  tenant_id: string;
+  product_id: string;
+  sku: string;
+  barcode: string | null;
+  attributes_json: string;
+  retail_price: bigint;
+  currency: string;
+  reorder_point: bigint;
+  is_active: Generated<number>;
+  created_at: Generated<string>;
+}
+
+export interface InventoryItemsTable {
+  id: string;
+  tenant_id: string;
+  store_id: string;
+  variant_id: string;
+  quantity_on_hand: bigint;
+  wac_cost: bigint;
+  currency: string;
+  updated_at: Generated<string>;
+}
+
+export interface StockMovementsTable {
+  id: string;
+  tenant_id: string;
+  store_id: string;
+  variant_id: string;
+  movement_type: string;
+  quantity_delta: bigint;
+  unit_cost: bigint;
+  currency: string;
+  resulting_quantity: bigint;
+  resulting_wac: bigint;
+  source_type: string;
+  source_id: string;
+  created_by_user_id: string;
+  created_at: Generated<string>;
+}
+
 export interface RetailOSDatabase {
   tenants: TenantsTable;
   stores: StoresTable;
@@ -183,4 +248,9 @@ export interface RetailOSDatabase {
   monthly_expense_actuals: MonthlyExpenseActualsTable;
   operating_expense_records: OperatingExpenseRecordsTable;
   outbox_events: OutboxEventsTable;
+  categories: CategoriesTable;
+  products: ProductsTable;
+  product_variants: ProductVariantsTable;
+  inventory_items: InventoryItemsTable;
+  stock_movements: StockMovementsTable;
 }

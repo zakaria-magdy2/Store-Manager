@@ -4,6 +4,7 @@ import { Logger } from '../logger/logger.js';
 import type { RetailOSDatabase } from './types.js';
 import * as initialFoundation from './migrations/001_initial_foundation.js';
 import * as identitySessions from './migrations/002_identity_sessions.js';
+import * as catalogInventory from './migrations/003_catalog_inventory.js';
 
 export class DatabaseMigrator {
   private readonly logger: Logger;
@@ -25,6 +26,10 @@ export class DatabaseMigrator {
       '002_identity_sessions': {
         up: identitySessions.up,
         down: identitySessions.down,
+      },
+      '003_catalog_inventory': {
+        up: catalogInventory.up,
+        down: catalogInventory.down,
       },
     };
 

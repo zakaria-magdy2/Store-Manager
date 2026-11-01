@@ -30,6 +30,9 @@ export const Permissions = {
   INVENTORY_RECEIVE: 'inventory:receive',
   INVENTORY_TRANSFER: 'inventory:transfer',
 
+  // Product Catalog
+  CATALOG_MANAGE: 'catalog:manage',
+
   // Financial & Reporting
   REPORTS_DAILY_VIEW: 'reports:daily:view',
   REPORTS_MONTHLY_VIEW: 'reports:monthly:view',
@@ -65,6 +68,7 @@ export const RolePermissions: Record<Role, ReadonlySet<string>> = {
     Permissions.INVENTORY_ADJUST,
     Permissions.INVENTORY_RECEIVE,
     Permissions.INVENTORY_TRANSFER,
+    Permissions.CATALOG_MANAGE,
     Permissions.REPORTS_DAILY_VIEW,
     Permissions.REPORTS_MONTHLY_VIEW,
     Permissions.EXPENSES_DIRECT_CREATE,

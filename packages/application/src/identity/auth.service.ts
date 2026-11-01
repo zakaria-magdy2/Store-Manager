@@ -55,7 +55,9 @@ export class AuthService {
     const tokenHash = this.tokenService.hashToken(rawToken);
     const expiresAt = new Date(Date.now() + this.sessionTtlHours * 3600 * 1000);
 
-    const sessionId = `sess_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    // Derive the session row id from the 256-bit token hash instead of using
+    // Math.random(). The token itself remains the only bearer secret.
+    const sessionId = `sess_${tokenHash.substring(0, 32)}`;
 
     await this.sessionRepo.createSession({
       id: sessionId,

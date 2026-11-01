@@ -21,6 +21,7 @@ export class SqliteTenantRepository implements TenantRepository {
       code: row.code,
       currency: row.currency,
       isActive: Boolean(row.is_active),
+      allowNegativeStock: Boolean(row.allow_negative_stock),
       createdAt: new Date(row.created_at),
     });
   }
@@ -40,6 +41,7 @@ export class SqliteTenantRepository implements TenantRepository {
       code: row.code,
       currency: row.currency,
       isActive: Boolean(row.is_active),
+      allowNegativeStock: Boolean(row.allow_negative_stock),
       createdAt: new Date(row.created_at),
     });
   }
@@ -53,12 +55,14 @@ export class SqliteTenantRepository implements TenantRepository {
         code: tenant.code,
         currency: tenant.currency,
         is_active: tenant.isActive ? 1 : 0,
+        allow_negative_stock: tenant.allowNegativeStock ? 1 : 0,
       })
       .onConflict((oc) =>
         oc.column('id').doUpdateSet({
           name: tenant.name,
           currency: tenant.currency,
           is_active: tenant.isActive ? 1 : 0,
+          allow_negative_stock: tenant.allowNegativeStock ? 1 : 0,
         }),
       )
       .execute();
@@ -73,6 +77,7 @@ export class SqliteTenantRepository implements TenantRepository {
         code: r.code,
         currency: r.currency,
         isActive: Boolean(r.is_active),
+        allowNegativeStock: Boolean(r.allow_negative_stock),
         createdAt: new Date(r.created_at),
       }),
     );

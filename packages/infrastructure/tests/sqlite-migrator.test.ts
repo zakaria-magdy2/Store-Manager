@@ -10,8 +10,8 @@ describe('SQLite Database & Migration Engine', () => {
     dbManager.connect();
   });
 
-  afterEach(() => {
-    dbManager.close();
+  afterEach(async () => {
+    await dbManager.close();
   });
 
   it('successfully executes initial migrations and verifies schema tables', async () => {

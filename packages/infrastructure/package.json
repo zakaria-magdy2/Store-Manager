@@ -17,12 +17,12 @@
     "@retailos/application": "workspace:*",
     "@retailos/core": "workspace:*",
     "@retailos/shared": "workspace:*",
-    "better-sqlite3": "^11.9.1",
+    "better-sqlite3": "13.0.3",
     "kysely": "^0.27.6"
   },
   "devDependencies": {
     "@retailos/tsconfig": "workspace:*",
-    "@types/better-sqlite3": "^7.6.12",
+    "@types/better-sqlite3": "9.6.0",
     "rimraf": "^6.0.1",
     "typescript": "^5.8.2",
     "vitest": "^3.0.7"

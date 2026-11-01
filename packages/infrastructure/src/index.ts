@@ -8,3 +8,8 @@ export * from './database/repositories/sqlite-tenant.repository.js';
 export * from './database/repositories/sqlite-store.repository.js';
 export * from './database/repositories/sqlite-user.repository.js';
 export * from './database/repositories/sqlite-session.repository.js';
+export * from './database/repositories/sqlite-category.repository.js';
+export * from './database/repositories/sqlite-product.repository.js';
+export * from './database/repositories/sqlite-product-variant.repository.js';
+export * from './database/repositories/sqlite-inventory.repository.js';
+export * from './database/repositories/sqlite-stock-movement.repository.js';

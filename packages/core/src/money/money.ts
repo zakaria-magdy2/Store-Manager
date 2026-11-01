@@ -50,10 +50,23 @@ export class Money extends ValueObject<MoneyProps> {
     const integerPart = parts[0] ?? '0';
     const fractionalPart = parts[1] ?? '';
 
-    // Scale to the currency's decimal places
+    // Scale to the currency's decimal places. Any excess decimals are rounded
+    // using Half-Even (Banker's Rounding) rather than silently truncated.
     const paddedFraction = fractionalPart.padEnd(currency.decimalPlaces, '0').slice(0, currency.decimalPlaces);
+    const extraDigits = fractionalPart.slice(currency.decimalPlaces);
     const combinedStr = integerPart + paddedFraction;
-    const rawBigInt = BigInt(combinedStr);
+    let rawBigInt = BigInt(combinedStr);
+
+    if (extraDigits.length > 0) {
+      const firstExtra = extraDigits.charAt(0);
+      const hasNonZeroTail = /[1-9]/.test(extraDigits.slice(1));
+      const shouldRoundUp =
+        firstExtra > '5' || (firstExtra === '5' && (hasNonZeroTail || rawBigInt % 2n !== 0n));
+      if (shouldRoundUp) {
+        rawBigInt += 1n;
+      }
+    }
+
     const finalAmount = isNegative ? -rawBigInt : rawBigInt;
 
     return new Money({ amount: finalAmount, currency });
@@ -116,6 +129,41 @@ export class Money extends ValueObject<MoneyProps> {
     }
 
     return new Money({ amount: rounded, currency: this.currency });
+  }
+
+  /**
+   * Exact integer division of the monetary amount by a scalar.
+   *
+   * Used by Weighted Average Cost valuation, where the numerator is the total
+   * inventory value in minor units and the divisor is the total quantity. The
+   * result is rounded with Half-Even by default so no fractional minor unit is
+   * ever silently dropped or invented.
+   */
+  public divideBy(divisor: bigint | number, mode: RoundingMode = 'HALF_EVEN'): Money {
+    const divisorBig = typeof divisor === 'bigint' ? divisor : BigInt(divisor);
+    if (divisorBig === 0n) {
+      throw new InvalidMoneyError('Cannot divide a monetary amount by zero');
+    }
+
+    const isNegative = (this.amount < 0n) !== (divisorBig < 0n);
+    const absNumerator = this.amount < 0n ? -this.amount : this.amount;
+    const absDivisor = divisorBig < 0n ? -divisorBig : divisorBig;
+    const quotient = absNumerator / absDivisor;
+    const remainder = absNumerator % absDivisor;
+    const half = absDivisor / 2n;
+
+    let shouldRoundUp = false;
+    if (remainder > half) {
+      shouldRoundUp = true;
+    } else if (remainder === half) {
+      shouldRoundUp = mode === 'HALF_UP' || quotient % 2n !== 0n;
+    }
+
+    const magnitude = quotient + (shouldRoundUp ? 1n : 0n);
+    return new Money({
+      amount: isNegative ? -magnitude : magnitude,
+      currency: this.currency,
+    });
   }
 
   public isZero(): boolean {

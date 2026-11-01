@@ -50,8 +50,8 @@ describe('Phase 2: Identity, RBAC & Multi-Tenant Isolation', () => {
     tenantService = new TenantService(tenantRepo, storeRepo, userRepo, passwordHasher);
   });
 
-  afterEach(() => {
-    dbManager.close();
+  afterEach(async () => {
+    await dbManager.close();
   });
 
   it('proves Argon2id password hashing and constant-time verification', async () => {
