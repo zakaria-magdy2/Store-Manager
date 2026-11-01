@@ -1,0 +1,15 @@
+{
+  "name": "@retailos/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RetailOS Electron Desktop Application",
+  "scripts": {
+    "build": "echo \"Desktop packaging prepared for Phase 8\""
+  },
+  "dependencies": {
+    "@retailos/core": "workspace:*",
+    "@retailos/shared": "workspace:*",
+    "@retailos/application": "workspace:*",
+    "@retailos/infrastructure": "workspace:*"
+  }
+}

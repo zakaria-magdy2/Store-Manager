@@ -1,0 +1,31 @@
+{
+  "name": "retailos",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Universal Retail Management System",
+  "packageManager": "pnpm@12.16.1",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "clean": "turbo run clean"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.14.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.10",
+    "turbo": "^2.4.4",
+    "typescript": "^5.8.2",
+    "typescript-eslint": "^8.72.1"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

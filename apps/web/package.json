@@ -1,0 +1,14 @@
+{
+  "name": "@retailos/web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RetailOS Web Client Application",
+  "scripts": {
+    "build": "echo \"Web application prepared for Phase 8\""
+  },
+  "dependencies": {
+    "@retailos/core": "workspace:*",
+    "@retailos/shared": "workspace:*",
+    "@retailos/application": "workspace:*"
+  }
+}

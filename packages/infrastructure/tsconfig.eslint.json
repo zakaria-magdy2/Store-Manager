@@ -1,0 +1,13 @@
+{
+  "extends": "@retailos/tsconfig/base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "paths": {
+      "@retailos/core": ["../core/src/index.ts"],
+      "@retailos/shared": ["../shared/src/index.ts"],
+      "@retailos/application": ["../application/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*", "tests/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

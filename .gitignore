@@ -1,0 +1,12 @@
+node_modules/
+dist/
+build/
+.turbo/
+*.log
+*.tsbuildinfo
+*.db
+*.db-wal
+*.db-shm
+.staging/
+.env
+.env.local

@@ -1,0 +1,29 @@
+{
+  "name": "@retailos/infrastructure",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rimraf dist tsconfig.tsbuildinfo",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src tests --max-warnings 0"
+  },
+  "dependencies": {
+    "@retailos/core": "workspace:*",
+    "@retailos/shared": "workspace:*",
+    "@retailos/application": "workspace:*",
+    "kysely": "^0.27.6",
+    "better-sqlite3": "^11.9.1"
+  },
+  "devDependencies": {
+    "@retailos/tsconfig": "workspace:*",
+    "@types/better-sqlite3": "^7.6.12",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.7",
+    "rimraf": "^6.0.1"
+  }
+}
