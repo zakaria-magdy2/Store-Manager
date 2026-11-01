@@ -2,7 +2,7 @@
 
 > **Document Status**: Active Master Reference  
 > **Target Audience**: Software Architects, Lead Engineers, and Core Contributors  
-> **Last Updated**: November 2026 (Reflecting Phase 0, 1, and 2 Completion)  
+> **Last Updated**: November 2026 (Reflecting Phase 0, 1, 2, and 3 Completion)  
 
 ---
 
@@ -48,8 +48,8 @@ RetailOS bridges this divide by delivering a **local-first, zero-cloud-dependenc
 | **Phase 0** | Architecture Analysis, Threat Modeling & Blueprint v2.5 | **COMPLETED** | Blueprint v2.5, ADR-001 through ADR-011, threat model. |
 | **Phase 1** | Monorepo Setup, Strict TypeScript, Core Domain & Database Migrations | **COMPLETED** | pnpm + Turborepo, `@retailos/core` (Money VO, Banker's Rounding, Hamilton-Hare), SQLite WAL manager, 12 tables, 11 tests. |
 | **Phase 2** | Identity, RBAC, Multi-Tenancy & Store Assignment | **COMPLETED** | Argon2id hasher, SHA-256 session tokens, RBAC roles & permissions, repository tenant boundaries, 20 tests. |
-| **Phase 3** | Product Catalog, Dynamic Attributes & WAC Inventory | **NEXT** | Universal Catalog, lot/serial tracking, append-only stock movements, WAC calculation. |
-| **Phase 4** | POS Checkout, Fast Cart & Peripheral Hardware | PLANNED | Barcode lookup, cart state machine, receipt printer ESC/POS, cash drawer trigger. |
+| **Phase 3** | Product Catalog, Dynamic Attributes & WAC Inventory | **COMPLETED** | Migration 003, JSON variant attributes, WAC engine, DB-enforced append-only ledger, atomic transfers, 42/42 tests. |
+| **Phase 4** | POS Checkout, Fast Cart & Peripheral Hardware | **NEXT** | Barcode lookup, cart state machine, receipt printer ESC/POS, cash drawer trigger. |
 | **Phase 5** | Financial Accounting, Expense Tracking & Cash Management | PLANNED | Sub-ledger postings, 3-tier cash flows (Drawer/Safe/Bank), monthly actuals tracker. |
 | **Phase 6** | Backup, Disaster Recovery & Security Hardening | PLANNED | SQLite Online Backup API, 4-stage atomic swap, corruption recovery marker. |
 | **Phase 7** | Dashboards, Analytics & Audit Logging | PLANNED | 8-Tier P&L engine, custom date ranges, drill-downs, tamper-evident audit log. |
@@ -86,31 +86,19 @@ RetailOS bridges this divide by delivering a **local-first, zero-cloud-dependenc
   - Cross-tenant data tampering raises `TenantIsolationViolation`.
 - **RBAC Matrix**: Built-in roles (`OWNER`, `STORE_MANAGER`, `CASHIER`, `AUDITOR`) with granular permission sets. Cashiers are strictly bound to a designated store.
 
----
-
-## 4. Master Forward Execution Plan: Phases 3 through 8
-
-### Phase 3: Product Catalog, Dynamic Attributes & WAC Inventory Engine
-
-#### Goal:
-Build the complete product catalog capable of handling any retail vertical (apparel, groceries, electronics, pharmacy) and the append-only inventory engine with Weighted Average Cost (WAC) valuation.
-
-#### Database Tables to Add (Migration `003_catalog_inventory.ts`):
-1. `categories`: Nested product categories (`id`, `tenant_id`, `parent_id`, `name`, `code`).
-2. `products`: Universal catalog entity (`id`, `tenant_id`, `name`, `sku`, `barcode`, `category_id`, `has_variants`, `is_active`).
-3. `product_variants`: Variant instances (`id`, `tenant_id`, `product_id`, `sku`, `barcode`, `attributes_json`, `retail_price`, `reorder_point`).
-4. `inventory_items`: Current physical stock partition (`id`, `tenant_id`, `store_id`, `variant_id`, `quantity_on_hand`, `wac_cost`, `updated_at`).
-5. `stock_movements`: Immutable append-only inventory ledger (`id`, `tenant_id`, `store_id`, `variant_id`, `movement_type`, `quantity_delta`, `unit_cost`, `resulting_quantity`, `resulting_wac`, `source_type`, `source_id`, `created_at`).
-   - Movement types: `PURCHASE_RECEIPT`, `SALE`, `CUSTOMER_RETURN`, `SUPPLIER_RETURN`, `TRANSFER_OUT`, `TRANSFER_IN`, `INVENTORY_ADJUSTMENT`, `DAMAGE_WRITE_OFF`.
-
-#### Business Rules to Implement:
-- **WAC Formula**:
-  $$\text{New WAC} = \frac{(\text{Current Qty} \times \text{Current WAC}) + (\text{Incoming Qty} \times \text{Incoming Unit Cost})}{\text{Current Qty} + \text{Incoming Qty}}$$
-- **Zero-Stock Edge Case**: If current quantity is $\le 0$, incoming purchase replaces the WAC entirely.
-- **Historical Snapshot**: Every sale movement must write an immutable `unit_cost_snapshot` equal to the prevailing WAC at that exact moment.
-- **Strict Negative Stock**: Sales cannot proceed if quantity on hand $< \text{requested}$ unless the tenant has explicitly enabled negative inventory overrides.
+### Phase 3: Product Catalog, Dynamic Attributes & WAC Inventory (Completed)
+- **Universal Catalog (`@retailos/core`)**: `Category`, `Product`, and `ProductVariant` entities. Every sellable unit is a variant; simple products use a single default variant so pricing, barcode lookup, and inventory share one code path.
+- **Dynamic Attributes**: Validated JSON primitive maps (`string | number | boolean`) stored in `attributes_json`, with key normalization, finite-number checks, and strict parse/serialize round-tripping. No schema change is required per retail vertical.
+- **WAC Engine**: `calculateWeightedAverageCost` uses exact integer numerator/denominator arithmetic; zero or negative current quantities replace the WAC entirely; `Money.divideBy` defaults to Half-Even so fractional minor units are neither dropped nor invented.
+- **Stock Ledger**: `StockMovement` is an immutable entry carrying either the receipt cost or the prevailing WAC snapshot on issues. Movement types: `PURCHASE_RECEIPT`, `SALE`, `CUSTOMER_RETURN`, `SUPPLIER_RETURN`, `TRANSFER_OUT`, `TRANSFER_IN`, `INVENTORY_ADJUSTMENT`, `DAMAGE_WRITE_OFF`.
+- **Database Expansion**: Migration `003_catalog_inventory` adds `categories`, `products`, `product_variants`, `inventory_items`, `stock_movements`, and `tenants.allow_negative_stock`. `BEFORE UPDATE` and `BEFORE DELETE` triggers on `stock_movements` raise `stock_movements is append-only: corrections must be compensating entries`.
+- **Application Services**: `CatalogService` (tenant-scoped category/product/variant creation, barcode lookup, SKU/barcode uniqueness) and `InventoryService` (receipts, sales with COGS snapshot, customer/supplier returns, damage, adjustments, atomic two-phase store transfers, movement history).
+- **Tenant Policy**: Negative stock is prohibited by default and only permitted when the tenant explicitly enables `allowNegativeStock`; store-bound actors are restricted to their assigned store.
+- **Tests**: 14 new core tests and 8 new infrastructure integration tests (barcode resolution, tenant isolation, WAC + COGS, append-only enforcement, negative-stock policy, atomic transfers, damage/returns/adjustments, store scoping).
 
 ---
+
+## 4. Master Forward Execution Plan: Phases 4 through 8
 
 ### Phase 4: POS Checkout, Fast Cart & Peripheral Drivers
 
@@ -224,4 +212,4 @@ To guarantee that any new engineer maintains the architectural integrity of Reta
 
 ---
 
-*This document serves as the permanent handover blueprint for RetailOS. Any contributor can continue implementation starting from Phase 3 with 100% architectural continuity.*
+*This document serves as the permanent handover blueprint for RetailOS. Any contributor can continue implementation starting from Phase 4 with 100% architectural continuity.*

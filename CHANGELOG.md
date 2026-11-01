@@ -4,6 +4,47 @@ All notable changes, architectural decisions, and milestones for this project wi
 
 ---
 
+## [Phase 3: Product Catalog, Dynamic Attributes & WAC Inventory] - 2026-11-01
+
+### Implemented & Verified
+- **Core Domain Catalog (`@retailos/core`)**:
+  - Implemented `Category` (nested), `Product`, and `ProductVariant` entities. Every sellable unit is a variant; simple products use one default variant so inventory, pricing, and barcode lookup share a single code path.
+  - Dynamic, industry-agnostic attributes stored as validated JSON primitives (`string | number | boolean`) with safe key normalization, finite-number checks, and strict parse/serialize round-tripping.
+  - Added `CATALOG_MANAGE` permission to `STORE_MANAGER` and `OWNER`.
+- **WAC Inventory Engine (`@retailos/core`)**:
+  - `calculateWeightedAverageCost` implements the GAAP/IFRS formula with exact integer numerator/denominator arithmetic.
+  - Zero/negative-quantity receipts replace the WAC entirely (no meaningless weighted history).
+  - New `Money.divideBy(divisor, roundingMode)` uses Half-Even by default, so fractional minor units are neither dropped nor invented.
+  - `InventoryPosition` is an immutable stock partition that preserves WAC on issues and optionally permits negative stock.
+  - `StockMovement` is an immutable ledger entry carrying the receipt cost or the prevailing WAC snapshot on issues.
+  - Tenant-level `allowNegativeStock` policy (strict prohibition by default).
+- **Application Layer (`@retailos/application`)**:
+  - Added catalog and inventory repository ports plus `CatalogService` (category/product/variant creation, barcode lookup, tenant-scoped SKU/barcode uniqueness) and `InventoryService` (receive, sale + COGS snapshot, customer/supplier returns, damage, adjustments, transfers, movement history).
+  - Every stock operation re-reads the tenant negative-stock policy and enforces store scoping from the execution context.
+- **Persistence (`@retailos/infrastructure`)**:
+  - Migration `003_catalog_inventory` adds `categories`, `products`, `product_variants`, `inventory_items`, `stock_movements`, and the `tenants.allow_negative_stock` column, with tenant-scoped unique indexes.
+  - `BEFORE UPDATE` / `BEFORE DELETE` triggers reject any mutation of `stock_movements`; corrections must be compensating entries.
+  - Added `SqliteCategoryRepository`, `SqliteProductRepository`, `SqliteProductVariantRepository`, `SqliteInventoryRepository` (atomic WAC updates and two-phase transfers inside a single transaction), and `SqliteStockMovementRepository`.
+  - Added `toBigInt` boundary normalization because better-sqlite3 returns runtime integers as JS numbers while Kysely types them as `bigint`.
+- **Shared Contracts (`@retailos/shared`)**:
+  - Added `CategoryDTO`, `ProductDTO`, `ProductVariantDTO`, `InventoryPositionDTO`, `StockMovementDTO`, and transfer/operation result DTOs.
+  - Added Zod schemas for category/product/variant creation and stock receive/sale/adjust/transfer inputs.
+
+### Fixed
+- `ValueObject.equals` no longer uses `JSON.stringify`, which throws on `bigint` and made `Money` comparison unusable.
+- `Money.fromDecimal` now rounds excess decimal digits with Half-Even instead of silently truncating.
+- Session row ids are derived from the SHA-256 token hash instead of `Math.random()`.
+- `TenantService.createUser` can no longer omit or mismatch a store for store-bound actors and can no longer mint another `OWNER` without OWNER authority.
+- Upgraded `better-sqlite3` to `13.0.3` (Node 24 compatible) and made `SqliteDatabaseManager.close()` async so the Kysely pool is destroyed; the previous partial teardown caused native process crashes during multi-file test runs.
+
+### Verification Results
+- 42/42 Vitest tests passing (28 in `@retailos/core`, 14 in `@retailos/infrastructure`).
+- Typecheck: 8/8 tasks passed with 0 errors.
+- Lint: 4/4 packages passed with 0 errors and 0 warnings.
+- Build: 6/6 tasks passed.
+
+---
+
 ## [Phase 2: Identity, RBAC, Multi-Tenancy & Store Assignment] - 2026-11-01
 
 ### Implemented & Verified

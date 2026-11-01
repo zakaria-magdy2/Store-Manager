@@ -6,7 +6,7 @@ Welcome to the RetailOS engineering workspace. All architectural decisions, comp
 
 1. 🌟 **[Master Vision & Execution Roadmap](docs/MASTER_ROADMAP_AND_VISION.md)**:
    - Complete product vision and target retail engine architecture.
-   - Detailed technical record of completed milestones (Phases 0, 1, 2).
+   - Detailed technical record of completed milestones (Phases 0, 1, 2, 3).
    - In-depth forward specifications for **Phases 3 through 8** (tables, domain models, business rules, and acceptance criteria).
    - Non-negotiable engineering rules and invariants.
 
@@ -17,7 +17,7 @@ Welcome to the RetailOS engineering workspace. All architectural decisions, comp
    - Instructions on how to resume immediately with Phase 3.
 
 3. 🏛️ **[Architecture Decisions (ADRs)](docs/architecture/ARCHITECTURE_DECISIONS.md)**:
-   - ADR-001 through ADR-011 covering Monorepo tooling, Kysely, BigInt minor units, WAC valuation, double-entry accounting, 4-stage recovery, and upfront monthly expense amortization.
+   - ADR-001 through ADR-013 covering Monorepo tooling, Kysely, BigInt minor units, WAC valuation, double-entry accounting, 4-stage recovery, upfront monthly expense amortization, and catalog/inventory representation.
 
 4. 📐 **[Master Architecture Blueprint v2.5](docs/architecture/retailos_architecture_blueprint.md)**:
    - The authoritative architectural blueprint specifying the full retail operating model.
@@ -32,8 +32,8 @@ Welcome to the RetailOS engineering workspace. All architectural decisions, comp
 - [x] **Phase 0**: Architecture Analysis, Threat Modeling & Blueprint v2.5
 - [x] **Phase 1**: Monorepo Setup, Strict TypeScript, Core Money VO & SQLite Engine
 - [x] **Phase 2**: Identity, RBAC, Multi-Tenancy & Store Assignment
-- [ ] **Phase 3**: Product Catalog, Dynamic Attributes & WAC Inventory Engine *(Ready to Start)*
-- [ ] **Phase 4**: POS Checkout, Fast Cart & Peripheral Drivers
+- [x] **Phase 3**: Product Catalog, Dynamic Attributes & WAC Inventory Engine
+- [ ] **Phase 4**: POS Checkout, Fast Cart & Peripheral Drivers *(Ready to Start)*
 - [ ] **Phase 5**: Financial Accounting, Expenses & 3-Tier Cash Management
 - [ ] **Phase 6**: Backup, Disaster Recovery & Security Hardening
 - [ ] **Phase 7**: Dashboards, Analytics & Audit Logging

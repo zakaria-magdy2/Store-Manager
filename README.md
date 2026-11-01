@@ -10,6 +10,8 @@
 - **Strict Multi-Tenancy & Store Scoping**: Data isolation enforced at both domain and database repository boundaries.
 - **Zero Floating-Point Financials**: Exact currency arithmetic using `bigint` minor units with Half-Even (Banker's) Rounding.
 - **Enterprise-Grade Security**: Password hashing powered by **Argon2id** (`@node-rs/argon2`) and cryptographically random session tokens (SHA-256 hashed in-storage).
+- **Universal Product Catalog**: Products, nested categories, and sellable variants with validated JSON attributes — apparel, grocery, electronics, and pharmacy share one schema.
+- **WAC Inventory with Immutable Ledger**: Weighted Average Cost valuation with exact integer arithmetic, immutable cost snapshots on every issue, atomic inter-store transfers, and a database-enforced append-only `stock_movements` ledger.
 - **8-Tier Sales & Profit Progression**: Real-time breakdown from Gross Sales down to Net Operating Profit with integer-safe monthly expense amortization.
 
 ---
@@ -36,10 +38,10 @@ This project is organized as a strict, high-performance monorepo powered by **pn
 
 ## 🛠️ Tech Stack
 
-- **Runtime**: Node.js `>=20` (NodeNext ESM)
+- **Runtime**: Node.js `>=22` (NodeNext ESM)
 - **Language**: Strict TypeScript 5.8
 - **Monorepo**: pnpm 12 + Turborepo 2
-- **Database**: SQLite (better-sqlite3) via Kysely query builder
+- **Database**: SQLite (`better-sqlite3` 13) via Kysely query builder
 - **Security**: Argon2id (`@node-rs/argon2`)
 - **Validation**: Zod
 - **Testing**: Vitest
@@ -59,7 +61,7 @@ This project is organized as a strict, high-performance monorepo powered by **pn
 
 ### Prerequisites
 
-- Node.js `>= 20.0.0`
+- Node.js `>= 22.0.0`
 - pnpm `>= 10.0.0`
 
 ### Installation

@@ -95,3 +95,27 @@
   4. **Missing Values**: If un-entered, the system calculates $\$0.00$ and displays an actionable warning banner. Fictitious values are never invented.
   5. **Payment Decoupling**: Paying a bill settles the liability (`Debit 2020 / Credit Cash/Bank`) and shows in the Cash Flow Panel, never deducting from profit on payment day.
 - **Consequences**: Drastically simpler operational workflow, zero ledger bloat, 100% audit integrity.
+
+---
+
+## ADR-012: Dynamic Product Attributes & Integer Stock Quantities
+- **Status**: Approved (Phase 3)
+- **Context**: RetailOS must serve apparel (size, color), grocery (expiry, batch), electronics (serial, warranty), and pharmacy (lot, dosage) without per-industry schema migrations. Stock quantities also need exact arithmetic for single-unit sales and future fractional units (weight, volume).
+- **Decision**:
+  1. Model **every sellable unit as a `ProductVariant`**; simple products use one default variant so pricing, barcode lookup, and stock share a single code path.
+  2. Store industry-specific attributes as a **validated JSON primitive map** (`string | number | boolean`) in `product_variants.attributes_json`, with normalized keys, finite-number checks, and strict parse/serialize round-tripping.
+  3. Store all stock quantities as **`BIGINT` integer units** (never floating point), converted at the SQLite boundary because `better-sqlite3` returns runtime integers as JavaScript numbers while Kysely types them as `bigint`.
+- **Consequences**: The catalog supports any retail vertical without schema churn; inventory arithmetic stays exact and deterministic. Attribute filtering is JSON-based on SQLite and may later need generated columns or a search index for high-volume queries.
+
+---
+
+## ADR-013: Database-Enforced Append-Only Stock Ledger & Half-Even WAC Division
+- **Status**: Approved (Phase 3)
+- **Context**: WAC valuation and COGS auditability depend on a stock history that can never be silently rewritten. Weighted-average division can also produce fractional minor units, which must be rounded consistently rather than truncated.
+- **Decision**:
+  1. Make `stock_movements` **append-only at the database level** using `BEFORE UPDATE` and `BEFORE DELETE` triggers that raise `stock_movements is append-only: corrections must be compensating entries`. Application code is not the only line of defense.
+  2. Calculate WAC with exact integer numerator/denominator arithmetic; when the current quantity is zero or negative, an incoming receipt **replaces** the WAC instead of blending meaningless history.
+  3. Round fractional minor units with **Half-Even (Banker's) rounding** via `Money.divideBy`, matching the project-wide monetary policy.
+  4. Record an immutable cost snapshot on every issue movement so COGS is reproducible at any later date.
+- **Consequences**: Ledger tampering requires a schema change, not just an application bug. Cost valuation never loses or invents minor units, and corrections remain fully auditable as compensating entries.
+

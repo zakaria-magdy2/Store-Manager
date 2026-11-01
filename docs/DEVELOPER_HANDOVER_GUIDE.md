@@ -50,10 +50,10 @@ RetailOS follows **Clean Architecture** (Hexagonal / Ports & Adapters) with a st
 ## 2. Development Setup & Workflow
 
 ### 2.1 Tooling & Environment
-- **Node.js**: `>= 20.0.0` (Verified on Node v24.21.0).
+- **Node.js**: `>= 22.0.0` (Verified on Node v24.21.0).
 - **Package Manager**: `pnpm` (v12).
 - **Build Orchestrator**: `Turborepo` (v2).
-- **SQLite Driver**: `better-sqlite3` (compiled natively via `node-gyp`).
+- **SQLite Driver**: `better-sqlite3` 13 (compiled natively via `node-gyp`; version 13 is required for Node 24).
 
 ### 2.2 Standard Commands
 
@@ -172,6 +172,19 @@ export class SqliteSampleRepository {
 }
 ```
 
+### 3.4 How to Shut Down SQLite in Tests
+`SqliteDatabaseManager.close()` is **async** because it destroys the Kysely driver pool (which owns the native `better-sqlite3` handle). Always await it, or the process may crash during teardown.
+
+```typescript
+let dbManager: SqliteDatabaseManager;
+
+afterEach(async () => {
+  await dbManager.close();
+});
+```
+
+When tests or repositories read `BIGINT` columns, normalize the runtime value with `toBigInt` from `packages/infrastructure/src/database/values.ts`: `better-sqlite3` returns integers as JavaScript numbers even though Kysely types them as `bigint`.
+
 ---
 
 ## 4. Current State & Where to Resume
@@ -180,6 +193,7 @@ export class SqliteSampleRepository {
   - **Phase 0**: Architecture Blueprint v2.5 (`docs/architecture/retailos_architecture_blueprint.md`).
   - **Phase 1**: Monorepo, Strict TypeScript, `@retailos/core` Money VO, SQLite WAL manager, Initial Migrations.
   - **Phase 2**: Argon2id password hashing, SHA-256 session management, RBAC matrix, and multi-tenant isolation.
+  - **Phase 3**: Universal catalog (categories, products, variants, JSON attributes), WAC inventory engine, tenant negative-stock policy, and DB-enforced append-only stock ledger.
 - **Where to Resume Immediately**:
-  - **Phase 3: Product Catalog, Dynamic Attributes & WAC Inventory Engine**.
-  - Review the Phase 3 technical specification in [`docs/MASTER_ROADMAP_AND_VISION.md`](file:///d:/Store%20Manager/docs/MASTER_ROADMAP_AND_VISION.md) and start by authoring the product & variant domain entities in `packages/core/src/catalog/`.
+  - **Phase 4: POS Checkout, Fast Cart & Peripheral Drivers**.
+  - Review the Phase 4 specification in [`docs/MASTER_ROADMAP_AND_VISION.md`](file:///d:/Store%20Manager/docs/MASTER_ROADMAP_AND_VISION.md) and start with the cart domain model in `packages/core/src/pos/`.
