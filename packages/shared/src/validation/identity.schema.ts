@@ -43,8 +43,13 @@ export const CreateUserSchema = z
       .max(30)
       .regex(/^[a-z0-9_]+$/, 'Username must be lowercase letters, numbers, and underscores only')
       .trim(),
-    password: z.string().min(6, 'Password must be at least 6 characters'),
+    password: z.string().min(12, 'Password must be at least 12 characters').max(128),
     fullName: z.string().min(2, 'Full name must be at least 2 characters').trim(),
+    phone: z.string().trim().max(32).regex(/^[+0-9().\-\s]*$/).optional(),
+    employmentStartDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
+      const date = new Date(`${value}T00:00:00.000Z`);
+      return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value;
+    }).optional(),
     role: z.enum(['OWNER', 'STORE_MANAGER', 'CASHIER', 'AUDITOR']),
     storeId: z.string().uuid().optional(),
   })

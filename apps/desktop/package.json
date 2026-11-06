@@ -2,14 +2,23 @@
   "name": "@retailos/desktop",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "description": "RetailOS Electron Desktop Application",
   "scripts": {
-    "build": "echo \"Desktop packaging prepared for Phase 8\""
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --max-warnings 0",
+    "test": "tsc -b && node --test tests/*.test.mjs"
   },
   "dependencies": {
     "@retailos/core": "workspace:*",
     "@retailos/shared": "workspace:*",
     "@retailos/application": "workspace:*",
     "@retailos/infrastructure": "workspace:*"
+  },
+  "devDependencies": {
+    "@retailos/tsconfig": "workspace:*"
   }
 }

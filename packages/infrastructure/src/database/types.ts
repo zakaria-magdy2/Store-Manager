@@ -28,6 +28,8 @@ export interface UsersTable {
   username: string;
   password_hash: string;
   full_name: string;
+  phone: string | null;
+  employment_start_date: string | null;
   role: string;
   is_active: Generated<number>;
   created_at: Generated<string>;
@@ -63,7 +65,7 @@ export interface JournalEntriesTable {
   period_id: string;
   entry_number: string;
   entry_date: string;
-  source_type: 'SALE' | 'PURCHASE' | 'RETURN' | 'TRANSFER' | 'EXPENSE' | 'ADJUSTMENT' | 'SESSION_CLOSING';
+  source_type: 'SALE' | 'PURCHASE' | 'PURCHASE_PAYMENT' | 'SUPPLIER_RETURN' | 'RETURN' | 'TRANSFER' | 'EXPENSE' | 'ADJUSTMENT' | 'SESSION_CLOSING';
   source_id: string;
   idempotency_key: string;
   status: Generated<'POSTED' | 'REVERSED'>;
@@ -103,6 +105,7 @@ export interface RecurringExpenseObligationsTable {
   due_day_of_month: number;
   currency: string;
   is_active: Generated<number>;
+  idempotency_key: string;
   created_at: Generated<string>;
 }
 
@@ -143,6 +146,7 @@ export interface OperatingExpenseRecordsTable {
   journal_entry_id: string | null;
   created_at: Generated<string>;
   created_by_user_id: string;
+  idempotency_key: string;
 }
 
 export interface OutboxEventsTable {
@@ -188,6 +192,11 @@ export interface ProductsTable {
   barcode: string | null;
   category_id: string | null;
   has_variants: number;
+  item_kind: 'PRODUCT' | 'SERVICE';
+  description: string | null;
+  brand: string | null;
+  image_path: string | null;
+  options_json: string;
   is_active: Generated<number>;
   created_at: Generated<string>;
 }
@@ -234,6 +243,123 @@ export interface StockMovementsTable {
   created_at: Generated<string>;
 }
 
+export interface SalesTable {
+  id: string;
+  tenant_id: string;
+  store_id: string;
+  sale_number: string;
+  idempotency_key: string;
+  customer_name: string | null;
+  currency: string;
+  subtotal: bigint;
+  discount_total: bigint;
+  total: bigint;
+  paid_total: bigint;
+  change_given: bigint;
+  cashier_user_id: string;
+  status: string;
+  created_at: Generated<string>;
+}
+
+export interface SaleItemsTable {
+  id: string;
+  sale_id: string;
+  tenant_id: string;
+  store_id: string;
+  variant_id: string;
+  product_id: string;
+  product_name: string;
+  sku: string;
+  variant_attributes_json: string | null;
+  line_number: number;
+  item_type: string;
+  quantity: bigint;
+  unit_price: bigint;
+  line_discount: bigint;
+  cart_discount_share: bigint;
+  net_revenue: bigint;
+  unit_cost_snapshot: bigint;
+  cost_of_goods_sold: bigint;
+  currency: string;
+  created_at: Generated<string>;
+}
+
+export interface SalePaymentsTable {
+  id: string;
+  sale_id: string;
+  tenant_id: string;
+  tender_index: number;
+  method: string;
+  amount: bigint;
+  created_at: Generated<string>;
+}
+
+export interface SuppliersTable {
+  id: string; tenant_id: string; name: string; phone: string | null; notes: string | null;
+  is_active: Generated<number>; created_at: Generated<string>;
+}
+
+export interface SupplierPurchasesTable {
+  id: string; tenant_id: string; store_id: string; supplier_id: string; invoice_number: string | null;
+  idempotency_key: string;
+  purchased_at: string; total_amount: bigint; initial_paid_amount: Generated<bigint>; currency: string;
+  notes: string | null; created_by_user_id: string; created_at: Generated<string>;
+}
+
+export interface SupplierPaymentsTable {
+  id: string; tenant_id: string; supplier_id: string; purchase_id: string; amount: bigint;
+  currency: string; payment_method: string; reference_number: string | null; paid_at: string;
+  idempotency_key: string;
+  created_by_user_id: string; created_at: Generated<string>;
+}
+
+export interface SupplierPurchaseItemsTable {
+  id: string; tenant_id: string; store_id: string; purchase_id: string; variant_id: string;
+  product_id: string; product_name: string; sku: string; quantity: bigint; unit_cost: bigint;
+  currency: string; created_at: Generated<string>;
+}
+
+export interface CustomerReturnsTable {
+  id: string; tenant_id: string; store_id: string; original_sale_id: string;
+  return_number: string; idempotency_key: string; refund_amount: bigint; currency: string;
+  payment_method: 'CASH' | 'CARD' | 'MOBILE' | 'OTHER'; journal_entry_id: string;
+  created_by_user_id: string; created_at: string;
+}
+
+export interface CustomerReturnItemsTable {
+  id: string; return_id: string; tenant_id: string; original_sale_item_id: string;
+  variant_id: string; quantity: bigint; refund_amount: bigint; cost_amount: bigint;
+}
+
+export interface SupplierReturnsTable {
+  id: string; tenant_id: string; store_id: string; supplier_id: string; purchase_id: string;
+  return_number: string; idempotency_key: string; credit_amount: bigint; currency: string;
+  journal_entry_id: string | null; created_by_user_id: string; created_at: string;
+}
+
+export interface SupplierReturnItemsTable {
+  id: string; return_id: string; tenant_id: string; purchase_item_id: string;
+  variant_id: string; quantity: bigint; credit_amount: bigint; inventory_cost: bigint;
+}
+
+export interface AuditLogsTable {
+  sequence_no: Generated<number>;
+  id: string;
+  tenant_id: string;
+  store_id: string | null;
+  actor_user_id: string | null;
+  actor_username: string;
+  actor_role: string;
+  action: string;
+  entity_type: string;
+  entity_id: string | null;
+  summary: string;
+  metadata_json: string;
+  previous_hash: string;
+  entry_hash: string;
+  created_at: string;
+}
+
 export interface RetailOSDatabase {
   tenants: TenantsTable;
   stores: StoresTable;
@@ -253,4 +379,16 @@ export interface RetailOSDatabase {
   product_variants: ProductVariantsTable;
   inventory_items: InventoryItemsTable;
   stock_movements: StockMovementsTable;
+  sales: SalesTable;
+  sale_items: SaleItemsTable;
+  sale_payments: SalePaymentsTable;
+  suppliers: SuppliersTable;
+  supplier_purchases: SupplierPurchasesTable;
+  supplier_payments: SupplierPaymentsTable;
+  supplier_purchase_items: SupplierPurchaseItemsTable;
+  customer_returns: CustomerReturnsTable;
+  customer_return_items: CustomerReturnItemsTable;
+  supplier_returns: SupplierReturnsTable;
+  supplier_return_items: SupplierReturnItemsTable;
+  audit_logs: AuditLogsTable;
 }

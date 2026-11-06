@@ -202,6 +202,10 @@ importers:
       '@retailos/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+    devDependencies:
+      '@retailos/tsconfig':
+        specifier: workspace:*
+        version: link:../../packages/tsconfig
 
   apps/web:
     dependencies:
@@ -211,9 +215,15 @@ importers:
       '@retailos/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@retailos/infrastructure':
+        specifier: workspace:*
+        version: link:../../packages/infrastructure
       '@retailos/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      zod:
+        specifier: ^3.24.2
+        version: 3.25.76
 
   packages/application:
     dependencies:
@@ -233,6 +243,9 @@ importers:
       typescript:
         specifier: ^5.8.2
         version: 5.9.3
+      vitest:
+        specifier: ^3.0.7
+        version: 3.2.7(@types/node@26.6.6)
 
   packages/core:
     devDependencies:

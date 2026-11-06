@@ -59,9 +59,11 @@ export class SqliteCategoryRepository implements CategoryRepository {
           parent_id: category.parentId ?? null,
           name: category.name,
           is_active: category.isActive ? 1 : 0,
-        }),
+        }).where('categories.tenant_id', '=', ctx.tenantId),
       )
       .execute();
+    const saved = await this.db.selectFrom('categories').select('id').where('id', '=', category.id).where('tenant_id', '=', ctx.tenantId).executeTakeFirst();
+    if (!saved) throw new Error('TenantIsolationViolation: Category id belongs to another tenant');
   }
 
   private toEntity(row: {

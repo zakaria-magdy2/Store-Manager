@@ -2,6 +2,172 @@
 
 All notable changes, architectural decisions, and milestones for this project will be documented in this file.
 
+## [Phase 7 & Phase 8 Completion: Tamper-Evident Audit Logging, Outbox CDC Sync, Desktop Host Supervisor & Full Test/Linter Expansion] - 2026-11-07
+
+### Added
+- **Phase 8 Outbox CDC Repository & Sync Worker (`@retailos/infrastructure`)**:
+  - Implemented `SqliteOutboxRepository` (`packages/infrastructure/src/sync/sqlite-outbox.repository.ts`) with monotonic per-tenant `sequence_no`, idempotent event enqueueing, conflict detection (`409`), safe `BigInt` JSON serialization, pending batch queries, and tenant-scoped sync state tracking.
+  - Implemented `OutboxSyncWorker` supporting batched event transport and selective acknowledgement (`markSynced`).
+- **Phase 8 Desktop Host Security Policy & Supervisor (`@retailos/desktop`)**:
+  - Implemented `createDesktopWindowSecurityPolicy` and `DesktopHostSupervisor` in `apps/desktop/src/index.ts`, enforcing strict `http://127.0.0.1` loopback origin validation, `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, `webSecurity: true`, and whitelisted IPC channel dispatch (`retailos:host:status`, `retailos:sync:run-batch`, `retailos:sync:stats`, `retailos:audit:verify-chain`).
+- **Comprehensive Unit & SQLite Integration Test Suites**:
+  - Added `packages/application/tests/application-services.test.ts` covering `AuthService`, `TenantService`, `CatalogService`, `InventoryService`, and `CashDrawerService`.
+  - Added `packages/infrastructure/tests/financial-accounting.test.ts` covering `SqlitePurchasingRepository`, `SqliteSupplierReturnRepository` (with `5090` WAC valuation variance), `SqliteReturnRepository`, `SqliteExpenseRepository`, and `SqliteRecurringExpenseRepository`.
+  - Added `packages/infrastructure/tests/outbox-sync.test.ts` covering `SqliteOutboxRepository` and `OutboxSyncWorker`.
+  - Added `apps/desktop/tests/desktop-host.test.mjs` covering `createDesktopWindowSecurityPolicy` and `DesktopHostSupervisor`.
+- **Tamper-Evident Audit Log Engine (`018_audit_logs` & `SqliteAuditLogRepository`)**:
+  - Added migration `018_audit_logs` with `audit_logs` table, database-level append-only triggers (`trg_audit_logs_immutable_update`, `trg_audit_logs_immutable_delete`), and cross-tenant isolation guard trigger (`trg_audit_logs_tenant_guard_insert`).
+  - Implemented `SqliteAuditLogRepository` with canonical SHA-256 hash chaining (`previous_hash` $\rightarrow$ `entry_hash` starting from `GENESIS`), automatic recursive redaction of sensitive metadata keys (`password`, `passphrase`, `token`, `secret`, `pin`), and full chain verification (`verifyChain()`).
+  - Integrated audit logging into `apps/web/server.mjs` across critical administrative, security, catalog, purchasing, POS, and backup operations, exposed via `GET /api/audit-logs` (`Permissions.AUDIT_LOG_VIEW`, restricted to `OWNER` and `AUDITOR`).
+  - Added the Arabic RTL Audit Log screen (`سجل المراجعة والأمان`) in `apps/web/public/app.js` with live cryptographic chain verification status.
+- **Full Operational UI & API Endpoints (`@retailos/web`)**:
+  - **Thermal Receipt Printing (`GET /api/sales/:id/receipt`)**: Formats 80mm/58mm thermal receipts using `EscPosReceiptPrinter`, returning structured receipt metadata, ESC/POS raw byte payload (`escPosBase64`), and an interactive print preview modal automatically displayed after checkout and from invoice details.
+  - **Multi-Store Branch Creation & Atomic Stock Transfers (`POST /api/stores`, `POST /api/inventory/transfer`)**: Enables creating new store branches (`Permissions.STORES_MANAGE`) and transferring inventory between branches (`Permissions.INVENTORY_TRANSFER`) with atomic WAC preservation and audit logging.
+  - **Cash Drawer Shift Closing / Z-Report Reconciliation (`POST /api/accounting/shift-close`)**: Calculates live book balance of `1010` (`درج النقدية`), compares against counted physical cash, and posts balanced `SESSION_CLOSING` journal entries (`6090`/`1010` for shortage, `1010`/`4010` for overage).
+  - **Accounting Period Close & Lock (`POST /api/accounting/periods/close`)**: Creates or locks accounting periods (`status = 'CLOSED'`) (`Permissions.SETTINGS_MANAGE`) with audit trail entries.
+
+### Fixed & Hardened
+- **Dynamic Migration Registry for Encrypted Backups (`@retailos/infrastructure`)**:
+  - Extracted `MIGRATION_REGISTRY` (`001_initial_foundation` through `018_audit_logs`), `REGISTERED_MIGRATION_NAMES`, and `MINIMUM_SUPPORTED_BACKUP_MIGRATION` in `migrator.ts`.
+  - Replaced the brittle hardcoded migration allowlist (`['014_supplier_returns', '015_employee_profiles']`) in `sqlite-backup.service.ts` with `isSupportedBackupMigrationHistory()`, fixing backup export/restore verification on schemas migrated through `018_audit_logs`.
+- **SQLite Concurrency, WAL Checkpointing & Unit of Work (`@retailos/infrastructure`)**:
+  - Hardened `SqliteDatabaseManager` with `busy_timeout = 10000`, `wal_autocheckpoint = 1000`, `temp_store = MEMORY`, and `checkpointPassive()` for non-blocking WAL maintenance.
+  - Added `SqliteUnitOfWork` (`unit-of-work.ts`) implementing the `UnitOfWork` port from `@retailos/application` with `AsyncLocalStorage` re-entrancy and serialized write transactions.
+- **Web Server Error Mapping & Endpoint Guards (`@retailos/web`)**:
+  - Mapped `DomainError` instances (`InsufficientStockError`, `InvalidSaleError`, `InvalidCartError`, `InvalidPaymentError`, etc.) to HTTP `400` instead of `500` in `apps/web/server.mjs`.
+  - Enforced `Permissions.INVENTORY_RECEIVE` check before returning `410` on deprecated direct `/api/inventory/receive` routes so unauthorized callers receive `403`.
+  - Added periodic passive WAL checkpointing and clean checkpoint-on-shutdown in `apps/web/server.mjs`.
+  - Replaced date-brittle assertions in `apps/web/tests/app-flow.test.mjs` with dynamic UTC date calculations, purchase-linked stock receipt checks, and audit chain assertions.
+  - Ignored `apps/web/.test-data-*/` and `apps/web/data/` in `.gitignore`.
+
+### Verification
+- `pnpm run typecheck`: 9/9 tasks passed (0 errors).
+- `pnpm run lint`: 6/6 tasks passed (0 errors, 0 warnings).
+- `pnpm run test`: 75/75 tests passed (30 core, 5 application, 33 infrastructure, 2 desktop, 5 web end-to-end integration).
+- `pnpm run build`: 6/6 tasks passed (`apps/web/dist` and `apps/desktop/dist` built and verified with 0 warnings).
+
+## [Employee Contact and Profile Details] - 2026-11-04
+
+### Added
+- Added employee phone numbers and employment start dates to account creation and persistence. Migration `015_employee_profiles` backfills existing accounts' start date from their original creation date.
+- Made employee names open a profile with username, role, branch, active status, account creation time, employment start date, and editable phone/start-date fields.
+- Kept backup restore compatible with both the prior `014_supplier_returns` schema and the current `015_employee_profiles` schema; restored prior backups are upgraded by normal startup migrations.
+- Added SQLite web integration coverage for creating, listing, and updating employee contact and start-date details.
+
+### Verification
+- Infrastructure tests passed (26/26), including legacy employee-date backfill; web SQLite integration passed (1/1); lint and typecheck passed.
+
+## [Cashier Access Boundaries] - 2026-11-04
+
+### Changed
+- Restricted cashier accounts to point-of-sale checkout and sellable catalog lookup. Cashiers land directly in POS and see no accounting, expense, supplier, inventory-management, sales-report, backup, or user-management navigation.
+- Removed cashier permissions for discounts, refunds, cash drawer administration, and direct expense entry. Only active products and variants are shown for checkout; checkout continues to reject inactive items server-side.
+- Redacted supplier balances, purchase/payment history, accounting entries, expense data, monthly obligations, and inventory cost valuation from cashier API responses.
+- Enforced catalog-management and inventory-receipt permissions in their API routes, closing direct-request paths that bypass hidden UI controls.
+- Added role and web integration assertions for cashier redaction and denied administrative actions.
+
+### Verification
+- Workspace lint and typecheck passed; all 57 tests passed. The focused web integration test passed again after the final active-item display filter, and the production web build succeeded.
+
+## [Runnable Local Store App and Supplier Ledger] - 2026-11-04
+
+### Added
+- Added temporary-database integration coverage for successful restore, wrong-passphrase and foreign-company rejection, interrupted swap recovery, and rollback snapshot recovery; fixed recovery to use the rollback snapshot when the active file is damaged.
+- Added owner-only encrypted SQLite restore with same-company and supported-schema checks, integrity and foreign-key verification, staged database replacement, rollback snapshot, startup recovery after interruption, session invalidation, upload bounds, and an explicit replacement confirmation in the UI.
+- Added owner-only encrypted SQLite backup downloads. Snapshots use the SQLite online backup API, AES-256-GCM with a user-chosen passphrase, and integrity plus foreign-key checks before export.
+- Added a permission-scoped profit and loss report with custom date ranges (up to one year), an eight-step sales-to-operating-profit breakdown, exact monthly expense amortization, warnings for unconfirmed recurring expense actuals, and a separate cash-flow panel. Supplier-return cost variances are included in cost of goods sold.
+- Added supplier returns tied to original purchase lines. Returns restore no stock; they decrease stock using current weighted average cost, credit the supplier at invoice cost, and post any valuation difference to a dedicated account. Return quantities are capped at the unreturned invoice quantity, and idempotency and immutable history are enforced. Supplier credits are reflected in balances and return history.
+- Added migration `013_monthly_expense_safety`, recurring monthly obligation
+  templates, one-time monthly actual confirmation, and partial settlement from
+  cash drawer, safe, or bank. Accrual debits expense and credits accrued
+  liabilities; payments settle that liability without booking expense again.
+- Added database safeguards for immutable confirmed values, monotonic payments,
+  append-only monthly payment records, and template idempotency.
+- Branded the customer-facing application **رَفّ**. Company and main-store
+  identity now come from deployment configuration; the first-run screen creates
+  only the store owner's login.
+- Added a dedicated supplier and purchases screen with supplier records,
+  purchase invoice totals, initial payments, later partial payments, payment
+  references, and remaining balances.
+- Added migration `007_suppliers_purchases` with tenant and store guards plus
+  append-only purchase and payment history.
+- Added an end-to-end SQLite test for provisioning, login, supplier invoices,
+  partial payments, overpayment rejection, inventory receipt, and checkout.
+- Added migration `010_supplier_journal_idempotency` and balanced journal
+  posting for supplier invoices, payments, and POS sales within their source
+  transactions. The accounting view shows posted source and debit/credit totals.
+- Added direct operating expense entry with migration `011_expense_idempotency`,
+  atomic balanced journal posting, payment source selection, and duplicate request
+  protection. Expense list and accounting view are permission-scoped.
+- Added migration `012_customer_returns` and partial customer returns linked to
+  original sale lines. Returned quantities cannot exceed the sold balance;
+  refunds use the original discounted line value, stock returns at original
+  WAC, and journal/inventory updates commit atomically. Added returns history.
+
+### Scope
+- Multi-line supplier invoices now record invoice items, WAC stock receipts,
+  purchase history, and initial payment in one SQLite transaction. Later
+  payments remain append-only and cannot exceed the outstanding amount.
+- Catalog entries can be stock-tracked products or non-stock services sold
+  through POS. Product returns for services remain unsupported.
+- Purchase, payment, sales, direct expense, and customer return journals post
+  atomically. Recurring expense accruals and supplier returns remain pending.
+- Company name, code, currency, and store name can be supplied through
+  deployment environment settings; end users do not create company tenants.
+
+### Verification
+- Web end-to-end integration: 1/1 passed.
+- Workspace lint passed; typecheck passed (8/8 tasks); 52 tests passed; build
+  passed (6/6 tasks). Turbo reports the existing desktop Phase 8 no-output
+  warning because that package is still a placeholder.
+
+## [Security Hardening Baseline] - 2026-11-03
+
+### Established
+- Added `docs/SECURITY_POLICY.md` with an ASVS-aligned baseline, secure
+  engineering rules, release controls, and prioritized security risks.
+- Added CI CodeQL analysis, production dependency audits, and vulnerable
+  dependency review. Repository settings must require these checks and enable
+  secret scanning/push protection where available.
+- Hardened session validation to revoke expired, inactive, tenant-disabled, or
+  user-scope-mismatched sessions.
+- Guarded tenant-owned repository upserts against cross-tenant identifier
+  collisions and added session/user isolation regression coverage.
+- Added migration `006_tenant_relationship_guards`, which checks for existing
+  company-scope violations and blocks invalid links across identity, catalog,
+  inventory, accounting, outbox, and POS rows at the database layer.
+- Added migrated SQLite integration coverage for cross-scope user, product,
+  variant, inventory, journal-line, and outbox relationships.
+- Recorded ADR-014: one installation and database per company; internal company
+  scope remains an integrity boundary rather than a shared-customer hosting model.
+- Updated `README.md`, `PROJECT_CONTEXT.md`, `PROJECT_DOCUMENTATION_POLICY.md`,
+  `docs/QUALITY_GATES.md`, `docs/MASTER_ROADMAP_AND_VISION.md`,
+  `docs/SECURITY_POLICY.md`, and `docs/architecture/ARCHITECTURE_DECISIONS.md`.
+
+### Verification Results
+- `pnpm run lint`: passed with zero warnings/errors.
+- `pnpm run typecheck`: passed (8/8 tasks).
+- `pnpm test`: passed (51 tests: 30 core, 1 application, 20 infrastructure).
+- `pnpm run build`: passed (6/6 tasks; web/desktop remain Phase 8 placeholders and Turbo reports their configured no-output warning).
+
+## [Engineering Quality Gates] - 2026-11-03
+
+### Established
+- Added `docs/QUALITY_GATES.md` defining ESLint requirements, unit-test boundaries,
+  SQLite integration-test expectations, and the four required merge commands.
+- Added a GitHub Actions workflow that runs lint, typecheck, tests, and build on
+  every push and pull request.
+- Enabled Vitest in `@retailos/application` and added a unit test for checkout
+  catalog snapshots and application-port orchestration.
+- Added `packages/application/tsconfig.eslint.json` so application tests receive
+  the same type-aware lint checks as source files.
+
+### Verification Results
+- 48/48 tests passed: 30 core, 1 application, and 17 infrastructure tests.
+- Workspace typecheck passed (8/8 tasks); lint passed with zero warnings/errors.
+- Workspace build passed (6/6 tasks; desktop and web report intentional Phase 8
+  placeholder output warnings).
+
 ---
 
 ## [Phase 3: Product Catalog, Dynamic Attributes & WAC Inventory] - 2026-11-01

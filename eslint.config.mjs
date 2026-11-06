@@ -19,9 +19,11 @@ export default tseslint.config(
       parserOptions: {
         project: [
           './packages/core/tsconfig.eslint.json',
+          './packages/application/tsconfig.eslint.json',
           './packages/infrastructure/tsconfig.eslint.json',
           './packages/shared/tsconfig.json',
           './packages/application/tsconfig.json',
+          './apps/desktop/tsconfig.eslint.json',
         ],
         tsconfigRootDir: __dirname,
       },

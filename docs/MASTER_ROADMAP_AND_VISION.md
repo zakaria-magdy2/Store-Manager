@@ -14,7 +14,7 @@
 1. **Cloud POS systems** fail when internet connectivity fluctuates, introduce latency at checkout, and impose costly mandatory cloud subscriptions.
 2. **Traditional legacy desktop POS systems** lack multi-store capabilities, suffer from database corruption during power outages, use inaccurate floating-point math, and cannot synchronize across modern web/mobile interfaces.
 
-RetailOS bridges this divide by delivering a **local-first, zero-cloud-dependency engine** that operates at native hardware speeds on a single cashier terminal, while providing built-in distributed synchronization capabilities to scale to multi-store retail chains and centralized cloud dashboards.
+RetailOS delivers a **local-first, zero-cloud-dependency engine** that operates at native hardware speeds. Each customer company receives a separate installation and database; synchronization may connect stores belonging to that company, without combining unrelated customer companies in a shared database.
 
 ### 1.2 Core Pillars & Design Philosophy
 
@@ -25,7 +25,7 @@ RetailOS bridges this divide by delivering a **local-first, zero-cloud-dependenc
 │ 1. Local-First   │ 2. Financial     │ 3. Universal    │ 4. Strict Data │
 │    & Zero Latency│    Accuracy      │    Catalog      │    Isolation   │
 ├──────────────────┼──────────────────┼─────────────────┼────────────────┤
-│ • Offline native │ • BigInt minor   │ • Dynamic EAV   │ • Multi-tenant │
+│ • Offline native │ • BigInt minor   │ • Dynamic EAV   │ • Company scope│
 │ • SQLite WAL mode│   units only     │   attributes    │   by default   │
 │ • Barcode <15ms  │ • Double-entry   │ • Apparel, tech │ • Partitioned  │
 │ • Checkout <60ms │ • GAAP/IFRS WAC  │   food & pharma │   store stocks │
@@ -47,13 +47,13 @@ RetailOS bridges this divide by delivering a **local-first, zero-cloud-dependenc
 | :--- | :--- | :---: | :--- |
 | **Phase 0** | Architecture Analysis, Threat Modeling & Blueprint v2.5 | **COMPLETED** | Blueprint v2.5, ADR-001 through ADR-011, threat model. |
 | **Phase 1** | Monorepo Setup, Strict TypeScript, Core Domain & Database Migrations | **COMPLETED** | pnpm + Turborepo, `@retailos/core` (Money VO, Banker's Rounding, Hamilton-Hare), SQLite WAL manager, 12 tables, 11 tests. |
-| **Phase 2** | Identity, RBAC, Multi-Tenancy & Store Assignment | **COMPLETED** | Argon2id hasher, SHA-256 session tokens, RBAC roles & permissions, repository tenant boundaries, 20 tests. |
+| **Phase 2** | Identity, RBAC, Company Scope & Store Assignment | **COMPLETED** | Argon2id hasher, SHA-256 session tokens, RBAC roles & permissions, company-scoped repository boundaries. |
 | **Phase 3** | Product Catalog, Dynamic Attributes & WAC Inventory | **COMPLETED** | Migration 003, JSON variant attributes, WAC engine, DB-enforced append-only ledger, atomic transfers, 42/42 tests. |
-| **Phase 4** | POS Checkout, Fast Cart & Peripheral Hardware | **NEXT** | Barcode lookup, cart state machine, receipt printer ESC/POS, cash drawer trigger. |
-| **Phase 5** | Financial Accounting, Expense Tracking & Cash Management | PLANNED | Sub-ledger postings, 3-tier cash flows (Drawer/Safe/Bank), monthly actuals tracker. |
-| **Phase 6** | Backup, Disaster Recovery & Security Hardening | PLANNED | SQLite Online Backup API, 4-stage atomic swap, corruption recovery marker. |
-| **Phase 7** | Dashboards, Analytics & Audit Logging | PLANNED | 8-Tier P&L engine, custom date ranges, drill-downs, tamper-evident audit log. |
-| **Phase 8** | Electron Desktop Packaging & Web Deployment | PLANNED | Electron context-isolation, React POS UI, offline synchronization daemon. |
+| **Phase 4** | POS Checkout, Fast Cart & Peripheral Hardware | **COMPLETED** | Cart/checkout, atomic stock + sale persistence, ESC/POS writer facade, permission-checked drawer service, keyboard-wedge parser, runnable local RTL store app (`apps/web`). |
+| **Phase 5** | Financial Accounting, Purchasing, Returns & Expense Tracking | **COMPLETED** | Migrations 007–017, balanced sub-ledger postings, supplier invoices/payments/returns, linked customer returns, direct & recurring monthly expenses, 8-tier P&L + cash-flow report. |
+| **Phase 6** | Backup, Disaster Recovery & Security Hardening | **COMPLETED** | Encrypted online SQLite backup export, 4-stage atomic restore swap, recovery marker, automatic rollback, dynamic migration registry validation, `SqliteUnitOfWork`. |
+| **Phase 7** | Dashboards, Analytics & Audit Logging | **COMPLETED** | 8-Tier P&L engine, custom date ranges, top products & supplier spend analytics, SHA-256 hash-chained append-only `audit_logs` (`018_audit_logs`), 60/60 tests passing. |
+| **Phase 8** | Electron Desktop Packaging & Web Deployment | PLANNED | Electron context-isolation, offline synchronization daemon, desktop installer. |
 
 ---
 
@@ -81,7 +81,7 @@ RetailOS bridges this divide by delivering a **local-first, zero-cloud-dependenc
 - **Argon2id Hashing**: Native `@node-rs/argon2` (memoryCost: 19MB, timeCost: 2) in [`argon2-password-hasher.ts`](file:///d:/Store%20Manager/packages/infrastructure/src/security/argon2-password-hasher.ts).
 - **Session Security**: Cryptographically secure 256-bit token generator (`CryptoTokenService`) with SHA-256 token hashing for lookup and revocation.
 - **Database Expansion**: Migration `002_identity_sessions` adding `sessions` table and `users.store_id`.
-- **Multi-Tenant Repositories**: `SqliteTenantRepository`, `SqliteStoreRepository`, `SqliteUserRepository`, `SqliteSessionRepository`.
+- **Company-Scoped Repositories**: `SqliteTenantRepository`, `SqliteStoreRepository`, `SqliteUserRepository`, `SqliteSessionRepository`.
   - Every query enforces `tenant_id = ctx.tenantId`.
   - Cross-tenant data tampering raises `TenantIsolationViolation`.
 - **RBAC Matrix**: Built-in roles (`OWNER`, `STORE_MANAGER`, `CASHIER`, `AUDITOR`) with granular permission sets. Cashiers are strictly bound to a designated store.
@@ -147,7 +147,7 @@ Zero-corruption backup automation and fail-safe recovery mechanism capable of wi
 1. **Backup Service (`packages/infrastructure/src/backup/`)**:
    - Utilizes SQLite Online Backup API (`rawDb.backup()`) to create consistent snapshot files without locking writers or readers.
    - Checkpoints WAL log prior to backup (`wal_checkpoint(TRUNCATE)`).
-   - Encrypts backup archives using AES-256-GCM with a tenant-controlled master key.
+   - Encrypts backup archives using AES-256-GCM with a company-controlled master key.
 2. **4-Stage Atomic Recovery & Rollback Engine**:
    - Stage 1: Validate archive integrity, decryption, and SQLite schema version.
    - Stage 2: Create a crash-recovery marker file (`.restoring_marker`) and backup the current active database to a `.rollback` staging copy.
@@ -182,7 +182,7 @@ Deliver the official 8-Tier Sales & Profit Performance Report, date-range filter
 ### Phase 8: Electron Desktop Packaging & Web Deployment
 
 #### Goal:
-Package RetailOS into a cross-platform desktop application (Windows, macOS, Linux) with native peripheral access, and deploy the centralized Web management dashboard.
+Package RetailOS into a cross-platform desktop application (Windows, macOS, Linux) with native peripheral access, and provide company-specific management tools without sharing customer databases.
 
 #### Architecture Components:
 1. **Desktop App (`apps/desktop`)**:
@@ -204,7 +204,7 @@ To guarantee that any new engineer maintains the architectural integrity of Reta
 
 1. **Rule 1: Zero Floating Point for Money**: Never use `Number`, `parseFloat`, or raw `Math.round` for prices, costs, totals, or balances. Use the `Money` Value Object with `BigInt` minor units.
 2. **Rule 2: Pure Core Domain**: `packages/core` must have **zero external runtime dependencies**. It must never import Electron, React, Kysely, SQLite, or network libraries.
-3. **Rule 3: Mandatory Tenant Scoping**: Every database repository method that queries, updates, or deletes tenant data must include `where('tenant_id', '=', ctx.tenantId)`. Never write an un-scoped query.
+3. **Rule 3: Mandatory Company Scoping**: Every database repository method that queries, updates, or deletes company data must include `where('tenant_id', '=', ctx.tenantId)`. Never write an un-scoped query. Here `tenant_id` is an internal company-scope key; each customer has a separate installation and database.
 4. **Rule 4: Double-Entry Equality**: Every financial journal entry must balance: $\sum \text{Debits} == \sum \text{Credits}$. Unbalanced entries must throw `UnbalancedJournalEntryError`.
 5. **Rule 5: Immutable Financial & Stock Ledgers**: Never `UPDATE` or `DELETE` posted `journal_entries`, `journal_lines`, or `stock_movements`. Any correction requires an explicit reversal or compensating record.
 6. **Rule 6: Tax Scope**: Value Added Tax (VAT) is intentionally excluded from the current scope. Do not inject tax calculations or VAT accounts.

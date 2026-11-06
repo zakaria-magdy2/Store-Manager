@@ -189,11 +189,14 @@ When tests or repositories read `BIGINT` columns, normalize the runtime value wi
 
 ## 4. Current State & Where to Resume
 
+All contributions must follow the lint, unit-test, integration-test, and merge
+rules in [`docs/QUALITY_GATES.md`](QUALITY_GATES.md).
+
 - **Completed Phases**:
   - **Phase 0**: Architecture Blueprint v2.5 (`docs/architecture/retailos_architecture_blueprint.md`).
   - **Phase 1**: Monorepo, Strict TypeScript, `@retailos/core` Money VO, SQLite WAL manager, Initial Migrations.
   - **Phase 2**: Argon2id password hashing, SHA-256 session management, RBAC matrix, and multi-tenant isolation.
   - **Phase 3**: Universal catalog (categories, products, variants, JSON attributes), WAC inventory engine, tenant negative-stock policy, and DB-enforced append-only stock ledger.
 - **Where to Resume Immediately**:
-  - **Phase 4: POS Checkout, Fast Cart & Peripheral Drivers**.
-  - Review the Phase 4 specification in [`docs/MASTER_ROADMAP_AND_VISION.md`](file:///d:/Store%20Manager/docs/MASTER_ROADMAP_AND_VISION.md) and start with the cart domain model in `packages/core/src/pos/`.
+  - **Phase 4: POS Checkout, Fast Cart & Peripheral Drivers** is in progress.
+  - Cart and sale domain models, checkout orchestration, atomic SQLite persistence, receipt formatting/writer facade, permission-checked cash drawer, and scanner parsing are present. Current gates pass (47 tests, typecheck, lint). Measure the documented latency targets and bind the host adapter for actual devices before marking the phase complete.

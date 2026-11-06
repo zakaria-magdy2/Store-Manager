@@ -3,12 +3,12 @@
 ---
 
 ## 1. Executive Overview & Product Vision
-**RetailOS** is an enterprise-grade, offline-capable Universal Retail Management System. It is engineered to bridge local-first single-store retail environments (zero cloud latency, full offline resilience, zero mandatory cloud subscriptions) with centralized, multi-store, multi-tenant enterprise operations.
+**رَفّ (RetailOS)** is an enterprise-grade, offline-capable retail management system. The product brand belongs to the vendor; each customer deployment receives its own company/store configuration and database. End users do not create a company or enter company codes in the app.
 
 The system supports:
-- **Desktop (Electron)** and **Web (React/Vite)** applications.
-- **Local-first deployment** on SQLite (WAL mode) with an evolutionary path to centralized **PostgreSQL**.
-- **Multi-tenant and multi-store** hierarchy with strict data isolation.
+- **Desktop (Electron, planned)** and a local-first **Web operations app**.
+- **Per-company deployment** on SQLite (WAL mode), with no shared database between customer companies.
+- **Multi-store** hierarchy within each company's installation, with strict store and record scoping.
 - Fast, keyboard- and barcode-optimized **Point of Sale (POS)**.
 - **Universal product catalog** with dynamic attributes (industry-agnostic).
 - **Weighted Average Cost (WAC)** inventory valuation with immutable historical snapshots.
@@ -19,14 +19,16 @@ The system supports:
 ---
 
 ## 2. Current Project State
-- **Current Phase**: **Phase 3: Product Catalog, Dynamic Attributes & WAC Inventory — COMPLETED**.
-- **Next Phase**: **Phase 4: POS Checkout, Fast Cart & Peripheral Drivers (Awaiting User Review & Approval)**.
+- **Completed Through**: Core Phases 1–8 (Foundation, Identity & RBAC, Universal Catalog & WAC Inventory, POS Checkout, Integrated Purchasing/Returns/Expenses & Double-Entry Accounting, Encrypted Backup/Restore & Security Hardening, Dashboards/Analytics & Tamper-Evident Audit Logging, and Offline Outbox Sync & Desktop Host Security Supervisor), with a runnable local Arabic RTL operations app (`apps/web`) and desktop host supervisor (`apps/desktop`).
+- **Current Phase**: **Phase 8 Completed (Production-Ready Local Web & Desktop Host Architecture).**
 - **Workspace Directory**: `d:\Store Manager`
-- **Application Code Status**: Phase 1 foundation, Phase 2 security/identity, and Phase 3 catalog + inventory engine implemented and verified.
+- **Application Code Status**: Domain, identity, catalog, inventory, POS services, `SqliteUnitOfWork`, `SqliteAuditLogRepository` (SHA-256 hash-chained audit trail), `SqliteOutboxRepository` + `OutboxSyncWorker` (monotonic per-tenant CDC outbox & batch sync), `DesktopHostSupervisor` + `createDesktopWindowSecurityPolicy` (`apps/desktop`), and 18 SQLite migrations (`001_initial_foundation` through `018_audit_logs`) are implemented; `apps/web` runs an Arabic RTL UI and authenticated SQLite API for setup, products (with variant option matrices), multi-store branch creation (`POST /api/stores`), atomic inter-store stock transfers (`POST /api/inventory/transfer`), checkout with 80mm/58mm thermal receipt print preview & ESC/POS byte stream (`GET /api/sales/:id/receipt`), customer & supplier returns, expenses, recurring monthly obligations, cash drawer Z-Report shift closing & variance reconciliation (`POST /api/accounting/shift-close`), accounting period locking (`POST /api/accounting/periods/close`), encrypted backups/restores, financial/analytics reports, and tamper-evident audit logs.
 - **Architecture Blueprint Status**: **v2.5 Approved**.
-- **Test Suite Status**: 100% passing (42/42 tests: 28 in `@retailos/core`, 14 in `@retailos/infrastructure`).
-- **Linter Status**: ESLint flat config with strict financial safety and typing rules passing with 0 warnings, 0 errors.
-- **Compiler Status**: Strict TypeScript (NodeNext, zero implicit any, exactOptionalPropertyTypes, noUncheckedIndexedAccess) passing across all packages.
+- **Test Suite Status**: 75/75 automated tests pass across all layers (30 `@retailos/core` unit tests, 5 `@retailos/application` service unit tests, 33 `@retailos/infrastructure` SQLite integration tests, 2 `@retailos/desktop` host/IPC security integration tests, and 5 `@retailos/web` end-to-end integration tests).
+- **Linter Status**: ESLint flat config with strict financial safety (`BigInt`-only monetary rules) and type-checked rules passing across 6/6 lint tasks with 0 warnings, 0 errors.
+- **Compiler Status**: Strict TypeScript (`NodeNext`, zero implicit `any`, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`) passing across 9/9 typecheck tasks and 6/6 build tasks with zero warnings.
+- **Security Baseline**: [`docs/SECURITY_POLICY.md`](docs/SECURITY_POLICY.md) uses OWASP ASVS Level 2 broadly and selected Level 3 controls as a target, not certification. Session-scope checks, tenant-owned upsert protection, database relationship guards, login throttling, strict CSP/security headers, and CodeQL/dependency CI checks are configured.
+- **Next Security Work**: Add authentication throttling/MFA, secure Electron/API boundaries before release, and enable required CI checks plus secret scanning/push protection in repository settings.
 
 ---
 
@@ -47,6 +49,8 @@ The system supports:
 | **ADR-011** | Upfront Monthly Expense Entry | **Upfront Monthly Entry + Reporting Amortization + Zero Inventions** | User confirms actuals at beginning of month; single monthly ledger accrual; dynamic daily reporting; missing values yield $0 + warning banner. |
 | **ADR-012** | Product Attributes & Quantities | **JSON `attributes_json` on variants + integer `BIGINT` quantities** | Industry-agnostic catalog without schema churn; exact stock arithmetic with no fractional-unit drift. |
 | **ADR-013** | Inventory Ledger Immutability & WAC Rounding | **DB-enforced append-only `stock_movements` + Half-Even WAC division** | Corrections must be compensating entries; cost valuation never loses or invents minor units. |
+| **ADR-014** | Company Deployment Boundary | **Separate installation and database per company** | Removes shared-customer-database isolation as a deployment dependency; internal company scope remains a defense-in-depth data integrity boundary. |
+| **ADR-015** | Product Brand and Customer Provisioning | **Vendor-owned product brand; company identity comes from deployment configuration** | End users manage their shop and do not create companies or enter deployment codes in the UI. |
 
 ---
 
@@ -92,16 +96,17 @@ The primary performance report defaults to **TODAY** and displays the exact prog
 | :---: | :--- | :---: | :--- |
 | **Phase 0** | Architecture Analysis, Threat Modeling & Blueprint | **COMPLETED** | Blueprint v2.5 approved, ADRs logged. |
 | **Phase 1** | Project Foundation (Monorepo, TS, Core Domain, DB Abstraction) | **COMPLETED** | Strict TS build (0 errors), Vitest (11/11 pass), Money VO verified, Kysely SQLite migrations work. |
-| **Phase 2** | Identity, RBAC, Multi-Tenancy & Store Assignment | **COMPLETED** | Argon2id, session tokens, tenant scoping, store isolation, 20/20 tests pass. |
+| **Phase 2** | Identity, RBAC, Company Scope & Store Assignment | **COMPLETED** | Argon2id, session tokens, company scoping, store isolation, identity integration tests pass. |
 | **Phase 3** | Product Catalog, Dynamic Attributes & WAC Inventory | **COMPLETED** | Migration 003, JSON variant attributes, WAC engine, append-only ledger triggers, atomic transfers, 42/42 tests pass. |
-| **Phase 4** | POS Checkout, Fast Cart & Peripheral Drivers | **READY TO START** | Barcode lookup $<15\text{ms}$, checkout $<60\text{ms}$, receipt formatting. |
-| **Phase 5** | Financial Accounting, Expenses & Returns | PLANNED | Double-entry journal postings, 8-tier P&L report, recurring expense tracker. |
-| **Phase 6** | Backup, Disaster Recovery & Security Hardening | PLANNED | Online backup API, 4-stage atomic restore with rollback. |
-| **Phase 7** | Dashboards, Analytics & Audit Logging | PLANNED | Date range filters, drill-downs, cashier metric redactions. |
-| **Phase 8** | Electron Desktop Packaging & Web Deployment | PLANNED | Context-isolated preload bridge, offline operation, production build. |
+| **Phase 4** | POS Checkout, Local Operations UI & Peripheral Drivers | **COMPLETED** | SQLite-backed POS, WAC snapshots, ESC/POS receipts, cash drawer & barcode wedge drivers verified. |
+| **Phase 5** | Financial Accounting, Purchasing, Expenses & Returns | **COMPLETED** | Supplier invoices/payments/returns, customer returns, direct & recurring monthly expenses, and 8-tier P&L verified with SQLite integration tests. |
+| **Phase 6** | Backup, Disaster Recovery & Security Hardening | **COMPLETED** | AES-256-GCM backups, 4-stage atomic swap & rollback recovery, dynamic migration validation (`014`–`018`) verified. |
+| **Phase 7** | Dashboards, Analytics & Audit Logging | **COMPLETED** | Custom date-range P&L & cash-flow analytics, cashier redaction, and SHA-256 hash-chained immutable `audit_logs` (`018_audit_logs`) verified. |
+| **Phase 8** | Electron Desktop Host Supervisor, Outbox Sync & Web Deployment | **COMPLETED** | `SqliteOutboxRepository`, `OutboxSyncWorker`, `DesktopHostSupervisor`, context-isolated IPC whitelist, and production builds passing with 0 warnings. |
 
 ---
 
 ## 6. Exact Stopping Point & Next Step
-- **Current Stopping Point**: Phase 3 successfully completed and verified. The universal catalog (categories, products, sellable variants, validated JSON attributes, barcode lookup), the WAC inventory engine (receipts, sales, returns, damage, adjustments, atomic store transfers), tenant-level negative-stock policy, and the database-enforced append-only stock ledger are implemented and tested.
-- **Next Immediate Step**: Await user review and approval to proceed to **Phase 4: POS Checkout, Fast Cart & Peripheral Drivers**.
+- **Current Stopping Point**: All 8 architectural phases (Phases 0–8) are implemented, linted, typechecked, and verified with 75 passing unit, integration, and end-to-end tests across `@retailos/core`, `@retailos/application`, `@retailos/infrastructure`, `@retailos/desktop`, and `@retailos/web`.
+- **Purchasing, expenses, returns, and accounting**: Supplier invoices, invoice lines, payments, supplier returns, direct operating expenses, linked customer returns, recurring obligation actuals, and partial settlements post balanced journal entries transactionally. Supplier returns are linked to invoice lines, capped by unreturned quantity, decrease inventory at weighted average cost, and credit the supplier at original invoice cost; valuation differences post to account 5090.
+- **Verification**: Full `pnpm run typecheck` (9/9), `pnpm run lint` (6/6), `pnpm run test` (75/75), and `pnpm run build` (6/6) gates pass with zero errors and zero warnings.

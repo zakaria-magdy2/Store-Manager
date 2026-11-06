@@ -3,18 +3,6 @@ import { z } from 'zod';
 const MinorUnitsSchema = z.string().regex(/^\d+$/, 'Amount must be an integer minor-units string');
 const QuantitySchema = z.string().regex(/^\d+$/, 'Quantity must be a non-negative integer string');
 
-export const ReceiveStockSchema = z.object({
-  storeId: z.string().uuid(),
-  variantId: z.string().uuid(),
-  quantity: QuantitySchema,
-  unitCost: MinorUnitsSchema,
-  currency: z.string().length(3),
-  sourceType: z.string().min(1).max(32).optional(),
-  sourceId: z.string().min(1).max(128).optional(),
-});
-
-export type ReceiveStockInput = z.infer<typeof ReceiveStockSchema>;
-
 export const RecordSaleSchema = z.object({
   storeId: z.string().uuid(),
   variantId: z.string().uuid(),

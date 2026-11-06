@@ -69,6 +69,8 @@ export class TenantService {
       username: string;
       passwordPlain: string;
       fullName: string;
+      phone?: string | undefined;
+      employmentStartDate?: string | undefined;
       role: Role;
       storeId?: string | undefined;
     },
@@ -80,9 +82,9 @@ export class TenantService {
       throw new Error('UnauthorizedError: Store Manager cannot assign users to other stores');
     }
 
-    // Prevent privilege escalation: only an OWNER may mint another OWNER.
-    if (ctx.roleId !== 'OWNER' && params.role === 'OWNER') {
-      throw new Error('UnauthorizedError: Only an OWNER can create another OWNER');
+    // Store managers may only create cashiers in their assigned store.
+    if (ctx.roleId !== 'OWNER' && params.role !== 'CASHIER') {
+      throw new Error('UnauthorizedError: Only an OWNER can create managers, auditors, or other owners');
     }
 
     // Verify assigned store exists in this tenant if storeId is specified
@@ -106,6 +108,8 @@ export class TenantService {
       username: params.username,
       passwordHash,
       fullName: params.fullName,
+      phone: params.phone,
+      employmentStartDate: params.employmentStartDate,
       role: params.role,
       storeId: params.storeId,
     });

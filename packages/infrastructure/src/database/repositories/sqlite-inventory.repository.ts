@@ -1,9 +1,7 @@
-import { randomUUID } from 'node:crypto';
 import type { Kysely } from 'kysely';
 import {
   InventoryPosition,
   InvalidStockOperationError,
-  Money,
   StockMovement,
 } from '@retailos/core';
 import type {
@@ -14,20 +12,17 @@ import type {
   TransferStockCommand,
 } from '@retailos/application';
 import type { RetailOSDatabase } from '../types.js';
+import { Money } from '@retailos/core';
 import { toBigInt } from '../values.js';
-
-type Executor = Kysely<RetailOSDatabase>;
-
-type InventoryRow = {
-  id: string;
-  tenant_id: string;
-  store_id: string;
-  variant_id: string;
-  quantity_on_hand: bigint;
-  wac_cost: bigint;
-  currency: string;
-  updated_at: string;
-};
+import {
+  applyStockMovementInTransaction,
+  assertPositionCurrency,
+  findInventoryRow,
+  insertStockMovement,
+  persistInventoryPosition,
+  toInventoryPosition,
+  type InventoryRow,
+} from './stock-movement.executor.js';
 
 export class SqliteInventoryRepository implements InventoryRepository {
   constructor(private readonly db: Kysely<RetailOSDatabase>) {}
@@ -67,7 +62,9 @@ export class SqliteInventoryRepository implements InventoryRepository {
     ctx: ExecutionContext,
     command: ApplyStockMovementCommand,
   ): Promise<StockMovement> {
-    return this.db.transaction().execute((trx) => this.applyMovementWithin(trx, ctx, command));
+    return this.db
+      .transaction()
+      .execute((trx) => applyStockMovementInTransaction(trx, ctx, command));
   }
 
   public async transfer(
@@ -82,29 +79,50 @@ export class SqliteInventoryRepository implements InventoryRepository {
         throw new InvalidStockOperationError('Transferred quantity must be strictly positive');
       }
 
-      const sourceRow = await this.findRow(trx, ctx, command.fromStoreId, command.variantId);
+      const sourceRow = await findInventoryRow(
+        trx,
+        ctx,
+        command.fromStoreId,
+        command.variantId,
+      );
       if (!sourceRow) {
         throw new InvalidStockOperationError(
           `No inventory exists for variant '${command.variantId}' in the source store`,
         );
       }
-      this.assertRowCurrency(sourceRow, command.currency);
+      if (sourceRow.currency !== command.currency) {
+        throw new InvalidStockOperationError(
+          `Inventory currency ${sourceRow.currency} does not match requested currency ${command.currency}`,
+        );
+      }
 
-      const source = this.toPosition(sourceRow);
+      const source = toInventoryPosition(sourceRow);
       const sourceAfter = source.issue(command.quantity, false);
       const transferredCost = source.wacCost;
 
-      const destinationRow = await this.findRow(trx, ctx, command.toStoreId, command.variantId);
+      const destinationRow = await findInventoryRow(
+        trx,
+        ctx,
+        command.toStoreId,
+        command.variantId,
+      );
       const destination = destinationRow
-        ? this.toPosition(destinationRow)
+        ? toInventoryPosition(destinationRow)
         : InventoryPosition.empty(command.variantId, command.currency);
-      this.assertPositionCurrency(destination, command.currency);
+      assertPositionCurrency(destination, command.currency);
 
       const destinationAfter = destination.receive(command.quantity, transferredCost);
       const now = new Date();
 
-      await this.persistPosition(trx, ctx, command.fromStoreId, sourceRow, sourceAfter, now);
-      await this.persistPosition(
+      await persistInventoryPosition(
+        trx,
+        ctx,
+        command.fromStoreId,
+        sourceRow,
+        sourceAfter,
+        now,
+      );
+      await persistInventoryPosition(
         trx,
         ctx,
         command.toStoreId,
@@ -145,149 +163,10 @@ export class SqliteInventoryRepository implements InventoryRepository {
         createdAt: now,
       });
 
-      await this.insertMovement(trx, outMovement);
-      await this.insertMovement(trx, inMovement);
+      await insertStockMovement(trx, outMovement);
+      await insertStockMovement(trx, inMovement);
 
       return { out: outMovement, in: inMovement };
-    });
-  }
-
-  private async applyMovementWithin(
-    trx: Executor,
-    ctx: ExecutionContext,
-    command: ApplyStockMovementCommand,
-  ): Promise<StockMovement> {
-    if (command.quantityDelta === 0n) {
-      throw new InvalidStockOperationError('Stock movement quantity delta cannot be zero');
-    }
-
-    const existingRow = await this.findRow(trx, ctx, command.storeId, command.variantId);
-    const current = existingRow
-      ? this.toPosition(existingRow)
-      : InventoryPosition.empty(command.variantId, command.currency);
-    this.assertPositionCurrency(current, command.currency);
-
-    let next: InventoryPosition;
-    let unitCost: Money;
-
-    if (command.quantityDelta > 0n) {
-      if (!command.unitCost) {
-        throw new InvalidStockOperationError('Incoming stock movements require a unit cost');
-      }
-      if (command.unitCost.currency.code !== command.currency) {
-        throw new InvalidStockOperationError(
-          `Unit cost currency ${command.unitCost.currency.code} does not match inventory currency ${command.currency}`,
-        );
-      }
-      next = current.receive(command.quantityDelta, command.unitCost);
-      unitCost = command.unitCost;
-    } else {
-      next = current.issue(-command.quantityDelta, command.allowNegativeStock ?? false);
-      unitCost = current.wacCost;
-    }
-
-    const now = new Date();
-    await this.persistPosition(trx, ctx, command.storeId, existingRow, next, now);
-
-    const movement = StockMovement.create({
-      id: command.id,
-      tenantId: ctx.tenantId,
-      storeId: command.storeId,
-      variantId: command.variantId,
-      movementType: command.movementType,
-      quantityDelta: command.quantityDelta,
-      unitCost,
-      resultingQuantity: next.quantityOnHand,
-      resultingWac: next.wacCost,
-      sourceType: command.sourceType,
-      sourceId: command.sourceId,
-      createdByUserId: ctx.userId,
-      createdAt: now,
-    });
-
-    await this.insertMovement(trx, movement);
-    return movement;
-  }
-
-  private async findRow(
-    db: Executor,
-    ctx: ExecutionContext,
-    storeId: string,
-    variantId: string,
-  ): Promise<InventoryRow | undefined> {
-    return db
-      .selectFrom('inventory_items')
-      .selectAll()
-      .where('tenant_id', '=', ctx.tenantId)
-      .where('store_id', '=', storeId)
-      .where('variant_id', '=', variantId)
-      .executeTakeFirst();
-  }
-
-  private async persistPosition(
-    db: Executor,
-    ctx: ExecutionContext,
-    storeId: string,
-    existingRow: InventoryRow | undefined,
-    position: InventoryPosition,
-    now: Date,
-  ): Promise<void> {
-    if (existingRow) {
-      await db
-        .updateTable('inventory_items')
-        .set({
-          quantity_on_hand: position.quantityOnHand,
-          wac_cost: position.wacCost.amount,
-          updated_at: now.toISOString(),
-        })
-        .where('id', '=', existingRow.id)
-        .where('tenant_id', '=', ctx.tenantId)
-        .execute();
-      return;
-    }
-
-    await db
-      .insertInto('inventory_items')
-      .values({
-        id: `inv_${randomUUID()}`,
-        tenant_id: ctx.tenantId,
-        store_id: storeId,
-        variant_id: position.variantId,
-        quantity_on_hand: position.quantityOnHand,
-        wac_cost: position.wacCost.amount,
-        currency: position.wacCost.currency.code,
-        updated_at: now.toISOString(),
-      })
-      .execute();
-  }
-
-  private async insertMovement(db: Executor, movement: StockMovement): Promise<void> {
-    await db
-      .insertInto('stock_movements')
-      .values({
-        id: movement.id,
-        tenant_id: movement.tenantId,
-        store_id: movement.storeId,
-        variant_id: movement.variantId,
-        movement_type: movement.movementType,
-        quantity_delta: movement.quantityDelta,
-        unit_cost: movement.unitCost.amount,
-        currency: movement.unitCost.currency.code,
-        resulting_quantity: movement.resultingQuantity,
-        resulting_wac: movement.resultingWac.amount,
-        source_type: movement.sourceType,
-        source_id: movement.sourceId,
-        created_by_user_id: movement.createdByUserId,
-        created_at: movement.createdAt.toISOString(),
-      })
-      .execute();
-  }
-
-  private toPosition(row: InventoryRow): InventoryPosition {
-    return InventoryPosition.create({
-      variantId: row.variant_id,
-      quantityOnHand: toBigInt(row.quantity_on_hand),
-      wacCost: Money.fromMinor(toBigInt(row.wac_cost), row.currency),
     });
   }
 
@@ -301,21 +180,5 @@ export class SqliteInventoryRepository implements InventoryRepository {
       wacCost: Money.fromMinor(toBigInt(row.wac_cost), row.currency),
       updatedAt: new Date(row.updated_at),
     };
-  }
-
-  private assertRowCurrency(row: InventoryRow, currency: string): void {
-    if (row.currency !== currency) {
-      throw new InvalidStockOperationError(
-        `Inventory currency ${row.currency} does not match requested currency ${currency}`,
-      );
-    }
-  }
-
-  private assertPositionCurrency(position: InventoryPosition, currency: string): void {
-    if (position.wacCost.currency.code !== currency) {
-      throw new InvalidStockOperationError(
-        `Inventory currency ${position.wacCost.currency.code} does not match requested currency ${currency}`,
-      );
-    }
   }
 }

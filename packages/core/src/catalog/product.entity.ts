@@ -8,8 +8,22 @@ export interface ProductProps {
   barcode: string | undefined;
   categoryId: string | undefined;
   hasVariants: boolean;
+  itemKind: ProductKind;
   isActive: boolean;
+  description: string | undefined;
+  brand: string | undefined;
+  imagePath: string | undefined;
+  options: readonly ProductOption[];
 }
+
+export interface ProductOption {
+  key: string;
+  name: string;
+  values: readonly string[];
+}
+
+export const ProductKinds = { PRODUCT: 'PRODUCT', SERVICE: 'SERVICE' } as const;
+export type ProductKind = keyof typeof ProductKinds;
 
 export class Product extends Entity<ProductProps> {
   private constructor(id: string, props: ProductProps, createdAt?: Date, updatedAt?: Date) {
@@ -24,7 +38,12 @@ export class Product extends Entity<ProductProps> {
     barcode?: string | undefined;
     categoryId?: string | undefined;
     hasVariants?: boolean;
+    itemKind?: ProductKind;
     isActive?: boolean;
+    description?: string | undefined;
+    brand?: string | undefined;
+    imagePath?: string | undefined;
+    options?: readonly ProductOption[] | undefined;
     createdAt?: Date;
     updatedAt?: Date;
   }): Product {
@@ -49,7 +68,12 @@ export class Product extends Entity<ProductProps> {
         barcode: barcode ? barcode : undefined,
         categoryId: params.categoryId?.trim() || undefined,
         hasVariants: params.hasVariants ?? false,
+        itemKind: params.itemKind ?? 'PRODUCT',
         isActive: params.isActive ?? true,
+        description: params.description?.trim() || undefined,
+        brand: params.brand?.trim() || undefined,
+        imagePath: params.imagePath?.trim() || undefined,
+        options: params.options ?? [],
       },
       params.createdAt,
       params.updatedAt,
@@ -80,9 +104,18 @@ export class Product extends Entity<ProductProps> {
     return this.props.hasVariants;
   }
 
+  public get itemKind(): ProductKind {
+    return this.props.itemKind;
+  }
+
   public get isActive(): boolean {
     return this.props.isActive;
   }
+
+  public get description(): string | undefined { return this.props.description; }
+  public get brand(): string | undefined { return this.props.brand; }
+  public get imagePath(): string | undefined { return this.props.imagePath; }
+  public get options(): readonly ProductOption[] { return this.props.options; }
 
   public rename(name: string): void {
     if (!name.trim()) {

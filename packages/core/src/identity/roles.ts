@@ -49,6 +49,7 @@ export const Permissions = {
   STORES_MANAGE: 'stores:manage',
   SETTINGS_MANAGE: 'settings:manage',
   AUDIT_LOG_VIEW: 'audit_log:view',
+  SYSTEM_BACKUP_MANAGE: 'system:backup:manage',
 } as const;
 
 export type Permission = (typeof Permissions)[keyof typeof Permissions];
@@ -72,17 +73,15 @@ export const RolePermissions: Record<Role, ReadonlySet<string>> = {
     Permissions.REPORTS_DAILY_VIEW,
     Permissions.REPORTS_MONTHLY_VIEW,
     Permissions.EXPENSES_DIRECT_CREATE,
+    Permissions.EXPENSES_MONTHLY_CONFIRM,
     Permissions.EXPENSES_MONTHLY_PAY,
     Permissions.USERS_MANAGE,
   ]),
 
   CASHIER: new Set([
     Permissions.POS_CHECKOUT,
-    Permissions.POS_DISCOUNT,
-    Permissions.POS_REFUND,
-    Permissions.POS_DRAWER_OPEN,
+    // Cashiers can browse sellable items and complete checkout only.
     Permissions.INVENTORY_VIEW,
-    Permissions.EXPENSES_DIRECT_CREATE,
   ]),
 
   AUDITOR: new Set([

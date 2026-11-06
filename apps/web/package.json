@@ -4,11 +4,17 @@
   "private": true,
   "description": "RetailOS Web Client Application",
   "scripts": {
-    "build": "echo \"Web application prepared for Phase 8\""
+    "dev": "node server.mjs",
+    "start": "node server.mjs",
+    "build": "node build.mjs",
+    "lint": "node --check server.mjs && node --check public/app.js && node --check build.mjs",
+    "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
     "@retailos/core": "workspace:*",
     "@retailos/shared": "workspace:*",
-    "@retailos/application": "workspace:*"
+    "@retailos/application": "workspace:*",
+    "@retailos/infrastructure": "workspace:*",
+    "zod": "^3.24.2"
   }
 }

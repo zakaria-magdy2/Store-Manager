@@ -17,7 +17,7 @@
 - **Consequences**:
   - Prisma's binary query engine (~40MB) is completely avoided inside the Electron distributable.
   - Kysely provides compile-time type safety with zero runtime overhead.
-  - Native support for both `better-sqlite3` (Desktop) and `pg` (Centralized Cloud).
+  - Native support for `better-sqlite3` per company installation; any future PostgreSQL adapter remains company-specific and does not imply a shared customer database.
 
 ---
 
@@ -118,4 +118,20 @@
   3. Round fractional minor units with **Half-Even (Banker's) rounding** via `Money.divideBy`, matching the project-wide monetary policy.
   4. Record an immutable cost snapshot on every issue movement so COGS is reproducible at any later date.
 - **Consequences**: Ledger tampering requires a schema change, not just an application bug. Cost valuation never loses or invents minor units, and corrections remain fully auditable as compensating entries.
+
+---
+
+## ADR-014: Separate Deployment and Database per Company
+- **Status**: Approved
+- **Context**: The product will be installed separately for each customer company. A company's branches may share that company's installation, but unrelated customer companies will not share an application database.
+- **Decision**: Each company deployment owns its application instance and database. Do not design customer-facing workflows around multiple unrelated companies sharing one deployment. Keep the existing internal `tenant_id`/execution scope as a defense-in-depth company ownership boundary and as a guard against malformed imports or future integration mistakes.
+- **Consequences**: Cross-customer isolation is provided primarily by deployment and database separation. Tenant-aware repositories and database relationship guards remain valuable integrity controls, but are not a substitute for operating-system, backup, and deployment isolation.
+
+---
+
+## ADR-015: Vendor-Owned Product Brand and Customer Provisioning
+- **Status**: Approved
+- **Context**: RetailOS is a product sold by its vendor to individual retail companies. A shop employee should open the configured shop system, not create a tenant or enter deployment identifiers.
+- **Decision**: Present the product under the vendor-owned Arabic brand **رَفّ**. Set customer company/store identity and currency at deployment through protected configuration. Keep the internal tenant boundary for data integrity, and allow the first-run user flow to create only the store owner's credentials.
+- **Consequences**: Product identity remains stable across customer installations. Each installation is customized before handoff. Configuration changes after the database is initialized need controlled deployment handling, especially for currency and identifiers.
 

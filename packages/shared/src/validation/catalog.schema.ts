@@ -1,6 +1,11 @@
 import { z } from 'zod';
 
 const AttributeValueSchema = z.union([z.string(), z.number().finite(), z.boolean()]);
+export const ProductOptionSchema = z.object({
+  key: z.string().min(1).max(64).regex(/^[a-zA-Z][a-zA-Z0-9_-]*$/),
+  name: z.string().min(1).max(64).trim(),
+  values: z.array(z.string().min(1).max(64).trim()).min(1).max(50),
+});
 
 export const ProductAttributesSchema = z.record(
   z
@@ -38,12 +43,37 @@ export const CreateVariantSchema = z.object({
 export type CreateVariantInput = z.infer<typeof CreateVariantSchema>;
 
 export const CreateProductSchema = z.object({
+  itemKind: z.enum(['PRODUCT', 'SERVICE']).default('PRODUCT'),
   name: z.string().min(2, 'Name must be at least 2 characters').trim(),
   sku: z.string().min(1, 'SKU is required').max(64).trim(),
   barcode: z.string().min(1).max(64).trim().optional(),
   categoryId: z.string().uuid().optional(),
+  description: z.string().max(2000).trim().optional(),
+  brand: z.string().max(100).trim().optional(),
+  imagePath: z.string().max(300).trim().optional(),
+  options: z.array(ProductOptionSchema).max(8).default([]),
   hasVariants: z.boolean().optional(),
-  variants: z.array(CreateVariantSchema).min(1, 'At least one sellable variant is required'),
+  variants: z.array(CreateVariantSchema).min(1, 'At least one sellable variant is required').max(50, 'A product can have at most 50 sellable variants'),
 });
 
 export type CreateProductInput = z.infer<typeof CreateProductSchema>;
+
+export const UpdateProductSchema = z.object({
+  name: z.string().min(2, 'Name must be at least 2 characters').trim(),
+  sku: z.string().min(1, 'SKU is required').max(64).trim(),
+  categoryId: z.string().uuid().nullable(),
+  description: z.string().max(2000).trim().nullable().optional(),
+  brand: z.string().max(100).trim().nullable().optional(),
+  imagePath: z.string().max(300).trim().nullable().optional(),
+  options: z.array(ProductOptionSchema).max(8),
+  variants: z.array(z.object({
+    id: z.string().uuid().optional(),
+    sku: z.string().min(1, 'SKU is required').max(64).trim(),
+    barcode: z.string().max(64).trim().nullable().optional(),
+    attributes: ProductAttributesSchema.optional(),
+    retailPrice: z.string().regex(/^\d+$/, 'Retail price must be an integer minor-units string'),
+    reorderPoint: z.string().regex(/^\d+$/, 'Reorder point must be an integer string'),
+  })).min(1).max(50),
+});
+
+export type UpdateProductInput = z.infer<typeof UpdateProductSchema>;

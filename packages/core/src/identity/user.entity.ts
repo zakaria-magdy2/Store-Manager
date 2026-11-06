@@ -6,6 +6,8 @@ export interface UserProps {
   username: string;
   passwordHash: string;
   fullName: string;
+  phone: string | undefined;
+  employmentStartDate: string;
   role: Role;
   storeId: string | undefined;
   isActive: boolean;
@@ -22,6 +24,8 @@ export class User extends Entity<UserProps> {
     username: string;
     passwordHash: string;
     fullName: string;
+    phone?: string | undefined;
+    employmentStartDate?: string | undefined;
     role: Role;
     storeId?: string | undefined;
     isActive?: boolean;
@@ -53,6 +57,8 @@ export class User extends Entity<UserProps> {
         username: params.username.trim().toLowerCase(),
         passwordHash: params.passwordHash,
         fullName: params.fullName.trim(),
+        phone: params.phone?.trim() || undefined,
+        employmentStartDate: params.employmentStartDate ?? (params.createdAt ?? new Date()).toISOString().slice(0, 10),
         role: params.role,
         storeId: params.storeId?.trim(),
         isActive: params.isActive ?? true,
@@ -76,6 +82,14 @@ export class User extends Entity<UserProps> {
 
   public get fullName(): string {
     return this.props.fullName;
+  }
+
+  public get phone(): string | undefined {
+    return this.props.phone;
+  }
+
+  public get employmentStartDate(): string {
+    return this.props.employmentStartDate;
   }
 
   public get role(): Role {

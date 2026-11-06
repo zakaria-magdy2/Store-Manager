@@ -98,8 +98,10 @@ export class SqliteStoreRepository implements StoreRepository {
           address: store.address ?? null,
           phone: store.phone ?? null,
           is_active: store.isActive ? 1 : 0,
-        }),
+        }).where('stores.tenant_id', '=', ctx.tenantId),
       )
       .execute();
+    const saved = await this.db.selectFrom('stores').select('id').where('id', '=', store.id).where('tenant_id', '=', ctx.tenantId).executeTakeFirst();
+    if (!saved) throw new Error('TenantIsolationViolation: Store id belongs to another tenant');
   }
 }

@@ -58,3 +58,16 @@ After completing any meaningful task, module, or phase:
    - Daily reports amortize monthly recurring commitments over actual calendar days in the month.
    - Paying a monthly bill must be recorded as an accrued liability settlement (balance sheet movement), NEVER as a direct daily expense on the payment date, preventing double-counting.
    - Operating Profit (accrual) must remain strictly decoupled from Cash Flow (liquidity).
+
+---
+
+## 5. Engineering Quality Gates (Mandatory)
+- Follow [`docs/QUALITY_GATES.md`](docs/QUALITY_GATES.md) for the lint, unit-test,
+  integration-test, and merge rules.
+- Follow [`docs/SECURITY_POLICY.md`](docs/SECURITY_POLICY.md) for security
+  baselines, release controls, and tracked risks.
+- Every bug fix must include a regression test; persistence changes must be
+  exercised through migrated SQLite integration tests.
+- Before reporting a meaningful code change complete, run and report the actual
+  results of `pnpm run lint`, `pnpm run typecheck`, `pnpm test`, and
+  `pnpm run build`.

@@ -104,6 +104,7 @@ export class AuthService {
     }
 
     if (new Date() > session.expiresAt) {
+      await this.sessionRepo.revokeSession(tokenHash);
       throw new Error('AuthenticationError: Session has expired');
     }
 
@@ -116,8 +117,12 @@ export class AuthService {
       correlationId: correlationId ?? 'sys-session-validation',
     });
 
-    const user = await this.userRepo.findById(dummyCtx, session.userId);
-    if (!user || !user.isActive) {
+    const [user, tenant] = await Promise.all([
+      this.userRepo.findById(dummyCtx, session.userId),
+      this.tenantRepo.findById(session.tenantId),
+    ]);
+    if (!tenant?.isActive || !user || !user.isActive || user.tenantId !== session.tenantId || user.storeId !== session.storeId) {
+      await this.sessionRepo.revokeSession(tokenHash);
       throw new Error('AuthenticationError: User account is inactive or disabled');
     }
 

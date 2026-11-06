@@ -103,7 +103,11 @@ describe('Identity & RBAC Domain Entities', () => {
 
     const cashierPerms = getPermissionsForRole(Roles.CASHIER);
     expect(cashierPerms.has(Permissions.POS_CHECKOUT)).toBe(true);
-    expect(cashierPerms.has(Permissions.POS_REFUND)).toBe(true);
+    expect(cashierPerms.has(Permissions.INVENTORY_VIEW)).toBe(true);
+    expect(cashierPerms.has(Permissions.POS_REFUND)).toBe(false);
+    expect(cashierPerms.has(Permissions.POS_DISCOUNT)).toBe(false);
+    expect(cashierPerms.has(Permissions.EXPENSES_DIRECT_CREATE)).toBe(false);
+    expect(cashierPerms.has(Permissions.REPORTS_DAILY_VIEW)).toBe(false);
     expect(cashierPerms.has(Permissions.REPORTS_FINANCIAL_VIEW)).toBe(false);
     expect(cashierPerms.has(Permissions.USERS_MANAGE)).toBe(false);
 
@@ -112,6 +116,7 @@ describe('Identity & RBAC Domain Entities', () => {
     expect(managerPerms.has(Permissions.INVENTORY_ADJUST)).toBe(true);
     expect(managerPerms.has(Permissions.EXPENSES_DIRECT_CREATE)).toBe(true);
     expect(managerPerms.has(Permissions.REPORTS_FINANCIAL_VIEW)).toBe(false); // Only Auditor or Owner
+    expect(managerPerms.has(Permissions.SYSTEM_BACKUP_MANAGE)).toBe(false);
 
     const auditorPerms = getPermissionsForRole(Roles.AUDITOR);
     expect(auditorPerms.has(Permissions.REPORTS_FINANCIAL_VIEW)).toBe(true);

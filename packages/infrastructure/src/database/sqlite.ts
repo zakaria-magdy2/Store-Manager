@@ -46,13 +46,30 @@ export class SqliteDatabaseManager {
     this.rawDb.pragma('journal_mode = WAL');
     this.rawDb.pragma('synchronous = NORMAL');
     this.rawDb.pragma('foreign_keys = ON');
-    this.rawDb.pragma('busy_timeout = 5000');
+    this.rawDb.pragma('busy_timeout = 10000');
+    this.rawDb.pragma('wal_autocheckpoint = 1000');
+    this.rawDb.pragma('temp_store = MEMORY');
 
     this.kyselyDb = new Kysely<RetailOSDatabase>({
       dialect: new SqliteDialect({
         database: this.rawDb,
       }),
     });
+  }
+
+  /**
+   * Runs a non-blocking passive WAL checkpoint to keep the WAL file bounded
+   * without blocking active readers or writers.
+   */
+  public checkpointPassive(): void {
+    if (!this.rawDb || !this.rawDb.open || this.options.readOnly) {
+      return;
+    }
+    try {
+      this.rawDb.pragma('wal_checkpoint(PASSIVE)');
+    } catch (err) {
+      this.logger.warn(`Passive WAL checkpoint returned notice: ${String(err)}`);
+    }
   }
 
   /**

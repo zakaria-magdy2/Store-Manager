@@ -4,7 +4,7 @@ import {
   Product,
   ProductVariant,
 } from '@retailos/core';
-import type { AttributeValue, Money } from '@retailos/core';
+import type { AttributeValue, Money, ProductKind, ProductOption } from '@retailos/core';
 import type { ExecutionContext } from '../context/execution-context.js';
 import type {
   CategoryRepository,
@@ -28,6 +28,11 @@ export interface CreateProductParams {
   barcode?: string | undefined;
   categoryId?: string | undefined;
   hasVariants?: boolean | undefined;
+  itemKind?: ProductKind | undefined;
+  description?: string | undefined;
+  brand?: string | undefined;
+  imagePath?: string | undefined;
+  options?: readonly ProductOption[] | undefined;
   variants: CreateVariantParams[];
 }
 
@@ -117,6 +122,11 @@ export class CatalogService {
       barcode: params.barcode,
       categoryId: params.categoryId,
       hasVariants,
+      description: params.description,
+      brand: params.brand,
+      imagePath: params.imagePath,
+      options: params.options,
+      ...(params.itemKind ? { itemKind: params.itemKind } : {}),
     });
 
     const variants = params.variants.map((variant) =>

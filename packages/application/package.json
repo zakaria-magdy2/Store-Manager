@@ -8,8 +8,9 @@
   "scripts": {
     "build": "tsc -b",
     "clean": "rimraf dist tsconfig.tsbuildinfo",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src --max-warnings 0"
+    "lint": "eslint src tests --max-warnings 0"
   },
   "dependencies": {
     "@retailos/core": "workspace:*",
@@ -18,6 +19,7 @@
   "devDependencies": {
     "@retailos/tsconfig": "workspace:*",
     "typescript": "^5.8.2",
-    "rimraf": "^6.0.1"
+    "rimraf": "^6.0.1",
+    "vitest": "^3.0.7"
   }
 }

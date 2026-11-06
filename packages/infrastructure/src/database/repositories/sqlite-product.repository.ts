@@ -1,6 +1,6 @@
 import type { Kysely } from 'kysely';
 import { Product, serializeAttributes } from '@retailos/core';
-import type { ProductVariant } from '@retailos/core';
+import type { ProductOption, ProductVariant } from '@retailos/core';
 import type {
   ExecutionContext,
   ProductListFilter,
@@ -59,7 +59,7 @@ export class SqliteProductRepository implements ProductRepository {
 
   public async save(ctx: ExecutionContext, product: Product): Promise<void> {
     this.assertTenant(ctx, product.tenantId);
-    await this.upsertProduct(this.db, product);
+    await this.upsertProduct(this.db, product, ctx.tenantId);
   }
 
   public async saveWithVariants(
@@ -70,7 +70,7 @@ export class SqliteProductRepository implements ProductRepository {
     this.assertTenant(ctx, product.tenantId);
 
     await this.db.transaction().execute(async (trx) => {
-      await this.upsertProduct(trx, product);
+      await this.upsertProduct(trx, product, ctx.tenantId);
 
       for (const variant of variants) {
         if (variant.tenantId !== ctx.tenantId || variant.productId !== product.id) {
@@ -102,14 +102,16 @@ export class SqliteProductRepository implements ProductRepository {
               currency: variant.retailPrice.currency.code,
               reorder_point: variant.reorderPoint,
               is_active: variant.isActive ? 1 : 0,
-            }),
+            }).where('product_variants.tenant_id', '=', ctx.tenantId),
           )
           .execute();
+        const savedVariant = await trx.selectFrom('product_variants').select('id').where('id', '=', variant.id).where('tenant_id', '=', ctx.tenantId).executeTakeFirst();
+        if (!savedVariant) throw new Error('TenantIsolationViolation: Variant id belongs to another tenant');
       }
     });
   }
 
-  private async upsertProduct(db: Kysely<RetailOSDatabase>, product: Product): Promise<void> {
+  private async upsertProduct(db: Kysely<RetailOSDatabase>, product: Product, tenantId: string): Promise<void> {
     await db
       .insertInto('products')
       .values({
@@ -120,6 +122,11 @@ export class SqliteProductRepository implements ProductRepository {
         barcode: product.barcode ?? null,
         category_id: product.categoryId ?? null,
         has_variants: product.hasVariants ? 1 : 0,
+        item_kind: product.itemKind,
+        description: product.description ?? null,
+        brand: product.brand ?? null,
+        image_path: product.imagePath ?? null,
+        options_json: JSON.stringify(product.options),
         is_active: product.isActive ? 1 : 0,
       })
       .onConflict((oc) =>
@@ -128,10 +135,17 @@ export class SqliteProductRepository implements ProductRepository {
           barcode: product.barcode ?? null,
           category_id: product.categoryId ?? null,
           has_variants: product.hasVariants ? 1 : 0,
+          item_kind: product.itemKind,
+          description: product.description ?? null,
+          brand: product.brand ?? null,
+          image_path: product.imagePath ?? null,
+          options_json: JSON.stringify(product.options),
           is_active: product.isActive ? 1 : 0,
-        }),
+        }).where('products.tenant_id', '=', tenantId),
       )
       .execute();
+    const saved = await db.selectFrom('products').select('id').where('id', '=', product.id).where('tenant_id', '=', tenantId).executeTakeFirst();
+    if (!saved) throw new Error('TenantIsolationViolation: Product id belongs to another tenant');
   }
 
   private assertTenant(ctx: ExecutionContext, tenantId: string): void {
@@ -148,6 +162,11 @@ export class SqliteProductRepository implements ProductRepository {
     barcode: string | null;
     category_id: string | null;
     has_variants: number;
+    item_kind: 'PRODUCT' | 'SERVICE';
+    description: string | null;
+    brand: string | null;
+    image_path: string | null;
+    options_json: string;
     is_active: number;
     created_at: string;
   }): Product {
@@ -159,7 +178,12 @@ export class SqliteProductRepository implements ProductRepository {
       barcode: row.barcode ?? undefined,
       categoryId: row.category_id ?? undefined,
       hasVariants: Boolean(row.has_variants),
+      itemKind: row.item_kind,
       isActive: Boolean(row.is_active),
+      description: row.description ?? undefined,
+      brand: row.brand ?? undefined,
+      imagePath: row.image_path ?? undefined,
+      options: JSON.parse(row.options_json || '[]') as ProductOption[],
       createdAt: new Date(row.created_at),
     });
   }

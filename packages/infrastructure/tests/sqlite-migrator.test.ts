@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { ScopedExecutionContext } from '@retailos/application';
+import { Permissions } from '@retailos/core';
 import { SqliteDatabaseManager } from '../src/database/sqlite.js';
 import { DatabaseMigrator } from '../src/database/migrator.js';
+import { SqliteUnitOfWork } from '../src/database/unit-of-work.js';
+import { SqliteAuditLogRepository } from '../src/database/repositories/sqlite-audit-log.repository.js';
+import { up as employeeProfileMigration } from '../src/database/migrations/015_employee_profiles.js';
 
 describe('SQLite Database & Migration Engine', () => {
   let dbManager: SqliteDatabaseManager;
@@ -63,6 +68,21 @@ describe('SQLite Database & Migration Engine', () => {
     expect(stores[0]!.name).toBe('Downtown Flagship Branch');
   });
 
+  it('backfills existing employee start dates from account creation dates', async () => {
+    const db = dbManager.getDb();
+    await db.schema.createTable('users')
+      .addColumn('id', 'text', (column) => column.primaryKey())
+      .addColumn('created_at', 'text', (column) => column.notNull())
+      .execute();
+    await db.insertInto('users').values({ id: 'legacy-user', created_at: '2024-02-01 10:30:00' }).execute();
+
+    await employeeProfileMigration(db);
+
+    const user = await db.selectFrom('users').select(['phone', 'employment_start_date']).where('id', '=', 'legacy-user').executeTakeFirstOrThrow();
+    expect(user.phone).toBeNull();
+    expect(user.employment_start_date).toBe('2024-02-01');
+  });
+
   it('enforces foreign key constraints in SQLite', async () => {
     const migrator = new DatabaseMigrator(dbManager.getDb());
     await migrator.migrateToLatest();
@@ -81,5 +101,264 @@ describe('SQLite Database & Migration Engine', () => {
         })
         .execute(),
     ).rejects.toThrow();
+  });
+
+  it('enforces tenant ownership across identity, catalog, and inventory relationships', async () => {
+    await new DatabaseMigrator(dbManager.getDb()).migrateToLatest();
+    const db = dbManager.getDb();
+    await db.insertInto('tenants').values([
+      { id: 'tenant-guard-a', name: 'A', code: 'GUARD_A', currency: 'USD' },
+      { id: 'tenant-guard-b', name: 'B', code: 'GUARD_B', currency: 'USD' },
+    ]).execute();
+    await db.insertInto('stores').values([
+      { id: 'store-guard-a', tenant_id: 'tenant-guard-a', name: 'A', code: 'A' },
+      { id: 'store-guard-b', tenant_id: 'tenant-guard-b', name: 'B', code: 'B' },
+    ]).execute();
+    await db.insertInto('users').values({
+      id: 'user-guard-a', tenant_id: 'tenant-guard-a', store_id: null,
+      username: 'a', password_hash: 'hash', full_name: 'A', role: 'OWNER',
+    }).execute();
+    await db.insertInto('suppliers').values({
+      id: 'supplier-guard-a', tenant_id: 'tenant-guard-a', name: 'Supplier A',
+      phone: null, notes: null,
+    }).execute();
+    await db.insertInto('supplier_purchases').values({
+      id: 'purchase-guard-a', tenant_id: 'tenant-guard-a', store_id: 'store-guard-a',
+      idempotency_key: 'purchase-guard-a',
+      supplier_id: 'supplier-guard-a', invoice_number: 'INV-A', purchased_at: '2026-11-04T10:00:00.000Z',
+      total_amount: 5000n, initial_paid_amount: 1000n, currency: 'USD',
+      notes: null, created_by_user_id: 'user-guard-a',
+    }).execute();
+    await db.insertInto('supplier_payments').values({
+      id: 'supplier-payment-guard-a', tenant_id: 'tenant-guard-a', supplier_id: 'supplier-guard-a',
+      idempotency_key: 'supplier-payment-guard-a',
+      purchase_id: 'purchase-guard-a', amount: 500n, currency: 'USD', payment_method: 'CASH',
+      reference_number: null, paid_at: '2026-11-04T11:00:00.000Z', created_by_user_id: 'user-guard-a',
+    }).execute();
+
+    await expect(db.updateTable('supplier_purchases').set({ total_amount: 4000n })
+      .where('id', '=', 'purchase-guard-a').execute()).rejects.toThrow('append-only');
+    await expect(db.deleteFrom('supplier_payments').where('id', '=', 'supplier-payment-guard-a')
+      .execute()).rejects.toThrow('append-only');
+    await expect(db.insertInto('supplier_purchases').values({
+      id: 'purchase-guard-invalid', tenant_id: 'tenant-guard-b', store_id: 'store-guard-a',
+      supplier_id: 'supplier-guard-a', invoice_number: null, purchased_at: '2026-11-04T10:00:00.000Z',
+      total_amount: 5000n, initial_paid_amount: 0n, currency: 'USD',
+      notes: null, created_by_user_id: 'user-guard-a',
+    }).execute()).rejects.toThrow('TenantIsolationViolation');
+    await db.insertInto('categories').values({
+      id: 'category-guard-a', tenant_id: 'tenant-guard-a', parent_id: null,
+      name: 'A', code: 'A',
+    }).execute();
+    await db.insertInto('products').values({
+      id: 'product-guard-a', tenant_id: 'tenant-guard-a', name: 'A', sku: 'A',
+      barcode: null, category_id: 'category-guard-a', has_variants: 1,
+    }).execute();
+    await db.insertInto('product_variants').values({
+      id: 'variant-guard-a', tenant_id: 'tenant-guard-a', product_id: 'product-guard-a',
+      sku: 'A-1', barcode: null, attributes_json: '{}', retail_price: 100n,
+      currency: 'USD', reorder_point: 0n,
+    }).execute();
+    await db.insertInto('supplier_purchase_items').values({
+      id: 'purchase-item-guard-a', tenant_id: 'tenant-guard-a', store_id: 'store-guard-a',
+      purchase_id: 'purchase-guard-a', variant_id: 'variant-guard-a', product_id: 'product-guard-a',
+      product_name: 'A', sku: 'A-1', quantity: 1n, unit_cost: 1000n, currency: 'USD',
+    }).execute();
+    await expect(db.updateTable('supplier_purchase_items').set({ quantity: 2n })
+      .where('id', '=', 'purchase-item-guard-a').execute()).rejects.toThrow('append-only');
+
+    await expect(db.insertInto('users').values({
+      id: 'user-guard-invalid', tenant_id: 'tenant-guard-a', store_id: 'store-guard-b',
+      username: 'invalid', password_hash: 'hash', full_name: 'Invalid', role: 'CASHIER',
+    }).execute()).rejects.toThrow('TenantIsolationViolation');
+
+    await expect(db.insertInto('products').values({
+      id: 'product-guard-invalid', tenant_id: 'tenant-guard-b', name: 'Invalid', sku: 'INVALID',
+      barcode: null, category_id: 'category-guard-a', has_variants: 0,
+    }).execute()).rejects.toThrow('TenantIsolationViolation');
+
+    await expect(db.insertInto('product_variants').values({
+      id: 'variant-guard-invalid', tenant_id: 'tenant-guard-b', product_id: 'product-guard-a',
+      sku: 'INVALID-1', barcode: null, attributes_json: '{}', retail_price: 100n,
+      currency: 'USD', reorder_point: 0n,
+    }).execute()).rejects.toThrow('TenantIsolationViolation');
+
+    await expect(db.insertInto('inventory_items').values({
+      id: 'inventory-guard-invalid', tenant_id: 'tenant-guard-a', store_id: 'store-guard-b',
+      variant_id: 'variant-guard-a', quantity_on_hand: 0n, wac_cost: 0n, currency: 'USD',
+    }).execute()).rejects.toThrow('TenantIsolationViolation');
+
+    await db.insertInto('accounting_periods').values({
+      id: 'period-guard-a', tenant_id: 'tenant-guard-a', name: '2026',
+      start_date: '2026-01-01', end_date: '2026-12-31',
+    }).execute();
+    await db.insertInto('accounts').values({
+      id: 'account-guard-b', tenant_id: 'tenant-guard-b', account_code: '1000',
+      account_name: 'Cash', account_type: 'ASSET', normal_balance: 'DEBIT',
+    }).execute();
+    await db.insertInto('journal_entries').values({
+      id: 'journal-guard-a', tenant_id: 'tenant-guard-a', store_id: null,
+      period_id: 'period-guard-a', entry_number: 'J-1', entry_date: '2026-01-01',
+      source_type: 'ADJUSTMENT', source_id: 'source-1', idempotency_key: 'key-1',
+      status: 'POSTED', reversed_by_entry_id: null, created_by_user_id: 'user-guard-a',
+    }).execute();
+    await expect(db.insertInto('journal_lines').values({
+      id: 'line-guard-invalid', journal_entry_id: 'journal-guard-a',
+      account_id: 'account-guard-b', entry_type: 'DEBIT', amount: 100n,
+      currency: 'USD', memo: null,
+    }).execute()).rejects.toThrow('TenantIsolationViolation');
+
+    await expect(db.insertInto('outbox_events').values({
+      id: 'outbox-guard-invalid', tenant_id: 'tenant-guard-a', store_id: 'store-guard-b',
+      aggregate_type: 'sale', aggregate_id: 'sale-1', event_type: 'created',
+      payload: '{}', sequence_no: 1, idempotency_key: 'outbox-key', synced_at: null,
+    }).execute()).rejects.toThrow('TenantIsolationViolation');
+  });
+
+  it('commits atomic work, rolls back on failure, and supports nested re-entrant transactions via SqliteUnitOfWork', async () => {
+    await new DatabaseMigrator(dbManager.getDb()).migrateToLatest();
+    const uow = new SqliteUnitOfWork(dbManager);
+
+    await uow.execute(async () => {
+      await uow.getExecutor().insertInto('tenants').values({
+        id: 'tenant-uow-1',
+        name: 'UoW Primary Tenant',
+        code: 'UOW_1',
+        currency: 'USD',
+      }).execute();
+
+      await uow.execute(async () => {
+        await uow.getExecutor().insertInto('stores').values({
+          id: 'store-uow-1',
+          tenant_id: 'tenant-uow-1',
+          name: 'Nested Store',
+          code: 'STORE_UOW_1',
+        }).execute();
+      });
+    });
+
+    await expect(
+      uow.execute(async () => {
+        await uow.getExecutor().insertInto('stores').values({
+          id: 'store-uow-rollback',
+          tenant_id: 'tenant-uow-1',
+          name: 'Rolled Back Store',
+          code: 'STORE_ROLLBACK',
+        }).execute();
+        throw new Error('Simulated transaction failure');
+      }),
+    ).rejects.toThrow('Simulated transaction failure');
+
+    dbManager.checkpointPassive();
+
+    const stores = await dbManager.getDb().selectFrom('stores').selectAll().execute();
+    expect(stores).toHaveLength(1);
+    expect(stores[0]?.id).toBe('store-uow-1');
+  });
+
+  it('maintains a tamper-evident hash chain in audit_logs, redacts secrets, and enforces append-only triggers', async () => {
+    await new DatabaseMigrator(dbManager.getDb()).migrateToLatest();
+    const db = dbManager.getDb();
+
+    await db.insertInto('tenants').values([
+      { id: 'tenant-audit-a', name: 'Audit Co A', code: 'AUDIT_A', currency: 'EGP' },
+      { id: 'tenant-audit-b', name: 'Audit Co B', code: 'AUDIT_B', currency: 'EGP' },
+    ]).execute();
+    await db.insertInto('stores').values([
+      { id: 'store-audit-a', tenant_id: 'tenant-audit-a', name: 'Main A', code: 'MAIN_A' },
+      { id: 'store-audit-b', tenant_id: 'tenant-audit-b', name: 'Main B', code: 'MAIN_B' },
+    ]).execute();
+    await db.insertInto('users').values({
+      id: 'user-audit-a',
+      tenant_id: 'tenant-audit-a',
+      store_id: 'store-audit-a',
+      username: 'owner_a',
+      password_hash: 'hash',
+      full_name: 'Owner A',
+      role: 'OWNER',
+    }).execute();
+
+    const ownerCtx = new ScopedExecutionContext({
+      tenantId: 'tenant-audit-a',
+      storeId: 'store-audit-a',
+      userId: 'user-audit-a',
+      roleId: 'OWNER',
+      permissions: new Set(['*']),
+      correlationId: 'corr-audit-1',
+    });
+
+    const cashierCtx = new ScopedExecutionContext({
+      tenantId: 'tenant-audit-a',
+      storeId: 'store-audit-a',
+      userId: 'user-audit-a',
+      roleId: 'CASHIER',
+      permissions: new Set([Permissions.POS_CHECKOUT]),
+      correlationId: 'corr-audit-2',
+    });
+
+    const auditRepo = new SqliteAuditLogRepository(db);
+
+    const first = await auditRepo.record(ownerCtx, {
+      actorUsername: 'owner_a',
+      actorRole: 'OWNER',
+      action: 'AUTH_LOGIN_SUCCESS',
+      entityType: 'USER',
+      entityId: 'user-audit-a',
+      summary: 'Owner signed in',
+      metadata: { password: 'should-never-be-stored', ip: '127.0.0.1' },
+    });
+    expect(first.previousHash).toBe('GENESIS');
+    expect(first.metadata).toEqual({ ip: '127.0.0.1', password: '[REDACTED]' });
+
+    const second = await auditRepo.record(ownerCtx, {
+      actorUsername: 'owner_a',
+      actorRole: 'OWNER',
+      action: 'PRODUCT_CREATED',
+      entityType: 'PRODUCT',
+      entityId: 'prod-1',
+      summary: 'Created product SKU-1',
+      metadata: { retailPrice: 12500n },
+    });
+    expect(second.previousHash).toBe(first.entryHash);
+    expect(second.metadata).toEqual({ retailPrice: '12500' });
+
+    const verification = await auditRepo.verifyChain(ownerCtx);
+    expect(verification.valid).toBe(true);
+    expect(verification.checkedCount).toBe(2);
+    expect(verification.headHash).toBe(second.entryHash);
+
+    const listed = await auditRepo.list(ownerCtx);
+    expect(listed).toHaveLength(2);
+    expect(listed[0]?.id).toBe(second.id);
+    expect(listed[1]?.id).toBe(first.id);
+
+    await expect(auditRepo.list(cashierCtx)).rejects.toThrow('UnauthorizedError');
+
+    await expect(
+      db.updateTable('audit_logs').set({ summary: 'Tampered' }).where('id', '=', first.id).execute(),
+    ).rejects.toThrow('append-only');
+
+    await expect(
+      db.deleteFrom('audit_logs').where('id', '=', first.id).execute(),
+    ).rejects.toThrow('append-only');
+
+    await expect(
+      db.insertInto('audit_logs').values({
+        id: 'cross-tenant-audit',
+        tenant_id: 'tenant-audit-a',
+        store_id: 'store-audit-b',
+        actor_user_id: 'user-audit-a',
+        actor_username: 'owner_a',
+        actor_role: 'OWNER',
+        action: 'TEST',
+        entity_type: 'STORE',
+        entity_id: 'store-audit-b',
+        summary: 'Invalid cross-tenant store',
+        metadata_json: '{}',
+        previous_hash: 'GENESIS',
+        entry_hash: 'hash',
+        created_at: new Date().toISOString(),
+      }).execute(),
+    ).rejects.toThrow('TenantIsolationViolation');
   });
 });

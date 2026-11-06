@@ -4,7 +4,7 @@ import {
   TenantService,
   ScopedExecutionContext,
 } from '@retailos/application';
-import { Roles, Permissions } from '@retailos/core';
+import { Roles, Permissions, User } from '@retailos/core';
 import { SqliteDatabaseManager } from '../src/database/sqlite.js';
 import { DatabaseMigrator } from '../src/database/migrator.js';
 import { Argon2PasswordHasher } from '../src/security/argon2-password-hasher.js';
@@ -191,6 +191,32 @@ describe('Phase 2: Identity, RBAC & Multi-Tenant Isolation', () => {
     // TEST 4: User lookup across tenants
     const userLookupByB = await userRepo.findById(ctxB, 'user-a1');
     expect(userLookupByB).toBeNull();
+  });
+
+  it('rejects an id collision when another tenant tries to overwrite a user', async () => {
+    const tenantA = await tenantService.createTenant({ id: 'tenant-collision-a', name: 'A', code: 'COL_A', currency: 'USD' });
+    const tenantB = await tenantService.createTenant({ id: 'tenant-collision-b', name: 'B', code: 'COL_B', currency: 'USD' });
+    const ctxA = new ScopedExecutionContext({ tenantId: tenantA.id, userId: 'owner-a', roleId: 'OWNER', permissions: new Set(['*']), correlationId: 'a' });
+    const ctxB = new ScopedExecutionContext({ tenantId: tenantB.id, userId: 'owner-b', roleId: 'OWNER', permissions: new Set(['*']), correlationId: 'b' });
+    await tenantService.createUser(ctxA, { id: 'shared-user-id', username: 'alice', passwordPlain: 'Password123', fullName: 'Alice', role: Roles.OWNER });
+    const foreignUser = (await userRepo.findById(ctxA, 'shared-user-id'))!;
+    await expect(userRepo.save(ctxB, User.create({ id: foreignUser.id, tenantId: tenantB.id, username: 'attacker', passwordHash: foreignUser.passwordHash, fullName: 'Attacker', role: Roles.OWNER }))).rejects.toThrow('TenantIsolationViolation');
+    expect((await userRepo.findById(ctxA, 'shared-user-id'))?.username).toBe('alice');
+  });
+
+  it('blocks a user store-scope change until the existing session is revoked', async () => {
+    const tenant = await tenantService.createTenant({ id: 'tenant-move', name: 'Move', code: 'MOVE', currency: 'USD' });
+    const ctx = new ScopedExecutionContext({ tenantId: tenant.id, userId: 'owner', roleId: 'OWNER', permissions: new Set(['*']), correlationId: 'seed' });
+    const firstStore = await tenantService.createStore(ctx, { id: 'move-store-1', name: 'One', code: 'ONE' });
+    const secondStore = await tenantService.createStore(ctx, { id: 'move-store-2', name: 'Two', code: 'TWO' });
+    await tenantService.createUser(ctx, { id: 'moving-user', username: 'moving', passwordPlain: 'Password123', fullName: 'Moving User', role: Roles.CASHIER, storeId: firstStore.id });
+    const session = await authService.login({ tenantCode: 'MOVE', username: 'moving', password: 'Password123' });
+    await expect(dbManager.getDb().updateTable('users').set({ store_id: secondStore.id }).where('id', '=', 'moving-user').execute())
+      .rejects.toThrow('TenantIsolationViolation');
+    await authService.logout(session.token);
+    await dbManager.getDb().updateTable('users').set({ store_id: secondStore.id }).where('id', '=', 'moving-user').execute();
+    await expect(authService.validateSession(session.token)).rejects.toThrow('Session not found or revoked');
+    await expect(authService.validateSession(session.token)).rejects.toThrow('Session not found or revoked');
   });
 
   it('enforces store-level authorization: Store Manager cannot manage outside their store', async () => {

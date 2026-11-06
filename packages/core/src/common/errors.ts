@@ -34,6 +34,18 @@ export class InvalidStockOperationError extends DomainError {
   public readonly code = 'INVALID_STOCK_OPERATION';
 }
 
+export class InvalidCartError extends DomainError {
+  public readonly code = 'INVALID_CART';
+}
+
+export class InvalidPaymentError extends DomainError {
+  public readonly code = 'INVALID_PAYMENT';
+}
+
+export class InvalidSaleError extends DomainError {
+  public readonly code = 'INVALID_SALE';
+}
+
 export class PeriodClosedError extends DomainError {
   public readonly code = 'PERIOD_CLOSED';
   constructor(periodName: string) {

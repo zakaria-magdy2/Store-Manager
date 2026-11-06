@@ -88,9 +88,11 @@ export class SqliteProductVariantRepository implements ProductVariantRepository 
           currency: variant.retailPrice.currency.code,
           reorder_point: variant.reorderPoint,
           is_active: variant.isActive ? 1 : 0,
-        }),
+        }).where('product_variants.tenant_id', '=', ctx.tenantId),
       )
       .execute();
+    const saved = await this.db.selectFrom('product_variants').select('id').where('id', '=', variant.id).where('tenant_id', '=', ctx.tenantId).executeTakeFirst();
+    if (!saved) throw new Error('TenantIsolationViolation: Variant id belongs to another tenant');
   }
 
   private toEntity(row: {

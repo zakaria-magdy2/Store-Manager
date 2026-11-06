@@ -24,6 +24,8 @@ export class SqliteUserRepository implements UserRepository {
       username: row.username,
       passwordHash: row.password_hash,
       fullName: row.full_name,
+      phone: row.phone ?? undefined,
+      employmentStartDate: row.employment_start_date ?? row.created_at.slice(0, 10),
       role: row.role as Role,
       isActive: Boolean(row.is_active),
       createdAt: new Date(row.created_at),
@@ -47,6 +49,8 @@ export class SqliteUserRepository implements UserRepository {
       username: row.username,
       passwordHash: row.password_hash,
       fullName: row.full_name,
+      phone: row.phone ?? undefined,
+      employmentStartDate: row.employment_start_date ?? row.created_at.slice(0, 10),
       role: row.role as Role,
       isActive: Boolean(row.is_active),
       createdAt: new Date(row.created_at),
@@ -73,6 +77,8 @@ export class SqliteUserRepository implements UserRepository {
         username: r.username,
         passwordHash: r.password_hash,
         fullName: r.full_name,
+        phone: r.phone ?? undefined,
+        employmentStartDate: r.employment_start_date ?? r.created_at.slice(0, 10),
         role: r.role as Role,
         isActive: Boolean(r.is_active),
         createdAt: new Date(r.created_at),
@@ -94,6 +100,8 @@ export class SqliteUserRepository implements UserRepository {
         username: user.username,
         password_hash: user.passwordHash,
         full_name: user.fullName,
+        phone: user.phone ?? null,
+        employment_start_date: user.employmentStartDate,
         role: user.role,
         is_active: user.isActive ? 1 : 0,
       })
@@ -102,10 +110,14 @@ export class SqliteUserRepository implements UserRepository {
           store_id: user.storeId ?? null,
           password_hash: user.passwordHash,
           full_name: user.fullName,
+          phone: user.phone ?? null,
+          employment_start_date: user.employmentStartDate,
           role: user.role,
           is_active: user.isActive ? 1 : 0,
-        }),
+        }).where('users.tenant_id', '=', ctx.tenantId),
       )
       .execute();
+    const saved = await this.db.selectFrom('users').select('id').where('id', '=', user.id).where('tenant_id', '=', ctx.tenantId).executeTakeFirst();
+    if (!saved) throw new Error('TenantIsolationViolation: User id belongs to another tenant');
   }
 }

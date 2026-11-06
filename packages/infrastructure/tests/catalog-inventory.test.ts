@@ -87,6 +87,10 @@ describe('Phase 3: Catalog & WAC Inventory Engine', () => {
       ctx,
       Store.create({ id: 'store-2', tenantId: TENANT_ID, name: 'Second Store', code: 'SECOND' }),
     );
+    await db.insertInto('users').values([
+      { id: 'owner-1', tenant_id: TENANT_ID, store_id: null, username: 'owner', password_hash: 'test-hash', full_name: 'Owner', role: 'OWNER' },
+      { id: 'cashier-1', tenant_id: TENANT_ID, store_id: STORE_ID, username: 'cashier', password_hash: 'test-hash', full_name: 'Cashier', role: 'CASHIER' },
+    ]).execute();
   });
 
   afterEach(async () => {
