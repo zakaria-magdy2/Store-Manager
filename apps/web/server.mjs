@@ -219,6 +219,8 @@ async function computeDrawerBookBalanceMinor(conn, tenantId, storeId) {
 }
 const failedLogins = new Map();
 const MAX_FAILED_LOGINS = 6;
+const failedPasswordChanges = new Map();
+const MAX_FAILED_PASSWORD_CHANGES = 5;
 const LOCK_WINDOW_MS = 10 * 60 * 1000;
 const MAX_FAILED_KEYS = 2000;
 
@@ -231,6 +233,18 @@ function pruneFailedLogins() {
     const oldestKey = failedLogins.keys().next().value;
     if (!oldestKey) break;
     failedLogins.delete(oldestKey);
+  }
+}
+
+function pruneFailedPasswordChanges() {
+  const now = Date.now();
+  for (const [k, v] of failedPasswordChanges.entries()) {
+    if (now - v.startedAt >= LOCK_WINDOW_MS) failedPasswordChanges.delete(k);
+  }
+  while (failedPasswordChanges.size > MAX_FAILED_KEYS) {
+    const oldestKey = failedPasswordChanges.keys().next().value;
+    if (!oldestKey) break;
+    failedPasswordChanges.delete(oldestKey);
   }
 }
 
@@ -472,6 +486,9 @@ async function ensureDailyBackup({ force = false } = {}) {
   try {
     database.checkpointPassive();
     await database.getRawDatabase().backup(tempPath);
+    if (existsSync(targetPath)) {
+      await rm(targetPath, { force: true }).catch(() => undefined);
+    }
     await rename(tempPath, targetPath);
   } finally {
     if (existsSync(tempPath)) await rm(tempPath, { force: true }).catch(() => undefined);
@@ -726,8 +743,39 @@ async function purchaseSupplierReport(ctx, url) {
 }
 
 function requireSameOrigin(req) {
-  if (req.headers.origin !== origin) {
+  const reqOrigin = req.headers.origin;
+  const host = req.headers.host;
+  const secFetchSite = req.headers['sec-fetch-site'];
+
+  if (secFetchSite && secFetchSite !== 'same-origin' && secFetchSite !== 'same-site' && secFetchSite !== 'none') {
     throw Object.assign(new Error('الطلب غير مسموح'), { status: 403 });
+  }
+
+  if (reqOrigin) {
+    const isMatchingOrigin =
+      reqOrigin === origin ||
+      reqOrigin === `http://localhost:${port}` ||
+      (host && (reqOrigin === `http://${host}` || reqOrigin === `https://${host}`));
+    if (!isMatchingOrigin) {
+      throw Object.assign(new Error('الطلب غير مسموح'), { status: 403 });
+    }
+    return;
+  }
+
+  const referer = req.headers.referer;
+  if (referer) {
+    try {
+      const refUrl = new URL(referer);
+      const isMatchingRef =
+        refUrl.origin === origin ||
+        refUrl.origin === `http://localhost:${port}` ||
+        (host && (refUrl.origin === `http://${host}` || refUrl.origin === `https://${host}`));
+      if (!isMatchingRef) {
+        throw Object.assign(new Error('الطلب غير مسموح'), { status: 403 });
+      }
+    } catch {
+      throw Object.assign(new Error('الطلب غير مسموح'), { status: 403 });
+    }
   }
 }
 
@@ -833,8 +881,8 @@ async function currentData(ctx, url) {
     .orderBy('operating_expense_records.expense_date', 'desc').execute() : [];
   const canManageCatalog = ctx.hasPermission(Permissions.CATALOG_MANAGE);
   const suppliers = canManageCatalog ? await db.selectFrom('suppliers').selectAll().where('tenant_id', '=', ctx.tenantId).where('is_active', '=', 1).orderBy('name').execute() : [];
-  const purchases = canManageCatalog ? await db.selectFrom('supplier_purchases').selectAll().where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).orderBy('purchased_at', 'desc').execute() : [];
-  const purchaseItems = canManageCatalog ? await db.selectFrom('supplier_purchase_items').selectAll().where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).execute() : [];
+  const purchases = canManageCatalog ? await db.selectFrom('supplier_purchases').selectAll().where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).orderBy('purchased_at', 'desc').limit(200).execute() : [];
+  const purchaseItems = canManageCatalog && purchases.length ? await db.selectFrom('supplier_purchase_items').selectAll().where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).where('purchase_id', 'in', purchases.map((p) => p.id)).execute() : [];
   const supplierPayments = canManageCatalog ? await db.selectFrom('supplier_payments').selectAll().where('tenant_id', '=', ctx.tenantId).execute() : [];
   const supplierReturnRows = canManageCatalog ? await db.selectFrom('supplier_returns').selectAll().where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).orderBy('created_at', 'desc').execute() : [];
   const supplierReturnItems = canManageCatalog ? await db.selectFrom('supplier_return_items').selectAll().where('tenant_id', '=', ctx.tenantId).execute() : [];
@@ -1332,11 +1380,22 @@ async function handleApi(req, res, url) {
   }
 
   if (method === 'POST' && path === '/api/account/password') {
+    pruneFailedPasswordChanges();
+    const rateLimitKey = `${ctx.tenantId}:${ctx.userId}`;
+    const failures = failedPasswordChanges.get(rateLimitKey) ?? { count: 0, startedAt: Date.now() };
+    if (Date.now() - failures.startedAt < LOCK_WINDOW_MS && failures.count >= MAX_FAILED_PASSWORD_CHANGES) {
+      throw Object.assign(new Error('محاولات كثيرة خاطئة. يرجى الانتظار 10 دقائق قبل المحاولة مجدداً.'), { status: 429 });
+    }
+
     const body = validate(PasswordChangeSchema, await readJson(req));
     const currentUser = await userRepo.findById(ctx, ctx.userId);
-    if (!currentUser || !await passwordHasher.verify(currentUser.passwordHash, body.currentPassword)) {
+    const validCurrent = currentUser && await passwordHasher.verify(currentUser.passwordHash, body.currentPassword);
+    if (!validCurrent) {
+      const next = Date.now() - failures.startedAt < LOCK_WINDOW_MS ? failures : { count: 0, startedAt: Date.now() };
+      failedPasswordChanges.set(rateLimitKey, { count: next.count + 1, startedAt: next.startedAt });
       throw Object.assign(new Error('Current password is incorrect'), { status: 400 });
     }
+    failedPasswordChanges.delete(rateLimitKey);
     const passwordHash = await passwordHasher.hash(body.newPassword);
     await db.transaction().execute(async (trx) => {
       await trx.updateTable('users').set({ password_hash: passwordHash }).where('tenant_id', '=', ctx.tenantId).where('id', '=', ctx.userId).execute();
@@ -1843,7 +1902,8 @@ function mimeType(path) {
 
 const server = createServer(async (req, res) => {
   try {
-    if (req.headers.host !== `127.0.0.1:${port}`) throw Object.assign(new Error('استخدم عنوان التطبيق المحلي'), { status: 421 });
+    const host = req.headers.host;
+    if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) throw Object.assign(new Error('استخدم عنوان التطبيق المحلي'), { status: 421 });
     const url = new URL(req.url ?? '/', origin);
     if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
     if (req.method !== 'GET' && req.method !== 'HEAD') throw Object.assign(new Error('الطريقة غير مسموحة'), { status: 405 });
@@ -1868,6 +1928,7 @@ const server = createServer(async (req, res) => {
 const walCheckpointTimer = setInterval(() => {
   database.checkpointPassive();
   pruneFailedLogins();
+  pruneFailedPasswordChanges();
   void ensureDailyBackup({ force: false }).catch(() => undefined);
   void db
     .deleteFrom('sessions')
