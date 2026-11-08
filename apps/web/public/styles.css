@@ -443,6 +443,35 @@ html[data-theme="dark"] .row-grandtotal td{background:rgba(13,122,107,.2);color:
 html[data-theme="dark"] .kpi-tag-green{background:rgba(22,163,74,.2);color:#86efac}
 html[data-theme="dark"] .stock-matrix-cell.cell-low{color:#fcd34d}
 
+/* Serie Weight Badges, Row Actions & Thermal Box Barcode Sticker Sheet */
+.serie-mode-select-label{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:700;color:var(--ink-soft)}
+.serie-mode-select-label select{height:30px;padding:0 8px;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--ink);font-size:11.5px;font-weight:700}
+.serie-weight-badge{display:block;font-size:9.5px;font-weight:700;color:var(--brand);margin-top:2px}
+.serie-row-actions{display:flex;align-items:center;justify-content:center;gap:4px;white-space:nowrap}
+.new-expanded-variant-row{background:color-mix(in srgb,var(--brand-soft) 35%,var(--panel))}
+
+.barcode-preview-header{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:12px 0 8px;padding-top:10px;border-top:1px solid var(--line)}
+.barcode-preview-header strong{font-size:13px;color:var(--ink)}
+.barcode-preview-header small{font-size:11.5px;font-weight:700;color:var(--brand)}
+.barcode-labels-sheet{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:10px;max-height:38vh;overflow-y:auto;padding:10px;border:1px dashed var(--line-strong);border-radius:10px;background:var(--surface-soft)}
+.barcode-sticker-card{display:grid;gap:3px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:7px;background:#fff;color:#0f172a;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+.sticker-top{display:flex;align-items:center;justify-content:space-between;font-size:10px;color:#475569;border-bottom:1px dashed #e2e8f0;padding-bottom:3px}
+.sticker-top strong{font-size:11px;color:#0f172a;font-weight:800}
+.sticker-model{font-size:12px;font-weight:800;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sticker-variant{font-size:10.5px;font-weight:700;color:#0d7a6b;background:#f0fdfa;border-radius:4px;padding:1px 6px}
+.sticker-bars{height:34px;padding:2px 4px;background:#fff}
+.barcode-svg{width:100%;height:30px;display:block}
+.sticker-code{display:flex;align-items:center;justify-content:space-between;gap:4px;font-size:9.5px;font-family:ui-monospace,monospace;color:#334155;direction:ltr}
+.sticker-code span{font-weight:800;color:#0f172a}
+
+@media print{
+  .barcode-print-modal,.barcode-print-modal *{visibility:visible!important}
+  .barcode-print-modal{position:absolute;inset:0;width:100%;max-height:none;box-shadow:none;border:0;background:#fff!important}
+  .barcode-print-modal .modal-heading,.barcode-print-modal .matrix-quick-toolbar,.barcode-print-modal .table-scroll,.barcode-print-modal .barcode-preview-header,.barcode-print-modal .modal-actions{display:none!important}
+  .barcode-labels-sheet{max-height:none!important;overflow:visible!important;border:0!important;padding:0!important;background:#fff!important;grid-template-columns:repeat(3,1fr);gap:8px}
+  .barcode-sticker-card{break-inside:avoid;page-break-inside:avoid;border:1px solid #000}
+}
+
 @media(max-width:980px){
   .smart-filter-bar{grid-template-columns:1fr 1fr}
   .smart-dropdown-label{grid-column:1 / -1}

@@ -111,7 +111,20 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.equal(createdProduct.response.status, 201, JSON.stringify(createdProduct.payload));
   const sizedProduct = await request('/api/products', {
     method: 'POST',
-    body: { name: 'Shirt', sku: 'SHIRT-TEST', variants: [{ sku: 'SHIRT-TEST-01', attributes: { size: 'S', color: 'Black' }, retailPrice: '8000', reorderPoint: '2' }, { sku: 'SHIRT-TEST-02', attributes: { size: 'M', color: 'Black' }, retailPrice: '8000', reorderPoint: '2' }, { sku: 'SHIRT-TEST-03', attributes: { size: 'S', color: 'White' }, retailPrice: '8000', reorderPoint: '2' }, { sku: 'SHIRT-TEST-04', attributes: { size: 'M', color: 'White' }, retailPrice: '8500', reorderPoint: '2' }] },
+    body: {
+      name: 'Shirt',
+      sku: 'SHIRT-TEST',
+      options: [
+        { key: 'size', name: 'المقاس', values: ['S', 'M'] },
+        { key: 'color', name: 'اللون', values: ['Black', 'White'] },
+      ],
+      variants: [
+        { sku: 'SHIRT-TEST-01', attributes: { size: 'S', color: 'Black' }, retailPrice: '8000', reorderPoint: '2' },
+        { sku: 'SHIRT-TEST-02', attributes: { size: 'M', color: 'Black' }, retailPrice: '8000', reorderPoint: '2' },
+        { sku: 'SHIRT-TEST-03', attributes: { size: 'S', color: 'White' }, retailPrice: '8000', reorderPoint: '2' },
+        { sku: 'SHIRT-TEST-04', attributes: { size: 'M', color: 'White' }, retailPrice: '8500', reorderPoint: '2' },
+      ],
+    },
   });
   assert.equal(sizedProduct.response.status, 201, JSON.stringify(sizedProduct.payload));
   const createdService = await request('/api/products', {
@@ -127,6 +140,34 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   const productWithSizes = data.payload.products.find((item) => item.id === sizedProduct.payload.id);
   assert.deepEqual(productWithSizes.variants.map((item) => `${item.attributes.size}/${item.attributes.color}`), ['S/Black', 'M/Black', 'S/White', 'M/White']);
   assert.equal(productWithSizes.variants[3].price.amount, '8500');
+  const expandedSizedProduct = await request(`/api/products/${sizedProduct.payload.id}`, {
+    method: 'PATCH',
+    body: {
+      name: 'Shirt',
+      sku: 'SHIRT-TEST',
+      categoryId: null,
+      options: [
+        { key: 'size', name: 'المقاس', values: ['S', 'M', 'L'] },
+        { key: 'color', name: 'اللون', values: ['Black', 'White', 'Navy'] },
+      ],
+      variants: [
+        ...productWithSizes.variants.map((v) => ({
+          id: v.id,
+          sku: v.sku,
+          barcode: v.barcode,
+          attributes: v.attributes,
+          retailPrice: v.price.amount,
+          reorderPoint: v.reorderPoint,
+        })),
+        { sku: 'SHIRT-TEST-NVY-L', barcode: '2001234567893', attributes: { size: 'L', color: 'Navy' }, retailPrice: '8500', reorderPoint: '2' },
+      ],
+    },
+  });
+  assert.equal(expandedSizedProduct.response.status, 200, JSON.stringify(expandedSizedProduct.payload));
+  data = await request('/api/data');
+  const updatedSizedProduct = data.payload.products.find((item) => item.id === sizedProduct.payload.id);
+  assert.equal(updatedSizedProduct.variants.length, 5);
+  assert.ok(updatedSizedProduct.variants.some((v) => v.sku === 'SHIRT-TEST-NVY-L' && v.barcode === '2001234567893'));
   assert.equal(data.payload.products.find((item) => item.id === createdService.payload.id).itemKind, 'PRODUCT');
   const variant = product.variants[0];
   const storeId = data.payload.selectedStoreId;

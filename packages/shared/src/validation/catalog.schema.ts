@@ -53,7 +53,7 @@ export const CreateProductSchema = z.object({
   imagePath: z.string().max(300).trim().optional(),
   options: z.array(ProductOptionSchema).max(8).default([]),
   hasVariants: z.boolean().optional(),
-  variants: z.array(CreateVariantSchema).min(1, 'At least one sellable variant is required').max(50, 'A product can have at most 50 sellable variants'),
+  variants: z.array(CreateVariantSchema).min(1, 'At least one sellable variant is required').max(200, 'A product can have at most 200 sellable variants'),
 });
 
 export type CreateProductInput = z.infer<typeof CreateProductSchema>;
@@ -73,7 +73,7 @@ export const UpdateProductSchema = z.object({
     attributes: ProductAttributesSchema.optional(),
     retailPrice: z.string().regex(/^\d+$/, 'Retail price must be an integer minor-units string'),
     reorderPoint: z.string().regex(/^\d+$/, 'Reorder point must be an integer string'),
-  })).min(1).max(50),
+  })).min(1).max(200),
 });
 
 export type UpdateProductInput = z.infer<typeof UpdateProductSchema>;

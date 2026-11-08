@@ -446,6 +446,110 @@ function methodLabel(method) {
 
 const COLOR_OPTION_NAMES = new Set(['color', 'colour', 'لون', 'اللون', 'الالوان', 'الألوان']);
 const SIZE_OPTION_NAMES = new Set(['size', 'مقاس', 'المقاس', 'المقاسات']);
+const COLOR_CODE_MAP = new Map([
+  ['أسود', 'BLK'], ['اسود', 'BLK'], ['black', 'BLK'],
+  ['أبيض', 'WHT'], ['ابيض', 'WHT'], ['white', 'WHT'],
+  ['كحلي', 'NVY'], ['كحلى', 'NVY'], ['navy', 'NVY'],
+  ['بيج', 'BGE'], ['beige', 'BGE'],
+  ['رمادي', 'GRY'], ['رمادى', 'GRY'], ['رصاصي', 'GRY'], ['gray', 'GRY'], ['grey', 'GRY'],
+  ['بني', 'BRN'], ['بنى', 'BRN'], ['brown', 'BRN'],
+  ['هافان', 'HVN'], ['tan', 'HVN'],
+  ['زيتي', 'OLV'], ['زيتى', 'OLV'], ['olive', 'OLV'],
+  ['جملي', 'CML'], ['جملى', 'CML'], ['camel', 'CML'],
+  ['نبيتي', 'MRN'], ['نبيتى', 'MRN'], ['عنابي', 'MRN'], ['maroon', 'MRN'], ['burgundy', 'MRN'],
+  ['أحمر', 'RED'], ['احمر', 'RED'], ['red', 'RED'],
+  ['أزرق', 'BLU'], ['ازرق', 'BLU'], ['لبني', 'BLU'], ['blue', 'BLU'],
+  ['أخضر', 'GRN'], ['اخضر', 'GRN'], ['green', 'GRN'],
+  ['وردي', 'PNK'], ['بمبي', 'PNK'], ['بينك', 'PNK'], ['pink', 'PNK'],
+  ['أصفر', 'YLW'], ['اصفر', 'YLW'], ['مسطردة', 'YLW'], ['yellow', 'YLW'],
+  ['برتقالي', 'ORG'], ['اورنج', 'ORG'], ['orange', 'ORG'],
+  ['بنفسجي', 'PRP'], ['موف', 'PRP'], ['purple', 'PRP'],
+  ['ذهبي', 'GLD'], ['ذهبى', 'GLD'], ['gold', 'GLD'],
+  ['فضي', 'SLV'], ['فضى', 'SLV'], ['سيلفر', 'SLV'], ['silver', 'SLV'],
+  ['كافيه', 'CAF'], ['نسكافيه', 'CAF'], ['coffee', 'CAF'],
+  ['طوبي', 'BRK'], ['طوبى', 'BRK'],
+  ['منت', 'MNT'], ['مينت', 'MNT'], ['mint', 'MNT'],
+  ['أوف وايت', 'OFW'], ['اوف وايت', 'OFW'], ['سكري', 'OFW'], ['كريمي', 'OFW'],
+]);
+
+function attributeValueToSkuCode(val, fallbackIdx = 1) {
+  const raw = String(val ?? '').trim();
+  if (!raw) return `V${fallbackIdx}`;
+  const lower = raw.toLowerCase();
+  if (COLOR_CODE_MAP.has(lower)) return COLOR_CODE_MAP.get(lower);
+  const ascii = raw.replace(/[^A-Za-z0-9.]/g, '').toUpperCase();
+  if (ascii.length >= 1) return ascii.slice(0, 6);
+  let hash = 0;
+  for (let i = 0; i < raw.length; i += 1) hash = ((hash * 31) + raw.charCodeAt(i)) % 900;
+  return `C${String(100 + hash)}`;
+}
+
+function buildSemanticVariantSku(baseSku, attributes, index, usedSkus) {
+  const cleanBase = (String(baseSku || 'ITEM').trim().toUpperCase().replace(/\s+/g, '-') || 'ITEM').slice(0, 38);
+  const values = Object.values(attributes ?? {}).map((v, i) => attributeValueToSkuCode(v, i + 1)).filter(Boolean);
+  const core = values.length ? `${cleanBase}-${values.join('-')}` : `${cleanBase}-${String(index + 1).padStart(2, '0')}`;
+  let candidate = core.slice(0, 60);
+  let counter = 2;
+  while (usedSkus.has(candidate.toLowerCase())) {
+    candidate = `${core.slice(0, 56)}-${counter++}`;
+  }
+  return candidate;
+}
+
+function generateEan13Barcode(seedText, seqIndex = 1, usedBarcodes = new Set()) {
+  let hash = 2166136261;
+  const input = `${seedText}:${seqIndex}`;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  let attempt = Math.abs(hash);
+  while (true) {
+    const body9 = String((attempt % 900000000) + 100000000).slice(0, 9);
+    const digits12 = `200${body9}`;
+    let sum = 0;
+    for (let i = 0; i < 12; i += 1) sum += Number(digits12[i]) * (i % 2 === 0 ? 1 : 3);
+    const check = (10 - (sum % 10)) % 10;
+    const ean13 = `${digits12}${check}`;
+    if (!usedBarcodes.has(ean13)) {
+      usedBarcodes.add(ean13);
+      return ean13;
+    }
+    attempt += 7919;
+  }
+}
+
+function renderBarcodeSvg(codeText) {
+  const text = String(codeText || '').trim() || '000000000000';
+  const bars = ['11010010000'];
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text.charCodeAt(i);
+    const p1 = ((ch * 7 + i * 3) % 3) + 1;
+    const s1 = ((ch * 3 + i) % 2) + 1;
+    const p2 = ((ch * 5 + i * 2) % 3) + 1;
+    const s2 = ((ch + i) % 2) + 1;
+    const p3 = Math.max(1, 11 - (p1 + s1 + p2 + s2 + 2));
+    bars.push(`${'1'.repeat(p1)}${'0'.repeat(s1)}${'1'.repeat(p2)}${'0'.repeat(s2)}${'1'.repeat(p3)}0`);
+  }
+  bars.push('1100011101011');
+  const bitString = bars.join('');
+  let rects = '';
+  let x = 0;
+  for (let i = 0; i < bitString.length; i += 1) {
+    if (bitString[i] === '1') rects += `<rect x="${x}" y="0" width="1.4" height="34" fill="#111827"/>`;
+    x += 1.4;
+  }
+  return `<svg class="barcode-svg" viewBox="0 0 ${Math.ceil(x)} 36" preserveAspectRatio="none" aria-hidden="true">${rects}</svg>`;
+}
+
+function computeSerieWeight(sizes, sizeValue, mode = 'standard') {
+  if (mode !== 'standard' || sizes.length < 3) return 1;
+  const idx = sizes.indexOf(sizeValue);
+  if (idx < 0) return 1;
+  const midStart = Math.floor((sizes.length - 1) / 3);
+  const midEnd = Math.ceil(((sizes.length - 1) * 2) / 3);
+  return idx >= midStart && idx <= midEnd ? 2 : 1;
+}
 
 function extractProductMatrix(product) {
   const activeVariants = (product.variants ?? []).filter((variant) => variant.isActive);
@@ -512,7 +616,7 @@ function productsView() {
     const subSummary = matrix.isMatrix
       ? `<div class="model-sub-badges">${matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(matrix.colorSummaryLabel)}</span>` : ''}${matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(matrix.sizeRangeLabel)}</span>` : ''}<small class="model-sub-count">${activeVariants.length} فرع (لون×مقاس)</small></div>`
       : `<span class="model-sub-count">${activeVariants.length === 1 ? 'صنف مباشر (بدون مقاسات)' : `${activeVariants.length} تركيبة`}</span>`;
-    return `<tr><td><div class="product-table-name"><span class="product-avatar">${escapeHtml(product.name.slice(0, 1))}</span><span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand ? `${product.brand} · كود الموديل ${product.sku}` : `كود الموديل: ${product.sku}`)}</small></span></div></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${subSummary}</td><td class="table-total">${priceRange}</td><td><strong>${totalQuantity}</strong> قطعة</td><td class="product-actions"><button type="button" class="text-action product-edit" data-product-id="${product.id}">المقاسات والتعديل</button><button type="button" class="text-action product-delete" data-product-id="${product.id}">حذف</button></td></tr>`;
+    return `<tr><td><div class="product-table-name"><span class="product-avatar">${escapeHtml(product.name.slice(0, 1))}</span><span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand ? `${product.brand} · كود الموديل ${product.sku}` : `كود الموديل: ${product.sku}`)}</small></span></div></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${subSummary}</td><td class="table-total">${priceRange}</td><td><strong>${totalQuantity}</strong> قطعة</td><td class="product-actions"><button type="button" class="text-action product-print-labels" data-product-id="${product.id}">🏷️ طباعة باركود</button><button type="button" class="text-action product-edit" data-product-id="${product.id}">المقاسات والتعديل</button><button type="button" class="text-action product-delete" data-product-id="${product.id}">حذف</button></td></tr>`;
   }).join('');
   return `<div class="page-heading-row"><div><p class="page-lead">نظام الموديل الموحد: كل موديل (مثل كوتشي ميلانو) يتسجل بكود أساسي واحد، وتحته كل الألوان والمقاسات كفروع منه.</p></div><div class="products-heading-actions"><button class="button button-secondary" id="add-category">${icon('plus', 18)} إضافة فئة</button><button class="button button-primary" id="new-product">${icon('plus', 18)} إضافة موديل / منتج</button></div></div><section class="panel products-panel"><div class="panel-heading"><div><h3>كتالوج الموديلات والمنتجات</h3><p>${state.data.products.length} موديل أساسي في الكتالوج</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="بحث باسم الموديل أو الكود أو اللون أو المقاس" value="${escapeHtml(state.query)}"></label></div>${products.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل / المنتج</th><th>كود الموديل</th><th>الألوان والمقاسات الفرعية</th><th>سعر البيع</th><th>إجمالي الرصيد</th><th>الإجراءات</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('box', 28)}</div><strong>${query ? 'مفيش نتائج مطابقة' : 'الكتالوج لسه فاضي'}</strong><p>${query ? 'جرب كلمة بحث تانية.' : 'أضف الموديل بكوده الأساسي وحدد الألوان والمقاسات، وبعدها استقبل الكميات في فاتورة الشراء.'}</p>${!query ? '<button class="button button-primary" id="empty-new-product">إضافة أول موديل</button>' : ''}</div>`}</section><div id="modal-root"></div>`;
 }
@@ -550,7 +654,7 @@ function suppliersView() {
   const currency = state.data.company.currency;
   const total = (key) => suppliers.reduce((sum, item) => sum + BigInt(item[key]), 0n).toString();
   const amount = (value) => money({ amount: value, currency, decimals: currencyDecimals(currency) });
-  const purchaseDisclosure = (supplier, purchase) => `<details class="purchase-disclosure"><summary><span class="invoice-number">${escapeHtml(purchase.invoiceNumber || `PUR-${purchase.id.slice(0, 8).toUpperCase()}`)}</span><span>${new Intl.DateTimeFormat('ar-EG', { dateStyle: 'medium' }).format(new Date(purchase.purchasedAt))}</span><strong>${money(purchase.totalAmount)}</strong><span class="status-pill ${BigInt(purchase.remainingAmount.amount) ? 'status-low' : 'status-complete'}">${BigInt(purchase.remainingAmount.amount) ? `متبقي ${money(purchase.remainingAmount)}` : 'مسددة'}</span></summary><div class="purchase-detail-content"><div class="invoice-detail-meta"><span>التاجر: ${escapeHtml(supplier.name)}</span><span>المدفوع: ${money(purchase.paidAmount)}</span><span>المتبقي: ${money(purchase.remainingAmount)}</span></div><div class="table-scroll"><table><thead><tr><th>المنتج</th><th>كود النسخة</th><th>الكمية</th><th>تكلفة الوحدة</th><th>الإرجاع</th></tr></thead><tbody>${purchase.items.map((item) => `<tr><td>${escapeHtml(item.productName)}</td><td>${escapeHtml(item.sku)}</td><td>${item.quantity}</td><td>${money(item.unitCost)}</td><td>${BigInt(item.returnableQuantity) > 0n ? `<button class="text-action return-supplier-item" data-purchase="${purchase.id}" data-item="${item.id}" data-quantity="${item.returnableQuantity}">إرجاع ${item.returnableQuantity}</button>` : 'غير متاح'}</td></tr>`).join('')}</tbody></table></div><div class="purchase-detail-actions">${BigInt(purchase.remainingAmount.amount) ? `<button class="button button-secondary pay-purchase" data-purchase="${purchase.id}" data-remaining="${purchase.remainingAmount.amount}">تسجيل سداد</button>` : '<span class="status-pill status-complete">الفاتورة مسددة</span>'}</div>${purchase.payments.length || purchase.returns.length ? `<details class="compact-disclosure"><summary><span>حركات الفاتورة</span><span>${purchase.payments.length} سداد · ${purchase.returns.length} مرتجع</span></summary><div class="disclosure-content">${purchase.payments.map((payment) => `<div class="invoice-history-row">سداد ${money(payment.amount)} · ${methodLabel(payment.paymentMethod)} · ${escapeHtml(payment.referenceNumber || 'بدون مرجع')} · ${new Date(payment.paidAt).toLocaleDateString('ar-EG')}</div>`).join('')}${purchase.returns.map((item) => `<div class="invoice-history-row">مرتجع ${escapeHtml(item.returnNumber)} · ${money(item.creditAmount)} · ${new Date(item.createdAt).toLocaleDateString('ar-EG')}</div>`).join('')}</div></details>` : ''}</div></details>`;
+  const purchaseDisclosure = (supplier, purchase) => `<details class="purchase-disclosure"><summary><span class="invoice-number">${escapeHtml(purchase.invoiceNumber || `PUR-${purchase.id.slice(0, 8).toUpperCase()}`)}</span><span>${new Intl.DateTimeFormat('ar-EG', { dateStyle: 'medium' }).format(new Date(purchase.purchasedAt))}</span><strong>${money(purchase.totalAmount)}</strong><span class="status-pill ${BigInt(purchase.remainingAmount.amount) ? 'status-low' : 'status-complete'}">${BigInt(purchase.remainingAmount.amount) ? `متبقي ${money(purchase.remainingAmount)}` : 'مسددة'}</span></summary><div class="purchase-detail-content"><div class="invoice-detail-meta"><span>التاجر: ${escapeHtml(supplier.name)}</span><span>المدفوع: ${money(purchase.paidAmount)}</span><span>المتبقي: ${money(purchase.remainingAmount)}</span></div><div class="table-scroll"><table><thead><tr><th>المنتج</th><th>كود النسخة</th><th>الكمية</th><th>تكلفة الوحدة</th><th>الإرجاع</th></tr></thead><tbody>${purchase.items.map((item) => `<tr><td>${escapeHtml(item.productName)}</td><td>${escapeHtml(item.sku)}</td><td>${item.quantity}</td><td>${money(item.unitCost)}</td><td>${BigInt(item.returnableQuantity) > 0n ? `<button class="text-action return-supplier-item" data-purchase="${purchase.id}" data-item="${item.id}" data-quantity="${item.returnableQuantity}">إرجاع ${item.returnableQuantity}</button>` : 'غير متاح'}</td></tr>`).join('')}</tbody></table></div><div class="purchase-detail-actions"><button type="button" class="button button-secondary button-sm print-purchase-labels" data-purchase-id="${purchase.id}">🏷️ طباعة باركود الفاتورة للعلب</button>${BigInt(purchase.remainingAmount.amount) ? `<button class="button button-secondary pay-purchase" data-purchase="${purchase.id}" data-remaining="${purchase.remainingAmount.amount}">تسجيل سداد</button>` : '<span class="status-pill status-complete">الفاتورة مسددة</span>'}</div>${purchase.payments.length || purchase.returns.length ? `<details class="compact-disclosure"><summary><span>حركات الفاتورة</span><span>${purchase.payments.length} سداد · ${purchase.returns.length} مرتجع</span></summary><div class="disclosure-content">${purchase.payments.map((payment) => `<div class="invoice-history-row">سداد ${money(payment.amount)} · ${methodLabel(payment.paymentMethod)} · ${escapeHtml(payment.referenceNumber || 'بدون مرجع')} · ${new Date(payment.paidAt).toLocaleDateString('ar-EG')}</div>`).join('')}${purchase.returns.map((item) => `<div class="invoice-history-row">مرتجع ${escapeHtml(item.returnNumber)} · ${money(item.creditAmount)} · ${new Date(item.createdAt).toLocaleDateString('ar-EG')}</div>`).join('')}</div></details>` : ''}</div></details>`;
   return `<div class="page-heading-row"><div><p class="page-lead">كل فاتورة ظاهرة برقمها وملخصها. افتحها لعرض الأصناف والسداد والمرتجعات.</p></div><div><button class="button button-secondary" id="new-supplier">إضافة تاجر</button> <button class="button button-primary" id="new-purchase">تسجيل فاتورة شراء</button></div></div><div class="inventory-summary"><div class="inventory-summary-card"><span class="summary-badge summary-indigo">${icon('users', 18)}</span><div><small>التجار المسجلون</small><strong>${suppliers.length}</strong></div></div><div class="inventory-summary-card"><span class="summary-badge summary-teal">${icon('bag', 18)}</span><div><small>إجمالي المشتريات</small><strong>${amount(total('totalPurchased'))}</strong></div></div><div class="inventory-summary-card"><span class="summary-badge summary-amber">${icon('wallet', 18)}</span><div><small>مستحق للتجار</small><strong>${amount(total('balanceDue'))}</strong></div></div></div>${suppliers.length ? suppliers.map((supplier) => `<section class="panel supplier-card"><div class="panel-heading"><div><h3>${escapeHtml(supplier.name)}</h3><p>${escapeHtml(supplier.phone || 'لا يوجد رقم هاتف')} · إجمالي المشتريات ${amount(supplier.totalPurchased)} · المدفوع ${amount(supplier.totalPaid)} · <strong>المتبقي ${amount(supplier.balanceDue)}</strong></p></div><button class="text-action purchase-for-supplier" data-supplier="${supplier.id}">فاتورة جديدة</button></div>${supplier.purchases.length ? `<div class="purchase-list">${supplier.purchases.map((purchase) => purchaseDisclosure(supplier, purchase)).join('')}</div>` : '<div class="empty-row">لا توجد فواتير مسجلة لهذا التاجر.</div>'}</section>`).join('') : `<section class="panel empty-chart"><div class="empty-illustration">${icon('users', 28)}</div><strong>ابدأ بإضافة أول تاجر</strong><p>سجّل فواتير الشراء، المبالغ المدفوعة، والرصيد المتبقي.</p><button class="button button-primary" id="empty-new-supplier">إضافة تاجر</button></section>`}<div id="modal-root"></div>`;
 }
 function accountingView() {
@@ -944,11 +1048,20 @@ function bindSuppliers() {
       const matrix = extractProductMatrix(product);
       const variants = matrix.activeVariants;
       if (matrix.isMatrix && matrix.colors.length >= 1 && matrix.sizes.length >= 1 && (matrix.rawColors.length > 0 || matrix.rawSizes.length > 0)) {
+        const serieMode = section.dataset.serieMode || 'standard';
+        section.dataset.serieMode = serieMode;
+        const serieUnitsCount = matrix.sizes.reduce((sum, sz) => sum + computeSerieWeight(matrix.sizes, sz, serieMode), 0);
         section.querySelector('.purchase-variant-grid').innerHTML = `
           <div class="matrix-quick-toolbar">
             <span><strong>مصفوفة استلام الموديل (${escapeHtml(product.sku)})</strong> — ${matrix.colors.length} لون × ${matrix.sizes.length} مقاس</span>
             <div class="matrix-quick-actions">
-              <button type="button" class="date-preset-chip" data-fill-serie="1">+1 سيريه كامل</button>
+              <label class="serie-mode-select-label">نظام السيريه:
+                <select data-serie-mode-select>
+                  <option value="standard" ${serieMode === 'standard' ? 'selected' : ''}>سيريه أحذية قياسي (الوسط ×2 والأطراف ×1 = ${matrix.sizes.reduce((s, z) => s + computeSerieWeight(matrix.sizes, z, 'standard'), 0)} زوج/لون)</option>
+                  <option value="equal" ${serieMode === 'equal' ? 'selected' : ''}>سيريه متساوي (1 لكل مقاس = ${matrix.sizes.length} زوج/لون)</option>
+                </select>
+              </label>
+              <button type="button" class="date-preset-chip" data-fill-serie="1">+1 سيريه لكل الألوان</button>
               <button type="button" class="date-preset-chip" data-fill-serie="2">+2 سيريه</button>
               <button type="button" class="date-preset-chip" data-clear-serie>تصفير الجدول</button>
             </div>
@@ -958,8 +1071,11 @@ function bindSuppliers() {
               <thead>
                 <tr>
                   <th>اللون \\ المقاس</th>
-                  ${matrix.sizes.map((size) => `<th>مقاس ${escapeHtml(size)}</th>`).join('')}
-                  <th>سيريه للون</th>
+                  ${matrix.sizes.map((size) => {
+                    const w = computeSerieWeight(matrix.sizes, size, serieMode);
+                    return `<th>مقاس ${escapeHtml(size)}<small class="serie-weight-badge">سيريه ×${w}</small></th>`;
+                  }).join('')}
+                  <th>توزيع السيريه للون (${serieUnitsCount} قطعة)</th>
                 </tr>
               </thead>
               <tbody>
@@ -970,9 +1086,9 @@ function bindSuppliers() {
                     if (!variant) return '<td class="matrix-empty-cell">—</td>';
                     const quantity = groupSelection.get(variant.id) ?? 0;
                     const label = `${color} · ${size}`;
-                    return `<td class="purchase-matrix-cell ${quantity ? 'selected' : ''}"><input type="number" min="0" step="1" data-purchase-quantity="${variant.id}" name="purchaseQty_${index}_${variant.id}" value="${quantity}" aria-label="كمية ${escapeHtml(label)}"><small>بالمخزن: ${variant.quantity}</small></td>`;
+                    return `<td class="purchase-matrix-cell ${quantity ? 'selected' : ''}"><input type="number" min="0" step="1" data-purchase-quantity="${variant.id}" data-purchase-size="${escapeHtml(size)}" name="purchaseQty_${index}_${variant.id}" value="${quantity}" aria-label="كمية ${escapeHtml(label)}"><small>بالمخزن: ${variant.quantity}</small></td>`;
                   }).join('')}
-                  <td><button type="button" class="text-action" data-fill-color-row="${escapeHtml(color)}">+1 سيريه</button></td>
+                  <td class="serie-row-actions"><button type="button" class="date-preset-chip" data-fill-color-row="${escapeHtml(color)}" data-serie-mult="1">+1 سيريه</button><button type="button" class="date-preset-chip" data-fill-color-row="${escapeHtml(color)}" data-serie-mult="2">+2</button><button type="button" class="text-action" data-clear-color-row="${escapeHtml(color)}">تصفير</button></td>
                 </tr>`).join('')}
               </tbody>
             </table>
@@ -1011,19 +1127,28 @@ function bindSuppliers() {
     });
     root.querySelector('#purchase-lines')?.addEventListener('change', (event) => {
       if (event.target.matches('[name^="purchaseProduct_"]')) { selections.set(event.target.name.replace('purchaseProduct_', ''), new Map()); renderGroup(event.target.closest('[data-purchase-group]')); updatePurchaseTotal(); }
+      if (event.target.matches('[data-serie-mode-select]')) {
+        const section = event.target.closest('[data-purchase-group]');
+        section.dataset.serieMode = event.target.value;
+        renderGroup(section);
+      }
       if (event.target.matches('[data-purchase-quantity]')) event.target.value = String(Math.max(0, Math.floor(Number(event.target.value) || 0)));
     });
     root.querySelector('#purchase-lines')?.addEventListener('click', (event) => {
       const section = event.target.closest('[data-purchase-group]');
       if (!section) return;
       const index = section.dataset.purchaseGroup;
+      const product = products.find((item) => item.id === section.querySelector(`[name="purchaseProduct_${index}"]`)?.value);
+      const matrix = product ? extractProductMatrix(product) : { sizes: [] };
+      const serieMode = section.dataset.serieMode || 'standard';
       if (event.target.closest('.remove-purchase-group')) { if (root.querySelectorAll('[data-purchase-group]').length > 1) { selections.delete(index); section.remove(); updatePurchaseTotal(); } return; }
       const fillSerieBtn = event.target.closest('[data-fill-serie]');
       if (fillSerieBtn) {
-        const delta = Number(fillSerieBtn.dataset.fillSerie) || 1;
+        const mult = Number(fillSerieBtn.dataset.fillSerie) || 1;
         const groupSelection = selections.get(index) ?? new Map();
         section.querySelectorAll('[data-purchase-quantity]').forEach((input) => {
-          const next = Math.max(0, (Number(input.value) || 0) + delta);
+          const weight = computeSerieWeight(matrix.sizes, input.dataset.purchaseSize, serieMode);
+          const next = Math.max(0, (Number(input.value) || 0) + (mult * weight));
           input.value = String(next);
           if (next > 0) groupSelection.set(input.dataset.purchaseQuantity, next);
           input.closest('.purchase-matrix-cell, tr')?.classList.toggle('selected', next > 0);
@@ -1043,12 +1168,28 @@ function bindSuppliers() {
         updatePurchaseTotal();
         return;
       }
+      const clearColorBtn = event.target.closest('[data-clear-color-row]');
+      if (clearColorBtn) {
+        const row = clearColorBtn.closest('tr');
+        const groupSelection = selections.get(index) ?? new Map();
+        row?.querySelectorAll('[data-purchase-quantity]').forEach((input) => {
+          input.value = '0';
+          groupSelection.delete(input.dataset.purchaseQuantity);
+          input.closest('.purchase-matrix-cell, tr')?.classList.remove('selected');
+        });
+        selections.set(index, groupSelection);
+        section.querySelector(`[name="purchaseCost_${index}"]`).required = groupSelection.size > 0;
+        updatePurchaseTotal();
+        return;
+      }
       const colorRowBtn = event.target.closest('[data-fill-color-row]');
       if (colorRowBtn) {
+        const mult = Number(colorRowBtn.dataset.serieMult) || 1;
         const row = colorRowBtn.closest('tr');
         const groupSelection = selections.get(index) ?? new Map();
         row?.querySelectorAll('[data-purchase-quantity]').forEach((input) => {
-          const next = Math.max(0, (Number(input.value) || 0) + 1);
+          const weight = computeSerieWeight(matrix.sizes, input.dataset.purchaseSize, serieMode);
+          const next = Math.max(0, (Number(input.value) || 0) + (mult * weight));
           input.value = String(next);
           groupSelection.set(input.dataset.purchaseQuantity, next);
           input.closest('.purchase-matrix-cell, tr')?.classList.add('selected');
@@ -1061,6 +1202,10 @@ function bindSuppliers() {
   };
   document.querySelector('#new-purchase')?.addEventListener('click', () => purchase());
   document.querySelectorAll('.purchase-for-supplier').forEach((button) => button.addEventListener('click', () => purchase(button.dataset.supplier)));
+  document.querySelectorAll('.print-purchase-labels').forEach((button) => button.addEventListener('click', () => {
+    const purchaseRecord = state.data.suppliers.flatMap((supplier) => supplier.purchases).find((item) => item.id === button.dataset.purchaseId);
+    if (purchaseRecord) showBarcodeLabelsModal({ purchase: purchaseRecord });
+  }));
   document.querySelectorAll('.return-supplier-item').forEach((button) => button.addEventListener('click', () => {
     const purchase = state.data.suppliers.flatMap((supplier) => supplier.purchases).find((item) => item.id === button.dataset.purchase);
     const line = purchase?.items.find((item) => item.id === button.dataset.item);
@@ -1422,16 +1567,134 @@ function bindLocalSearch() {
   });
 }
 
+function openModelVariantStockModal({ mode }) {
+  const products = state.data.products.filter((p) => p.itemKind === 'PRODUCT' && p.isActive && p.variants.some((v) => v.isActive && (mode === 'adjust' ? true : BigInt(v.quantity) > 0n)));
+  if (!products.length) {
+    toast(mode === 'adjust' ? 'لا توجد أصناف لتسوية الجرد' : 'لا توجد أصناف بها رصيد متاح في الفرع الحالي', 'error');
+    return;
+  }
+  const decimals = currencyDecimals(state.data.company.currency);
+  const otherStores = state.data.stores.filter((s) => s.id !== state.data.selectedStoreId);
+  const buildVariantOptionsHtml = (product) => {
+    const variants = (product?.variants ?? []).filter((v) => v.isActive && (mode === 'adjust' ? true : BigInt(v.quantity) > 0n));
+    return variants.map((v) => {
+      const attrLabel = Object.entries(v.attributes ?? {}).map(([k, val]) => `${product.options?.find((o) => o.key === k)?.name ?? k}: ${val}`).join(' · ') || 'النسخة الأساسية';
+      return `<option value="${v.id}" data-max-qty="${v.quantity}">${escapeHtml(attrLabel)} (${escapeHtml(v.sku)}) — الرصيد الحالي: ${v.quantity} قطعة</option>`;
+    }).join('');
+  };
+  const firstProduct = products[0];
+  const modelSelectorHtml = `<label>الموديل / المنتج الأساسي<select id="stock-modal-product-select">${products.map((p) => `<option value="${p.id}">${escapeHtml(p.name)} (${escapeHtml(p.sku)})</option>`).join('')}</select></label><label>اللون والمقاس الفرعي (SKU)<select name="variantId" id="stock-modal-variant-select" required>${buildVariantOptionsHtml(firstProduct)}</select></label>`;
+  if (mode === 'transfer') {
+    supplierModal(`<p>التحويل من الفرع الحالي: <strong>${escapeHtml(state.data.stores.find((s) => s.id === state.data.selectedStoreId)?.name ?? '')}</strong></p><label>إلى الفرع<select name="toStoreId" required>${otherStores.map((s) => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('')}</select></label>${modelSelectorHtml}<label>الكمية المحولة<input name="quantity" type="number" min="1" step="1" value="1" required></label><input type="hidden" name="fromStoreId" value="${state.data.selectedStoreId}">`, 'transfer-form', '/api/inventory/transfer', (d) => d, 'تم تحويل المخزون بين الفروع بنجاح');
+  } else if (mode === 'damage') {
+    supplierModal(`<p>سيتم خصم الكمية التالفة من المخزون وترحيل تكلفتها المرجحة كخسائر وتوالف مخزون (5090).</p>${modelSelectorHtml}<label>الكمية التالفة<input name="quantity" type="number" min="1" step="1" value="1" required></label><label>سبب الإعدام / التلف<input name="reason" maxlength="300" placeholder="مثال: كسر أثناء النقل أو عيب صناعة"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'damage-form', '/api/inventory/damage', (d) => d, 'تم تسجيل التالف وترحيل القيد المحاسبي');
+  } else {
+    supplierModal(`<p>أدخل الرصيد الفعلي الجديد بعد الجرد؛ سيقوم النظام بحساب الفرق وترحيل قيد التسوية تلقائيًا.</p>${modelSelectorHtml}<label>الرصيد الفعلي الجديد (قطعة)<input name="targetQuantity" type="number" min="0" step="1" required></label><label>تكلفة الوحدة في حالة الزيادة (${state.data.company.currency} - اختياري)<input name="unitCost" inputmode="decimal"></label><label>سبب التسوية<input name="reason" maxlength="300" placeholder="مثال: جرد دوري للفرع"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'adjust-form', '/api/inventory/adjust', (d) => ({ ...d, unitCost: d.unitCost ? toMinor(d.unitCost, decimals) : undefined }), 'تم تسوية رصيد المخزون وترحيل القيد المحاسبي');
+  }
+  const prodSelect = document.querySelector('#stock-modal-product-select');
+  const varSelect = document.querySelector('#stock-modal-variant-select');
+  prodSelect?.addEventListener('change', () => {
+    const selectedProduct = products.find((p) => p.id === prodSelect.value);
+    if (varSelect && selectedProduct) varSelect.innerHTML = buildVariantOptionsHtml(selectedProduct);
+  });
+}
+
+function showBarcodeLabelsModal({ product = null, purchase = null } = {}) {
+  let modal = document.querySelector('#modal-root');
+  if (!modal) { modal = document.createElement('div'); modal.id = 'modal-root'; document.body.append(modal); }
+  const storeName = state.data.company.name || 'المتجر';
+  const rowsData = [];
+  if (purchase) {
+    for (const item of purchase.items ?? []) {
+      const matchedProduct = state.data.products.find((p) => p.variants.some((v) => v.sku === item.sku));
+      const matchedVariant = matchedProduct?.variants.find((v) => v.sku === item.sku);
+      const attrLabel = matchedVariant
+        ? Object.entries(matchedVariant.attributes ?? {}).map(([k, val]) => `${matchedProduct.options?.find((o) => o.key === k)?.name ?? k}: ${val}`).join(' · ')
+        : '';
+      const code = matchedVariant?.barcode || matchedVariant?.sku || item.sku;
+      const retailPriceText = matchedVariant ? money(matchedVariant.price) : '';
+      rowsData.push({
+        id: item.id,
+        modelName: matchedProduct?.name || item.productName,
+        modelSku: matchedProduct?.sku || item.sku,
+        subLabel: attrLabel || 'النسخة الأساسية',
+        sku: item.sku,
+        barcode: code,
+        priceText: retailPriceText,
+        defaultCopies: Math.max(0, Number(item.quantity) || 1),
+        stockQty: matchedVariant?.quantity ?? item.quantity,
+      });
+    }
+  } else if (product) {
+    const activeVariants = (product.variants ?? []).filter((v) => v.isActive);
+    activeVariants.forEach((v, idx) => {
+      const attrLabel = Object.entries(v.attributes ?? {}).map(([k, val]) => `${product.options?.find((o) => o.key === k)?.name ?? k}: ${val}`).join(' · ') || 'النسخة الأساسية';
+      const code = v.barcode || v.sku || generateEan13Barcode(v.sku, idx + 1);
+      rowsData.push({
+        id: v.id,
+        modelName: product.name,
+        modelSku: product.sku,
+        subLabel: attrLabel,
+        sku: v.sku,
+        barcode: code,
+        priceText: money(v.price),
+        defaultCopies: Number(v.quantity) > 0 ? Number(v.quantity) : 1,
+        stockQty: v.quantity,
+      });
+    });
+  }
+  const title = purchase
+    ? `طباعة استيكرات باركود فاتورة الشراء (${purchase.invoiceNumber || purchase.id.slice(0, 8)})`
+    : `طباعة استيكرات باركود العلب — ${product?.name ?? ''}`;
+  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal barcode-print-modal" role="dialog" aria-modal="true"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">نظام الباركود واستيكرات العلب الحرارية</span><h2>${escapeHtml(title)}</h2></div><button type="button" class="modal-close" data-close-barcode-modal>×</button></div><div class="matrix-quick-toolbar"><span>حدد عدد الاستيكرات المطلوب طباعتها لكل لون ومقاس:</span><div class="matrix-quick-actions"><button type="button" class="date-preset-chip" data-label-preset="one">استيكر واحد لكل مقاس (1)</button><button type="button" class="date-preset-chip" data-label-preset="stock">بعدد الرصيد/الفاتورة الفعلي</button><button type="button" class="date-preset-chip" data-label-preset="zero">تصفير الكل</button></div></div><div class="table-scroll" style="max-height:220px"><table class="variant-matrix-table compact-table"><thead><tr><th>الموديل</th><th>اللون والمقاس</th><th>كود الفرع (SKU)</th><th>الباركود</th><th>السعر</th><th>عدد الاستيكرات</th></tr></thead><tbody>${rowsData.map((r, idx) => `<tr data-label-row="${idx}"><td><strong>${escapeHtml(r.modelName)}</strong></td><td>${escapeHtml(r.subLabel)}</td><td><span class="sku-code">${escapeHtml(r.sku)}</span></td><td><span class="sku-code">${escapeHtml(r.barcode)}</span></td><td>${escapeHtml(r.priceText)}</td><td><input type="number" min="0" max="200" step="1" data-label-copies="${idx}" value="${r.defaultCopies}" style="width:82px;text-align:center;font-weight:800"></td></tr>`).join('')}</tbody></table></div><div class="barcode-preview-header"><strong>معاينة ملصقات الباركود الجاهزة للطباعة</strong><small id="barcode-total-count"></small></div><div id="barcode-sheet-preview" class="barcode-labels-sheet"></div><div class="modal-actions"><button type="button" class="button button-secondary" data-close-barcode-modal>إغلاق</button><button type="button" class="button button-primary" id="print-barcode-sheet-btn">🖨️ طباعة الاستيكرات الآن</button></div></section></div>`;
+  modal.querySelectorAll('[data-close-barcode-modal]').forEach((b) => b.addEventListener('click', () => { modal.innerHTML = ''; }));
+  const sheet = modal.querySelector('#barcode-sheet-preview');
+  const countEl = modal.querySelector('#barcode-total-count');
+  const renderLabelsPreview = () => {
+    const cards = [];
+    modal.querySelectorAll('[data-label-copies]').forEach((input) => {
+      const idx = Number(input.dataset.labelCopies);
+      const copies = Math.min(200, Math.max(0, Math.floor(Number(input.value) || 0)));
+      const item = rowsData[idx];
+      if (!item || copies <= 0) return;
+      const svg = renderBarcodeSvg(item.barcode);
+      for (let c = 0; c < copies; c += 1) {
+        cards.push(`<article class="barcode-sticker-card"><div class="sticker-top"><span>${escapeHtml(storeName)}</span><strong>${escapeHtml(item.priceText)}</strong></div><div class="sticker-model">${escapeHtml(item.modelName)}</div><div class="sticker-variant">${escapeHtml(item.subLabel)}</div><div class="sticker-bars">${svg}</div><div class="sticker-code"><span>${escapeHtml(item.sku)}</span><small>${escapeHtml(item.barcode)}</small></div></article>`);
+      }
+    });
+    countEl.textContent = `إجمالي الملصقات: ${cards.length} استيكر`;
+    sheet.innerHTML = cards.length ? cards.join('') : '<div class="empty-row">حدد عدد استيكرات أكبر من صفر لمعاينة الطباعة.</div>';
+  };
+  modal.querySelectorAll('[data-label-copies]').forEach((input) => input.addEventListener('input', renderLabelsPreview));
+  modal.querySelectorAll('[data-label-preset]').forEach((btn) => btn.addEventListener('click', () => {
+    const preset = btn.dataset.labelPreset;
+    modal.querySelectorAll('[data-label-copies]').forEach((input) => {
+      const idx = Number(input.dataset.labelCopies);
+      const item = rowsData[idx];
+      if (preset === 'one') input.value = '1';
+      else if (preset === 'stock') input.value = String(Math.max(0, Number(purchase ? item.defaultCopies : item.stockQty) || 0));
+      else input.value = '0';
+    });
+    renderLabelsPreview();
+  }));
+  modal.querySelector('#print-barcode-sheet-btn')?.addEventListener('click', () => window.print());
+  renderLabelsPreview();
+}
+
 function bindProducts() {
   bindLocalSearch();
   document.querySelector('#new-store-btn')?.addEventListener('click', () => supplierModal('<label>اسم الفرع الجديد<input name="name" required minlength="2" maxlength="100" placeholder="مثال: فرع المعادي"></label><label>كود الفرع<input name="code" required minlength="2" maxlength="20" pattern="[A-Za-z0-9_-]+" placeholder="MAADI"></label><label>العنوان (اختياري)<input name="address" maxlength="240"></label><label>الهاتف (اختياري)<input name="phone" maxlength="40"></label>', 'store-form', '/api/stores', (d) => d, 'تم إضافة الفرع الجديد بنجاح'));
-  document.querySelector('#transfer-stock-btn')?.addEventListener('click', () => { const otherStores = state.data.stores.filter((s) => s.id !== state.data.selectedStoreId); const variants = state.data.products.filter((p) => p.itemKind === 'PRODUCT' && p.isActive).flatMap((p) => p.variants.filter((v) => v.isActive && BigInt(v.quantity) > 0n).map((v) => ({ id: v.id, label: `${p.name} (${v.sku}) — متاح ${v.quantity}` }))); if (!variants.length) { toast('لا توجد أصناف بها رصيد متاح للتحويل في الفرع الحالي', 'error'); return; } supplierModal(`<p>التحويل من الفرع الحالي: <strong>${escapeHtml(state.data.stores.find((s) => s.id === state.data.selectedStoreId)?.name ?? '')}</strong></p><label>إلى الفرع<select name="toStoreId" required>${otherStores.map((s) => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('')}</select></label><label>الصنف والنسخة<select name="variantId" required>${variants.map((v) => `<option value="${v.id}">${escapeHtml(v.label)}</option>`).join('')}</select></label><label>الكمية المحولة<input name="quantity" type="number" min="1" step="1" value="1" required></label><input type="hidden" name="fromStoreId" value="${state.data.selectedStoreId}">`, 'transfer-form', '/api/inventory/transfer', (d) => d, 'تم تحويل المخزون بين الفروع بنجاح'); });
-  document.querySelector('#record-damage-btn')?.addEventListener('click', () => { const variants = state.data.products.filter((p) => p.itemKind === 'PRODUCT' && p.isActive).flatMap((p) => p.variants.filter((v) => v.isActive && BigInt(v.quantity) > 0n).map((v) => ({ id: v.id, label: `${p.name} (${v.sku}) — متاح ${v.quantity}` }))); if (!variants.length) { toast('لا توجد أصناف بها رصيد لتسجيل تالف', 'error'); return; } supplierModal(`<p>سيتم خصم الكمية التالفة من المخزون وترحيل تكلفتها المرجحة كخسائر وتوالف مخزون (5090).</p><label>الصنف والنسخة<select name="variantId" required>${variants.map((v) => `<option value="${v.id}">${escapeHtml(v.label)}</option>`).join('')}</select></label><label>الكمية التالفة<input name="quantity" type="number" min="1" step="1" value="1" required></label><label>سبب الإعدام / التلف<input name="reason" maxlength="300" placeholder="مثال: كسر أثناء النقل أو انتهاء صلاحية"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'damage-form', '/api/inventory/damage', (d) => d, 'تم تسجيل التالف وترحيل القيد المحاسبي'); });
-  document.querySelector('#adjust-stock-btn')?.addEventListener('click', () => { const decimals = currencyDecimals(state.data.company.currency); const variants = state.data.products.filter((p) => p.itemKind === 'PRODUCT' && p.isActive).flatMap((p) => p.variants.filter((v) => v.isActive).map((v) => ({ id: v.id, label: `${p.name} (${v.sku}) — الرصيد الحالي ${v.quantity}` }))); if (!variants.length) { toast('لا توجد أصناف لتسوية الجرد', 'error'); return; } supplierModal(`<p>أدخل الرصيد الفعلي الجديد بعد الجرد؛ سيقوم النظام بحساب الفرق وترحيل قيد التسوية تلقائيًا.</p><label>الصنف والنسخة<select name="variantId" required>${variants.map((v) => `<option value="${v.id}">${escapeHtml(v.label)}</option>`).join('')}</select></label><label>الرصيد الفعلي الجديد (قطعة)<input name="targetQuantity" type="number" min="0" step="1" required></label><label>تكلفة الوحدة في حالة الزيادة (${state.data.company.currency} - اختياري)<input name="unitCost" inputmode="decimal"></label><label>سبب التسوية<input name="reason" maxlength="300" placeholder="مثال: جرد دوري للفرع"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'adjust-form', '/api/inventory/adjust', (d) => ({ ...d, unitCost: d.unitCost ? toMinor(d.unitCost, decimals) : undefined }), 'تم تسوية رصيد المخزون وترحيل القيد المحاسبي'); });
+  document.querySelector('#transfer-stock-btn')?.addEventListener('click', () => openModelVariantStockModal({ mode: 'transfer' }));
+  document.querySelector('#record-damage-btn')?.addEventListener('click', () => openModelVariantStockModal({ mode: 'damage' }));
+  document.querySelector('#adjust-stock-btn')?.addEventListener('click', () => openModelVariantStockModal({ mode: 'adjust' }));
   const open = () => showProductModal();
   document.querySelector('#new-product')?.addEventListener('click', open);
   document.querySelector('#add-category')?.addEventListener('click', () => showCategoryModal());
   document.querySelector('#empty-new-product')?.addEventListener('click', open);
+  document.querySelectorAll('.product-print-labels').forEach((button) => button.addEventListener('click', () => {
+    const product = state.data.products.find((item) => item.id === button.dataset.productId);
+    if (product) showBarcodeLabelsModal({ product });
+  }));
   document.querySelectorAll('.product-edit').forEach((button) => button.addEventListener('click', () => {
     const product = state.data.products.find((item) => item.id === button.dataset.productId);
     if (product) showProductEditModal(product);
@@ -1458,14 +1721,112 @@ function decimalPrice(value) {
 function showProductEditModal(product) {
   const modal = document.querySelector('#modal-root');
   const currency = state.data.company.currency;
+  const quickColors = ['أسود', 'أبيض', 'كحلي', 'بيج', 'رمادي', 'بني', 'هافان', 'زيتي', 'جملي', 'نبيتي'];
+  const quickSizes = ['36, 37, 38, 39, 40, 41', '40, 41, 42, 43, 44, 45', '41, 42, 43, 44, 45, 46', 'S, M, L, XL, XXL'];
   const categoryChoices = state.data.categories.map((category) => `<option value="${category.id}" ${category.id === product.categoryId ? 'selected' : ''}>${escapeHtml(category.name)}</option>`).join('');
-  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="product-edit-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">الكتالوج</span><h2 id="product-edit-title">تعديل المنتج</h2></div><button class="modal-close" data-close-modal>×</button></div><form id="product-edit-form" class="form-stack modal-form"><label>اسم المنتج<input name="name" required minlength="2" maxlength="120" value="${escapeHtml(product.name)}"></label><div class="form-grid"><label>كود المنتج<input name="sku" required maxlength="64" value="${escapeHtml(product.sku)}"></label><label>الفئة<select name="categoryId"><option value="">بدون فئة</option>${categoryChoices}</select></label></div><div class="form-grid"><label>الماركة<input name="brand" maxlength="100" value="${escapeHtml(product.brand ?? '')}"></label><label>رابط الصورة<input name="imagePath" type="url" maxlength="300" value="${escapeHtml(product.imagePath ?? '')}"></label></div><label>وصف المنتج<textarea name="description" maxlength="2000" rows="2">${escapeHtml(product.description ?? '')}</textarea></label><div class="table-scroll"><table class="variant-matrix-table"><thead><tr><th>متاحة</th><th>التركيبة</th><th>كود النسخة</th><th>السعر (${currency})</th><th>حد الطلب</th></tr></thead><tbody>${product.variants.filter((variant) => variant.isActive).map((variant) => `<tr data-variant-id="${variant.id}"><td><input data-edit-active type="checkbox" checked aria-label="إبقاء التركيبة متاحة"></td><td>${escapeHtml(Object.entries(variant.attributes ?? {}).map(([key, value]) => `${product.options?.find((option) => option.key === key)?.name ?? key}: ${value}`).join(' · ') || product.name)}</td><td><input data-edit-sku maxlength="64" required value="${escapeHtml(variant.sku)}"></td><td><input data-edit-price inputmode="decimal" required value="${escapeHtml(decimalPrice(variant.price))}"></td><td><input data-edit-reorder type="number" min="0" step="1" required value="${escapeHtml(variant.reorderPoint)}"></td></tr>`).join('')}</tbody></table></div><div id="new-variant-rows" class="form-stack"></div>${product.options?.length ? '<button type="button" class="button button-secondary" id="add-edit-variant">إضافة تركيبة من الخيارات الحالية</button>' : ''}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">حفظ التعديلات</button></div></form></section></div>`;
+  const activeExisting = product.variants.filter((variant) => variant.isActive);
+  const defaultPrice = activeExisting[0] ? decimalPrice(activeExisting[0].price) : '0';
+  const defaultReorder = activeExisting[0]?.reorderPoint ?? '3';
+  const initialOptions = (product.options?.length ? product.options : []).map((opt) => ({ key: opt.key, name: opt.name, values: [...(opt.values ?? [])] }));
+
+  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="product-edit-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">الكتالوج الموحد — توسيع وتعديل الموديل</span><h2 id="product-edit-title">تعديل الموديل: ${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2></div><button class="modal-close" data-close-modal>×</button></div><form id="product-edit-form" class="form-stack modal-form"><div class="form-grid"><label>اسم الموديل / المنتج<input name="name" required minlength="2" maxlength="120" value="${escapeHtml(product.name)}"></label><label>كود الموديل الأساسي<input name="sku" required maxlength="64" value="${escapeHtml(product.sku)}"></label></div><div class="form-grid"><label>الفئة<select name="categoryId"><option value="">بدون فئة</option>${categoryChoices}</select></label><label>الماركة / المصنع<input name="brand" maxlength="100" value="${escapeHtml(product.brand ?? '')}"></label></div><div class="form-grid"><label>رابط الصورة<input name="imagePath" type="url" maxlength="300" value="${escapeHtml(product.imagePath ?? '')}"></label><label>وصف الموديل<input name="description" maxlength="2000" value="${escapeHtml(product.description ?? '')}"></label></div>
+  ${initialOptions.length ? `<div class="variant-options-section"><div><strong>توسيع ألوان ومقاسات الموديل (إضافة لون جديد أو مقاس جديد للموديل)</strong><small>أضف أي لون جديد (مثل هافان) أو مقاس جديد (مثل 46) وسيقوم النظام بتوليد الفروع الجديدة فقط تلقائيًا بكود ذكي وباركود دون المساس بالفروع السابقة.</small></div><div class="model-presets-bar"><span class="preset-label">إضافة لون جديد للموديل:</span>${quickColors.map((c) => `<button type="button" class="color-quick-chip" data-edit-add-color="${c}">+ ${c}</button>`).join('')}</div><div class="model-presets-bar"><span class="preset-label">إضافة مقاسات سريعة:</span>${quickSizes.map((s) => `<button type="button" class="date-preset-chip" data-edit-add-sizes="${s}">+ (${s})</button>`).join('')}</div><div id="edit-option-rows" class="form-stack">${initialOptions.map((opt) => `<div class="variant-option-row" data-edit-option-key="${escapeHtml(opt.key)}"><input data-edit-option-name value="${escapeHtml(opt.name)}" readonly><input data-edit-option-values value="${escapeHtml(opt.values.join(', '))}" placeholder="القيم مفصولة بفواصل"></div>`).join('')}</div></div>` : ''}
+  <div class="matrix-quick-toolbar"><span>الفروع الحالية والجديدة التابعة للموديل (<strong>${activeExisting.length}</strong> فرع مسجل)</span><div class="matrix-quick-actions"><button type="button" class="date-preset-chip" id="edit-generate-barcodes">🏷️ توليد باركود تلقائي للفروع بدون باركود</button><button type="button" class="date-preset-chip" id="edit-open-print-labels">🖨️ طباعة استيكرات الباركود</button></div></div>
+  <div class="table-scroll"><table class="variant-matrix-table"><thead><tr><th>متاحة</th><th>اللون والمقاس الفرعي</th><th>كود الفرع (SKU)</th><th>الباركود</th><th>السعر (${currency})</th><th>حد الطلب</th></tr></thead><tbody id="edit-existing-tbody">${activeExisting.map((variant) => `<tr data-variant-id="${variant.id}" data-variant-attrs="${escapeHtml(JSON.stringify(variant.attributes ?? {}))}"><td><input data-edit-active type="checkbox" checked aria-label="إبقاء التركيبة متاحة"></td><td><strong>${escapeHtml(Object.entries(variant.attributes ?? {}).map(([key, value]) => `${product.options?.find((option) => option.key === key)?.name ?? key}: ${value}`).join(' · ') || product.name)}</strong></td><td><input data-edit-sku maxlength="64" required value="${escapeHtml(variant.sku)}"></td><td><input data-edit-barcode maxlength="64" value="${escapeHtml(variant.barcode ?? '')}" placeholder="باركود العلبة"></td><td><input data-edit-price inputmode="decimal" required value="${escapeHtml(decimalPrice(variant.price))}"></td><td><input data-edit-reorder type="number" min="0" step="1" required value="${escapeHtml(variant.reorderPoint)}"></td></tr>`).join('')}</tbody><tbody id="edit-generated-tbody"></tbody></table></div><div id="new-variant-rows" class="form-stack"></div>${product.options?.length ? '<button type="button" class="button button-secondary button-sm" id="add-edit-variant">+ إضافة فرع مفرد يدويًا</button>' : ''}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">حفظ التعديلات والفروع الجديدة</button></div></form></section></div>`;
   modal.querySelectorAll('[data-close-modal]').forEach((button) => button.addEventListener('click', () => { modal.innerHTML = ''; }));
+  modal.querySelector('#edit-open-print-labels')?.addEventListener('click', () => showBarcodeLabelsModal({ product }));
+  const generatedTbody = modal.querySelector('#edit-generated-tbody');
+  const editOptionRows = modal.querySelector('#edit-option-rows');
+
+  const syncExpandedVariants = () => {
+    if (!editOptionRows) return;
+    const baseSku = modal.querySelector('[name="sku"]').value.trim() || product.sku;
+    const updatedOptions = [...editOptionRows.querySelectorAll('[data-edit-option-key]')].map((row) => {
+      const key = row.dataset.editOptionKey;
+      const name = row.querySelector('[data-edit-option-name]').value.trim();
+      const origValues = product.options?.find((o) => o.key === key)?.values ?? [];
+      const typedValues = row.querySelector('[data-edit-option-values]').value.split(/[,،]/).map((v) => v.trim()).filter(Boolean);
+      const merged = [...origValues];
+      for (const v of typedValues) if (!merged.includes(v)) merged.push(v);
+      return { key, name, values: merged };
+    });
+    const existingKeys = new Set(product.variants.map((v) => JSON.stringify(Object.fromEntries(updatedOptions.map((o) => [o.key, (v.attributes ?? {})[o.key]])))));
+    const usedSkus = new Set([...modal.querySelectorAll('[data-edit-sku]')].map((el) => el.value.trim().toLowerCase()));
+    const usedBarcodes = new Set([...modal.querySelectorAll('[data-edit-barcode]')].map((el) => el.value.trim()).filter(Boolean));
+    const savedNew = new Map([...generatedTbody.querySelectorAll('[data-new-combo-key]')].map((tr) => [tr.dataset.newComboKey, {
+      enabled: tr.querySelector('[data-new-combo-enabled]').checked,
+      sku: tr.querySelector('[data-new-combo-sku]').value,
+      barcode: tr.querySelector('[data-new-combo-barcode]').value,
+      price: tr.querySelector('[data-new-combo-price]').value,
+      reorder: tr.querySelector('[data-new-combo-reorder]').value,
+    }]));
+    const combos = [];
+    const expand = (pos, attrs) => {
+      if (pos === updatedOptions.length) { combos.push(attrs); return; }
+      const opt = updatedOptions[pos];
+      for (const val of opt.values) expand(pos + 1, { ...attrs, [opt.key]: val });
+    };
+    if (updatedOptions.length) expand(0, {});
+    const newCombos = combos.filter((attrs) => !existingKeys.has(JSON.stringify(attrs)));
+    generatedTbody.innerHTML = newCombos.map((attrs, idx) => {
+      const comboKey = JSON.stringify(attrs);
+      const prev = savedNew.get(comboKey);
+      const label = Object.entries(attrs).map(([k, val]) => `${updatedOptions.find((o) => o.key === k)?.name ?? k}: ${val}`).join(' · ');
+      const sku = prev?.sku || buildSemanticVariantSku(baseSku, attrs, activeExisting.length + idx, usedSkus);
+      usedSkus.add(sku.toLowerCase());
+      const barcode = prev?.barcode ?? generateEan13Barcode(sku, activeExisting.length + idx + 1, usedBarcodes);
+      return `<tr class="new-expanded-variant-row" data-new-combo-key="${escapeHtml(comboKey)}"><td><input data-new-combo-enabled type="checkbox" ${prev?.enabled === false ? '' : 'checked'}></td><td><span class="kpi-tag kpi-tag-teal">جديد</span> <strong>${escapeHtml(label)}</strong></td><td><input data-new-combo-sku maxlength="64" required value="${escapeHtml(sku)}"></td><td><input data-new-combo-barcode maxlength="64" value="${escapeHtml(barcode)}"></td><td><input data-new-combo-price inputmode="decimal" required value="${escapeHtml(prev?.price ?? defaultPrice)}"></td><td><input data-new-combo-reorder type="number" min="0" step="1" required value="${escapeHtml(prev?.reorder ?? defaultReorder)}"></td></tr>`;
+    }).join('');
+  };
+
+  editOptionRows?.addEventListener('input', syncExpandedVariants);
+  modal.querySelectorAll('[data-edit-add-color]').forEach((btn) => btn.addEventListener('click', () => {
+    if (!editOptionRows) return;
+    const color = btn.dataset.editAddColor;
+    const targetRow = [...editOptionRows.querySelectorAll('[data-edit-option-key]')].find((r) => COLOR_OPTION_NAMES.has(r.querySelector('[data-edit-option-name]').value.trim().toLowerCase())) ?? editOptionRows.firstElementChild;
+    if (!targetRow) return;
+    const input = targetRow.querySelector('[data-edit-option-values]');
+    const vals = input.value.split(/[,،]/).map((v) => v.trim()).filter(Boolean);
+    if (!vals.includes(color)) vals.push(color);
+    input.value = vals.join(', ');
+    syncExpandedVariants();
+  }));
+  modal.querySelectorAll('[data-edit-add-sizes]').forEach((btn) => btn.addEventListener('click', () => {
+    if (!editOptionRows) return;
+    const sizesToAdd = btn.dataset.editAddSizes.split(/[,،]/).map((v) => v.trim()).filter(Boolean);
+    const targetRow = [...editOptionRows.querySelectorAll('[data-edit-option-key]')].find((r) => SIZE_OPTION_NAMES.has(r.querySelector('[data-edit-option-name]').value.trim().toLowerCase())) ?? editOptionRows.lastElementChild;
+    if (!targetRow) return;
+    const input = targetRow.querySelector('[data-edit-option-values]');
+    const vals = input.value.split(/[,،]/).map((v) => v.trim()).filter(Boolean);
+    for (const s of sizesToAdd) if (!vals.includes(s)) vals.push(s);
+    input.value = vals.join(', ');
+    syncExpandedVariants();
+  }));
+  modal.querySelector('#edit-generate-barcodes')?.addEventListener('click', () => {
+    const usedBarcodes = new Set();
+    modal.querySelectorAll('[data-edit-barcode], [data-new-combo-barcode]').forEach((el) => { if (el.value.trim()) usedBarcodes.add(el.value.trim()); });
+    let seq = 1;
+    modal.querySelectorAll('[data-edit-barcode]').forEach((el) => {
+      if (!el.value.trim()) {
+        const sku = el.closest('tr')?.querySelector('[data-edit-sku]')?.value || product.sku;
+        el.value = generateEan13Barcode(sku, seq++, usedBarcodes);
+      }
+    });
+    modal.querySelectorAll('[data-new-combo-barcode]').forEach((el) => {
+      if (!el.value.trim()) {
+        const sku = el.closest('tr')?.querySelector('[data-new-combo-sku]')?.value || product.sku;
+        el.value = generateEan13Barcode(sku, seq++, usedBarcodes);
+      }
+    });
+    toast('تم توليد أرقام باركود فريدة لجميع المقاسات والألوان');
+  });
+
   const newVariantRows = modal.querySelector('#new-variant-rows');
   modal.querySelector('#add-edit-variant')?.addEventListener('click', () => {
     const row = document.createElement('div'); row.className = 'form-grid edit-new-variant';
-    const selectors = product.options.map((option) => `<label>${escapeHtml(option.name)}<select data-new-attribute="${escapeHtml(option.key)}">${option.values.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join('')}</select></label>`).join('');
-    row.innerHTML = `${selectors}<label>كود النسخة<input data-new-sku required maxlength="64"></label><label>السعر (${currency})<input data-new-price inputmode="decimal" required></label><label>حد الطلب<input data-new-reorder type="number" min="0" value="5" required></label><button type="button" class="text-action" data-remove-new>حذف</button>`;
+    const currentOptions = editOptionRows ? [...editOptionRows.querySelectorAll('[data-edit-option-key]')].map((r) => ({ key: r.dataset.editOptionKey, name: r.querySelector('[data-edit-option-name]').value.trim(), values: r.querySelector('[data-edit-option-values]').value.split(/[,،]/).map((v) => v.trim()).filter(Boolean) })) : (product.options ?? []);
+    const selectors = currentOptions.map((option) => `<label>${escapeHtml(option.name)}<select data-new-attribute="${escapeHtml(option.key)}">${option.values.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join('')}</select></label>`).join('');
+    row.innerHTML = `${selectors}<label>كود النسخة<input data-new-sku required maxlength="64"></label><label>السعر (${currency})<input data-new-price inputmode="decimal" required value="${escapeHtml(defaultPrice)}"></label><label>حد الطلب<input data-new-reorder type="number" min="0" value="${escapeHtml(defaultReorder)}" required></label><button type="button" class="text-action" data-remove-new>حذف</button>`;
     row.querySelector('[data-remove-new]').addEventListener('click', () => row.remove()); newVariantRows.append(row);
   });
   modal.querySelector('#product-edit-form').addEventListener('submit', async (event) => {
@@ -1475,18 +1836,38 @@ function showProductEditModal(product) {
     submit.disabled = true;
     try {
       const data = new FormData(form);
+      const updatedOptions = editOptionRows ? [...editOptionRows.querySelectorAll('[data-edit-option-key]')].map((row) => {
+        const key = row.dataset.editOptionKey;
+        const name = row.querySelector('[data-edit-option-name]').value.trim();
+        const origValues = product.options?.find((o) => o.key === key)?.values ?? [];
+        const typedValues = row.querySelector('[data-edit-option-values]').value.split(/[,،]/).map((v) => v.trim()).filter(Boolean);
+        const merged = [...origValues];
+        for (const v of typedValues) if (!merged.includes(v)) merged.push(v);
+        return { key, name, values: merged };
+      }) : (product.options ?? []);
       const variants = [...form.querySelectorAll('[data-variant-id]')].filter((row) => row.querySelector('[data-edit-active]').checked).map((row) => ({
         id: row.dataset.variantId,
         sku: row.querySelector('[data-edit-sku]').value.trim(),
+        barcode: row.querySelector('[data-edit-barcode]')?.value.trim() || null,
         attributes: product.variants.find((item) => item.id === row.dataset.variantId)?.attributes ?? {},
         retailPrice: toMinor(row.querySelector('[data-edit-price]').value, currencyDecimals(currency)),
         reorderPoint: row.querySelector('[data-edit-reorder]').value,
       }));
+      for (const row of generatedTbody?.querySelectorAll('[data-new-combo-key]') ?? []) {
+        if (!row.querySelector('[data-new-combo-enabled]')?.checked) continue;
+        variants.push({
+          sku: row.querySelector('[data-new-combo-sku]').value.trim(),
+          barcode: row.querySelector('[data-new-combo-barcode]')?.value.trim() || null,
+          attributes: JSON.parse(row.dataset.newComboKey),
+          retailPrice: toMinor(row.querySelector('[data-new-combo-price]').value, currencyDecimals(currency)),
+          reorderPoint: row.querySelector('[data-new-combo-reorder]').value,
+        });
+      }
       for (const row of newVariantRows?.querySelectorAll('.edit-new-variant') ?? []) variants.push({ sku: row.querySelector('[data-new-sku]').value.trim(), attributes: Object.fromEntries([...row.querySelectorAll('[data-new-attribute]')].map((select) => [select.dataset.newAttribute, select.value])), retailPrice: toMinor(row.querySelector('[data-new-price]').value, currencyDecimals(currency)), reorderPoint: row.querySelector('[data-new-reorder]').value });
-      await api(`/api/products/${encodeURIComponent(product.id)}`, { method: 'PATCH', body: JSON.stringify({ name: data.get('name'), sku: data.get('sku'), categoryId: data.get('categoryId') || null, description: data.get('description') || null, brand: data.get('brand') || null, imagePath: data.get('imagePath') || null, options: product.options ?? [], variants }) });
+      await api(`/api/products/${encodeURIComponent(product.id)}`, { method: 'PATCH', body: JSON.stringify({ name: data.get('name'), sku: data.get('sku'), categoryId: data.get('categoryId') || null, description: data.get('description') || null, brand: data.get('brand') || null, imagePath: data.get('imagePath') || null, options: updatedOptions, variants }) });
       await loadData(state.data.selectedStoreId);
       render();
-      toast('تم حفظ تعديلات المنتج');
+      toast('تم حفظ تعديلات الموديل والفروع الجديدة بنجاح');
     } catch (error) { toast(error.message, 'error'); submit.disabled = false; }
   });
 }
@@ -1522,8 +1903,8 @@ function showCategoryModal(onCreated = null) {
 function showProductModal() {
   const modal = document.querySelector('#modal-root');
   const currency = state.data.company.currency;
-  const quickColors = ['أسود', 'أبيض', 'كحلي', 'بيج', 'رمادي', 'بني', 'هافان', 'زيتي'];
-  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="product-modal-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">الكتالوج الموحد (نظام الموديل والفروع)</span><h2 id="product-modal-title">إضافة موديل / منتج جديد</h2></div><button class="modal-close" data-close-modal>×</button></div><form id="product-form" class="form-stack modal-form"><div class="form-grid"><label>اسم الموديل / المنتج<input name="name" required minlength="2" maxlength="120" placeholder="مثال: كوتشي ميلانو"></label><label>كود الموديل الأساسي (Model Code)<input name="sku" required maxlength="64" placeholder="MIL-205"></label></div><div class="form-grid"><label>الماركة / المصنع (اختياري)<input name="brand" maxlength="100" placeholder="مثال: ميلانو"></label><label>سعر البيع الافتراضي (${currency})<input name="price" required inputmode="decimal" placeholder="0.00"></label></div><div class="form-grid"><label>حد التنبيه لنقص المقاس<input name="reorderPoint" type="number" required min="0" step="1" value="3"></label><label>رابط صورة الموديل (اختياري)<input name="imagePath" type="url" maxlength="300" placeholder="https://..."></label></div><label>وصف الموديل (اختياري)<textarea name="description" maxlength="2000" rows="2" placeholder="خامة الموديل أو تفاصيل إضافية"></textarea></label><div class="variant-options-section"><div class="model-presets-header"><div><strong>الألوان والمقاسات التابعة للموديل</strong><small>الموديل يتسجل كنوع واحد بكوده الأساسي، وكل الألوان والمقاسات بتتولد تحته تلقائيًا (حتى 50 فرع).</small></div></div><div class="model-presets-bar"><span class="preset-label">قوالب سريعة:</span><button type="button" class="date-preset-chip" data-model-preset="men-shoes">👟 كوتشي رجالي (40–45)</button><button type="button" class="date-preset-chip" data-model-preset="women-shoes">👠 حذاء حريمي (36–41)</button><button type="button" class="date-preset-chip" data-model-preset="kids-shoes">👟 أطفال (28–35)</button><button type="button" class="date-preset-chip" data-model-preset="apparel">👕 ملابس (S–XXL)</button><button type="button" class="date-preset-chip" data-model-preset="clear">صنف بدون مقاسات</button></div><div class="model-presets-bar"><span class="preset-label">إضافة لون سريع:</span>${quickColors.map((c) => `<button type="button" class="color-quick-chip" data-add-color="${c}">+ ${c}</button>`).join('')}</div><div id="product-option-rows"></div><button type="button" class="button button-secondary button-sm" id="add-product-option">+ إضافة خاصية أخرى</button><p class="variant-options-note">كل لون ومقاس بياخد كود فرعي مشتق من كود الموديل تلقائيًا، وتقدر تستلم كميات كل مقاس ولون من فاتورة الشراء في جدول واحد.</p><div id="variant-matrix-notice" role="status"></div><div id="variant-matrix"></div></div><div class="single-variant-sku"><label>كود النسخة<input name="variantSku" required maxlength="64" placeholder="MIL-205-STD"></label><label>باركود (اختياري)<input name="variantBarcode" maxlength="64"></label><small>لو المنتج بدون ألوان أو مقاسات، اترك الخيارات فارغة وسيتم حفظه كصنف مفرد.</small></div><div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">حفظ الموديل وفروعه</button></div></form></section></div>`;
+  const quickColors = ['أسود', 'أبيض', 'كحلي', 'بيج', 'رمادي', 'بني', 'هافان', 'زيتي', 'جملي', 'نبيتي'];
+  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="product-modal-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">الكتالوج الموحد (نظام الموديل والفروع)</span><h2 id="product-modal-title">إضافة موديل / منتج جديد</h2></div><button class="modal-close" data-close-modal>×</button></div><form id="product-form" class="form-stack modal-form"><div class="form-grid"><label>اسم الموديل / المنتج<input name="name" required minlength="2" maxlength="120" placeholder="مثال: كوتشي ميلانو"></label><label>كود الموديل الأساسي (Model Code)<input name="sku" required maxlength="64" placeholder="MIL-205"></label></div><div class="form-grid"><label>الماركة / المصنع (اختياري)<input name="brand" maxlength="100" placeholder="مثال: ميلانو"></label><label>سعر البيع الافتراضي (${currency})<input name="price" required inputmode="decimal" placeholder="0.00"></label></div><div class="form-grid"><label>حد التنبيه لنقص المقاس<input name="reorderPoint" type="number" required min="0" step="1" value="3"></label><label>رابط صورة الموديل (اختياري)<input name="imagePath" type="url" maxlength="300" placeholder="https://..."></label></div><label>وصف الموديل (اختياري)<textarea name="description" maxlength="2000" rows="2" placeholder="خامة الموديل أو تفاصيل إضافية"></textarea></label><div class="variant-options-section"><div class="model-presets-header"><div><strong>الألوان والمقاسات التابعة للموديل</strong><small>الموديل يتسجل كنوع واحد بكوده الأساسي، وكل الألوان والمقاسات بتتولد تحته تلقائيًا بأكواد ذكية وباركود لكل مقاس (حتى 200 فرع).</small></div></div><div class="model-presets-bar"><span class="preset-label">قوالب سريعة:</span><button type="button" class="date-preset-chip" data-model-preset="men-shoes">👟 كوتشي رجالي (40–45)</button><button type="button" class="date-preset-chip" data-model-preset="women-shoes">👠 حذاء حريمي (36–41)</button><button type="button" class="date-preset-chip" data-model-preset="kids-shoes">👟 أطفال (28–35)</button><button type="button" class="date-preset-chip" data-model-preset="apparel">👕 ملابس (S–XXL)</button><button type="button" class="date-preset-chip" data-model-preset="clear">صنف بدون مقاسات</button></div><div class="model-presets-bar"><span class="preset-label">إضافة لون سريع:</span>${quickColors.map((c) => `<button type="button" class="color-quick-chip" data-add-color="${c}">+ ${c}</button>`).join('')}</div><div id="product-option-rows"></div><button type="button" class="button button-secondary button-sm" id="add-product-option">+ إضافة خاصية أخرى</button><p class="variant-options-note">كل لون ومقاس بياخد كود فرعي ذكي مقروء (مثل MIL-205-BLK-42) وباركود تلقائي جاهز لطباعة استيكرات العلب.</p><div id="variant-matrix-notice" role="status"></div><div id="variant-matrix"></div></div><div class="single-variant-sku"><label>كود النسخة<input name="variantSku" required maxlength="64" placeholder="MIL-205-STD"></label><label>باركود (اختياري)<input name="variantBarcode" maxlength="64"></label><small>لو المنتج بدون ألوان أو مقاسات، اترك الخيارات فارغة وسيتم حفظه كصنف مفرد.</small></div><div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">حفظ الموديل وفروعه</button></div></form></section></div>`;
   const productForm = modal.querySelector('#product-form');
   const categoryLabel = document.createElement('label');
   categoryLabel.innerHTML = `<span>الفئة</span><div class="category-select-row"><select name="categoryId"><option value="">بدون فئة</option>${state.data.categories.map((category) => `<option value="${category.id}">${escapeHtml(category.name)}</option>`).join('')}</select><button type="button" class="text-action" id="add-category-inline">إضافة فئة</button></div>`;
@@ -1581,6 +1962,7 @@ function showProductModal() {
   const buildMatrix = () => {
     const previous = new Map([...matrix.querySelectorAll('[data-variant-key]')].map((row) => [row.dataset.variantKey, {
       sku: row.querySelector('[data-variant-sku]').value,
+      skuCustom: row.querySelector('[data-variant-sku]').dataset.custom === 'true',
       barcode: row.querySelector('[data-variant-barcode]')?.value ?? '',
       price: row.querySelector('[data-variant-price]').value,
       reorderPoint: row.querySelector('[data-variant-reorder]').value,
@@ -1594,7 +1976,7 @@ function showProductModal() {
     const oversizedValues = active.some((option) => option.values.some((value) => value.length > 64));
     const missingValues = options.some((option) => option.name && !option.values.length);
     const combinationCount = active.reduce((total, option) => total * option.values.length, 1);
-    const tooMany = combinationCount > 50;
+    const tooMany = combinationCount > 200;
     const combinations = [];
     const expand = (position, attributes) => {
       if (position === active.length) { combinations.push(attributes); return; }
@@ -1603,7 +1985,7 @@ function showProductModal() {
     };
     if (active.length && !tooMany) expand(0, {});
     if (missingKeys || duplicateKeys || duplicateValues || oversizedValues || missingValues || tooMany) {
-      notice.textContent = missingKeys ? 'اكتب اسم الخاصية لكل مجموعة قيم.' : duplicateKeys ? 'لا تكرر اسم الخاصية نفسها.' : duplicateValues ? 'احذف القيم المكررة داخل الخاصية.' : oversizedValues ? 'كل قيمة للخاصية يجب ألا تتجاوز 64 حرفًا.' : missingValues ? 'اكتب قيمة واحدة على الأقل لكل خاصية اخترتها.' : 'التركيبات أكثر من الحد المسموح (50). قلل الخيارات.';
+      notice.textContent = missingKeys ? 'اكتب اسم الخاصية لكل مجموعة قيم.' : duplicateKeys ? 'لا تكرر اسم الخاصية نفسها.' : duplicateValues ? 'احذف القيم المكررة داخل الخاصية.' : oversizedValues ? 'كل قيمة للخاصية يجب ألا تتجاوز 64 حرفًا.' : missingValues ? 'اكتب قيمة واحدة على الأقل لكل خاصية اخترتها.' : 'التركيبات أكثر من الحد المسموح (200). قلل الخيارات.';
       matrix.innerHTML = '';
       return;
     }
@@ -1614,19 +1996,31 @@ function showProductModal() {
     singleSkuField.hidden = hasVariants;
     productForm.elements.namedItem('variantSku').required = !hasVariants;
     if (!hasVariants) { matrix.innerHTML = ''; return; }
-    const usedSkus = new Set([...previous.values()].map((item) => item.sku.toLocaleLowerCase()));
+    const usedSkus = new Set();
+    const usedBarcodes = new Set();
     const baseSku = (productForm.elements.namedItem('sku').value.trim() || 'ITEM').slice(0, 48);
-    matrix.innerHTML = `<div class="matrix-quick-toolbar"><span>تم توليد <strong>${combinations.length} فرع (لون × مقاس)</strong> تحت كود الموديل <strong>${escapeHtml(baseSku)}</strong></span></div><div class="variant-matrix-scroll"><table class="variant-matrix-table"><thead><tr><th>متاحة</th><th>اللون والمقاس الفرعي</th><th>كود الفرع (SKU)</th><th>باركود (اختياري)</th><th>السعر (${currency})</th><th>حد الطلب</th></tr></thead><tbody>${combinations.map((attributes, index) => {
+    matrix.innerHTML = `<div class="matrix-quick-toolbar"><span>تم توليد <strong>${combinations.length} فرع (لون × مقاس)</strong> تحت كود الموديل <strong>${escapeHtml(baseSku)}</strong></span><div class="matrix-quick-actions"><button type="button" class="date-preset-chip" id="matrix-auto-barcodes-btn">🏷️ توليد باركود EAN-13 تلقائي للكل</button></div></div><div class="variant-matrix-scroll"><table class="variant-matrix-table"><thead><tr><th>متاحة</th><th>اللون والمقاس الفرعي</th><th>كود الفرع الذكي (SKU)</th><th>باركود العلبة (اختياري)</th><th>السعر (${currency})</th><th>حد الطلب</th></tr></thead><tbody>${combinations.map((attributes, index) => {
       const key = JSON.stringify(attributes), saved = previous.get(key);
       const label = Object.values(attributes).map((value) => escapeHtml(String(value))).join(' · ');
-      let suffix = index + 1, generatedSku = '';
-      do { generatedSku = `${baseSku}-${String(suffix++).padStart(2, '0')}`; } while (usedSkus.has(generatedSku.toLocaleLowerCase()));
-      const sku = saved?.sku || generatedSku;
+      const generatedSku = buildSemanticVariantSku(baseSku, attributes, index, usedSkus);
+      const sku = (saved?.skuCustom && saved.sku) ? saved.sku : generatedSku;
       usedSkus.add(sku.toLocaleLowerCase());
+      const barcode = saved?.barcode ?? '';
+      if (barcode) usedBarcodes.add(barcode);
       const price = saved?.price || productForm.elements.namedItem('price').value;
       const reorderPoint = saved?.reorderPoint ?? productForm.elements.namedItem('reorderPoint').value;
-      return `<tr data-variant-key="${escapeHtml(key)}"><td><input data-variant-enabled type="checkbox" aria-label="إضافة النسخة ${label}" ${saved?.enabled === false ? '' : 'checked'}></td><td><strong>${label}</strong></td><td><input data-variant-sku maxlength="64" required value="${escapeHtml(sku)}"></td><td><input data-variant-barcode maxlength="64" value="${escapeHtml(saved?.barcode ?? '')}"></td><td><input data-variant-price inputmode="decimal" required value="${escapeHtml(price)}"></td><td><input data-variant-reorder type="number" min="0" step="1" required value="${escapeHtml(reorderPoint)}"></td></tr>`;
+      return `<tr data-variant-key="${escapeHtml(key)}"><td><input data-variant-enabled type="checkbox" aria-label="إضافة النسخة ${label}" ${saved?.enabled === false ? '' : 'checked'}></td><td><strong>${label}</strong></td><td><input data-variant-sku data-custom="${saved?.skuCustom ? 'true' : 'false'}" maxlength="64" required value="${escapeHtml(sku)}"></td><td><input data-variant-barcode maxlength="64" value="${escapeHtml(barcode)}" placeholder="يُولّد تلقائيًا أو بالزر"></td><td><input data-variant-price inputmode="decimal" required value="${escapeHtml(price)}"></td><td><input data-variant-reorder type="number" min="0" step="1" required value="${escapeHtml(reorderPoint)}"></td></tr>`;
     }).join('')}</tbody></table></div>`;
+    matrix.querySelectorAll('[data-variant-sku]').forEach((inp) => inp.addEventListener('input', () => { inp.dataset.custom = 'true'; }));
+    matrix.querySelector('#matrix-auto-barcodes-btn')?.addEventListener('click', () => {
+      const bSet = new Set();
+      let idx = 1;
+      matrix.querySelectorAll('[data-variant-barcode]').forEach((inp) => {
+        const skuVal = inp.closest('tr')?.querySelector('[data-variant-sku]')?.value || baseSku;
+        inp.value = generateEan13Barcode(skuVal, idx++, bSet);
+      });
+      toast('تم توليد باركود تلقائي لجميع مقاسات وألوان الموديل');
+    });
   };
   addOptionRow(); addOptionRow();
   productForm.elements.namedItem('sku').addEventListener('input', () => {
@@ -1684,9 +2078,9 @@ function showProductModal() {
 function bindInventory() {
   bindLocalSearch();
   document.querySelector('#new-store-btn')?.addEventListener('click', () => supplierModal('<label>اسم الفرع الجديد<input name="name" required minlength="2" maxlength="100" placeholder="مثال: فرع المعادي"></label><label>كود الفرع<input name="code" required minlength="2" maxlength="20" pattern="[A-Za-z0-9_-]+" placeholder="MAADI"></label><label>العنوان (اختياري)<input name="address" maxlength="240"></label><label>الهاتف (اختياري)<input name="phone" maxlength="40"></label>', 'store-form', '/api/stores', (d) => d, 'تم إضافة الفرع الجديد بنجاح'));
-  document.querySelector('#transfer-stock-btn')?.addEventListener('click', () => { const otherStores = state.data.stores.filter((s) => s.id !== state.data.selectedStoreId); const variants = state.data.products.filter((p) => p.itemKind === 'PRODUCT' && p.isActive).flatMap((p) => p.variants.filter((v) => v.isActive && BigInt(v.quantity) > 0n).map((v) => ({ id: v.id, label: `${p.name} (${v.sku}) — متاح ${v.quantity}` }))); if (!variants.length) { toast('لا توجد أصناف بها رصيد متاح للتحويل في الفرع الحالي', 'error'); return; } supplierModal(`<p>التحويل من الفرع الحالي: <strong>${escapeHtml(state.data.stores.find((s) => s.id === state.data.selectedStoreId)?.name ?? '')}</strong></p><label>إلى الفرع<select name="toStoreId" required>${otherStores.map((s) => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('')}</select></label><label>الصنف والنسخة<select name="variantId" required>${variants.map((v) => `<option value="${v.id}">${escapeHtml(v.label)}</option>`).join('')}</select></label><label>الكمية المحولة<input name="quantity" type="number" min="1" step="1" value="1" required></label><input type="hidden" name="fromStoreId" value="${state.data.selectedStoreId}">`, 'transfer-form', '/api/inventory/transfer', (d) => d, 'تم تحويل المخزون بين الفروع بنجاح'); });
-  document.querySelector('#record-damage-btn')?.addEventListener('click', () => { const variants = state.data.products.filter((p) => p.itemKind === 'PRODUCT' && p.isActive).flatMap((p) => p.variants.filter((v) => v.isActive && BigInt(v.quantity) > 0n).map((v) => ({ id: v.id, label: `${p.name} (${v.sku}) — متاح ${v.quantity}` }))); if (!variants.length) { toast('لا توجد أصناف بها رصيد لتسجيل تالف', 'error'); return; } supplierModal(`<p>سيتم خصم الكمية التالفة من المخزون وترحيل تكلفتها المرجحة كخسائر وتوالف مخزون (5090).</p><label>الصنف والنسخة<select name="variantId" required>${variants.map((v) => `<option value="${v.id}">${escapeHtml(v.label)}</option>`).join('')}</select></label><label>الكمية التالفة<input name="quantity" type="number" min="1" step="1" value="1" required></label><label>سبب الإعدام / التلف<input name="reason" maxlength="300" placeholder="مثال: كسر أثناء النقل أو انتهاء صلاحية"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'damage-form', '/api/inventory/damage', (d) => d, 'تم تسجيل التالف وترحيل القيد المحاسبي'); });
-  document.querySelector('#adjust-stock-btn')?.addEventListener('click', () => { const decimals = currencyDecimals(state.data.company.currency); const variants = state.data.products.filter((p) => p.itemKind === 'PRODUCT' && p.isActive).flatMap((p) => p.variants.filter((v) => v.isActive).map((v) => ({ id: v.id, label: `${p.name} (${v.sku}) — الرصيد الحالي ${v.quantity}` }))); if (!variants.length) { toast('لا توجد أصناف لتسوية الجرد', 'error'); return; } supplierModal(`<p>أدخل الرصيد الفعلي الجديد بعد الجرد؛ سيقوم النظام بحساب الفرق وترحيل قيد التسوية تلقائيًا.</p><label>الصنف والنسخة<select name="variantId" required>${variants.map((v) => `<option value="${v.id}">${escapeHtml(v.label)}</option>`).join('')}</select></label><label>الرصيد الفعلي الجديد (قطعة)<input name="targetQuantity" type="number" min="0" step="1" required></label><label>تكلفة الوحدة في حالة الزيادة (${state.data.company.currency} - اختياري)<input name="unitCost" inputmode="decimal"></label><label>سبب التسوية<input name="reason" maxlength="300" placeholder="مثال: جرد دوري للفرع"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'adjust-form', '/api/inventory/adjust', (d) => ({ ...d, unitCost: d.unitCost ? toMinor(d.unitCost, decimals) : undefined }), 'تم تسوية رصيد المخزون وترحيل القيد المحاسبي'); });
+  document.querySelector('#transfer-stock-btn')?.addEventListener('click', () => openModelVariantStockModal({ mode: 'transfer' }));
+  document.querySelector('#record-damage-btn')?.addEventListener('click', () => openModelVariantStockModal({ mode: 'damage' }));
+  document.querySelector('#adjust-stock-btn')?.addEventListener('click', () => openModelVariantStockModal({ mode: 'adjust' }));
   document.querySelectorAll('.inventory-product-details').forEach((button) => button.addEventListener('click', () => {
     const product = state.data.products.find((item) => item.id === button.dataset.productId);
     if (product) showInventoryProductDetails(product);
@@ -1730,8 +2124,10 @@ function showInventoryProductDetails(product) {
         </table>
       </div>
     </div>` : '';
-  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="inventory-product-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">تفاصيل الموديل والمقاسات</span><h2 id="inventory-product-title">${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2><p>إجمالي الرصيد: <strong>${total}</strong> قطعة · ${variants.length} فرع (لون/مقاس)</p></div><button type="button" class="modal-close" data-close-inventory-details aria-label="إغلاق">×</button></div>${matrixGridHtml}${variants.length ? `<details class="compact-disclosure" ${matrix.isMatrix ? '' : 'open'}><summary><span>القائمة التفصيلية للفروع والأكواد (SKUs)</span><span>${variants.length} فرع</span></summary><div class="disclosure-content"><div class="table-scroll"><table><thead><tr><th>التركيبة</th><th>SKU</th><th>الكمية</th><th>حد التنبيه</th><th>متوسط التكلفة</th><th>الحالة</th>${state.data.capabilities.canManageCatalog ? '<th>الإجراء</th>' : ''}</tr></thead><tbody>${variants.map((variant) => { const label = Object.entries(variant.attributes ?? {}).map(([key, value]) => `${product.options?.find((option) => option.key === key)?.name ?? key}: ${value}`).join(' · ') || 'النسخة الأساسية'; const low = BigInt(variant.quantity) <= BigInt(variant.reorderPoint); const removeAction = state.data.capabilities.canManageCatalog ? `<td>${BigInt(variant.quantity) === 0n ? `<button type="button" class="text-action product-delete" data-remove-variant="${variant.id}">حذف</button>` : '<small>صفّر الرصيد أولًا للحذف</small>'}</td>` : ''; return `<tr><td><strong>${escapeHtml(label)}</strong></td><td><span class="sku-code">${escapeHtml(variant.sku)}</span></td><td><strong>${variant.quantity}</strong></td><td>${variant.reorderPoint}</td><td>${variant.wac ? money(variant.wac) : '—'}</td><td>${low ? '<span class="status-pill status-low">مخزون منخفض</span>' : '<span class="status-pill status-complete">متوفر</span>'}</td>${removeAction}</tr>`; }).join('')}</tbody></table></div></div></details>` : '<div class="empty-row">لا توجد تركيبات نشطة لهذا المنتج.</div>'}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-inventory-details>إغلاق</button></div></section></div>`;
+  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="inventory-product-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">تفاصيل الموديل والمقاسات</span><h2 id="inventory-product-title">${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2><p>إجمالي الرصيد: <strong>${total}</strong> قطعة · ${variants.length} فرع (لون/مقاس)</p></div><button type="button" class="modal-close" data-close-inventory-details aria-label="إغلاق">×</button></div>${matrixGridHtml}${variants.length ? `<details class="compact-disclosure" ${matrix.isMatrix ? '' : 'open'}><summary><span>القائمة التفصيلية للفروع والأكواد (SKUs)</span><span>${variants.length} فرع</span></summary><div class="disclosure-content"><div class="table-scroll"><table><thead><tr><th>التركيبة</th><th>SKU</th><th>الكمية</th><th>حد التنبيه</th><th>متوسط التكلفة</th><th>الحالة</th>${state.data.capabilities.canManageCatalog ? '<th>الإجراء</th>' : ''}</tr></thead><tbody>${variants.map((variant) => { const label = Object.entries(variant.attributes ?? {}).map(([key, value]) => `${product.options?.find((option) => option.key === key)?.name ?? key}: ${value}`).join(' · ') || 'النسخة الأساسية'; const low = BigInt(variant.quantity) <= BigInt(variant.reorderPoint); const removeAction = state.data.capabilities.canManageCatalog ? `<td>${BigInt(variant.quantity) === 0n ? `<button type="button" class="text-action product-delete" data-remove-variant="${variant.id}">حذف</button>` : '<small>صفّر الرصيد أولًا للحذف</small>'}</td>` : ''; return `<tr><td><strong>${escapeHtml(label)}</strong></td><td><span class="sku-code">${escapeHtml(variant.sku)}</span></td><td><strong>${variant.quantity}</strong></td><td>${variant.reorderPoint}</td><td>${variant.wac ? money(variant.wac) : '—'}</td><td>${low ? '<span class="status-pill status-low">مخزون منخفض</span>' : '<span class="status-pill status-complete">متوفر</span>'}</td>${removeAction}</tr>`; }).join('')}</tbody></table></div></div></details>` : '<div class="empty-row">لا توجد تركيبات نشطة لهذا المنتج.</div>'}<div class="modal-actions">${state.data.capabilities.canManageCatalog ? `<button type="button" class="button button-secondary" id="inventory-edit-model-btn">توسيع/تعديل الألوان والمقاسات</button>` : ''}<button type="button" class="button button-primary" id="inventory-print-labels-btn">🏷️ طباعة باركود العلب</button><button type="button" class="button button-secondary" data-close-inventory-details>إغلاق</button></div></section></div>`;
   modal.querySelectorAll('[data-close-inventory-details]').forEach((button) => button.addEventListener('click', () => { modal.innerHTML = ''; }));
+  modal.querySelector('#inventory-print-labels-btn')?.addEventListener('click', () => showBarcodeLabelsModal({ product }));
+  modal.querySelector('#inventory-edit-model-btn')?.addEventListener('click', () => showProductEditModal(product));
   modal.querySelectorAll('[data-remove-variant]').forEach((button) => button.addEventListener('click', async () => {
     button.disabled = true;
     try {
