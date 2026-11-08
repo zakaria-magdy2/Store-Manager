@@ -18,7 +18,7 @@
     "@retailos/core": "workspace:*",
     "@retailos/shared": "workspace:*",
     "better-sqlite3": "13.0.3",
-    "kysely": "^0.27.6"
+    "kysely": "^0.28.19"
   },
   "devDependencies": {
     "@retailos/tsconfig": "workspace:*",
