@@ -843,7 +843,15 @@ async function currentData(ctx, url) {
   }).filter(Boolean);
   const canViewSales = ctx.hasPermission(Permissions.REPORTS_DAILY_VIEW);
   const canViewAccounting = ctx.hasPermission(Permissions.REPORTS_FINANCIAL_VIEW);
-  const sales = canViewSales ? (await saleRepo.listByStore(ctx, storeId, 100)).map(saleJson) : [];
+  const allTenantUsers = await db.selectFrom('users')
+    .select(['id', 'username', 'full_name as fullName', 'role'])
+    .where('tenant_id', '=', ctx.tenantId)
+    .execute();
+  const userMap = new Map(allTenantUsers.map((u) => [u.id, u.fullName || u.username]));
+  const sales = canViewSales ? (await saleRepo.listByStore(ctx, storeId, 100)).map((s) => ({
+    ...saleJson(s),
+    cashierName: userMap.get(s.cashierUserId) || 'كاشير',
+  })) : [];
   const returnedLines = canViewSales ? await db.selectFrom('customer_return_items').innerJoin('customer_returns', 'customer_returns.id', 'customer_return_items.return_id')
     .select(['customer_return_items.original_sale_item_id as itemId', 'customer_return_items.quantity as quantity'])
     .where('customer_return_items.tenant_id', '=', ctx.tenantId).where('customer_returns.store_id', '=', storeId).execute() : [];
@@ -894,7 +902,7 @@ async function currentData(ctx, url) {
       const vendorReturns = supplierReturnRows.filter((item) => item.purchase_id === purchase.id);
       const paid = BigInt(purchase.initial_paid_amount) + payments.reduce((sum, payment) => sum + BigInt(payment.amount), 0n);
       const returnCredit = vendorReturns.reduce((sum, item) => sum + BigInt(item.credit_amount), 0n);
-      return { id: purchase.id, invoiceNumber: purchase.invoice_number, purchasedAt: purchase.purchased_at, totalAmount: moneyJson(Money.fromMinor(BigInt(purchase.total_amount), purchase.currency)), paidAmount: moneyJson(Money.fromMinor(paid, purchase.currency)), returnedCredit: moneyJson(Money.fromMinor(returnCredit, purchase.currency)), remainingAmount: moneyJson(Money.fromMinor(BigInt(purchase.total_amount) - paid - returnCredit, purchase.currency)), notes: purchase.notes, items: purchaseItems.filter((line) => line.purchase_id === purchase.id).map((line) => { const returned = returnedQuantityByPurchaseItem.get(line.id) ?? 0n; return { id: line.id, productName: line.product_name, sku: line.sku, quantity: line.quantity.toString(), returnableQuantity: (BigInt(line.quantity) - returned).toString(), unitCost: moneyJson(Money.fromMinor(BigInt(line.unit_cost), line.currency)) }; }), payments: payments.map((payment) => ({ id: payment.id, amount: moneyJson(Money.fromMinor(BigInt(payment.amount), payment.currency)), paymentMethod: payment.payment_method, referenceNumber: payment.reference_number, paidAt: payment.paid_at })), returns: vendorReturns.map((item) => ({ id: item.id, returnNumber: item.return_number, creditAmount: moneyJson(Money.fromMinor(BigInt(item.credit_amount), item.currency)), createdAt: item.created_at })) };
+      return { id: purchase.id, invoiceNumber: purchase.invoice_number, purchasedAt: purchase.purchased_at, createdByUserId: purchase.created_by_user_id, createdByName: userMap.get(purchase.created_by_user_id) || 'المسؤول', totalAmount: moneyJson(Money.fromMinor(BigInt(purchase.total_amount), purchase.currency)), paidAmount: moneyJson(Money.fromMinor(paid, purchase.currency)), returnedCredit: moneyJson(Money.fromMinor(returnCredit, purchase.currency)), remainingAmount: moneyJson(Money.fromMinor(BigInt(purchase.total_amount) - paid - returnCredit, purchase.currency)), notes: purchase.notes, items: purchaseItems.filter((line) => line.purchase_id === purchase.id).map((line) => { const returned = returnedQuantityByPurchaseItem.get(line.id) ?? 0n; return { id: line.id, productName: line.product_name, sku: line.sku, quantity: line.quantity.toString(), returnableQuantity: (BigInt(line.quantity) - returned).toString(), unitCost: moneyJson(Money.fromMinor(BigInt(line.unit_cost), line.currency)) }; }), payments: payments.map((payment) => ({ id: payment.id, amount: moneyJson(Money.fromMinor(BigInt(payment.amount), payment.currency)), paymentMethod: payment.payment_method, referenceNumber: payment.reference_number, paidAt: payment.paid_at, createdByUserId: payment.created_by_user_id, createdByName: userMap.get(payment.created_by_user_id) || 'المسؤول' })), returns: vendorReturns.map((item) => ({ id: item.id, returnNumber: item.return_number, creditAmount: moneyJson(Money.fromMinor(BigInt(item.credit_amount), item.currency)), createdAt: item.created_at })) };
     });
     return { id: supplier.id, name: supplier.name, phone: supplier.phone, notes: supplier.notes, purchases: entries, totalPurchased: entries.reduce((sum, item) => sum + BigInt(item.totalAmount.amount), 0n).toString(), totalPaid: entries.reduce((sum, item) => sum + BigInt(item.paidAmount.amount), 0n).toString(), balanceDue: entries.reduce((sum, item) => sum + BigInt(item.remainingAmount.amount), 0n).toString(), currency: tenant.currency };
   });
@@ -1027,7 +1035,14 @@ async function handleApi(req, res, url) {
       .where('customer_return_items.tenant_id', '=', ctx.tenantId).where('customer_returns.store_id', '=', storeId).where('sale_items.sale_id', 'in', ids).execute() : [];
     const returned = new Map();
     for (const line of returnedLines) returned.set(line.itemId, (returned.get(line.itemId) ?? 0n) + BigInt(line.quantity));
-    const rows = sales.map(saleJson).map((sale) => ({ ...sale, items: sale.items.map((item) => ({ ...item, returnableQuantity: item.type === 'SALE' ? (BigInt(item.quantity) - (returned.get(item.id) ?? 0n)).toString() : '0' })) }));
+    const cashierIds = [...new Set(sales.map((s) => s.cashierUserId))];
+    const cashierRows = cashierIds.length ? await db.selectFrom('users').select(['id', 'full_name as fullName', 'username']).where('tenant_id', '=', ctx.tenantId).where('id', 'in', cashierIds).execute() : [];
+    const cashierNameMap = new Map(cashierRows.map((u) => [u.id, u.fullName || u.username]));
+    const rows = sales.map(saleJson).map((sale) => ({
+      ...sale,
+      cashierName: cashierNameMap.get(sale.cashierUserId) || 'كاشير',
+      items: sale.items.map((item) => ({ ...item, returnableQuantity: item.type === 'SALE' ? (BigInt(item.quantity) - (returned.get(item.id) ?? 0n)).toString() : '0' })),
+    }));
     return json(res, 200, { payload: { sales: rows, total, offset, limit } });
   }
 
@@ -1246,6 +1261,9 @@ async function handleApi(req, res, url) {
   }
 
   if (method === 'POST' && path === '/api/attendance/check-in') {
+    if (ctx.roleId === 'OWNER') {
+      throw Object.assign(new Error('تسجيل الحضور مخصص للموظفين (الكاشير) فقط، ولا ينطبق على مالك المتجر.'), { status: 403 });
+    }
     const todayDateStr = new Date().toISOString().slice(0, 10);
     const rawDatabase = database.getRawDatabase();
     const existing = rawDatabase.prepare(
@@ -1268,6 +1286,26 @@ async function handleApi(req, res, url) {
       metadata: { checkInAt: checkInTime },
     });
     return json(res, 201, { ok: true, alreadyCheckedIn: false, checkInAt: checkInTime });
+  }
+
+  if (method === 'GET' && path === '/api/attendance/history') {
+    if (!ctx.hasPermission(Permissions.USERS_MANAGE)) {
+      throw Object.assign(new Error('غير مصرح بعرض سجل الحضور'), { status: 403 });
+    }
+    const targetUserId = url.searchParams.get('userId');
+    if (!targetUserId) throw Object.assign(new Error('معرف المستخدم مطلوب'), { status: 400 });
+    const rawDatabase = database.getRawDatabase();
+    const rows = rawDatabase.prepare(
+      "SELECT id, actor_user_id AS userId, actor_username AS username, created_at AS createdAt, summary FROM audit_logs WHERE tenant_id = ? AND actor_user_id = ? AND action = 'ATTENDANCE_CHECK_IN' ORDER BY created_at DESC LIMIT 60"
+    ).all(ctx.tenantId, targetUserId);
+    return json(res, 200, {
+      userId: targetUserId,
+      history: rows.map((r) => ({
+        id: r.id,
+        createdAt: r.createdAt,
+        summary: r.summary,
+      })),
+    });
   }
 
   if (method === 'GET' && path === '/api/backups/daily') {
@@ -1933,7 +1971,8 @@ async function handleApi(req, res, url) {
       idempotencyKey: body.idempotencyKey, customerName: body.customerName, occurredAt: now,
     });
     await recordAudit(ctx, { storeId: body.storeId, action: 'SALE_COMPLETED', entityType: 'SALE', entityId: sale.id, summary: `إتمام عملية بيع (${sale.saleNumber})`, metadata: { saleNumber: sale.saleNumber, total: sale.total.amount.toString(), paymentMethod: body.payment.method } });
-    return json(res, 201, saleJson(sale));
+    const cashierUser = await userRepo.findById(ctx, ctx.userId);
+    return json(res, 201, { ...saleJson(sale), cashierName: cashierUser?.fullName ?? cashierUser?.username ?? 'كاشير' });
   }
 
   throw Object.assign(new Error('المسار غير موجود'), { status: 404 });
