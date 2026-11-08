@@ -52,8 +52,8 @@ RetailOS delivers a **local-first, zero-cloud-dependency engine** that operates 
 | **Phase 4** | POS Checkout, Fast Cart & Peripheral Hardware | **COMPLETED** | Cart/checkout, atomic stock + sale persistence, ESC/POS writer facade, permission-checked drawer service, keyboard-wedge parser, runnable local RTL store app (`apps/web`). |
 | **Phase 5** | Financial Accounting, Purchasing, Returns & Expense Tracking | **COMPLETED** | Migrations 007–017, balanced sub-ledger postings, supplier invoices/payments/returns, linked customer returns, direct & recurring monthly expenses, 8-tier P&L + cash-flow report. |
 | **Phase 6** | Backup, Disaster Recovery & Security Hardening | **COMPLETED** | Encrypted online SQLite backup export, 4-stage atomic restore swap, recovery marker, automatic rollback, dynamic migration registry validation, `SqliteUnitOfWork`. |
-| **Phase 7** | Dashboards, Analytics & Audit Logging | **COMPLETED** | 8-Tier P&L engine, custom date ranges, top products & supplier spend analytics, SHA-256 hash-chained append-only `audit_logs` (`018_audit_logs`), 60/60 tests passing. |
-| **Phase 8** | Electron Desktop Packaging & Web Deployment | PLANNED | Electron context-isolation, offline synchronization daemon, desktop installer. |
+| **Phase 7** | Dashboards, Analytics & Audit Logging | **COMPLETED** | 8-Tier P&L engine, custom date ranges, top products & supplier spend analytics, SHA-256 hash-chained append-only `audit_logs` (`018_audit_logs`), 75/75 tests passing. |
+| **Phase 8** | Desktop Host Supervisor, Outbox CDC Sync & Web Operations | **COMPLETED** | `DesktopHostSupervisor` context-isolated IPC policy, `SqliteOutboxRepository` + `OutboxSyncWorker`, thermal receipt ESC/POS preview, multi-store transfers, Z-Report shift closing, and period locking. |
 
 ---
 

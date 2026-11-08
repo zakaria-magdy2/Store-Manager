@@ -193,10 +193,13 @@ All contributions must follow the lint, unit-test, integration-test, and merge
 rules in [`docs/QUALITY_GATES.md`](QUALITY_GATES.md).
 
 - **Completed Phases**:
-  - **Phase 0**: Architecture Blueprint v2.5 (`docs/architecture/retailos_architecture_blueprint.md`).
-  - **Phase 1**: Monorepo, Strict TypeScript, `@retailos/core` Money VO, SQLite WAL manager, Initial Migrations.
-  - **Phase 2**: Argon2id password hashing, SHA-256 session management, RBAC matrix, and multi-tenant isolation.
-  - **Phase 3**: Universal catalog (categories, products, variants, JSON attributes), WAC inventory engine, tenant negative-stock policy, and DB-enforced append-only stock ledger.
-- **Where to Resume Immediately**:
-  - **Phase 4: POS Checkout, Fast Cart & Peripheral Drivers** is in progress.
-  - Cart and sale domain models, checkout orchestration, atomic SQLite persistence, receipt formatting/writer facade, permission-checked cash drawer, and scanner parsing are present. Current gates pass (47 tests, typecheck, lint). Measure the documented latency targets and bind the host adapter for actual devices before marking the phase complete.
+  - **Phase 0–8 (All Core Architecture Phases Completed)**:
+    - **Phase 0**: Architecture Blueprint v2.5 (`docs/architecture/retailos_architecture_blueprint.md`).
+    - **Phase 1**: Monorepo, Strict TypeScript, `@retailos/core` Money VO, SQLite WAL manager, Initial Migrations.
+    - **Phase 2**: Argon2id password hashing, SHA-256 session management, RBAC matrix, and multi-tenant isolation.
+    - **Phase 3**: Universal catalog (categories, products, variants, JSON attributes), WAC inventory engine, tenant negative-stock policy, and DB-enforced append-only stock ledger.
+    - **Phase 4**: POS Checkout, Fast Cart, ESC/POS receipt formatter, cash drawer & barcode scanner drivers, and Arabic RTL local store web app (`apps/web`).
+    - **Phase 5**: Integrated double-entry accounting sub-ledger, supplier purchases/payments/returns, customer returns, direct & recurring monthly expenses, Z-Report shift closing, and accounting period locking.
+    - **Phase 6**: AES-256-GCM encrypted SQLite online backups, 4-stage atomic restore & rollback recovery, dynamic migration validation (`001`–`018`), and `SqliteUnitOfWork`.
+    - **Phase 7**: 8-Tier P&L & cash-flow reports, top products/suppliers analytics, and SHA-256 hash-chained tamper-evident `audit_logs`.
+    - **Phase 8**: `SqliteOutboxRepository` & `OutboxSyncWorker` CDC synchronization, `DesktopHostSupervisor` & context-isolated IPC security policy (`apps/desktop`), and 75/75 automated unit, integration, and E2E tests passing.

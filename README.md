@@ -12,7 +12,8 @@
 - **Enterprise-Grade Security**: Separate company installations and databases, Argon2id password hashing (`@node-rs/argon2`), and cryptographically random session tokens (SHA-256 hashed in storage).
 - **Universal Product Catalog**: Products, nested categories, and sellable variants with validated JSON attributes — apparel, grocery, electronics, and pharmacy share one schema.
 - **WAC Inventory with Immutable Ledger**: Weighted Average Cost valuation with exact integer arithmetic, immutable cost snapshots on every issue, atomic inter-store transfers, and a database-enforced append-only `stock_movements` ledger.
-- **Supplier Ledger**: Supplier directory, purchase invoice totals, payments, and outstanding balances. Integrated stock receiving and double-entry accounting are upcoming milestones.
+- **Supplier & Financial Sub-Ledger**: Multi-line supplier invoices, supplier payments, supplier returns (with `5090` WAC variance accounting), linked customer returns, direct daily expenses, recurring monthly obligations, cash drawer Z-Report shift closing, and accounting period locking — all posting balanced double-entry journal entries atomically.
+- **Encrypted Disaster Recovery & Tamper-Evident Audit Chain**: AES-256-GCM online SQLite backups, 4-stage atomic swap & rollback recovery, SHA-256 hash-chained append-only `audit_logs`, Outbox CDC sync worker, and Desktop Host security supervisor.
 
 ---
 
@@ -104,9 +105,7 @@ transaction. Direct operating expenses post to the journal atomically with
 cash drawer, safe, or bank movements. Linked partial customer returns update
 inventory at the original sale cost, refund the original discounted value,
 and post a balancing journal entry. Recurring expense actuals are confirmed once
-per month, then settled as liability payments without double-counting. Supplier
-returns, staff administration, backups, and final Electron packaging remain
-future work.
+per month, then settled as liability payments without double-counting. The system also includes multi-store creation and atomic inter-store stock transfers, 80mm/58mm thermal receipt preview and ESC/POS byte generation, cash drawer Z-Report shift closing, accounting period locking, SHA-256 hash-chained audit logs, Outbox CDC synchronization (`SqliteOutboxRepository` + `OutboxSyncWorker`), and the desktop security supervisor (`@retailos/desktop`).
 
 ### Build & Verification Commands
 
