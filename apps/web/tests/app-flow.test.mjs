@@ -395,6 +395,25 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.equal(topProducts.payload.topByUnits.unitsSold, '1');
   assert.equal(topProducts.payload.topByUnits.netRevenue.amount, '12500');
   assert.ok(topProducts.payload.products.length >= 1);
+  assert.ok(Array.isArray(topProducts.payload.mostPurchasedProducts));
+  assert.equal(topProducts.payload.topPurchasedByUnits.name, 'قهوة اختبار');
+  assert.equal(topProducts.payload.topPurchasedByUnits.unitsOrdered, '5');
+  assert.equal(topProducts.payload.topPurchasedByUnits.returnedUnits, '1');
+  assert.equal(topProducts.payload.topPurchasedByUnits.netUnitsReceived, '4');
+
+  const dailyBackupsList = await request('/api/backups/daily');
+  assert.equal(dailyBackupsList.response.status, 200, JSON.stringify(dailyBackupsList.payload));
+  assert.equal(dailyBackupsList.payload.autoSchedule, 'DAILY_NIGHTLY');
+  assert.ok(dailyBackupsList.payload.backups.length >= 1);
+  const runDailyNow = await request('/api/backups/daily/run-now', { method: 'POST', body: {} });
+  assert.equal(runDailyNow.response.status, 201, JSON.stringify(runDailyNow.payload));
+  assert.ok(runDailyNow.payload.backup.filename.endsWith('.sqlite'));
+  const downloadDaily = await fetch(`${baseUrl}/api/backups/daily/${encodeURIComponent(runDailyNow.payload.backup.filename)}`, {
+    headers: { Origin: baseUrl, Cookie: cookie },
+  });
+  assert.equal(downloadDaily.status, 200);
+  const dailyBytes = Buffer.from(await downloadDaily.arrayBuffer());
+  assert.equal(dailyBytes.subarray(0, 15).toString('utf8'), 'SQLite format 3');
 
   const receipt80 = await request(`/api/sales/${additionalSale.payload.id}/receipt?width=80mm`);
   assert.equal(receipt80.response.status, 200, JSON.stringify(receipt80.payload));

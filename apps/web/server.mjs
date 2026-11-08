@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Transform } from 'node:stream';
 import { createReadStream, createWriteStream, existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
@@ -64,7 +64,10 @@ const companyConfig = {
 const port = Number.parseInt(process.env.PORT ?? '4173', 10);
 const origin = `http://127.0.0.1:${port}`;
 const databasePath = join(dataDir, 'retailos.sqlite');
+const dailyBackupDir = join(dataDir, 'backups', 'daily');
+const MAX_DAILY_BACKUPS = 30;
 await mkdir(dataDir, { recursive: true });
+await mkdir(dailyBackupDir, { recursive: true });
 const restoredAfterCrash = await recoverPendingSqliteRestore(dataDir, databasePath, companyConfig.code);
 const database = new SqliteDatabaseManager({ filename: databasePath });
 database.connect();
@@ -455,6 +458,59 @@ async function profitLossReport(ctx, url) {
     cashFlow: { cashSales: money(cashSales), electronicSales: money(electronicSales), directExpenseOutflow: money(directCashOutflow), monthlyObligationOutflow: money(monthlyCashOutflow), pendingUnpaidObligations: money(pendingDue) } };
 }
 
+async function ensureDailyBackup({ force = false } = {}) {
+  await mkdir(dailyBackupDir, { recursive: true });
+  const now = new Date();
+  const localDate = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const filename = `retailos-daily-${localDate}.sqlite`;
+  const targetPath = join(dailyBackupDir, filename);
+  if (!force && existsSync(targetPath)) {
+    const fileStat = await stat(targetPath);
+    return { filename, date: localDate, size: fileStat.size, updatedAt: fileStat.mtime.toISOString(), createdNew: false };
+  }
+  const tempPath = join(dailyBackupDir, `.tmp-${filename}-${randomUUID().slice(0, 8)}`);
+  try {
+    database.checkpointPassive();
+    await database.getRawDatabase().backup(tempPath);
+    await rename(tempPath, targetPath);
+  } finally {
+    if (existsSync(tempPath)) await rm(tempPath, { force: true }).catch(() => undefined);
+  }
+  const files = (await readdir(dailyBackupDir))
+    .filter((f) => /^retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite$/.test(f))
+    .sort()
+    .reverse();
+  for (const oldFile of files.slice(MAX_DAILY_BACKUPS)) {
+    await rm(join(dailyBackupDir, oldFile), { force: true }).catch(() => undefined);
+  }
+  const fileStat = await stat(targetPath);
+  return { filename, date: localDate, size: fileStat.size, updatedAt: fileStat.mtime.toISOString(), createdNew: true };
+}
+
+async function listDailyBackups() {
+  await mkdir(dailyBackupDir, { recursive: true });
+  const names = (await readdir(dailyBackupDir))
+    .filter((f) => /^retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite$/.test(f))
+    .sort()
+    .reverse();
+  const backups = [];
+  for (const filename of names) {
+    try {
+      const fileStat = await stat(join(dailyBackupDir, filename));
+      const dateMatch = filename.match(/^retailos-daily-(\d{4}-\d{2}-\d{2})\.sqlite$/);
+      backups.push({
+        filename,
+        date: dateMatch ? dateMatch[1] : filename,
+        size: fileStat.size,
+        sizeBytes: fileStat.size,
+        updatedAt: fileStat.mtime.toISOString(),
+        createdAt: fileStat.mtime.toISOString(),
+      });
+    } catch { /* ignore transient file race */ }
+  }
+  return backups;
+}
+
 async function topProductsReport(ctx, url) {
   ctx.assertPermission(Permissions.REPORTS_DAILY_VIEW);
   const fromValue = url.searchParams.get('from');
@@ -473,10 +529,13 @@ async function topProductsReport(ctx, url) {
   if (!storeId || !stores.some((store) => store.id === storeId)) throw Object.assign(new Error('Store scope mismatch'), { status: 403 });
   const tenant = await tenantRepo.findById(ctx.tenantId);
   if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
-  const result = database.getRawDatabase().prepare(`
-    SELECT p.id AS productId, p.name AS productName,
+  const rawDb = database.getRawDatabase();
+  const result = rawDb.prepare(`
+    SELECT p.id AS productId, p.name AS productName, p.sku AS productSku,
       SUM(si.quantity - COALESCE((SELECT SUM(ri.quantity) FROM customer_return_items ri WHERE ri.tenant_id = si.tenant_id AND ri.original_sale_item_id = si.id), 0)) AS unitsSold,
+      SUM(COALESCE((SELECT SUM(ri.quantity) FROM customer_return_items ri WHERE ri.tenant_id = si.tenant_id AND ri.original_sale_item_id = si.id), 0)) AS returnedUnits,
       SUM(si.net_revenue - COALESCE((SELECT SUM(ri.refund_amount) FROM customer_return_items ri WHERE ri.tenant_id = si.tenant_id AND ri.original_sale_item_id = si.id), 0)) AS netRevenue,
+      SUM(si.cost_of_goods_sold - COALESCE((SELECT SUM(ri.cost_amount) FROM customer_return_items ri WHERE ri.tenant_id = si.tenant_id AND ri.original_sale_item_id = si.id), 0)) AS netCogs,
       COUNT(DISTINCT s.id) AS orderCount
     FROM sale_items si
     INNER JOIN sales s ON s.id = si.sale_id AND s.tenant_id = si.tenant_id AND s.store_id = si.store_id
@@ -484,16 +543,27 @@ async function topProductsReport(ctx, url) {
     WHERE si.tenant_id = ? AND si.store_id = ? AND s.status = 'COMPLETED'
       AND (? IS NULL OR s.created_at >= ?)
       AND (? IS NULL OR s.created_at <= ?)
-    GROUP BY p.id, p.name
+    GROUP BY p.id, p.name, p.sku
     HAVING unitsSold > 0
   `).all(ctx.tenantId, storeId, start, start, end, end);
-  const products = result.map((row) => ({
-    id: row.productId,
-    name: row.productName,
-    unitsSold: String(row.unitsSold),
-    netRevenue: moneyJson(Money.fromMinor(BigInt(row.netRevenue), tenant.currency)),
-    orderCount: String(row.orderCount),
-  }));
+  const products = result.map((row) => {
+    const revMinor = BigInt(row.netRevenue ?? 0);
+    const cogsMinor = BigInt(row.netCogs ?? 0);
+    const profitMinor = revMinor - cogsMinor;
+    const marginPercent = revMinor > 0n ? Number((profitMinor * 100n) / revMinor) : 0;
+    return {
+      id: row.productId,
+      name: row.productName,
+      sku: row.productSku,
+      unitsSold: String(row.unitsSold),
+      returnedUnits: String(row.returnedUnits ?? 0),
+      netRevenue: moneyJson(Money.fromMinor(revMinor, tenant.currency)),
+      cogs: moneyJson(Money.fromMinor(cogsMinor, tenant.currency)),
+      grossProfit: moneyJson(Money.fromMinor(profitMinor, tenant.currency)),
+      marginPercent,
+      orderCount: String(row.orderCount),
+    };
+  });
   const byUnits = [...products].sort((a, b) => {
     if (a.unitsSold !== b.unitsSold) return BigInt(a.unitsSold) > BigInt(b.unitsSold) ? -1 : 1;
     if (a.netRevenue.amount !== b.netRevenue.amount) return BigInt(a.netRevenue.amount) > BigInt(b.netRevenue.amount) ? -1 : 1;
@@ -504,7 +574,112 @@ async function topProductsReport(ctx, url) {
     if (a.unitsSold !== b.unitsSold) return BigInt(a.unitsSold) > BigInt(b.unitsSold) ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
-  return { range: fromValue && toValue ? { from: fromValue, to: toValue } : { from: null, to: null }, topByUnits: byUnits[0] ?? null, topByRevenue: byRevenue[0] ?? null, products: byUnits.slice(0, 10) };
+  const byProfit = [...products].sort((a, b) => {
+    if (a.grossProfit.amount !== b.grossProfit.amount) return BigInt(a.grossProfit.amount) > BigInt(b.grossProfit.amount) ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  // Most purchased / ordered products from suppliers ("أكثر المنتجات التي طلبناها وجت")
+  const purchasedRows = rawDb.prepare(`
+    SELECT COALESCE(p.id, spi.variant_id) AS productId,
+           COALESCE(p.name, spi.product_name) AS productName,
+           COALESCE(p.sku, spi.sku) AS productSku,
+           SUM(spi.quantity) AS unitsOrdered,
+           SUM(COALESCE((SELECT SUM(sri.quantity) FROM supplier_return_items sri WHERE sri.tenant_id = spi.tenant_id AND sri.purchase_item_id = spi.id), 0)) AS returnedToSupplier,
+           SUM(spi.quantity * spi.unit_cost) AS totalPurchaseCost,
+           COUNT(DISTINCT sp.id) AS purchaseInvoiceCount
+    FROM supplier_purchase_items spi
+    INNER JOIN supplier_purchases sp ON sp.id = spi.purchase_id AND sp.tenant_id = spi.tenant_id AND sp.store_id = spi.store_id
+    LEFT JOIN product_variants pv ON pv.id = spi.variant_id AND pv.tenant_id = spi.tenant_id
+    LEFT JOIN products p ON p.id = pv.product_id AND p.tenant_id = spi.tenant_id
+    WHERE spi.tenant_id = ? AND spi.store_id = ?
+      AND (? IS NULL OR substr(sp.purchased_at, 1, 10) >= ?)
+      AND (? IS NULL OR substr(sp.purchased_at, 1, 10) <= ?)
+    GROUP BY COALESCE(p.id, spi.variant_id), COALESCE(p.name, spi.product_name), COALESCE(p.sku, spi.sku)
+    HAVING unitsOrdered > 0
+  `).all(ctx.tenantId, storeId, fromValue, fromValue, toValue, toValue);
+  const mostPurchasedProducts = purchasedRows.map((row) => {
+    const ordered = BigInt(row.unitsOrdered ?? 0);
+    const returned = BigInt(row.returnedToSupplier ?? 0);
+    const netReceived = ordered - returned;
+    const totalCostMinor = BigInt(row.totalPurchaseCost ?? 0);
+    const avgCostMinor = ordered > 0n ? totalCostMinor / ordered : 0n;
+    return {
+      id: row.productId,
+      name: row.productName,
+      sku: row.productSku,
+      unitsOrdered: ordered.toString(),
+      returnedUnits: returned.toString(),
+      netUnitsReceived: netReceived.toString(),
+      invoiceCount: String(row.purchaseInvoiceCount ?? 0),
+      totalCost: moneyJson(Money.fromMinor(totalCostMinor, tenant.currency)),
+      avgUnitCost: moneyJson(Money.fromMinor(avgCostMinor, tenant.currency)),
+    };
+  }).sort((a, b) => BigInt(b.unitsOrdered) !== BigInt(a.unitsOrdered) ? (BigInt(b.unitsOrdered) > BigInt(a.unitsOrdered) ? 1 : -1) : (BigInt(b.totalCost.amount) > BigInt(a.totalCost.amount) ? 1 : -1));
+
+  // Variant / Size / Color breakdown
+  const variantRows = rawDb.prepare(`
+    SELECT si.variant_id AS variantId, si.product_name AS itemLabel, si.sku AS sku, si.variant_attributes_json AS attrsJson, p.name AS productName, p.options_json AS optionsJson,
+      SUM(si.quantity - COALESCE((SELECT SUM(ri.quantity) FROM customer_return_items ri WHERE ri.tenant_id = si.tenant_id AND ri.original_sale_item_id = si.id), 0)) AS unitsSold,
+      SUM(si.net_revenue - COALESCE((SELECT SUM(ri.refund_amount) FROM customer_return_items ri WHERE ri.tenant_id = si.tenant_id AND ri.original_sale_item_id = si.id), 0)) AS netRevenue
+    FROM sale_items si
+    INNER JOIN sales s ON s.id = si.sale_id AND s.tenant_id = si.tenant_id AND s.store_id = si.store_id
+    INNER JOIN products p ON p.id = si.product_id AND p.tenant_id = si.tenant_id
+    WHERE si.tenant_id = ? AND si.store_id = ? AND s.status = 'COMPLETED'
+      AND (? IS NULL OR s.created_at >= ?)
+      AND (? IS NULL OR s.created_at <= ?)
+    GROUP BY si.variant_id, si.product_name, si.sku, si.variant_attributes_json, p.name, p.options_json
+    HAVING unitsSold > 0
+  `).all(ctx.tenantId, storeId, start, start, end, end);
+  const sizeCounter = new Map();
+  const colorCounter = new Map();
+  let totalVariantUnits = 0n;
+  const topVariants = variantRows.map((row) => {
+    const qty = BigInt(row.unitsSold ?? 0);
+    totalVariantUnits += qty;
+    let attrs = {};
+    let opts = [];
+    try { attrs = JSON.parse(row.attrsJson || '{}'); } catch { /* ignore */ }
+    try { opts = JSON.parse(row.optionsJson || '[]'); } catch { /* ignore */ }
+    for (const [k, v] of Object.entries(attrs)) {
+      const optName = (opts.find((o) => o.key === k)?.name ?? k).toLowerCase();
+      const val = String(v).trim();
+      if (!val) continue;
+      if (optName.includes('مقاس') || optName.includes('size') || /^(2[89]|3\d|4\d|50|xs|s|m|l|xl|xxl|xxxl)$/i.test(val)) {
+        sizeCounter.set(val, (sizeCounter.get(val) ?? 0n) + qty);
+      } else if (optName.includes('لون') || optName.includes('color') || optName.includes('colour')) {
+        colorCounter.set(val, (colorCounter.get(val) ?? 0n) + qty);
+      }
+    }
+    return {
+      variantId: row.variantId,
+      productName: row.productName,
+      label: row.itemLabel,
+      sku: row.sku,
+      unitsSold: qty.toString(),
+      netRevenue: moneyJson(Money.fromMinor(BigInt(row.netRevenue ?? 0), tenant.currency)),
+    };
+  }).sort((a, b) => BigInt(b.unitsSold) > BigInt(a.unitsSold) ? 1 : -1).slice(0, 15);
+
+  const topSizes = [...sizeCounter.entries()]
+    .map(([size, count]) => ({ size, unitsSold: count.toString(), sharePercent: totalVariantUnits > 0n ? Number((count * 100n) / totalVariantUnits) : 0 }))
+    .sort((a, b) => BigInt(b.unitsSold) > BigInt(a.unitsSold) ? 1 : -1);
+  const topColors = [...colorCounter.entries()]
+    .map(([color, count]) => ({ color, unitsSold: count.toString(), sharePercent: totalVariantUnits > 0n ? Number((count * 100n) / totalVariantUnits) : 0 }))
+    .sort((a, b) => BigInt(b.unitsSold) > BigInt(a.unitsSold) ? 1 : -1);
+
+  return {
+    range: fromValue && toValue ? { from: fromValue, to: toValue } : { from: null, to: null },
+    topByUnits: byUnits[0] ?? null,
+    topByRevenue: byRevenue[0] ?? null,
+    topByProfit: byProfit[0] ?? null,
+    products: byUnits.slice(0, 20),
+    mostPurchasedProducts: mostPurchasedProducts.slice(0, 20),
+    topPurchasedByUnits: mostPurchasedProducts[0] ?? null,
+    topVariants,
+    topSizes,
+    topColors,
+  };
 }
 
 async function purchaseSupplierReport(ctx, url) {
@@ -520,13 +695,31 @@ async function purchaseSupplierReport(ctx, url) {
   const tenant = await tenantRepo.findById(ctx.tenantId);
   if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
   const rows = database.getRawDatabase().prepare(`
-    SELECT s.id AS supplierId, s.name AS supplierName, COUNT(p.id) AS invoiceCount, SUM(p.total_amount) AS totalAmount
+    SELECT s.id AS supplierId, s.name AS supplierName, COUNT(p.id) AS invoiceCount, SUM(p.total_amount) AS totalAmount,
+      SUM(p.initial_paid_amount + COALESCE((SELECT SUM(pay.amount) FROM supplier_payments pay WHERE pay.tenant_id = p.tenant_id AND pay.purchase_id = p.id), 0)) AS paidAmount,
+      SUM(COALESCE((SELECT SUM(sr.credit_amount) FROM supplier_returns sr WHERE sr.tenant_id = p.tenant_id AND sr.purchase_id = p.id), 0)) AS returnedCredit,
+      SUM(COALESCE((SELECT SUM(spi.quantity) FROM supplier_purchase_items spi WHERE spi.tenant_id = p.tenant_id AND spi.purchase_id = p.id), 0)) AS unitsOrdered
     FROM supplier_purchases p
     INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
     WHERE p.tenant_id = ? AND p.store_id = ? AND substr(p.purchased_at, 1, 10) >= ? AND substr(p.purchased_at, 1, 10) <= ?
     GROUP BY s.id, s.name
   `).all(ctx.tenantId, storeId, fromValue, toValue);
-  const suppliers = rows.map((row) => ({ id: row.supplierId, name: row.supplierName, invoiceCount: String(row.invoiceCount), totalAmount: moneyJson(Money.fromMinor(BigInt(row.totalAmount), tenant.currency)) }));
+  const suppliers = rows.map((row) => {
+    const totalMinor = BigInt(row.totalAmount ?? 0);
+    const paidMinor = BigInt(row.paidAmount ?? 0);
+    const creditMinor = BigInt(row.returnedCredit ?? 0);
+    const remainingMinor = totalMinor - paidMinor - creditMinor;
+    return {
+      id: row.supplierId,
+      name: row.supplierName,
+      invoiceCount: String(row.invoiceCount),
+      unitsOrdered: String(row.unitsOrdered ?? 0),
+      totalAmount: moneyJson(Money.fromMinor(totalMinor, tenant.currency)),
+      paidAmount: moneyJson(Money.fromMinor(paidMinor, tenant.currency)),
+      returnedCredit: moneyJson(Money.fromMinor(creditMinor, tenant.currency)),
+      balanceDue: moneyJson(Money.fromMinor(remainingMinor, tenant.currency)),
+    };
+  });
   const bySpend = [...suppliers].sort((a, b) => BigInt(a.totalAmount.amount) === BigInt(b.totalAmount.amount) ? a.name.localeCompare(b.name) : BigInt(a.totalAmount.amount) > BigInt(b.totalAmount.amount) ? -1 : 1);
   const byInvoices = [...suppliers].sort((a, b) => Number(b.invoiceCount) - Number(a.invoiceCount) || a.name.localeCompare(b.name));
   return { range: { from: fromValue, to: toValue }, topBySpend: bySpend[0] ?? null, topByInvoices: byInvoices[0] ?? null, suppliers: bySpend };
@@ -984,6 +1177,50 @@ async function handleApi(req, res, url) {
       auditLogs.verifyChain(ctx),
     ]);
     return json(res, 200, { entries, chainVerification });
+  }
+
+  if (method === 'GET' && path === '/api/backups/daily') {
+    ctx.assertPermission(Permissions.SYSTEM_BACKUP_MANAGE);
+    await ensureDailyBackup({ force: false }).catch(() => undefined);
+    const backups = await listDailyBackups();
+    return json(res, 200, {
+      enabled: true,
+      autoSchedule: 'DAILY_NIGHTLY',
+      retentionDays: MAX_DAILY_BACKUPS,
+      scheduleLabel: 'نسخ احتياطي يومي تلقائي كل ليلة وعند بدء التشغيل (يحتفظ بآخر 30 يومًا)',
+      backups,
+    });
+  }
+
+  if (method === 'POST' && path === '/api/backups/daily/run-now') {
+    ctx.assertPermission(Permissions.SYSTEM_BACKUP_MANAGE);
+    const backup = await ensureDailyBackup({ force: true });
+    await recordAudit(ctx, { action: 'DAILY_BACKUP_CREATED', entityType: 'BACKUP', entityId: backup.filename, summary: `إنشاء وتحديث النسخة الاحتياطية اليومية (${backup.date})`, metadata: { filename: backup.filename, size: backup.size } });
+    return json(res, 201, { created: true, backup, backups: await listDailyBackups() });
+  }
+
+  const dailyDownloadMatch = method === 'GET' ? path.match(/^\/api\/backups\/daily\/(retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite)$/) : null;
+  if (dailyDownloadMatch) {
+    ctx.assertPermission(Permissions.SYSTEM_BACKUP_MANAGE);
+    const filename = dailyDownloadMatch[1];
+    const targetPath = join(dailyBackupDir, filename);
+    if (!existsSync(targetPath)) throw Object.assign(new Error('النسخة الاحتياطية غير موجودة'), { status: 404 });
+    const fileStat = await stat(targetPath);
+    res.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Content-Length': fileStat.size,
+      'Cache-Control': 'no-store',
+      ...securityHeaders(),
+    });
+    await new Promise((resolve, reject) => {
+      const stream = createReadStream(targetPath);
+      stream.on('error', reject);
+      res.on('finish', resolve);
+      res.on('close', resolve);
+      stream.pipe(res);
+    });
+    return;
   }
 
   if (method === 'POST' && path === '/api/backups/export') {
@@ -1631,6 +1868,7 @@ const server = createServer(async (req, res) => {
 const walCheckpointTimer = setInterval(() => {
   database.checkpointPassive();
   pruneFailedLogins();
+  void ensureDailyBackup({ force: false }).catch(() => undefined);
   void db
     .deleteFrom('sessions')
     .where((eb) => eb.or([eb('is_revoked', '=', 1), eb('expires_at', '<', new Date().toISOString())]))
@@ -1638,6 +1876,9 @@ const walCheckpointTimer = setInterval(() => {
     .catch(() => undefined);
 }, 5 * 60 * 1000);
 walCheckpointTimer.unref();
+setTimeout(() => {
+  void ensureDailyBackup({ force: false }).catch(() => undefined);
+}, 1500).unref();
 
 let restartScheduled = false;
 function restartLocalServer() {

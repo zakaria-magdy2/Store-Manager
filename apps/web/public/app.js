@@ -20,7 +20,7 @@ const state = {
   salesHistoryTotal: 0,
   salesHistorySearch: '',
   salesFrom: null,
-  salesTo: null, auditLogs: null, auditChainVerification: null, auditLogsKey: null,
+  salesTo: null, auditLogs: null, auditChainVerification: null, auditLogsKey: null, plSection: 'overview', analyticsSection: 'all', dailyBackups: null, dailyBackupsKey: null,
 };
 
 const icons = {
@@ -79,18 +79,17 @@ window.addEventListener('resize', closeAccountMenu);
 const navItems = [
   { id: 'dashboard', label: 'الرئيسية', icon: 'grid' },
   { id: 'pos', label: 'نقطة البيع', icon: 'bag' },
-  { id: 'products', label: 'المنتجات', icon: 'box' },
+  { id: 'products', label: 'المنتجات والموديلات', icon: 'box' },
   { id: 'inventory', label: 'المخزون', icon: 'store' },
   { id: 'sales', label: 'المبيعات', icon: 'chart' },
   { id: 'suppliers', label: 'التجار والمشتريات', icon: 'users' },
   { id: 'expenses', label: 'المصروفات', icon: 'wallet' },
   { id: 'monthly-expenses', label: 'الالتزامات الشهرية', icon: 'chart' },
-  { id: 'users', label: '\u0627\u0644\u0645\u0633\u062a\u062e\u062f\u0645\u0648\u0646', icon: 'users' },
-  { id: 'backups', label: '\u0627\u0644\u0646\u0633\u062e \u0627\u0644\u0627\u062d\u062a\u064a\u0627\u0637\u064a', icon: 'store' },
   { id: 'reports', label: 'الأرباح والخسائر', icon: 'chart' },
-  { id: 'top-products', label: 'التقارير', icon: 'chart' },
-  { id: 'accounting', label: 'القيود المحاسبية', icon: 'chart' }, { id: 'audit-logs', label: 'سجل المراجعة والأمان', icon: 'scan' },
+  { id: 'top-products', label: 'التقارير والإحصائيات', icon: 'chart' },
+  { id: 'users', label: 'المستخدمون', icon: 'users' },
 ];
+const extraPageTitles = { backups: 'النسخ الاحتياطي اليومي والاستعادة', 'audit-logs': 'سجل المراجعة والأمان' };
 
 function icon(name, size = 20) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] ?? ''}</svg>`;
@@ -260,8 +259,9 @@ function bindLogin() {
 
 function shellView() {
   const visibleNavItems = state.data.capabilities.cashierMode ? navItems.filter((item) => item.id === 'pos') : navItems;
-  const pageTitle = navItems.find((item) => item.id === state.page)?.label ?? 'الرئيسية';
-  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'accounting' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'backups' || state.data.capabilities.canManageBackups).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'audit-logs' || state.data.capabilities.canViewAuditLogs).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden><a class="account-menu-item" role="menuitem" href="mailto:support@retailos.local">${icon('help', 17)}<span>\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u0627\u0644\u062f\u0639\u0645</span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions"><label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>⌘ K</kbd></label><button class="icon-button notification-button" aria-label="التنبيهات">${icon('bell', 19)}${state.data.summary.lowStockCount ? '<i></i>' : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${pageView()}</section><div id="account-modal-root"></div></main>`;
+  const pageTitle = navItems.find((item) => item.id === state.page)?.label ?? extraPageTitles[state.page] ?? 'الرئيسية';
+  const menuExtraItems = `${state.data.capabilities.canManageBackups ? `<button type="button" class="account-menu-item" role="menuitem" data-page="backups">${icon('store', 17)}<span>النسخ الاحتياطي اليومي</span></button>` : ''}${state.data.capabilities.canViewAuditLogs ? `<button type="button" class="account-menu-item" role="menuitem" data-page="audit-logs">${icon('scan', 17)}<span>سجل المراجعة والأمان</span></button>` : ''}`;
+  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item" role="menuitem" href="mailto:support@retailos.local">${icon('help', 17)}<span>\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u0627\u0644\u062f\u0639\u0645</span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions"><label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>⌘ K</kbd></label><button class="icon-button notification-button" aria-label="التنبيهات">${icon('bell', 19)}${state.data.summary.lowStockCount ? '<i></i>' : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${pageView()}</section><div id="account-modal-root"></div></main>`;
 }
 
 function roleLabel(role) {
@@ -444,22 +444,84 @@ function methodLabel(method) {
   return ({ CASH: 'نقدي', CARD: 'بطاقة', MOBILE: 'محفظة', OTHER: 'أخرى' })[method] ?? method;
 }
 
+const COLOR_OPTION_NAMES = new Set(['color', 'colour', 'لون', 'اللون', 'الالوان', 'الألوان']);
+const SIZE_OPTION_NAMES = new Set(['size', 'مقاس', 'المقاس', 'المقاسات']);
+
+function extractProductMatrix(product) {
+  const activeVariants = (product.variants ?? []).filter((variant) => variant.isActive);
+  const options = product.options ?? [];
+  let colorOption = options.find((opt) => COLOR_OPTION_NAMES.has(String(opt.name ?? '').trim().toLowerCase()) || COLOR_OPTION_NAMES.has(String(opt.key ?? '').trim().toLowerCase()));
+  let sizeOption = options.find((opt) => SIZE_OPTION_NAMES.has(String(opt.name ?? '').trim().toLowerCase()) || SIZE_OPTION_NAMES.has(String(opt.key ?? '').trim().toLowerCase()));
+  if (!colorOption && !sizeOption && options.length >= 2) {
+    colorOption = options[0];
+    sizeOption = options[1];
+  } else if (!colorOption && !sizeOption && options.length === 1) {
+    const firstVals = options[0].values ?? [];
+    const looksLikeSize = firstVals.every((v) => /^(?:\d{2}|[xXsSmMlL]{1,4}|\d{1,2}\.\d)$/.test(String(v).trim()));
+    if (looksLikeSize) sizeOption = options[0];
+    else colorOption = options[0];
+  }
+  const colors = [];
+  const sizes = [];
+  const addUnique = (list, val) => { if (val && !list.includes(val)) list.push(val); };
+  if (colorOption) for (const v of colorOption.values ?? []) addUnique(colors, String(v).trim());
+  if (sizeOption) for (const v of sizeOption.values ?? []) addUnique(sizes, String(v).trim());
+  for (const variant of activeVariants) {
+    const attrs = variant.attributes ?? {};
+    const cVal = colorOption ? attrs[colorOption.key] ?? attrs[colorOption.name] : null;
+    const sVal = sizeOption ? attrs[sizeOption.key] ?? attrs[sizeOption.name] : null;
+    if (cVal) addUnique(colors, String(cVal).trim());
+    if (sVal) addUnique(sizes, String(sVal).trim());
+  }
+  const hasAttributes = activeVariants.some((v) => Object.keys(v.attributes ?? {}).length > 0);
+  const isMatrix = hasAttributes && (colors.length > 0 || sizes.length > 0);
+  const effectiveColors = colors.length ? colors : ['الأساسي'];
+  const effectiveSizes = sizes.length ? sizes : ['موحد'];
+  const matrixMap = new Map();
+  for (const variant of activeVariants) {
+    const attrs = variant.attributes ?? {};
+    const cVal = colorOption ? (attrs[colorOption.key] ?? attrs[colorOption.name] ?? 'الأساسي') : 'الأساسي';
+    const sVal = sizeOption ? (attrs[sizeOption.key] ?? attrs[sizeOption.name] ?? 'موحد') : 'موحد';
+    matrixMap.set(`${String(cVal).trim()}:::${String(sVal).trim()}`, variant);
+  }
+  const sizeRangeLabel = sizes.length > 2 ? `مقاس ${sizes[0]}–${sizes[sizes.length - 1]} (${sizes.length})` : sizes.length ? `مقاس ${sizes.join(' · ')}` : '';
+  const colorSummaryLabel = colors.length ? `${colors.slice(0, 4).join(' · ')}${colors.length > 4 ? ` +${colors.length - 4}` : ''}` : '';
+  return {
+    activeVariants,
+    colorOption,
+    sizeOption,
+    colors: effectiveColors,
+    rawColors: colors,
+    sizes: effectiveSizes,
+    rawSizes: sizes,
+    isMatrix,
+    matrixMap,
+    sizeRangeLabel,
+    colorSummaryLabel,
+  };
+}
+
 function productsView() {
   const query = state.query.trim().toLowerCase();
-  const products = state.data.products.filter((product) => !query || `${product.name} ${product.sku} ${product.variants.map((item) => `${item.sku} ${item.barcode ?? ''}`).join(' ')}`.toLowerCase().includes(query));
+  const products = state.data.products.filter((product) => !query || `${product.name} ${product.sku} ${product.brand ?? ''} ${product.variants.map((item) => `${item.sku} ${item.barcode ?? ''} ${Object.values(item.attributes ?? {}).join(' ')}`).join(' ')}`.toLowerCase().includes(query));
   const rows = products.map((product) => {
-    const activeVariants = product.variants.filter((variant) => variant.isActive);
+    const matrix = extractProductMatrix(product);
+    const activeVariants = matrix.activeVariants;
     const totalQuantity = activeVariants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n);
     const priceRange = activeVariants.length ? (new Set(activeVariants.map((variant) => variant.price.amount)).size === 1 ? money(activeVariants[0].price) : `${money(activeVariants.reduce((min, variant) => BigInt(variant.price.amount) < BigInt(min.price.amount) ? variant : min, activeVariants[0]).price)} – ${money(activeVariants.reduce((max, variant) => BigInt(variant.price.amount) > BigInt(max.price.amount) ? variant : max, activeVariants[0]).price)}`) : '—';
-    return `<tr><td><div class="product-table-name"><span class="product-avatar">${escapeHtml(product.name.slice(0, 1))}</span><span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand || product.sku)}</small></span></div></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td class="table-total">${priceRange}</td><td><strong>${totalQuantity}</strong> وحدة</td><td>${activeVariants.length} تركيبة</td><td class="product-actions"><button type="button" class="text-action product-edit" data-product-id="${product.id}">التفاصيل والتعديل</button><button type="button" class="text-action product-delete" data-product-id="${product.id}">حذف</button></td></tr>`;
+    const subSummary = matrix.isMatrix
+      ? `<div class="model-sub-badges">${matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(matrix.colorSummaryLabel)}</span>` : ''}${matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(matrix.sizeRangeLabel)}</span>` : ''}<small class="model-sub-count">${activeVariants.length} فرع (لون×مقاس)</small></div>`
+      : `<span class="model-sub-count">${activeVariants.length === 1 ? 'صنف مباشر (بدون مقاسات)' : `${activeVariants.length} تركيبة`}</span>`;
+    return `<tr><td><div class="product-table-name"><span class="product-avatar">${escapeHtml(product.name.slice(0, 1))}</span><span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand ? `${product.brand} · كود الموديل ${product.sku}` : `كود الموديل: ${product.sku}`)}</small></span></div></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${subSummary}</td><td class="table-total">${priceRange}</td><td><strong>${totalQuantity}</strong> قطعة</td><td class="product-actions"><button type="button" class="text-action product-edit" data-product-id="${product.id}">المقاسات والتعديل</button><button type="button" class="text-action product-delete" data-product-id="${product.id}">حذف</button></td></tr>`;
   }).join('');
-  return `<div class="page-heading-row"><div><p class="page-lead">كتالوج منتجات ${escapeHtml(state.data.company.name)}</p></div><div class="products-heading-actions"><button class="button button-secondary" id="add-category">${icon('plus', 18)} إضافة فئة</button><button class="button button-primary" id="new-product">${icon('plus', 18)} إضافة منتج</button></div></div><section class="panel products-panel"><div class="panel-heading"><div><h3>قائمة المنتجات</h3><p>${state.data.products.length} منتج أساسي في الكتالوج</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="بحث بالاسم أو كود النسخة أو الباركود" value="${escapeHtml(state.query)}"></label></div>${products.length ? `<div class="table-scroll"><table><thead><tr><th>المنتج</th><th>كود المنتج</th><th>سعر البيع</th><th>إجمالي المخزون</th><th>عدد التركيبات</th><th>الإجراءات</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('box', 28)}</div><strong>${query ? 'مفيش نتائج مطابقة' : 'الكتالوج لسه فاضي'}</strong><p>${query ? 'جرب كلمة بحث تانية.' : 'أضف المنتجات اللي بتبيعها، وبعدها استقبل الكمية وسجّل البيع.'}</p>${!query ? '<button class="button button-primary" id="empty-new-product">إضافة أول منتج</button>' : ''}</div>`}</section><div id="modal-root"></div>`;
+  return `<div class="page-heading-row"><div><p class="page-lead">نظام الموديل الموحد: كل موديل (مثل كوتشي ميلانو) يتسجل بكود أساسي واحد، وتحته كل الألوان والمقاسات كفروع منه.</p></div><div class="products-heading-actions"><button class="button button-secondary" id="add-category">${icon('plus', 18)} إضافة فئة</button><button class="button button-primary" id="new-product">${icon('plus', 18)} إضافة موديل / منتج</button></div></div><section class="panel products-panel"><div class="panel-heading"><div><h3>كتالوج الموديلات والمنتجات</h3><p>${state.data.products.length} موديل أساسي في الكتالوج</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="بحث باسم الموديل أو الكود أو اللون أو المقاس" value="${escapeHtml(state.query)}"></label></div>${products.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل / المنتج</th><th>كود الموديل</th><th>الألوان والمقاسات الفرعية</th><th>سعر البيع</th><th>إجمالي الرصيد</th><th>الإجراءات</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('box', 28)}</div><strong>${query ? 'مفيش نتائج مطابقة' : 'الكتالوج لسه فاضي'}</strong><p>${query ? 'جرب كلمة بحث تانية.' : 'أضف الموديل بكوده الأساسي وحدد الألوان والمقاسات، وبعدها استقبل الكميات في فاتورة الشراء.'}</p>${!query ? '<button class="button button-primary" id="empty-new-product">إضافة أول موديل</button>' : ''}</div>`}</section><div id="modal-root"></div>`;
 }
 
 function inventoryView() {
   const data = state.data;
   const items = data.products.filter((product) => product.itemKind === 'PRODUCT').map((product) => {
-    const variants = product.variants.filter((variant) => variant.isActive);
+    const matrix = extractProductMatrix(product);
+    const variants = matrix.activeVariants;
     const quantity = variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n);
     const reorderPoint = variants.reduce((sum, variant) => sum + BigInt(variant.reorderPoint), 0n);
     const hasLowVariant = variants.some((variant) => BigInt(variant.quantity) <= BigInt(variant.reorderPoint));
@@ -469,9 +531,9 @@ function inventoryView() {
       const amount = variants.reduce((sum, variant) => sum + BigInt(variant.quantity) * BigInt(variant.wac.amount), 0n) / weight;
       return { ...variants[0].wac, amount: amount.toString() };
     })() : null;
-    return { ...product, variants, quantity, reorderPoint, hasLowVariant, cost };
-  }).filter((product) => product.isActive && (!state.query.trim() || `${product.name} ${product.sku} ${product.variants.map((variant) => `${variant.sku} ${Object.values(variant.attributes ?? {}).join(' ')}`).join(' ')}`.toLowerCase().includes(state.query.trim().toLowerCase())));
-  return `<div class="page-heading-row"><div><p class="page-lead">كل منتج أساسي يظهر مرة واحدة بإجمالي رصيده؛ اضغط على اسمه لمراجعة تفاصيل المقاسات والألوان. إضافة البضاعة تتم من فاتورة الشراء.</p></div><div class="products-heading-actions">${data.capabilities.canManageStores ? '<button class="button button-secondary" id="new-store-btn">+ إضافة فرع</button>' : ''}${data.capabilities.canTransferInventory && data.stores.length > 1 ? '<button class="button button-secondary" id="transfer-stock-btn">تحويل مخزون بين الفروع</button>' : ''}${data.capabilities.canViewInventory ? '<button class="button button-secondary" id="record-damage-btn">تسجيل تالف / هالك</button><button class="button button-secondary" id="adjust-stock-btn">تسوية جرد فعلي</button>' : ''}<a class="button button-secondary" href="/api/reports/export.csv?type=inventory&storeId=${encodeURIComponent(data.selectedStoreId)}" download>تصدير CSV</a><button class="button button-secondary" data-page="suppliers">${icon('plus', 18)} تسجيل فاتورة شراء</button></div></div><div class="inventory-summary"><div class="inventory-summary-card"><span class="summary-badge summary-indigo">${icon('box', 18)}</span><div><small>المنتجات الأساسية</small><strong>${items.length}</strong></div></div><div class="inventory-summary-card"><span class="summary-badge summary-amber">${icon('bell', 18)}</span><div><small>منتجات بها تركيبات منخفضة</small><strong>${data.lowStock.length}</strong></div></div><div class="inventory-summary-card"><span class="summary-badge summary-teal">${icon('store', 18)}</span><div><small>الفرع الحالي</small><strong>${escapeHtml(data.stores.find((store) => store.id === data.selectedStoreId)?.name ?? '—')}</strong></div></div></div><section class="panel"><div class="panel-heading"><div><h3>أرصدة المنتجات</h3><p>الإجمالي هنا للمنتج الأساسي، والتفاصيل داخل المنتج</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="ابحث عن المنتج أو كوده" value="${escapeHtml(state.query)}"></label></div>${items.length ? `<div class="table-scroll"><table><thead><tr><th>المنتج</th><th>كود المنتج</th><th>إجمالي الرصيد</th><th>عدد التركيبات</th><th>متوسط التكلفة</th><th>حالة المخزون</th></tr></thead><tbody>${items.map((product) => `<tr><td><button type="button" class="product-name-action inventory-product-details" data-product-id="${product.id}"><span class="product-avatar">${escapeHtml(product.name.slice(0, 1))}</span><strong>${escapeHtml(product.name)}</strong></button></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td><strong>${product.quantity}</strong> قطعة</td><td>${product.variants.length}</td><td>${product.cost ? money(product.cost) : '—'}</td><td>${product.hasLowVariant ? '<span class="status-pill status-low">تركيبة تحتاج طلب</span>' : '<span class="status-pill status-complete">طبيعي</span>'}</td></tr>`).join('')}</tbody></table></div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('box', 28)}</div><strong>مفيش منتجات في المخزون</strong><p>سجّل فاتورة شراء لإضافة البضاعة للمخزون.</p><button class="button button-primary" data-page="suppliers">فاتورة شراء</button></div>`}</section><div id="modal-root"></div>`;
+    return { ...product, matrix, variants, quantity, reorderPoint, hasLowVariant, cost };
+  }).filter((product) => product.isActive && (!state.query.trim() || `${product.name} ${product.sku} ${product.brand ?? ''} ${product.variants.map((variant) => `${variant.sku} ${Object.values(variant.attributes ?? {}).join(' ')}`).join(' ')}`.toLowerCase().includes(state.query.trim().toLowerCase())));
+  return `<div class="page-heading-row"><div><p class="page-lead">كل موديل يظهر كوحدة واحدة بإجمالي رصيده؛ اضغط على اسم الموديل لفتح جدول توزيع الألوان × المقاسات بالتفصيل.</p></div><div class="products-heading-actions">${data.capabilities.canManageStores ? '<button class="button button-secondary" id="new-store-btn">+ إضافة فرع</button>' : ''}${data.capabilities.canTransferInventory && data.stores.length > 1 ? '<button class="button button-secondary" id="transfer-stock-btn">تحويل مخزون بين الفروع</button>' : ''}${data.capabilities.canViewInventory ? '<button class="button button-secondary" id="record-damage-btn">تسجيل تالف / هالك</button><button class="button button-secondary" id="adjust-stock-btn">تسوية جرد فعلي</button>' : ''}<a class="button button-secondary" href="/api/reports/export.csv?type=inventory&storeId=${encodeURIComponent(data.selectedStoreId)}" download>تصدير CSV</a><button class="button button-primary" data-page="suppliers">${icon('plus', 18)} فاتورة شراء من تاجر</button></div></div><div class="inventory-summary"><div class="inventory-summary-card"><span class="summary-badge summary-indigo">${icon('box', 18)}</span><div><small>الموديلات المسجلة</small><strong>${items.length}</strong></div></div><div class="inventory-summary-card"><span class="summary-badge summary-amber">${icon('bell', 18)}</span><div><small>موديلات بها مقاسات ناقصة</small><strong>${data.lowStock.length}</strong></div></div><div class="inventory-summary-card"><span class="summary-badge summary-teal">${icon('store', 18)}</span><div><small>الفرع الحالي</small><strong>${escapeHtml(data.stores.find((store) => store.id === data.selectedStoreId)?.name ?? '—')}</strong></div></div></div><section class="panel"><div class="panel-heading"><div><h3>أرصدة الموديلات والمقاسات</h3><p>اضغط على الموديل لعرض مصفوفة الألوان والمقاسات (2D Matrix)</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="ابحث عن الموديل أو الكود أو المقاس" value="${escapeHtml(state.query)}"></label></div>${items.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل</th><th>كود الموديل</th><th>الألوان والمقاسات</th><th>إجمالي الرصيد</th><th>متوسط التكلفة</th><th>حالة المقاسات</th></tr></thead><tbody>${items.map((product) => `<tr><td><button type="button" class="product-name-action inventory-product-details" data-product-id="${product.id}"><span class="product-avatar">${escapeHtml(product.name.slice(0, 1))}</span><span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand || 'اضغط لعرض جدول المقاسات')}</small></span></button></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${product.matrix.isMatrix ? `<div class="model-sub-badges">${product.matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(product.matrix.colorSummaryLabel)}</span>` : ''}${product.matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(product.matrix.sizeRangeLabel)}</span>` : ''}</div>` : `<small>${product.variants.length} نسخة</small>`}</td><td><strong>${product.quantity}</strong> قطعة</td><td>${product.cost ? money(product.cost) : '—'}</td><td>${product.hasLowVariant ? '<span class="status-pill status-low">مقاسات تحتاج طلب</span>' : '<span class="status-pill status-complete">مكتمل</span>'}</td></tr>`).join('')}</tbody></table></div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('box', 28)}</div><strong>مفيش منتجات في المخزون</strong><p>سجّل فاتورة شراء لإضافة البضاعة للمخزون.</p><button class="button button-primary" data-page="suppliers">فاتورة شراء</button></div>`}</section><div id="modal-root"></div>`;
 }
 
 function salesView() {
@@ -501,23 +563,290 @@ function profitLossView() {
   const today = new Date().toISOString().slice(0, 10);
   const from = state.reportFrom ?? today, to = state.reportTo ?? today;
   const report = state.report;
-  const breakdown = report ? [
-    ['إجمالي المبيعات', report.profitLoss.grossSales], ['الخصومات', report.profitLoss.discounts],
-    ['مرتجعات العملاء', report.profitLoss.returns], ['صافي المبيعات', report.profitLoss.netSales],
-    ['تكلفة البضاعة المباعة', report.profitLoss.cogs], ['مجمل الربح', report.profitLoss.grossProfit],
-    ['المصروفات اليومية', report.profitLoss.directExpenses], ['نصيب المصروفات الشهرية', report.profitLoss.monthlyExpenses],
-  ] : [];
-  return `<div class="page-heading-row"><div><p class="page-lead">ملخص أداء المحل للفترة المحددة. افصل بين الربح التشغيلي وحركة النقدية.</p></div></div><section class="panel"><form id="profit-loss-filter" class="date-filter-bar"><label>من تاريخ<input id="report-from" type="date" value="${from}" required></label><label>إلى تاريخ<input id="report-to" type="date" value="${to}" required></label><button class="button button-primary" type="submit">تحديث الملخص</button></form></section>${report?.missingMonthlyActuals?.length ? `<section class="panel report-notice"><span class="status-pill status-low">تنبيه</span> مصروفات شهرية لم تؤكد: ${report.missingMonthlyActuals.map((item) => `${escapeHtml(item.name)} · ${String(item.month).padStart(2, '0')}/${item.year}`).join('، ')}.</section>` : ''}${report ? `<div class="profit-metrics"><article class="metric-card"><div class="metric-head"><span>صافي المبيعات</span><span class="metric-icon metric-purple">${icon('bag', 19)}</span></div><strong>${money(report.profitLoss.netSales)}</strong><div class="metric-foot"><span>${report.from} — ${report.to}</span></div></article><article class="metric-card"><div class="metric-head"><span>مجمل الربح</span><span class="metric-icon metric-green">${icon('chart', 19)}</span></div><strong>${money(report.profitLoss.grossProfit)}</strong><div class="metric-foot"><span>بعد خصم تكلفة البضاعة</span></div></article><article class="metric-card"><div class="metric-head"><span>المصروفات</span><span class="metric-icon metric-orange">${icon('wallet', 19)}</span></div><strong>${money({ ...report.profitLoss.directExpenses, amount: (BigInt(report.profitLoss.directExpenses.amount) + BigInt(report.profitLoss.monthlyExpenses.amount)).toString() })}</strong><div class="metric-foot"><span>يومية وشهرية</span></div></article><article class="metric-card profit-primary"><div class="metric-head"><span>صافي ربح التشغيل</span><span class="metric-icon metric-green">${icon('chart', 19)}</span></div><strong>${money(report.profitLoss.operatingProfit)}</strong><div class="metric-foot"><span>بعد المصروفات</span></div></article></div><details class="panel compact-disclosure"><summary><span>تفاصيل حساب الأرباح والخسائر</span><span>${report.from} — ${report.to}</span></summary><div class="disclosure-content"><div class="table-scroll"><table><tbody>${breakdown.map(([label, amount]) => `<tr><td>${label}</td><td class="table-total">${money(amount)}</td></tr>`).join('')}<tr><td><strong>صافي ربح التشغيل</strong></td><td class="table-total"><strong>${money(report.profitLoss.operatingProfit)}</strong></td></tr></tbody></table></div></div></details><details class="panel compact-disclosure"><summary><span>تفاصيل التدفق النقدي</span><span>التحصيل والمدفوعات خلال الفترة</span></summary><div class="disclosure-content"><div class="report-cash-list"><div><span>مبيعات نقدية</span><strong>${money(report.cashFlow.cashSales)}</strong></div><div><span>مبيعات إلكترونية</span><strong>${money(report.cashFlow.electronicSales)}</strong></div><div><span>مصروفات مدفوعة</span><strong>${money(report.cashFlow.directExpenseOutflow)}</strong></div><div><span>سداد الالتزامات</span><strong>${money(report.cashFlow.monthlyObligationOutflow)}</strong></div><div><span>مستحقات غير مسددة بنهاية الفترة</span><strong>${money(report.cashFlow.pendingUnpaidObligations)}</strong></div></div></div></details>` : '<section class="panel empty-row">جاري تحميل التقرير...</section>'}<div id="modal-root"></div>`;
+  const section = state.plSection ?? 'overview';
+  const currency = state.data.company.currency;
+  const decimals = currencyDecimals(currency);
+  const plSections = [
+    ['overview', 'الملخص التنفيذي والهوامش (نظرة شاملة)'],
+    ['revenue_cogs', 'إحصائيات المبيعات وتكلفة البضاعة والمرتجعات'],
+    ['expenses', 'إحصائيات المصروفات اليومية والالتزامات الشهرية'],
+    ['treasury_cashflow', 'التدفق النقدي وأرصدة الخزينة والدرج والبنك'],
+    ['periods', 'الفترات المحاسبية الشهرية والرقابة المالية'],
+  ];
+  const pct = (partMinor, baseMinor) => {
+    const base = BigInt(baseMinor || '0');
+    if (base <= 0n) return '0.0';
+    return (Number((BigInt(partMinor || '0') * 1000n) / base) / 10).toFixed(1);
+  };
+  let sectionMarkup = '';
+  if (report) {
+    const grossAmt = BigInt(report.profitLoss.grossSales.amount);
+    const netAmt = BigInt(report.profitLoss.netSales.amount);
+    const cogsAmt = BigInt(report.profitLoss.cogs.amount);
+    const grossProfitAmt = BigInt(report.profitLoss.grossProfit.amount);
+    const directExpAmt = BigInt(report.profitLoss.directExpenses.amount);
+    const monthlyExpAmt = BigInt(report.profitLoss.monthlyExpenses.amount);
+    const totalExpAmt = directExpAmt + monthlyExpAmt;
+    const opProfitAmt = BigInt(report.profitLoss.operatingProfit.amount);
+    const grossMarginPct = pct(grossProfitAmt, netAmt);
+    const opMarginPct = pct(opProfitAmt, netAmt);
+    const cogsPct = pct(cogsAmt, netAmt);
+    const expPct = pct(totalExpAmt, netAmt);
+
+    const overviewHtml = `
+      <div class="compact-kpi-grid">
+        <article class="compact-kpi-card">
+          <div class="compact-kpi-top"><span>صافي المبيعات</span><span class="kpi-tag kpi-tag-indigo">${report.from} ← ${report.to}</span></div>
+          <strong class="compact-kpi-value">${money(report.profitLoss.netSales)}</strong>
+          <small>إجمالي المبيعات قبل الخصم والمرتجع: ${money(report.profitLoss.grossSales)}</small>
+        </article>
+        <article class="compact-kpi-card">
+          <div class="compact-kpi-top"><span>مجمل الربح (بعد تكلفة البضاعة)</span><span class="kpi-tag kpi-tag-teal">هامش ${grossMarginPct}%</span></div>
+          <strong class="compact-kpi-value">${money(report.profitLoss.grossProfit)}</strong>
+          <small>تكلفة البضاعة المباعة (COGS): ${money(report.profitLoss.cogs)}</small>
+        </article>
+        <article class="compact-kpi-card">
+          <div class="compact-kpi-top"><span>إجمالي المصروفات التشغيلية</span><span class="kpi-tag kpi-tag-amber">${expPct}% من المبيعات</span></div>
+          <strong class="compact-kpi-value">${money({ amount: totalExpAmt.toString(), currency, decimals })}</strong>
+          <small>يومية: ${money(report.profitLoss.directExpenses)} · شهرية: ${money(report.profitLoss.monthlyExpenses)}</small>
+        </article>
+        <article class="compact-kpi-card ${opProfitAmt >= 0n ? 'compact-kpi-positive' : 'compact-kpi-negative'}">
+          <div class="compact-kpi-top"><span>صافي ربح التشغيل الفعلي</span><span class="kpi-tag ${opProfitAmt >= 0n ? 'kpi-tag-green' : 'kpi-tag-red'}">هامش صافي ${opMarginPct}%</span></div>
+          <strong class="compact-kpi-value">${money(report.profitLoss.operatingProfit)}</strong>
+          <small>${opProfitAmt >= 0n ? 'ربح تشغيلي صافي بعد كل التكاليف' : 'خسارة تشغيلية في الفترة المحددة'}</small>
+        </article>
+      </div>
+      <div class="analytics-two-col">
+        <section class="panel compact-panel">
+          <div class="panel-heading"><div><h3>مؤشرات الكفاءة والربحية</h3><p>توزيع كل جنيه من صافي المبيعات</p></div></div>
+          <div class="stat-bars-stack">
+            <div class="stat-bar-row"><div class="stat-bar-label"><span>تكلفة البضاعة المباعة (COGS)</span><strong>${cogsPct}% · ${money(report.profitLoss.cogs)}</strong></div><div class="stat-bar-track"><i class="bar-fill-indigo" style="width:${Math.min(100, Math.max(3, Number(cogsPct)))}%"></i></div></div>
+            <div class="stat-bar-row"><div class="stat-bar-label"><span>هامش مجمل الربح</span><strong>${grossMarginPct}% · ${money(report.profitLoss.grossProfit)}</strong></div><div class="stat-bar-track"><i class="bar-fill-teal" style="width:${Math.min(100, Math.max(3, Number(grossMarginPct)))}%"></i></div></div>
+            <div class="stat-bar-row"><div class="stat-bar-label"><span>عبء المصروفات (يومية + شهرية)</span><strong>${expPct}% · ${money({ amount: totalExpAmt.toString(), currency, decimals })}</strong></div><div class="stat-bar-track"><i class="bar-fill-amber" style="width:${Math.min(100, Math.max(3, Number(expPct)))}%"></i></div></div>
+            <div class="stat-bar-row"><div class="stat-bar-label"><span>هامش صافي الربح التشغيلي</span><strong>${opMarginPct}% · ${money(report.profitLoss.operatingProfit)}</strong></div><div class="stat-bar-track"><i class="${opProfitAmt >= 0n ? 'bar-fill-green' : 'bar-fill-red'}" style="width:${Math.min(100, Math.max(3, Math.abs(Number(opMarginPct))))}%"></i></div></div>
+          </div>
+        </section>
+        <section class="panel compact-panel">
+          <div class="panel-heading"><div><h3>قائمة الدخل المختصرة</h3><p>ملخص الأرباح والخسائر المحاسبي</p></div></div>
+          <div class="table-scroll"><table class="compact-table"><tbody>
+            <tr><td>إجمالي المبيعات</td><td class="table-total">${money(report.profitLoss.grossSales)}</td></tr>
+            <tr><td>(-) الخصومات الممنوحة</td><td class="table-total">${money(report.profitLoss.discounts)}</td></tr>
+            <tr><td>(-) مرتجعات العملاء</td><td class="table-total">${money(report.profitLoss.returns)}</td></tr>
+            <tr class="row-subtotal"><td><strong>= صافي المبيعات</strong></td><td class="table-total"><strong>${money(report.profitLoss.netSales)}</strong></td></tr>
+            <tr><td>(-) تكلفة البضاعة المباعة</td><td class="table-total">${money(report.profitLoss.cogs)}</td></tr>
+            <tr class="row-subtotal"><td><strong>= مجمل الربح</strong></td><td class="table-total"><strong>${money(report.profitLoss.grossProfit)}</strong></td></tr>
+            <tr><td>(-) المصروفات اليومية والالتزامات الشهرية</td><td class="table-total">${money({ amount: totalExpAmt.toString(), currency, decimals })}</td></tr>
+            <tr class="row-grandtotal"><td><strong>= صافي ربح التشغيل</strong></td><td class="table-total"><strong>${money(report.profitLoss.operatingProfit)}</strong></td></tr>
+          </tbody></table></div>
+        </section>
+      </div>`;
+
+    const revenueCogsHtml = `
+      <section class="panel compact-panel">
+        <div class="panel-heading"><div><h3>تحليل المبيعات وتكلفة البضاعة والمرتجعات</h3><p>تفصيل حركة الإيرادات من إجمالي البيع حتى مجمل الربح</p></div><span class="status-pill status-complete">هامش مجمل الربح ${grossMarginPct}%</span></div>
+        <div class="compact-kpi-grid">
+          <article class="compact-kpi-card"><small>إجمالي المبيعات (قبل الخصم)</small><strong class="compact-kpi-value">${money(report.profitLoss.grossSales)}</strong><small>100% من حركة البيع</small></article>
+          <article class="compact-kpi-card"><small>الخصومات + مرتجعات العملاء</small><strong class="compact-kpi-value">${money({ amount: (BigInt(report.profitLoss.discounts.amount) + BigInt(report.profitLoss.returns.amount)).toString(), currency, decimals })}</strong><small>خصومات: ${money(report.profitLoss.discounts)} · مرتجعات: ${money(report.profitLoss.returns)}</small></article>
+          <article class="compact-kpi-card"><small>تكلفة البضاعة المباعة (WAC)</small><strong class="compact-kpi-value">${money(report.profitLoss.cogs)}</strong><small>${cogsPct}% من صافي المبيعات</small></article>
+          <article class="compact-kpi-card compact-kpi-positive"><small>مجمل الربح الصافي من البضاعة</small><strong class="compact-kpi-value">${money(report.profitLoss.grossProfit)}</strong><small>الربح قبل المصروفات التشغيلية (${grossMarginPct}%)</small></article>
+        </div>
+        <div class="table-scroll"><table class="compact-table"><thead><tr><th>البند</th><th>القيمة</th><th>النسبة من إجمالي المبيعات</th><th>ملاحظات توضيحية</th></tr></thead><tbody>
+          <tr><td><strong>إجمالي المبيعات</strong></td><td class="table-total">${money(report.profitLoss.grossSales)}</td><td>100%</td><td>قيمة جميع الفواتير قبل الخصومات والمرتجعات</td></tr>
+          <tr><td>الخصومات</td><td class="table-total">${money(report.profitLoss.discounts)}</td><td>${pct(report.profitLoss.discounts.amount, grossAmt)}%</td><td>خصومات الأصناف والفواتير</td></tr>
+          <tr><td>مرتجعات العملاء</td><td class="table-total">${money(report.profitLoss.returns)}</td><td>${pct(report.profitLoss.returns.amount, grossAmt)}%</td><td>المبالغ المستردة للعملاء مقابل استرجاع بضاعة</td></tr>
+          <tr class="row-subtotal"><td><strong>صافي المبيعات</strong></td><td class="table-total"><strong>${money(report.profitLoss.netSales)}</strong></td><td><strong>${pct(netAmt, grossAmt)}%</strong></td><td>الإيراد الفعلي المعتمد في حساب الأرباح</td></tr>
+          <tr><td>تكلفة البضاعة المباعة (COGS)</td><td class="table-total">${money(report.profitLoss.cogs)}</td><td>${pct(cogsAmt, grossAmt)}%</td><td>محسوبة بمتوسط التكلفة المرجح لكل موديل ومقاس</td></tr>
+          <tr class="row-grandtotal"><td><strong>مجمل الربح</strong></td><td class="table-total"><strong>${money(report.profitLoss.grossProfit)}</strong></td><td><strong>${pct(grossProfitAmt, grossAmt)}%</strong></td><td>ربح البضاعة قبل خصم الإيجار والمصاريف</td></tr>
+        </tbody></table></div>
+      </section>`;
+
+    const expensesHtml = `
+      <section class="panel compact-panel">
+        <div class="panel-heading"><div><h3>تحليل المصروفات اليومية والالتزامات الشهرية</h3><p>مقارنة المصاريف التشغيلية المباشرة بالالتزامات الثابتة</p></div><div class="products-heading-actions"><button type="button" class="button button-secondary button-sm" data-page="expenses">سجل المصروفات اليومية</button><button type="button" class="button button-secondary button-sm" data-page="monthly-expenses">الالتزامات الشهرية</button></div></div>
+        <div class="compact-kpi-grid">
+          <article class="compact-kpi-card"><small>المصروفات اليومية المباشرة</small><strong class="compact-kpi-value">${money(report.profitLoss.directExpenses)}</strong><small>${pct(directExpAmt, totalExpAmt)}% من إجمالي المصروفات</small></article>
+          <article class="compact-kpi-card"><small>نصيب الفترة من الالتزامات الشهرية</small><strong class="compact-kpi-value">${money(report.profitLoss.monthlyExpenses)}</strong><small>${pct(monthlyExpAmt, totalExpAmt)}% من إجمالي المصروفات</small></article>
+          <article class="compact-kpi-card"><small>إجمالي المصروفات المحملة على الفترة</small><strong class="compact-kpi-value">${money({ amount: totalExpAmt.toString(), currency, decimals })}</strong><small>${expPct}% من صافي المبيعات</small></article>
+          <article class="compact-kpi-card"><small>التزامات شهرية غير مسددة حتى نهاية الفترة</small><strong class="compact-kpi-value">${money(report.cashFlow.pendingUnpaidObligations)}</strong><small>مستحقات مقيدة لم يتم سدادها نقدًا بعد</small></article>
+        </div>
+      </section>`;
+
+    const treasuryHtml = `
+      <section class="panel compact-panel">
+        <div class="panel-heading"><div><h3>أرصدة الخزينة الثلاثية والتدفق النقدي</h3><p>الرصيد الفعلي الآن في الدرج والخزينة والبنك + حركة النقدية خلال الفترة</p></div><div class="products-heading-actions">${state.data.capabilities.canCloseShift ? '<button type="button" class="button button-secondary button-sm" id="treasury-transfer-btn">تحويل خزينة / توريد نقدية</button><button type="button" class="button button-primary button-sm" id="close-shift-btn">تقفيل الوردية وجرد الدرج (Z-Report)</button>' : ''}</div></div>
+        ${state.data.treasuryBalances ? `<div class="compact-kpi-grid">
+          <article class="compact-kpi-card"><div class="compact-kpi-top"><span>درج النقدية بالكاشير (1010)</span><span class="kpi-tag kpi-tag-teal">نقدي بالفرع</span></div><strong class="compact-kpi-value">${money(state.data.treasuryBalances.drawer)}</strong><small>الرصيد الدفتري الحالي لدرج الكاشير</small></article>
+          <article class="compact-kpi-card"><div class="compact-kpi-top"><span>الخزينة الرئيسية (1015)</span><span class="kpi-tag kpi-tag-indigo">خزنة الإدارة</span></div><strong class="compact-kpi-value">${money(state.data.treasuryBalances.safe)}</strong><small>النقدية المحولة للخزينة الرئيسية</small></article>
+          <article class="compact-kpi-card"><div class="compact-kpi-top"><span>البنك والمحافظ والبطاقات (1020)</span><span class="kpi-tag kpi-tag-amber">تحصيل إلكتروني</span></div><strong class="compact-kpi-value">${money(state.data.treasuryBalances.bank)}</strong><small>أرصدة البطاقات والمحافظ والتحويلات البنكية</small></article>
+        </div>` : ''}
+        <div class="table-scroll"><table class="compact-table"><thead><tr><th>بند التدفق النقدي خلال الفترة (${report.from} ← ${report.to})</th><th>القيمة</th><th>الاتجاه</th></tr></thead><tbody>
+          <tr><td><strong>مبيعات نقدية محصلة (درج النقدية)</strong></td><td class="table-total">${money(report.cashFlow.cashSales)}</td><td><span class="status-pill status-complete">تدفق داخل (+)</span></td></tr>
+          <tr><td><strong>مبيعات إلكترونية محصلة (بطاقة / محفظة)</strong></td><td class="table-total">${money(report.cashFlow.electronicSales)}</td><td><span class="status-pill status-complete">تدفق داخل (+)</span></td></tr>
+          <tr><td>المصروفات اليومية المدفوعة نقدًا/بنكيًا</td><td class="table-total">${money(report.cashFlow.directExpenseOutflow)}</td><td><span class="status-pill status-low">تدفق خارج (-)</span></td></tr>
+          <tr><td>سداد الالتزامات الشهرية</td><td class="table-total">${money(report.cashFlow.monthlyObligationOutflow)}</td><td><span class="status-pill status-low">تدفق خارج (-)</span></td></tr>
+          <tr class="row-subtotal"><td><strong>التزامات شهرية مستحقة لم تُسدد بعد</strong></td><td class="table-total"><strong>${money(report.cashFlow.pendingUnpaidObligations)}</strong></td><td><span>التزام قائم</span></td></tr>
+        </tbody></table></div>
+      </section>`;
+
+    const periodsHtml = `
+      <section class="panel compact-panel">
+        <div class="panel-heading"><div><h3>الفترات المحاسبية الشهرية والرقابة المالية</h3><p>إقفال الشهر يمنع تعديل أو إضافة حركات بتاريخ قديم داخل الشهر المقفل</p></div><a class="button button-secondary button-sm" href="/api/reports/export.csv?type=accounting&storeId=${encodeURIComponent(state.data.selectedStoreId)}" download>تصدير الدفتر المحاسبي CSV</a></div>
+        ${(state.data.accountingPeriods ?? []).length ? `<div class="table-scroll"><table class="compact-table"><thead><tr><th>الفترة الشهرية</th><th>من تاريخ</th><th>إلى تاريخ</th><th>الحالة</th><th>الإجراء</th></tr></thead><tbody>${state.data.accountingPeriods.map((period) => `<tr><td><strong>${escapeHtml(period.name)}</strong></td><td>${escapeHtml(period.startDate)}</td><td>${escapeHtml(period.endDate)}</td><td><span class="status-pill ${period.status === 'OPEN' ? 'status-complete' : 'status-low'}">${period.status === 'OPEN' ? 'مفتوحة' : 'مقفلة نهائيًا'}</span></td><td>${period.status === 'OPEN' && state.data.capabilities.canClosePeriod ? `<button type="button" class="text-action close-period-btn" data-period-id="${escapeHtml(period.id)}" data-period-name="${escapeHtml(period.name)}">إقفال الشهر</button>` : '—'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">لا توجد فترات محاسبية مسجلة.</div>'}
+      </section>`;
+
+    sectionMarkup = section === 'revenue_cogs' ? revenueCogsHtml
+      : section === 'expenses' ? expensesHtml
+      : section === 'treasury_cashflow' ? treasuryHtml
+      : section === 'periods' ? periodsHtml
+      : overviewHtml;
+  }
+
+  return `<div class="page-heading-row"><div><p class="page-lead">مركز الأرباح والخسائر والخزينة: اختر القسم من القائمة المنسدلة أو الفلاتر بالأسفل لعرض إحصائياته التفصيلية فورًا.</p></div><div class="products-heading-actions">${state.data.capabilities.canCloseShift ? '<button type="button" class="button button-secondary button-sm" id="treasury-transfer-btn">تحويل خزينة</button><button type="button" class="button button-primary button-sm" id="close-shift-btn">تقفيل الوردية (Z-Report)</button>' : ''}</div></div>
+    <section class="panel compact-filter-panel">
+      <form id="profit-loss-filter" class="smart-filter-bar">
+        <label class="smart-dropdown-label"><span>القسم المعروض</span><select id="pl-section-select" class="smart-section-select">${plSections.map(([id, label]) => `<option value="${id}" ${section === id ? 'selected' : ''}>📊 ${label}</option>`).join('')}</select></label>
+        <label><span>من تاريخ</span><input id="report-from" type="date" value="${from}" required></label>
+        <label><span>إلى تاريخ</span><input id="report-to" type="date" value="${to}" required></label>
+        <button class="button button-primary" type="submit">تحديث</button>
+      </form>
+      <div class="smart-pills-bar">
+        <div class="section-pills">${plSections.map(([id, label]) => `<button type="button" class="section-pill ${section === id ? 'active' : ''}" data-pl-section="${id}">${label.split(' (')[0]}</button>`).join('')}</div>
+        <div class="quick-date-pills">
+          <button type="button" class="date-preset-chip" data-pl-range="today">اليوم</button>
+          <button type="button" class="date-preset-chip" data-pl-range="7d">آخر 7 أيام</button>
+          <button type="button" class="date-preset-chip" data-pl-range="month">هذا الشهر</button>
+          <button type="button" class="date-preset-chip" data-pl-range="year">هذا العام</button>
+        </div>
+      </div>
+    </section>
+    ${report?.missingMonthlyActuals?.length ? `<section class="panel report-notice"><span class="status-pill status-low">تنبيه</span> مصروفات شهرية لم تؤكد بعد: ${report.missingMonthlyActuals.map((item) => `${escapeHtml(item.name)} · ${String(item.month).padStart(2, '0')}/${item.year}`).join('، ')}.</section>` : ''}
+    ${report ? sectionMarkup : '<section class="panel empty-row">جاري تحميل التقرير المالي...</section>'}
+    <div id="modal-root"></div>`;
 }
+
 function topProductsView() {
   const stats = state.productStats;
   const vendors = state.supplierStats;
   const today = new Date().toISOString().slice(0, 10);
   const from = state.analyticsFrom ?? (() => { const date = new Date(); date.setUTCDate(date.getUTCDate() - 29); return date.toISOString().slice(0, 10); })();
   const to = state.analyticsTo ?? today;
+  const section = state.analyticsSection ?? 'all';
+  const currency = state.data.company.currency;
+  const decimals = currencyDecimals(currency);
+  const analyticsSections = [
+    ['all', 'نظرة شاملة (كل الإحصائيات المختصرة)'],
+    ['most_purchased', 'أكثر المنتجات طلبًا واستلامًا من التجار (الوارد)'],
+    ['top_selling', 'الأكثر مبيعًا وربحية وهوامش الموديلات'],
+    ['sizes_colors', 'إحصائيات المقاسات والألوان الأكثر طلبًا'],
+    ['suppliers', 'إحصائيات التجار والموردين والمسحوبات'],
+    ['inventory_health', 'تقييم المخزون والمنتجات الراكدة والنواقص'],
+  ];
+
   const products = stats?.products ?? [];
-  const maxUnits = products.reduce((max, product) => BigInt(product.unitsSold) > max ? BigInt(product.unitsSold) : max, 1n);
-  return `<div class="page-heading-row"><div><p class="page-lead">تقارير المبيعات والمشتريات حسب الفترة التي تختارها.</p></div></div><section class="panel"><form id="analytics-filter" class="date-filter-bar"><label>من تاريخ<input name="from" type="date" value="${from}" required></label><label>إلى تاريخ<input name="to" type="date" value="${to}" required></label><button class="button button-primary" type="submit">عرض التقارير</button></form></section>${!stats || !vendors ? '<section class="panel"><div class="empty-row">جاري تحميل التقارير...</div></section>' : `<div class="metric-grid product-stat-metrics"><article class="metric-card"><div class="metric-head"><span>الأكثر مبيعًا بالكمية</span><span class="metric-icon metric-purple">${icon('box', 19)}</span></div><strong>${stats.topByUnits ? escapeHtml(stats.topByUnits.name) : '—'}</strong><div class="metric-foot"><span class="metric-muted">${stats.topByUnits ? `${stats.topByUnits.unitsSold} قطعة صافي` : 'لا توجد مبيعات في الفترة'}</span></div></article><article class="metric-card"><div class="metric-head"><span>أعلى منتج في الإيراد</span><span class="metric-icon metric-green">${icon('chart', 19)}</span></div><strong>${stats.topByRevenue ? money(stats.topByRevenue.netRevenue) : '—'}</strong><div class="metric-foot"><span class="metric-muted">${stats.topByRevenue ? escapeHtml(stats.topByRevenue.name) : 'لا توجد مبيعات في الفترة'}</span></div></article>${state.data.capabilities.canViewAccounting ? `<article class="metric-card"><div class="metric-head"><span>أكثر تاجر شراءً</span><span class="metric-icon metric-purple">${icon('users', 19)}</span></div><strong>${vendors.topBySpend ? escapeHtml(vendors.topBySpend.name) : '—'}</strong><div class="metric-foot"><span class="metric-muted">${vendors.topBySpend ? money(vendors.topBySpend.totalAmount) : 'لا توجد مشتريات في الفترة'}</span></div></article><article class="metric-card"><div class="metric-head"><span>أكثر تاجر فواتير</span><span class="metric-icon metric-green">${icon('bag', 19)}</span></div><strong>${vendors.topByInvoices ? escapeHtml(vendors.topByInvoices.name) : '—'}</strong><div class="metric-foot"><span class="metric-muted">${vendors.topByInvoices ? `${vendors.topByInvoices.invoiceCount} فاتورة` : 'لا توجد مشتريات في الفترة'}</span></div></article>` : ''}</div><details class="panel compact-disclosure" open><summary><span>المنتجات الأكثر مبيعًا</span><span>${products.length} منتجات</span></summary><div class="disclosure-content">${products.length ? `<div class="table-scroll"><table><thead><tr><th>الترتيب</th><th>المنتج</th><th>القطع المباعة</th><th>الفواتير</th><th>صافي الإيراد</th></tr></thead><tbody>${products.map((product, index) => `<tr><td><span class="product-rank ${index === 0 ? 'product-rank-first' : ''}">${index + 1}</span></td><td><strong>${escapeHtml(product.name)}</strong></td><td><div class="product-units-cell"><strong>${product.unitsSold}</strong><span class="product-units-track"><i style="width:${Math.max(4, Number(BigInt(product.unitsSold) * 100n / maxUnits))}%"></i></span></div></td><td>${product.orderCount}</td><td class="table-total">${money(product.netRevenue)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">لا توجد مبيعات في الفترة المحددة.</div>'}</div></details>${state.data.capabilities.canViewAccounting ? `<details class="panel compact-disclosure"><summary><span>المشتريات حسب التاجر</span><span>${vendors.suppliers.length} تجار</span></summary><div class="disclosure-content">${vendors.suppliers.length ? `<div class="table-scroll"><table><thead><tr><th>الترتيب</th><th>التاجر</th><th>عدد الفواتير</th><th>إجمالي الشراء</th></tr></thead><tbody>${vendors.suppliers.map((supplier, index) => `<tr><td>${index + 1}</td><td><strong>${escapeHtml(supplier.name)}</strong></td><td>${supplier.invoiceCount}</td><td class="table-total">${money(supplier.totalAmount)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">لا توجد مشتريات في الفترة المحددة.</div>'}</div></details>` : ''}<button class="button button-secondary" data-page="reports">عرض الأرباح والخسائر</button>`}`;
+  const mostPurchased = stats?.mostPurchasedProducts ?? [];
+  const topSizes = stats?.topSizes ?? [];
+  const topColors = stats?.topColors ?? [];
+  const topVariants = stats?.topVariants ?? [];
+  const maxUnitsSold = products.reduce((max, p) => BigInt(p.unitsSold) > max ? BigInt(p.unitsSold) : max, 1n);
+  const maxUnitsPurchased = mostPurchased.reduce((max, p) => BigInt(p.unitsOrdered) > max ? BigInt(p.unitsOrdered) : max, 1n);
+  const maxSizeUnits = topSizes.reduce((max, s) => BigInt(s.unitsSold) > max ? BigInt(s.unitsSold) : max, 1n);
+  const maxColorUnits = topColors.reduce((max, c) => BigInt(c.unitsSold) > max ? BigInt(c.unitsSold) : max, 1n);
+
+  const catalogProducts = state.data.products.filter((p) => p.itemKind === 'PRODUCT' && p.isActive);
+  const soldProductIds = new Set(products.filter((p) => BigInt(p.unitsSold) > 0n).map((p) => p.productId));
+  const dormantProducts = catalogProducts.filter((p) => !soldProductIds.has(p.id));
+  let totalStockUnits = 0n;
+  let totalStockCostMinor = 0n;
+  let totalStockRetailMinor = 0n;
+  for (const p of catalogProducts) {
+    for (const v of p.variants.filter((item) => item.isActive)) {
+      const q = BigInt(v.quantity);
+      if (q > 0n) {
+        totalStockUnits += q;
+        if (v.wac) totalStockCostMinor += q * BigInt(v.wac.amount);
+        totalStockRetailMinor += q * BigInt(v.price.amount);
+      }
+    }
+  }
+  const expectedStockProfitMinor = totalStockRetailMinor > totalStockCostMinor ? totalStockRetailMinor - totalStockCostMinor : 0n;
+
+  const mostPurchasedBlock = `
+    <section class="panel compact-panel">
+      <div class="panel-heading"><div><h3>أكثر الموديلات والمنتجات التي طلبناها من التجار وجاءت</h3><p>إحصائية البضاعة الواردة حسب عدد القطع المطلوبة وصافي المستلم والتكلفة</p></div><span class="status-pill status-complete">${mostPurchased.length} موديل وارد</span></div>
+      ${mostPurchased.length ? `<div class="table-scroll"><table class="compact-table"><thead><tr><th>#</th><th>الموديل / المنتج</th><th>كود الموديل</th><th>الكمية المطلوبة</th><th>مرتجع للتاجر</th><th>صافي الوارد للمخزن</th><th>عدد الفواتير</th><th>متوسط تكلفة القطعة</th><th>إجمالي تكلفة الشراء</th></tr></thead><tbody>${mostPurchased.map((item, idx) => `<tr><td><span class="product-rank ${idx === 0 ? 'product-rank-first' : ''}">${idx + 1}</span></td><td><strong>${escapeHtml(item.name)}</strong></td><td><span class="sku-code">${escapeHtml(item.sku || '—')}</span></td><td><div class="product-units-cell"><strong>${item.unitsOrdered} قطعة</strong><span class="product-units-track"><i style="width:${Math.max(5, Number((BigInt(item.unitsOrdered) * 100n) / maxUnitsPurchased))}%"></i></span></div></td><td>${item.returnedUnits}</td><td><strong>${item.netUnitsReceived}</strong> قطعة</td><td>${item.invoiceCount} فاتورة</td><td>${money(item.avgUnitCost)}</td><td class="table-total">${money(item.totalCost)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">لا توجد فواتير مشتريات مسجلة في هذه الفترة.</div>'}
+    </section>`;
+
+  const topSellingBlock = `
+    <section class="panel compact-panel">
+      <div class="panel-heading"><div><h3>الموديلات والمنتجات الأكثر مبيعًا وربحية</h3><p>ترتيب الموديلات حسب الكمية المباعة وصافي الإيراد ومجمل الربح ونسبة الهامش</p></div><span class="status-pill status-complete">${products.length} موديل مباع</span></div>
+      ${products.length ? `<div class="table-scroll"><table class="compact-table"><thead><tr><th>#</th><th>الموديل</th><th>الكود</th><th>صافي المباع</th><th>الفواتير</th><th>صافي الإيراد</th><th>تكلفة المباع</th><th>مجمل الربح</th><th>الهامش</th></tr></thead><tbody>${products.map((product, index) => `<tr><td><span class="product-rank ${index === 0 ? 'product-rank-first' : ''}">${index + 1}</span></td><td><strong>${escapeHtml(product.name)}</strong></td><td><span class="sku-code">${escapeHtml(product.sku || '—')}</span></td><td><div class="product-units-cell"><strong>${product.unitsSold}</strong><span class="product-units-track"><i style="width:${Math.max(5, Number((BigInt(product.unitsSold) * 100n) / maxUnitsSold))}%"></i></span></div></td><td>${product.orderCount}</td><td class="table-total">${money(product.netRevenue)}</td><td>${product.cogs ? money(product.cogs) : '—'}</td><td class="table-total">${product.grossProfit ? money(product.grossProfit) : '—'}</td><td><span class="kpi-tag ${Number(product.marginPercent ?? 0) >= 25 ? 'kpi-tag-green' : 'kpi-tag-indigo'}">${escapeHtml(product.marginPercent ?? '0.0')}%</span></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">لا توجد مبيعات في الفترة المحددة.</div>'}
+    </section>`;
+
+  const sizesColorsBlock = `
+    <div class="analytics-two-col">
+      <section class="panel compact-panel">
+        <div class="panel-heading"><div><h3>أكثر المقاسات طلبًا ومبيعًا</h3><p>اعرف المقاسات السريعة اللي بتخلص أول بأول عند الطلب من التاجر</p></div></div>
+        ${topSizes.length ? `<div class="stat-bars-stack">${topSizes.map((item) => `<div class="stat-bar-row"><div class="stat-bar-label"><span>مقاس <strong>${escapeHtml(item.size)}</strong></span><strong>${item.unitsSold} قطعة</strong></div><div class="stat-bar-track"><i class="bar-fill-indigo" style="width:${Math.max(6, Number((BigInt(item.unitsSold) * 100n) / maxSizeUnits))}%"></i></div></div>`).join('')}</div>` : '<div class="empty-row">تظهر إحصائيات المقاسات فور بيع موديلات بمقاسات.</div>'}
+      </section>
+      <section class="panel compact-panel">
+        <div class="panel-heading"><div><h3>أكثر الألوان طلبًا ومبيعًا</h3><p>الألوان الأكثر حركة وإقبالًا من العملاء</p></div></div>
+        ${topColors.length ? `<div class="stat-bars-stack">${topColors.map((item) => `<div class="stat-bar-row"><div class="stat-bar-label"><span>لون <strong>${escapeHtml(item.color)}</strong></span><strong>${item.unitsSold} قطعة</strong></div><div class="stat-bar-track"><i class="bar-fill-teal" style="width:${Math.max(6, Number((BigInt(item.unitsSold) * 100n) / maxColorUnits))}%"></i></div></div>`).join('')}</div>` : '<div class="empty-row">تظهر إحصائيات الألوان فور بيع موديلات بألوان.</div>'}
+      </section>
+    </div>
+    ${topVariants.length ? `<section class="panel compact-panel"><div class="panel-heading"><div><h3>أعلى الفروع (لون × مقاس) مبيعًا</h3><p>أكثر التركيبات الفرعية حركة بالقطعة والإيراد</p></div></div><div class="table-scroll"><table class="compact-table"><thead><tr><th>#</th><th>الموديل</th><th>اللون والمقاس</th><th>كود الفرع (SKU)</th><th>الكمية المباعة</th><th>صافي الإيراد</th></tr></thead><tbody>${topVariants.slice(0, 12).map((v, idx) => `<tr><td>${idx + 1}</td><td><strong>${escapeHtml(v.productName)}</strong></td><td><span class="model-chip model-chip-size">${escapeHtml(v.label)}</span></td><td><span class="sku-code">${escapeHtml(v.sku)}</span></td><td><strong>${v.unitsSold}</strong> قطعة</td><td class="table-total">${money(v.netRevenue)}</td></tr>`).join('')}</tbody></table></div></section>` : ''}`;
+
+  const suppliersBlock = state.data.capabilities.canViewAccounting ? `
+    <section class="panel compact-panel">
+      <div class="panel-heading"><div><h3>إحصائيات التجار والموردين والمسحوبات</h3><p>إجمالي الطلبات وعدد القطع والمسدد والمتبقي لكل تاجر في الفترة</p></div><span class="status-pill status-complete">${vendors?.suppliers?.length ?? 0} تاجر</span></div>
+      ${vendors?.suppliers?.length ? `<div class="table-scroll"><table class="compact-table"><thead><tr><th>#</th><th>اسم التاجر</th><th>عدد الفواتير</th><th>إجمالي القطع المطلوبة</th><th>إجمالي المشتريات</th><th>المدفوع</th><th>المرتجعات</th><th>المتبقي للتاجر</th></tr></thead><tbody>${vendors.suppliers.map((s, idx) => `<tr><td>${idx + 1}</td><td><strong>${escapeHtml(s.name)}</strong></td><td>${s.invoiceCount} فاتورة</td><td><strong>${s.unitsOrdered ?? '—'}</strong> قطعة</td><td class="table-total">${money(s.totalAmount)}</td><td>${s.paidAmount ? money(s.paidAmount) : '—'}</td><td>${s.returnedCredit ? money(s.returnedCredit) : '—'}</td><td>${s.balanceDue && BigInt(s.balanceDue.amount) > 0n ? `<span class="status-pill status-low">${money(s.balanceDue)}</span>` : '<span class="status-pill status-complete">مسدد</span>'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">لا توجد مشتريات مسجلة من التجار في هذه الفترة.</div>'}
+    </section>` : '';
+
+  const inventoryHealthBlock = `
+    <section class="panel compact-panel">
+      <div class="panel-heading"><div><h3>تقييم المخزون الحالي والأصناف الراكدة</h3><p>القيمة المالية للبضاعة الموجودة على الرف والربح المتوقع منها + الموديلات التي لم تتحرك</p></div></div>
+      <div class="compact-kpi-grid">
+        <article class="compact-kpi-card"><small>إجمالي القطع بالمخزن الآن</small><strong class="compact-kpi-value">${totalStockUnits} قطعة</strong><small>موزعة على ${catalogProducts.length} موديل أساسي</small></article>
+        <article class="compact-kpi-card"><small>تكلفة البضاعة الموجودة بالمخزن</small><strong class="compact-kpi-value">${money({ amount: totalStockCostMinor.toString(), currency, decimals })}</strong><small>بسعر الشراء المرجح (WAC)</small></article>
+        <article class="compact-kpi-card"><small>القيمة البيعية للبضاعة بالمخزن</small><strong class="compact-kpi-value">${money({ amount: totalStockRetailMinor.toString(), currency, decimals })}</strong><small>ربح متوقع عند البيع: ${money({ amount: expectedStockProfitMinor.toString(), currency, decimals })}</small></article>
+        <article class="compact-kpi-card"><small>موديلات راكدة (لم تُباع في الفترة)</small><strong class="compact-kpi-value">${dormantProducts.length} موديل</strong><small>موديلات بها نواقص: ${state.data.lowStock.length}</small></article>
+      </div>
+      ${dormantProducts.length ? `<div class="table-scroll"><table class="compact-table"><thead><tr><th>الموديل الراكد في الفترة</th><th>كود الموديل</th><th>الرصيد الحالي بالمخزن</th><th>عدد المقاسات/الألوان</th></tr></thead><tbody>${dormantProducts.slice(0, 10).map((p) => { const activeVars = p.variants.filter((v) => v.isActive); const stock = activeVars.reduce((s, v) => s + BigInt(v.quantity), 0n); return `<tr><td><strong>${escapeHtml(p.name)}</strong></td><td><span class="sku-code">${escapeHtml(p.sku)}</span></td><td><strong>${stock}</strong> قطعة</td><td>${activeVars.length} فرع</td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty-row">كل الموديلات المسجلة تحركت وحققت مبيعات في هذه الفترة!</div>'}
+    </section>`;
+
+  const selectedContent = section === 'most_purchased' ? mostPurchasedBlock
+    : section === 'top_selling' ? topSellingBlock
+    : section === 'sizes_colors' ? sizesColorsBlock
+    : section === 'suppliers' ? suppliersBlock
+    : section === 'inventory_health' ? inventoryHealthBlock
+    : `${mostPurchasedBlock}${topSellingBlock}${sizesColorsBlock}${suppliersBlock}${inventoryHealthBlock}`;
+
+  return `<div class="page-heading-row"><div><p class="page-lead">مركز الإحصائيات والتقارير الذكية: اختر نوع الإحصائية من القائمة المنسدلة أو الفلاتر السريعة بالأسفل.</p></div><button class="button button-secondary button-sm" data-page="reports">فتح الأرباح والخسائر ←</button></div>
+    <section class="panel compact-filter-panel">
+      <form id="analytics-filter" class="smart-filter-bar">
+        <label class="smart-dropdown-label"><span>نوع الإحصائية</span><select id="analytics-section-select" class="smart-section-select">${analyticsSections.map(([id, label]) => `<option value="${id}" ${section === id ? 'selected' : ''}>📈 ${label}</option>`).join('')}</select></label>
+        <label><span>من تاريخ</span><input name="from" id="analytics-from" type="date" value="${from}" required></label>
+        <label><span>إلى تاريخ</span><input name="to" id="analytics-to" type="date" value="${to}" required></label>
+        <button class="button button-primary" type="submit">تطبيق</button>
+      </form>
+      <div class="smart-pills-bar">
+        <div class="section-pills">${analyticsSections.map(([id, label]) => `<button type="button" class="section-pill ${section === id ? 'active' : ''}" data-analytics-section="${id}">${label.split(' (')[0]}</button>`).join('')}</div>
+        <div class="quick-date-pills">
+          <button type="button" class="date-preset-chip" data-analytics-range="7d">7 أيام</button>
+          <button type="button" class="date-preset-chip" data-analytics-range="30d">30 يوم</button>
+          <button type="button" class="date-preset-chip" data-analytics-range="month">هذا الشهر</button>
+          <button type="button" class="date-preset-chip" data-analytics-range="year">السنة</button>
+        </div>
+      </div>
+    </section>
+    ${!stats || !vendors ? '<section class="panel"><div class="empty-row">جاري تحميل الإحصائيات...</div></section>' : `
+      <div class="compact-kpi-grid">
+        <article class="compact-kpi-card"><div class="compact-kpi-top"><span>أكثر موديل طلبناه من التجار</span><span class="kpi-tag kpi-tag-teal">الوارد</span></div><strong class="compact-kpi-value">${stats.topPurchasedByUnits ? escapeHtml(stats.topPurchasedByUnits.name) : '—'}</strong><small>${stats.topPurchasedByUnits ? `طلبنا ${stats.topPurchasedByUnits.unitsOrdered} قطعة (صافي ${stats.topPurchasedByUnits.netUnitsReceived})` : 'لا توجد مشتريات في الفترة'}</small></article>
+        <article class="compact-kpi-card"><div class="compact-kpi-top"><span>الأكثر مبيعًا للعملاء</span><span class="kpi-tag kpi-tag-indigo">المبيعات</span></div><strong class="compact-kpi-value">${stats.topByUnits ? escapeHtml(stats.topByUnits.name) : '—'}</strong><small>${stats.topByUnits ? `${stats.topByUnits.unitsSold} قطعة مباعة · ${money(stats.topByUnits.netRevenue)}` : 'لا توجد مبيعات في الفترة'}</small></article>
+        <article class="compact-kpi-card"><div class="compact-kpi-top"><span>الأعلى ربحية (مجمل ربح)</span><span class="kpi-tag kpi-tag-green">الربح</span></div><strong class="compact-kpi-value">${stats.topByProfit ? escapeHtml(stats.topByProfit.name) : (stats.topByRevenue ? escapeHtml(stats.topByRevenue.name) : '—')}</strong><small>${stats.topByProfit ? `ربح ${money(stats.topByProfit.grossProfit)} (هامش ${stats.topByProfit.marginPercent}%)` : '—'}</small></article>
+        <article class="compact-kpi-card"><div class="compact-kpi-top"><span>أكثر مقاس ولون مطلوبين</span><span class="kpi-tag kpi-tag-amber">المقاسات</span></div><strong class="compact-kpi-value">${topSizes[0] ? `مقاس ${escapeHtml(topSizes[0].size)}` : '—'} ${topColors[0] ? `· ${escapeHtml(topColors[0].color)}` : ''}</strong><small>${topSizes[0] ? `${topSizes[0].unitsSold} قطعة لأعلى مقاس` : 'بيانات المقاسات والألوان'}</small></article>
+      </div>
+      ${selectedContent}
+    `}`;
 }
 function expensesView() {
   const expenses = state.data.expenses;
@@ -541,17 +870,17 @@ function monthlyExpensesView() {
 
 function posView() {
   const query = state.query.trim().toLowerCase();
-  const products = state.data.products.filter((product) => product.isActive).map((product) => ({ ...product, variants: product.variants.filter((variant) => variant.isActive) })).filter((product) => product.variants.length && (!query || `${product.name} ${product.sku} ${product.variants.map((variant) => `${variant.sku} ${variant.barcode ?? ''} ${Object.values(variant.attributes ?? {}).join(' ')}`).join(' ')}`.toLowerCase().includes(query)));
+  const products = state.data.products.filter((product) => product.isActive).map((product) => ({ ...product, matrix: extractProductMatrix(product), variants: product.variants.filter((variant) => variant.isActive) })).filter((product) => product.variants.length && (!query || `${product.name} ${product.sku} ${product.brand ?? ''} ${product.variants.map((variant) => `${variant.sku} ${variant.barcode ?? ''} ${Object.values(variant.attributes ?? {}).join(' ')}`).join(' ')}`.toLowerCase().includes(query)));
   const totalMinor = state.cart.reduce((sum, item) => sum + BigInt(item.price.amount) * BigInt(item.quantity), 0n);
   const currency = state.data.company.currency;
   const decimals = state.cart[0]?.price.decimals ?? currencyDecimals(currency);
   const total = { amount: totalMinor.toString(), currency, decimals };
-  return `<div class="pos-layout"><section class="pos-catalog"><div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>ابحث عن المنتج ثم اختر التركيبة المطلوبة.</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="ابحث بالاسم أو SKU أو الباركود" value="${escapeHtml(state.query)}" autofocus><kbd>Enter</kbd></label><div class="pos-category-row"><button class="category-chip active">كل المنتجات <span>${products.length}</span></button>${state.data.categories.slice(0, 5).map((category) => `<button class="category-chip">${escapeHtml(category.name)}</button>`).join('')}</div><div class="pos-products">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const allSamePrice = new Set(product.variants.map((variant) => variant.price.amount)).size === 1; const price = allSamePrice ? money(product.variants[0].price) : 'أسعار متعددة'; const label = `${product.name} · ${product.variants.length} تركيبة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${product.itemKind === 'PRODUCT' && stock <= 0n ? 'disabled' : ''}><span class="pos-product-art art-${index % 6}">${icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(label)}</strong><small>${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${price}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${state.cart.length ? state.cart.map((item) => `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art">${icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button data-qty="${item.variantId}" data-delta="-1">−</button><span>${item.quantity}</span><button data-qty="${item.variantId}" data-delta="1">+</button></div><strong>${money({ ...item.price, amount: (BigInt(item.price.amount) * BigInt(item.quantity)).toString() })}</strong></div></div>`).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة أو امسح الباركود عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong>${state.cart.reduce((sum, item) => sum + item.quantity, 0)}</strong></div><div><span>الخصم</span><strong>${money({ ...total, amount: '0' })}</strong></div><div class="cart-grand-total"><span>الإجمالي المستحق</span><strong>${money(total)}</strong></div></div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}"><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button" ${state.cart.length && !state.isSaving ? '' : 'disabled'}><span>إتمام البيع</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div><div id="modal-root"></div></div>`;
+  return `<div class="pos-layout"><section class="pos-catalog"><div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="ابحث باسم الموديل أو كود الموديل أو الباركود" value="${escapeHtml(state.query)}" autofocus><kbd>Enter</kbd></label><div class="pos-category-row"><button class="category-chip active">كل الموديلات <span>${products.length}</span></button>${state.data.categories.slice(0, 5).map((category) => `<button class="category-chip">${escapeHtml(category.name)}</button>`).join('')}</div><div class="pos-products">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const allSamePrice = new Set(product.variants.map((variant) => variant.price.amount)).size === 1; const price = allSamePrice ? money(product.variants[0].price) : 'أسعار متعددة'; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${product.itemKind === 'PRODUCT' && stock <= 0n ? 'disabled' : ''}><span class="pos-product-art art-${index % 6}">${icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${price}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${state.cart.length ? state.cart.map((item) => `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art">${icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button data-qty="${item.variantId}" data-delta="-1">−</button><span>${item.quantity}</span><button data-qty="${item.variantId}" data-delta="1">+</button></div><strong>${money({ ...item.price, amount: (BigInt(item.price.amount) * BigInt(item.quantity)).toString() })}</strong></div></div>`).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة أو امسح الباركود عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong>${state.cart.reduce((sum, item) => sum + item.quantity, 0)}</strong></div><div><span>الخصم</span><strong>${money({ ...total, amount: '0' })}</strong></div><div class="cart-grand-total"><span>الإجمالي المستحق</span><strong>${money(total)}</strong></div></div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}"><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button" ${state.cart.length && !state.isSaving ? '' : 'disabled'}><span>إتمام البيع</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div><div id="modal-root"></div></div>`;
 }
 
 function supplierModal(html, formId, endpoint, convert = (data) => data, successMessage = 'تم حفظ الحركة في سجل التاجر') {
   const root = document.querySelector('#modal-root');
-  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card" role="dialog" aria-modal="true"><div class="modal-heading"><h2>${formId === 'supplier-form' ? 'إضافة تاجر' : formId === 'purchase-form' ? 'تسجيل فاتورة شراء' : formId === 'expense-form' ? 'تسجيل مصروف' : formId === 'return-form' ? 'تسجيل مرتجع مرتبط بالفاتورة' : formId === 'supplier-return-form' ? '\u062a\u0633\u062c\u064a\u0644 \u0645\u0631\u062a\u062c\u0639 \u0644\u0644\u0645\u0648\u0631\u062f' : formId === 'monthly-obligation-form' ? 'إضافة التزام شهري' : formId === 'monthly-actual-form' ? 'تأكيد المصروف الفعلي' : 'تسجيل سداد'}</h2><button class="modal-close" data-close-modal>×</button></div><form id="${formId}" class="form-stack modal-form">${html}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">حفظ</button></div></form></section></div>`;
+  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card ${formId === 'purchase-form' ? 'product-variants-modal' : ''}" role="dialog" aria-modal="true"><div class="modal-heading"><h2>${formId === 'supplier-form' ? 'إضافة تاجر' : formId === 'purchase-form' ? 'تسجيل فاتورة شراء من تاجر (نظام الموديل والألوان والمقاسات)' : formId === 'expense-form' ? 'تسجيل مصروف' : formId === 'return-form' ? 'تسجيل مرتجع مرتبط بالفاتورة' : formId === 'supplier-return-form' ? '\u062a\u0633\u062c\u064a\u0644 \u0645\u0631\u062a\u062c\u0639 \u0644\u0644\u0645\u0648\u0631\u062f' : formId === 'monthly-obligation-form' ? 'إضافة التزام شهري' : formId === 'monthly-actual-form' ? 'تأكيد المصروف الفعلي' : 'تسجيل سداد'}</h2><button class="modal-close" data-close-modal>×</button></div><form id="${formId}" class="form-stack modal-form">${html}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">حفظ</button></div></form></section></div>`;
   root.querySelectorAll('[data-close-modal]').forEach((button) => button.addEventListener('click', () => { root.innerHTML = ''; }));
   root.querySelector(`#${formId}`).addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -580,8 +909,8 @@ function bindSuppliers() {
     if (!products.length) { toast('أضف المنتجات قبل تسجيل فاتورة شراء', 'error'); return; }
     let groupIndex = 0;
     const selections = new Map();
-    const groupMarkup = (index) => `<section class="purchase-product-group" data-purchase-group="${index}"><div class="form-grid"><label>المنتج الأساسي<select name="purchaseProduct_${index}">${products.map((product) => `<option value="${product.id}">${escapeHtml(product.name)}</option>`).join('')}</select></label><label>تكلفة الوحدة (${state.data.company.currency})<input name="purchaseCost_${index}" inputmode="decimal" required></label><button type="button" class="text-action remove-purchase-group">إزالة المنتج</button></div><div class="purchase-variant-grid"></div></section>`;
-    supplierModal(`<label>التاجر<select name="supplierId">${state.data.suppliers.map((supplier) => `<option value="${supplier.id}" ${supplier.id === supplierId ? 'selected' : ''}>${escapeHtml(supplier.name)}</option>`).join('')}</select></label><label>رقم فاتورة التاجر (اختياري)<input name="invoiceNumber" maxlength="80" placeholder="يُنشأ رقم تلقائي إذا تُرك فارغًا"></label><div id="purchase-lines">${groupMarkup(groupIndex)}</div><button id="add-purchase-product" type="button" class="button button-secondary">إضافة منتج للفاتورة</button><p class="variant-options-note">اختار المنتج الأساسي واكتب كمية كل مقاس أو لون في الجدول. تكلفة الوحدة تُطبق على تركيبات المنتج المحدد.</p><div class="form-grid"><label>إجمالي الفاتورة (${state.data.company.currency}) — محسوب من الأصناف<input name="totalAmount" inputmode="decimal" required readonly></label><label>المدفوع الآن<input name="paidAmount" inputmode="decimal" value="0" required></label></div><label>طريقة السداد الأولي<select name="paymentMethod"><option value="CASH">نقدي</option><option value="BANK_TRANSFER">تحويل بنكي</option><option value="CARD">بطاقة</option><option value="MOBILE">محفظة</option></select></label><label>مرجع السداد<input name="referenceNumber" maxlength="80"></label><label>ملاحظات<input name="notes" maxlength="500"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'purchase-form', '/api/purchases', (data) => {
+    const groupMarkup = (index) => `<section class="purchase-product-group" data-purchase-group="${index}"><div class="form-grid"><label>الموديل / المنتج الأساسي<select name="purchaseProduct_${index}">${products.map((product) => `<option value="${product.id}">${escapeHtml(product.name)} (${escapeHtml(product.sku)})</option>`).join('')}</select></label><label>تكلفة القطعة من الموديل (${state.data.company.currency})<input name="purchaseCost_${index}" inputmode="decimal" required placeholder="مثال: 450"></label><button type="button" class="text-action remove-purchase-group">إزالة الموديل</button></div><div class="purchase-variant-grid"></div></section>`;
+    supplierModal(`<label>التاجر<select name="supplierId">${state.data.suppliers.map((supplier) => `<option value="${supplier.id}" ${supplier.id === supplierId ? 'selected' : ''}>${escapeHtml(supplier.name)}</option>`).join('')}</select></label><label>رقم فاتورة التاجر (اختياري)<input name="invoiceNumber" maxlength="80" placeholder="يُنشأ رقم تلقائي إذا تُرك فارغًا"></label><div id="purchase-lines">${groupMarkup(groupIndex)}</div><button id="add-purchase-product" type="button" class="button button-secondary">+ إضافة موديل آخر لنفس الفاتورة</button><p class="variant-options-note">اختار الموديل الأساسي (مثل: كوتشي ميلانو) واكتب الكميات مباشرة في جدول الألوان × المقاسات أو اضغط (+1 سيريه كامل).</p><div class="form-grid"><label>إجمالي الفاتورة (${state.data.company.currency}) — محسوب تلقائيًا<input name="totalAmount" inputmode="decimal" required readonly></label><label>المدفوع الآن<input name="paidAmount" inputmode="decimal" value="0" required></label></div><label>طريقة السداد الأولي<select name="paymentMethod"><option value="CASH">نقدي</option><option value="BANK_TRANSFER">تحويل بنكي</option><option value="CARD">بطاقة</option><option value="MOBILE">محفظة</option></select></label><label>مرجع السداد<input name="referenceNumber" maxlength="80"></label><label>ملاحظات<input name="notes" maxlength="500"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'purchase-form', '/api/purchases', (data) => {
       const items = [];
       for (const [key, quantity] of Object.entries(data)) {
         if (!key.startsWith('purchaseQty_') || Number(quantity) <= 0) continue;
@@ -612,7 +941,44 @@ function bindSuppliers() {
       const groupSelection = selections.get(index) ?? new Map();
       selections.set(index, groupSelection);
       section.querySelector(`[name="purchaseCost_${index}"]`).required = groupSelection.size > 0;
-      const variants = product.variants.filter((variant) => variant.isActive);
+      const matrix = extractProductMatrix(product);
+      const variants = matrix.activeVariants;
+      if (matrix.isMatrix && matrix.colors.length >= 1 && matrix.sizes.length >= 1 && (matrix.rawColors.length > 0 || matrix.rawSizes.length > 0)) {
+        section.querySelector('.purchase-variant-grid').innerHTML = `
+          <div class="matrix-quick-toolbar">
+            <span><strong>مصفوفة استلام الموديل (${escapeHtml(product.sku)})</strong> — ${matrix.colors.length} لون × ${matrix.sizes.length} مقاس</span>
+            <div class="matrix-quick-actions">
+              <button type="button" class="date-preset-chip" data-fill-serie="1">+1 سيريه كامل</button>
+              <button type="button" class="date-preset-chip" data-fill-serie="2">+2 سيريه</button>
+              <button type="button" class="date-preset-chip" data-clear-serie>تصفير الجدول</button>
+            </div>
+          </div>
+          <div class="table-scroll">
+            <table class="variant-matrix-table purchase-2d-matrix">
+              <thead>
+                <tr>
+                  <th>اللون \\ المقاس</th>
+                  ${matrix.sizes.map((size) => `<th>مقاس ${escapeHtml(size)}</th>`).join('')}
+                  <th>سيريه للون</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${matrix.colors.map((color) => `<tr data-color-row="${escapeHtml(color)}">
+                  <td><strong>${escapeHtml(color)}</strong></td>
+                  ${matrix.sizes.map((size) => {
+                    const variant = matrix.matrixMap.get(`${color}:::${size}`);
+                    if (!variant) return '<td class="matrix-empty-cell">—</td>';
+                    const quantity = groupSelection.get(variant.id) ?? 0;
+                    const label = `${color} · ${size}`;
+                    return `<td class="purchase-matrix-cell ${quantity ? 'selected' : ''}"><input type="number" min="0" step="1" data-purchase-quantity="${variant.id}" name="purchaseQty_${index}_${variant.id}" value="${quantity}" aria-label="كمية ${escapeHtml(label)}"><small>بالمخزن: ${variant.quantity}</small></td>`;
+                  }).join('')}
+                  <td><button type="button" class="text-action" data-fill-color-row="${escapeHtml(color)}">+1 سيريه</button></td>
+                </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>`;
+        return;
+      }
       section.querySelector('.purchase-variant-grid').innerHTML = `<div class="table-scroll"><table class="variant-matrix-table purchase-variant-table"><thead><tr><th>اللون والمقاس</th><th>SKU</th><th>الرصيد الحالي</th><th>الكمية في الفاتورة</th></tr></thead><tbody>${variants.map((variant) => {
         const quantity = groupSelection.get(variant.id) ?? 0;
         const label = Object.entries(variant.attributes ?? {}).map(([key, value]) => `${product.options?.find((option) => option.key === key)?.name ?? key}: ${value}`).join(' · ') || 'النسخة الأساسية';
@@ -632,7 +998,8 @@ function bindSuppliers() {
         const groupSelection = selections.get(index) ?? new Map();
         if (quantity) groupSelection.set(variantId, quantity); else groupSelection.delete(variantId);
         selections.set(index, groupSelection);
-        quantityInput.closest('tr').classList.toggle('selected', quantity > 0);
+        quantityInput.closest('.purchase-matrix-cell, tr')?.classList.toggle('selected', quantity > 0);
+        section.querySelector(`[name="purchaseCost_${index}"]`).required = groupSelection.size > 0;
         updatePurchaseTotal();
       }
     });
@@ -651,6 +1018,45 @@ function bindSuppliers() {
       if (!section) return;
       const index = section.dataset.purchaseGroup;
       if (event.target.closest('.remove-purchase-group')) { if (root.querySelectorAll('[data-purchase-group]').length > 1) { selections.delete(index); section.remove(); updatePurchaseTotal(); } return; }
+      const fillSerieBtn = event.target.closest('[data-fill-serie]');
+      if (fillSerieBtn) {
+        const delta = Number(fillSerieBtn.dataset.fillSerie) || 1;
+        const groupSelection = selections.get(index) ?? new Map();
+        section.querySelectorAll('[data-purchase-quantity]').forEach((input) => {
+          const next = Math.max(0, (Number(input.value) || 0) + delta);
+          input.value = String(next);
+          if (next > 0) groupSelection.set(input.dataset.purchaseQuantity, next);
+          input.closest('.purchase-matrix-cell, tr')?.classList.toggle('selected', next > 0);
+        });
+        selections.set(index, groupSelection);
+        section.querySelector(`[name="purchaseCost_${index}"]`).required = groupSelection.size > 0;
+        updatePurchaseTotal();
+        return;
+      }
+      if (event.target.closest('[data-clear-serie]')) {
+        selections.set(index, new Map());
+        section.querySelectorAll('[data-purchase-quantity]').forEach((input) => {
+          input.value = '0';
+          input.closest('.purchase-matrix-cell, tr')?.classList.remove('selected');
+        });
+        section.querySelector(`[name="purchaseCost_${index}"]`).required = false;
+        updatePurchaseTotal();
+        return;
+      }
+      const colorRowBtn = event.target.closest('[data-fill-color-row]');
+      if (colorRowBtn) {
+        const row = colorRowBtn.closest('tr');
+        const groupSelection = selections.get(index) ?? new Map();
+        row?.querySelectorAll('[data-purchase-quantity]').forEach((input) => {
+          const next = Math.max(0, (Number(input.value) || 0) + 1);
+          input.value = String(next);
+          groupSelection.set(input.dataset.purchaseQuantity, next);
+          input.closest('.purchase-matrix-cell, tr')?.classList.add('selected');
+        });
+        selections.set(index, groupSelection);
+        section.querySelector(`[name="purchaseCost_${index}"]`).required = groupSelection.size > 0;
+        updatePurchaseTotal();
+      }
     });
   };
   document.querySelector('#new-purchase')?.addEventListener('click', () => purchase());
@@ -755,6 +1161,7 @@ function currencyDecimals(currency) {
 
 function bindShell() {
   document.querySelectorAll('[data-page]').forEach((button) => button.addEventListener('click', async () => {
+    closeAccountMenu();
     state.page = button.dataset.page;
     state.query = '';
     render();
@@ -833,12 +1240,41 @@ function bindShell() {
 
 function bindAuditLogs() { const key = `${state.data.selectedStoreId}:audit`; if (state.auditLogsKey === key && state.auditLogs) return; state.auditLogsKey = key; void api(`/api/audit-logs?storeId=${encodeURIComponent(state.data.selectedStoreId)}&limit=100`).then((result) => { state.auditLogs = result.entries; state.auditChainVerification = result.chainVerification; render(); }).catch((error) => { state.auditLogsKey = null; toast(error.message, 'error'); }); }
 async function showThermalReceiptModal(saleId) { try { const { receipt } = await api(`/api/sales/${encodeURIComponent(saleId)}/receipt?width=80mm`); let root = document.querySelector('#modal-root'); if (!root) { root = document.createElement('div'); root.id = 'modal-root'; document.body.append(root); } root.innerHTML = `<div class="modal-backdrop"><section class="modal-card" role="dialog" aria-modal="true"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">معاينة الإيصال الحراري (${escapeHtml(receipt.width)})</span><h2>${escapeHtml(receipt.companyName)} — ${escapeHtml(receipt.storeName)}</h2></div><button class="modal-close" data-close-modal>×</button></div><div class="invoice-detail-meta"><span>إيصال: ${escapeHtml(receipt.saleNumber)}</span><span>الكاشير: ${escapeHtml(receipt.cashierName)}</span><span>${new Date(receipt.createdAt).toLocaleString('ar-EG')}</span></div><div class="table-scroll"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>السعر</th><th>الإجمالي</th></tr></thead><tbody>${receipt.items.map((item) => `<tr><td>${escapeHtml(item.productName)}</td><td>${escapeHtml(item.quantity)}</td><td>${money(item.unitPrice)}</td><td>${money(item.lineTotal)}</td></tr>`).join('')}</tbody></table></div><div class="invoice-detail-totals"><div><span>الإجمالي المطلوب</span><strong>${money(receipt.total)}</strong></div><div><span>المدفوع</span><strong>${money(receipt.paidTotal)}</strong></div><div><span>الباقي</span><strong>${money(receipt.changeGiven)}</strong></div></div><div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إغلاق</button><button type="button" class="button button-primary" id="confirm-thermal-print">طباعة الآن</button></div></section></div>`; root.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; })); root.querySelector('#confirm-thermal-print')?.addEventListener('click', () => window.print()); } catch (error) { toast(error.message, 'error'); } }
-function bindAccounting() { const decimals = currencyDecimals(state.data.company.currency); document.querySelector('#treasury-transfer-btn')?.addEventListener('click', () => { supplierModal(`<p>تحويل النقدية بين الدرج والخزينة والبنك مع ترحيل قيد مزدوج فوري.</p><label>من حساب<select name="fromAccount" required><option value="1010">درج النقدية (1010)</option><option value="1015">الخزينة الرئيسية (1015)</option><option value="1020">البنك والتحصيل الإلكتروني (1020)</option></select></label><label>إلى حساب<select name="toAccount" required><option value="1015">الخزينة الرئيسية (1015)</option><option value="1020">البنك والتحصيل الإلكتروني (1020)</option><option value="1010">درج النقدية (1010)</option></select></label><label>المبلغ (${state.data.company.currency})<input name="amount" inputmode="decimal" required></label><label>ملاحظات (اختياري)<input name="notes" maxlength="300" placeholder="مثال: توريد نقدية نهاية اليوم"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'treasury-transfer-form', '/api/accounting/treasury-transfer', (data) => ({ ...data, amount: toMinor(data.amount, decimals) }), 'تم تحويل النقدية وترحيل القيد المحاسبي بنجاح'); }); document.querySelector('#close-shift-btn')?.addEventListener('click', () => { const bookLabel = state.data.drawerBookBalance ? money(state.data.drawerBookBalance) : '—'; supplierModal(`<p>الرصيد الدفتري الحالي لدرج النقدية (1010): <strong>${bookLabel}</strong>. أدخل النقدية الفعلية المعدودة في الدرج لإثبات التطابق أو تسوية العجز/الزيادة محاسبيًا.</p><label>النقدية الفعلية في الدرج (${state.data.company.currency})<input name="actualCashAmount" inputmode="decimal" required></label><label>ملاحظات التقفيل (اختياري)<input name="notes" maxlength="300"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'shift-close-form', '/api/accounting/shift-close', (data) => ({ ...data, actualCashAmount: toMinor(data.actualCashAmount, decimals) }), 'تم تقفيل الوردية وتسوية رصيد درج النقدية'); }); document.querySelectorAll('.close-period-btn').forEach((btn) => btn.addEventListener('click', async () => { if (!window.confirm(`هل تريد إقفال الفترة المحاسبية (${btn.dataset.periodName}) نهائيًا؟ لا يمكن تسجيل قيود بتاريخ قديم داخلها بعد الإقفال.`)) return; btn.disabled = true; try { await api('/api/accounting/periods/close', { method: 'POST', body: JSON.stringify({ periodId: btn.dataset.periodId }) }); await loadData(state.data.selectedStoreId); render(); toast('تم إقفال الفترة المحاسبية بنجاح'); } catch (error) { toast(error.message, 'error'); btn.disabled = false; } })); }
+function bindAccounting() { const decimals = currencyDecimals(state.data.company.currency); document.querySelectorAll('#treasury-transfer-btn').forEach((btn) => btn.addEventListener('click', () => { supplierModal(`<p>تحويل النقدية بين الدرج والخزينة والبنك مع ترحيل قيد مزدوج فوري.</p><label>من حساب<select name="fromAccount" required><option value="1010">درج النقدية (1010)</option><option value="1015">الخزينة الرئيسية (1015)</option><option value="1020">البنك والتحصيل الإلكتروني (1020)</option></select></label><label>إلى حساب<select name="toAccount" required><option value="1015">الخزينة الرئيسية (1015)</option><option value="1020">البنك والتحصيل الإلكتروني (1020)</option><option value="1010">درج النقدية (1010)</option></select></label><label>المبلغ (${state.data.company.currency})<input name="amount" inputmode="decimal" required></label><label>ملاحظات (اختياري)<input name="notes" maxlength="300" placeholder="مثال: توريد نقدية نهاية اليوم"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'treasury-transfer-form', '/api/accounting/treasury-transfer', (data) => ({ ...data, amount: toMinor(data.amount, decimals) }), 'تم تحويل النقدية وترحيل القيد المحاسبي بنجاح'); })); document.querySelectorAll('#close-shift-btn').forEach((btn) => btn.addEventListener('click', () => { const bookLabel = state.data.drawerBookBalance ? money(state.data.drawerBookBalance) : '—'; supplierModal(`<p>الرصيد الدفتري الحالي لدرج النقدية (1010): <strong>${bookLabel}</strong>. أدخل النقدية الفعلية المعدودة في الدرج لإثبات التطابق أو تسوية العجز/الزيادة محاسبيًا.</p><label>النقدية الفعلية في الدرج (${state.data.company.currency})<input name="actualCashAmount" inputmode="decimal" required></label><label>ملاحظات التقفيل (اختياري)<input name="notes" maxlength="300"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'shift-close-form', '/api/accounting/shift-close', (data) => ({ ...data, actualCashAmount: toMinor(data.actualCashAmount, decimals) }), 'تم تقفيل الوردية وتسوية رصيد درج النقدية'); })); document.querySelectorAll('.close-period-btn').forEach((btn) => btn.addEventListener('click', async () => { if (!window.confirm(`هل تريد إقفال الفترة المحاسبية (${btn.dataset.periodName}) نهائيًا؟ لا يمكن تسجيل قيود بتاريخ قديم داخلها بعد الإقفال.`)) return; btn.disabled = true; try { await api('/api/accounting/periods/close', { method: 'POST', body: JSON.stringify({ periodId: btn.dataset.periodId }) }); await loadData(state.data.selectedStoreId); render(); toast('تم إقفال الفترة المحاسبية بنجاح'); } catch (error) { toast(error.message, 'error'); btn.disabled = false; } })); }
 function backupView() {
-  return `<section class="panel"><div class="panel-heading"><div><h3>\u0646\u0633\u062e\u0629 \u0627\u062d\u062a\u064a\u0627\u0637\u064a\u0629 \u0645\u0634\u0641\u0631\u0629</h3><p>\u0646\u0633\u062e\u0629 \u0645\u062a\u0633\u0642\u0629 \u0645\u0646 \u0642\u0627\u0639\u062f\u0629 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0646\u0634\u0637\u0629.</p></div></div><div class="empty-row">\u0627\u0644\u0646\u0633\u062e\u0629 \u0645\u0634\u0641\u0631\u0629 \u0628\u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631 \u0627\u0644\u0644\u064a \u0647\u062a\u062e\u062a\u0627\u0631\u0647\u0627. \u0627\u062d\u0641\u0638 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631 \u0641\u064a \u0645\u0643\u0627\u0646 \u0622\u0645\u0646 \u0645\u0646\u0641\u0635\u0644\u061b \u0644\u0627 \u064a\u0645\u0643\u0646 \u0627\u0633\u062a\u0639\u0627\u062f\u062a\u0647\u0627 \u0645\u0646 \u0627\u0644\u0646\u0633\u062e\u0629.</div><form id="backup-export-form" class="form-stack"><label>\u0643\u0644\u0645\u0629 \u0645\u0631\u0648\u0631 \u0644\u0644\u062a\u0634\u0641\u064a\u0631<input name="passphrase" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label><label>\u0623\u0643\u062f \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631<input name="confirmPassphrase" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label><button class="button button-primary" type="submit">\u062a\u0646\u0632\u064a\u0644 \u0646\u0633\u062e\u0629 \u0627\u062d\u062a\u064a\u0627\u0637\u064a\u0629</button></form><hr><h3>\u0627\u0633\u062a\u0639\u0627\u062f\u0629 \u0646\u0633\u062e\u0629</h3><p>\u0633\u064a\u062a\u0645 \u0627\u0633\u062a\u0628\u062f\u0627\u0644 \u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0645\u062d\u0644 \u0627\u0644\u062d\u0627\u0644\u064a\u0629 \u0648\u0625\u0639\u0627\u062f\u0629 \u062a\u0634\u063a\u064a\u0644 \u0627\u0644\u0646\u0638\u0627\u0645. \u0627\u0633\u062a\u0639\u0645\u0644 \u0646\u0633\u062e\u0629 \u0644\u0646\u0641\u0633 \u0627\u0644\u0634\u0631\u0643\u0629.</p><form id="backup-restore-form" class="form-stack"><label>\u0645\u0644\u0641 \u0627\u0644\u0646\u0633\u062e\u0629<input name="archive" type="file" accept=".rfbackup,application/octet-stream" required></label><label>\u0643\u0644\u0645\u0629 \u0645\u0631\u0648\u0631 \u0627\u0644\u0646\u0633\u062e\u0629<input name="passphrase" type="password" minlength="12" maxlength="256" autocomplete="current-password" required></label><label><input name="confirmReplace" type="checkbox" required> \u0623\u0641\u0647\u0645 \u0623\u0646 \u0627\u0644\u0627\u0633\u062a\u0639\u0627\u062f\u0629 \u0633\u062a\u0633\u062a\u0628\u062f\u0644 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a.</label><button class="button button-danger" type="submit">\u0627\u0633\u062a\u0639\u0627\u062f\u0629 \u0627\u0644\u0646\u0633\u062e\u0629</button></form></section>`;
+  const daily = state.dailyBackups;
+  const backupsList = daily?.backups ?? [];
+  const formatBytes = (bytes) => {
+    const n = Number(bytes) || 0;
+    if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+    return `${Math.max(1, Math.round(n / 1024))} KB`;
+  };
+  return `<div class="page-heading-row"><div><p class="page-lead">نظام الحماية المزدوج: نسخ احتياطي يومي تلقائي كل ليلة على الجهاز + إمكانية تصدير واستعادة نسخة مشفرة بكلمة مرور.</p></div><button type="button" class="button button-primary button-sm" id="run-daily-backup-now">${icon('plus', 16)} حفظ نسخة يومية فورية الآن</button></div>
+    <section class="panel compact-panel">
+      <div class="panel-heading"><div><h3>النسخ الاحتياطي اليومي التلقائي (حماية تلقائية كل ليلة)</h3><p>يقوم النظام بحفظ نسخة كاملة من قاعدة البيانات تلقائيًا كل يوم والاحتفاظ بآخر ${daily?.retentionDays ?? 30} يومًا للرجوع إليها في أي وقت.</p></div><span class="status-pill status-complete">مفعّل تلقائيًا</span></div>
+      ${backupsList.length ? `<div class="table-scroll"><table class="compact-table"><thead><tr><th>تاريخ النسخة اليومية</th><th>اسم الملف</th><th>الحجم</th><th>وقت الحفظ</th><th>تحميل</th></tr></thead><tbody>${backupsList.map((item) => `<tr><td><strong>${escapeHtml(item.date)}</strong></td><td><span class="sku-code">${escapeHtml(item.filename)}</span></td><td>${formatBytes(item.sizeBytes)}</td><td>${new Date(item.createdAt).toLocaleString('ar-EG')}</td><td><a class="text-action" href="/api/backups/daily/${encodeURIComponent(item.filename)}" download>تنزيل النسخة ↓</a></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">جاري تجهيز سجل النسخ اليومية التلقائية...</div>'}
+    </section>
+    <div class="analytics-two-col">
+      <section class="panel compact-panel"><div class="panel-heading"><div><h3>تصدير نسخة احتياطية مشفرة (.rfbackup)</h3><p>نسخة خارجية مشفرة بكلمة مرور لحفظها على فلاشة أو سحابة خارجية.</p></div></div><div class="empty-row">احفظ كلمة المرور في مكان آمن؛ لا يمكن فك تشفير النسخة بدونها.</div><form id="backup-export-form" class="form-stack"><label>كلمة مرور للتشفير<input name="passphrase" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label><label>أكد كلمة المرور<input name="confirmPassphrase" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label><button class="button button-primary" type="submit">تنزيل نسخة احتياطية</button></form></section>
+      <section class="panel compact-panel"><div class="panel-heading"><div><h3>استعادة نسخة مشفرة</h3><p>سيتم استبدال بيانات المحل الحالية وإعادة تشغيل النظام.</p></div></div><form id="backup-restore-form" class="form-stack"><label>ملف النسخة<input name="archive" type="file" accept=".rfbackup,application/octet-stream" required></label><label>كلمة مرور النسخة<input name="passphrase" type="password" minlength="12" maxlength="256" autocomplete="current-password" required></label><label><input name="confirmReplace" type="checkbox" required> أفهم أن الاستعادة ستستبدل البيانات.</label><button class="button button-danger" type="submit">استعادة النسخة</button></form></section>
+    </div>`;
 }
 
 function bindBackups() {
+  if (!state.dailyBackupsKey) {
+    state.dailyBackupsKey = 'loaded';
+    void api('/api/backups/daily').then((res) => { state.dailyBackups = res; render(); }).catch(() => {});
+  }
+  document.querySelector('#run-daily-backup-now')?.addEventListener('click', async (event) => {
+    const btn = event.currentTarget;
+    btn.disabled = true;
+    try {
+      const res = await api('/api/backups/daily/run-now', { method: 'POST', body: '{}' });
+      state.dailyBackups = { ...(state.dailyBackups ?? { retentionDays: 30 }), backups: res.backups ?? [] };
+      render();
+      toast('تم حفظ النسخة الاحتياطية اليومية بنجاح');
+    } catch (error) { toast(error.message, 'error'); btn.disabled = false; }
+  });
   document.querySelector('#backup-export-form')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -870,7 +1306,35 @@ function bindBackups() {
   });
 }
 
+function computePresetRange(preset) {
+  const now = new Date();
+  const to = now.toISOString().slice(0, 10);
+  if (preset === 'today') return { from: to, to };
+  if (preset === '7d') { const d = new Date(now); d.setUTCDate(d.getUTCDate() - 6); return { from: d.toISOString().slice(0, 10), to }; }
+  if (preset === '30d') { const d = new Date(now); d.setUTCDate(d.getUTCDate() - 29); return { from: d.toISOString().slice(0, 10), to }; }
+  if (preset === 'month') return { from: `${to.slice(0, 7)}-01`, to };
+  if (preset === 'year') return { from: `${to.slice(0, 4)}-01-01`, to };
+  return { from: to, to };
+}
+
 function bindTopProducts() {
+  document.querySelector('#analytics-section-select')?.addEventListener('change', (event) => {
+    state.analyticsSection = event.currentTarget.value;
+    render();
+  });
+  document.querySelectorAll('[data-analytics-section]').forEach((btn) => btn.addEventListener('click', () => {
+    state.analyticsSection = btn.dataset.analyticsSection;
+    render();
+  }));
+  document.querySelectorAll('[data-analytics-range]').forEach((btn) => btn.addEventListener('click', () => {
+    const range = computePresetRange(btn.dataset.analyticsRange);
+    state.analyticsFrom = range.from;
+    state.analyticsTo = range.to;
+    state.productStats = null;
+    state.supplierStats = null;
+    state.analyticsKey = null;
+    render();
+  }));
   document.querySelector('#analytics-filter')?.addEventListener('submit', (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -901,6 +1365,15 @@ function bindTopProducts() {
   });
 }
 function bindProfitLoss() {
+  bindAccounting();
+  document.querySelector('#pl-section-select')?.addEventListener('change', (event) => {
+    state.plSection = event.currentTarget.value;
+    render();
+  });
+  document.querySelectorAll('[data-pl-section]').forEach((btn) => btn.addEventListener('click', () => {
+    state.plSection = btn.dataset.plSection;
+    render();
+  }));
   const today = new Date().toISOString().slice(0, 10);
   state.reportFrom ??= today;
   state.reportTo ??= today;
@@ -919,6 +1392,11 @@ function bindProfitLoss() {
       toast(error.message, 'error');
     }
   };
+  document.querySelectorAll('[data-pl-range]').forEach((btn) => btn.addEventListener('click', () => {
+    const range = computePresetRange(btn.dataset.plRange);
+    state.reportKey = null;
+    void load(range.from, range.to);
+  }));
   document.querySelector('#profit-loss-filter')?.addEventListener('submit', (event) => {
     event.preventDefault();
     const from = document.querySelector('#report-from').value;
@@ -1044,7 +1522,8 @@ function showCategoryModal(onCreated = null) {
 function showProductModal() {
   const modal = document.querySelector('#modal-root');
   const currency = state.data.company.currency;
-  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="product-modal-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">الكتالوج</span><h2 id="product-modal-title">إضافة منتج جديد</h2></div><button class="modal-close" data-close-modal>×</button></div><form id="product-form" class="form-stack modal-form"><label>اسم المنتج<input name="name" required minlength="2" maxlength="120" placeholder="مثال: شنطة يومية"></label><label>كود المنتج<input name="sku" required maxlength="64" placeholder="BAG-001"></label><div class="form-grid"><label>الماركة (اختياري)<input name="brand" maxlength="100"></label><label>السعر الافتراضي (${currency})<input name="price" required inputmode="decimal" placeholder="0.00"></label></div><label>وصف المنتج (اختياري)<textarea name="description" maxlength="2000" rows="2"></textarea></label><label>رابط صورة المنتج (اختياري)<input name="imagePath" type="url" maxlength="300" placeholder="https://..."></label><div class="form-grid"><label>حد إعادة الطلب الافتراضي<input name="reorderPoint" type="number" required min="0" step="1" value="5"></label></div><div class="variant-options-section"><div><strong>خيارات المنتج</strong><small>أضف أي خاصية بالاسم والقيم. النظام ينشئ التركيبات تلقائيًا (حتى 50 تركيبة).</small></div><div id="product-option-rows"></div><button type="button" class="button button-secondary" id="add-product-option">إضافة خاصية</button><p class="variant-options-note">كل تركيبة لها SKU وباركود اختياري ومخزون مستقل. يمكنك استلام خليط الكميات لاحقًا من شاشة المشتريات أو المخزون.</p><div id="variant-matrix-notice" role="status"></div><div id="variant-matrix"></div></div><div class="single-variant-sku"><label>كود النسخة<input name="variantSku" required maxlength="64" placeholder="BAG-001-STD"></label><label>باركود (اختياري)<input name="variantBarcode" maxlength="64"></label><small>لو المنتج بدون خيارات، أنشئ له نسخة واحدة.</small></div><div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">حفظ المنتج</button></div></form></section></div>`;
+  const quickColors = ['أسود', 'أبيض', 'كحلي', 'بيج', 'رمادي', 'بني', 'هافان', 'زيتي'];
+  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="product-modal-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">الكتالوج الموحد (نظام الموديل والفروع)</span><h2 id="product-modal-title">إضافة موديل / منتج جديد</h2></div><button class="modal-close" data-close-modal>×</button></div><form id="product-form" class="form-stack modal-form"><div class="form-grid"><label>اسم الموديل / المنتج<input name="name" required minlength="2" maxlength="120" placeholder="مثال: كوتشي ميلانو"></label><label>كود الموديل الأساسي (Model Code)<input name="sku" required maxlength="64" placeholder="MIL-205"></label></div><div class="form-grid"><label>الماركة / المصنع (اختياري)<input name="brand" maxlength="100" placeholder="مثال: ميلانو"></label><label>سعر البيع الافتراضي (${currency})<input name="price" required inputmode="decimal" placeholder="0.00"></label></div><div class="form-grid"><label>حد التنبيه لنقص المقاس<input name="reorderPoint" type="number" required min="0" step="1" value="3"></label><label>رابط صورة الموديل (اختياري)<input name="imagePath" type="url" maxlength="300" placeholder="https://..."></label></div><label>وصف الموديل (اختياري)<textarea name="description" maxlength="2000" rows="2" placeholder="خامة الموديل أو تفاصيل إضافية"></textarea></label><div class="variant-options-section"><div class="model-presets-header"><div><strong>الألوان والمقاسات التابعة للموديل</strong><small>الموديل يتسجل كنوع واحد بكوده الأساسي، وكل الألوان والمقاسات بتتولد تحته تلقائيًا (حتى 50 فرع).</small></div></div><div class="model-presets-bar"><span class="preset-label">قوالب سريعة:</span><button type="button" class="date-preset-chip" data-model-preset="men-shoes">👟 كوتشي رجالي (40–45)</button><button type="button" class="date-preset-chip" data-model-preset="women-shoes">👠 حذاء حريمي (36–41)</button><button type="button" class="date-preset-chip" data-model-preset="kids-shoes">👟 أطفال (28–35)</button><button type="button" class="date-preset-chip" data-model-preset="apparel">👕 ملابس (S–XXL)</button><button type="button" class="date-preset-chip" data-model-preset="clear">صنف بدون مقاسات</button></div><div class="model-presets-bar"><span class="preset-label">إضافة لون سريع:</span>${quickColors.map((c) => `<button type="button" class="color-quick-chip" data-add-color="${c}">+ ${c}</button>`).join('')}</div><div id="product-option-rows"></div><button type="button" class="button button-secondary button-sm" id="add-product-option">+ إضافة خاصية أخرى</button><p class="variant-options-note">كل لون ومقاس بياخد كود فرعي مشتق من كود الموديل تلقائيًا، وتقدر تستلم كميات كل مقاس ولون من فاتورة الشراء في جدول واحد.</p><div id="variant-matrix-notice" role="status"></div><div id="variant-matrix"></div></div><div class="single-variant-sku"><label>كود النسخة<input name="variantSku" required maxlength="64" placeholder="MIL-205-STD"></label><label>باركود (اختياري)<input name="variantBarcode" maxlength="64"></label><small>لو المنتج بدون ألوان أو مقاسات، اترك الخيارات فارغة وسيتم حفظه كصنف مفرد.</small></div><div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">حفظ الموديل وفروعه</button></div></form></section></div>`;
   const productForm = modal.querySelector('#product-form');
   const categoryLabel = document.createElement('label');
   categoryLabel.innerHTML = `<span>الفئة</span><div class="category-select-row"><select name="categoryId"><option value="">بدون فئة</option>${state.data.categories.map((category) => `<option value="${category.id}">${escapeHtml(category.name)}</option>`).join('')}</select><button type="button" class="text-action" id="add-category-inline">إضافة فئة</button></div>`;
@@ -1058,12 +1537,45 @@ function showProductModal() {
   const addOptionRow = (name = '', values = '') => {
     if (optionRows.children.length >= 8) { toast('الحد الأقصى 8 خيارات'); return; }
     const row = document.createElement('div'); row.className = 'variant-option-row';
-    row.innerHTML = '<input data-option-name maxlength="64" placeholder="اسم الخاصية، مثل اللون"><input data-option-values maxlength="500" placeholder="القيم مفصولة بفواصل، مثل أسود، أبيض"><button type="button" class="text-action" data-remove-option aria-label="حذف الخاصية">حذف</button>';
+    row.innerHTML = '<input data-option-name maxlength="64" placeholder="اسم الخاصية (مثال: اللون أو المقاس)"><input data-option-values maxlength="500" placeholder="القيم مفصولة بفواصل، مثل: أسود، أبيض أو 41، 42، 43"><button type="button" class="text-action" data-remove-option aria-label="حذف الخاصية">حذف</button>';
     row.querySelector('[data-option-name]').value = name; row.querySelector('[data-option-values]').value = values;
     row.addEventListener('input', buildMatrix); row.querySelector('[data-remove-option]').addEventListener('click', () => { row.remove(); buildMatrix(); });
     optionRows.append(row);
   };
   productForm.querySelector('#add-product-option').addEventListener('click', () => { addOptionRow(); buildMatrix(); });
+  const applyPreset = (colorsStr, sizesStr) => {
+    optionRows.innerHTML = '';
+    if (colorsStr || sizesStr) {
+      addOptionRow('اللون', colorsStr);
+      addOptionRow('المقاس', sizesStr);
+    } else {
+      addOptionRow();
+      addOptionRow();
+    }
+    buildMatrix();
+  };
+  productForm.querySelectorAll('[data-model-preset]').forEach((btn) => btn.addEventListener('click', () => {
+    const preset = btn.dataset.modelPreset;
+    if (preset === 'men-shoes') applyPreset('أسود, أبيض', '40, 41, 42, 43, 44, 45');
+    else if (preset === 'women-shoes') applyPreset('أسود, بيج, أبيض', '36, 37, 38, 39, 40, 41');
+    else if (preset === 'kids-shoes') applyPreset('أسود, أبيض, كحلي', '28, 30, 32, 34, 35');
+    else if (preset === 'apparel') applyPreset('أسود, أبيض, كحلي', 'S, M, L, XL, XXL');
+    else applyPreset('', '');
+  }));
+  productForm.querySelectorAll('[data-add-color]').forEach((btn) => btn.addEventListener('click', () => {
+    const colorToAdd = btn.dataset.addColor;
+    let colorRow = [...optionRows.children].find((r) => r.querySelector('[data-option-name]').value.trim() === 'اللون');
+    if (!colorRow) {
+      colorRow = [...optionRows.children].find((r) => !r.querySelector('[data-option-name]').value.trim());
+      if (colorRow) colorRow.querySelector('[data-option-name]').value = 'اللون';
+      else { addOptionRow('اللون', ''); colorRow = optionRows.lastElementChild; }
+    }
+    const input = colorRow.querySelector('[data-option-values]');
+    const current = input.value.split(/[,،]/).map((v) => v.trim()).filter(Boolean);
+    if (!current.includes(colorToAdd)) current.push(colorToAdd);
+    input.value = current.join(', ');
+    buildMatrix();
+  }));
   let lastDefaultPrice = productForm.elements.namedItem('price').value;
   let lastDefaultReorderPoint = productForm.elements.namedItem('reorderPoint').value;
   const buildMatrix = () => {
@@ -1074,13 +1586,13 @@ function showProductModal() {
       reorderPoint: row.querySelector('[data-variant-reorder]').value,
       enabled: row.querySelector('[data-variant-enabled]').checked,
     }]));
-    const options = [...optionRows.children].map((row, index) => ({ name: row.querySelector('[data-option-name]').value.trim(), key: `option_${index + 1}`, values: row.querySelector('[data-option-values]').value.split(',').map((value) => value.trim()).filter(Boolean) })).filter((option) => option.name || option.values.length);
+    const options = [...optionRows.children].map((row, index) => ({ name: row.querySelector('[data-option-name]').value.trim(), key: `option_${index + 1}`, values: row.querySelector('[data-option-values]').value.split(/[,،]/).map((value) => value.trim()).filter(Boolean) })).filter((option) => option.name || option.values.length);
     const active = options.filter((option) => option.values.length);
     const missingKeys = options.some((option) => !option.name && option.values.length);
     const duplicateKeys = new Set(active.map((option) => option.name.toLocaleLowerCase())).size !== active.length;
     const duplicateValues = active.some((option) => new Set(option.values.map((value) => value.toLocaleLowerCase())).size !== option.values.length);
     const oversizedValues = active.some((option) => option.values.some((value) => value.length > 64));
-    const missingValues = options.some((option) => option.key && !option.values.length);
+    const missingValues = options.some((option) => option.name && !option.values.length);
     const combinationCount = active.reduce((total, option) => total * option.values.length, 1);
     const tooMany = combinationCount > 50;
     const combinations = [];
@@ -1103,11 +1615,11 @@ function showProductModal() {
     productForm.elements.namedItem('variantSku').required = !hasVariants;
     if (!hasVariants) { matrix.innerHTML = ''; return; }
     const usedSkus = new Set([...previous.values()].map((item) => item.sku.toLocaleLowerCase()));
-    matrix.innerHTML = `<div class="variant-matrix-scroll"><table class="variant-matrix-table"><thead><tr><th>متاحة</th><th>النسخة</th><th>SKU</th><th>باركود (اختياري)</th><th>السعر (${currency})</th><th>حد الطلب</th></tr></thead><tbody>${combinations.map((attributes, index) => {
+    const baseSku = (productForm.elements.namedItem('sku').value.trim() || 'ITEM').slice(0, 48);
+    matrix.innerHTML = `<div class="matrix-quick-toolbar"><span>تم توليد <strong>${combinations.length} فرع (لون × مقاس)</strong> تحت كود الموديل <strong>${escapeHtml(baseSku)}</strong></span></div><div class="variant-matrix-scroll"><table class="variant-matrix-table"><thead><tr><th>متاحة</th><th>اللون والمقاس الفرعي</th><th>كود الفرع (SKU)</th><th>باركود (اختياري)</th><th>السعر (${currency})</th><th>حد الطلب</th></tr></thead><tbody>${combinations.map((attributes, index) => {
       const key = JSON.stringify(attributes), saved = previous.get(key);
       const label = Object.values(attributes).map((value) => escapeHtml(String(value))).join(' · ');
       let suffix = index + 1, generatedSku = '';
-      const baseSku = (productForm.elements.namedItem('sku').value.trim() || 'ITEM').slice(0, 61);
       do { generatedSku = `${baseSku}-${String(suffix++).padStart(2, '0')}`; } while (usedSkus.has(generatedSku.toLocaleLowerCase()));
       const sku = saved?.sku || generatedSku;
       usedSkus.add(sku.toLocaleLowerCase());
@@ -1117,7 +1629,16 @@ function showProductModal() {
     }).join('')}</tbody></table></div>`;
   };
   addOptionRow(); addOptionRow();
-  productForm.elements.namedItem('sku').addEventListener('change', buildMatrix);
+  productForm.elements.namedItem('sku').addEventListener('input', () => {
+    const skuVal = productForm.elements.namedItem('sku').value.trim();
+    const singleSkuInput = productForm.elements.namedItem('variantSku');
+    if (singleSkuInput && (!singleSkuInput.value || singleSkuInput.dataset.autoFilled === 'true')) {
+      singleSkuInput.value = skuVal ? `${skuVal}-01` : '';
+      singleSkuInput.dataset.autoFilled = 'true';
+    }
+    buildMatrix();
+  });
+  productForm.elements.namedItem('variantSku').addEventListener('input', (e) => { e.currentTarget.dataset.autoFilled = 'false'; });
   productForm.elements.namedItem('price').addEventListener('change', (event) => {
     for (const row of matrix.querySelectorAll('[data-variant-price]')) {
       if (row.value === lastDefaultPrice) row.value = event.currentTarget.value;
@@ -1143,19 +1664,19 @@ function showProductModal() {
       const rows = [...matrix.querySelectorAll('[data-variant-key]')];
       const enabledRows = rows.filter((row) => row.querySelector('[data-variant-enabled]').checked);
       if (rows.length && !enabledRows.length) throw new Error('اختار تركيبة مقاس أو لون واحدة على الأقل.');
-      const options = [...optionRows.children].map((row, index) => ({ key: `option_${index + 1}`, name: row.querySelector('[data-option-name]').value.trim(), values: row.querySelector('[data-option-values]').value.split(',').map((value) => value.trim()).filter(Boolean) })).filter((option) => option.name && option.values.length);
+      const options = [...optionRows.children].map((row, index) => ({ key: `option_${index + 1}`, name: row.querySelector('[data-option-name]').value.trim(), values: row.querySelector('[data-option-values]').value.split(/[,،]/).map((value) => value.trim()).filter(Boolean) })).filter((option) => option.name && option.values.length);
       const variants = rows.length ? enabledRows.map((row) => ({
         sku: row.querySelector('[data-variant-sku]').value.trim(),
         barcode: row.querySelector('[data-variant-barcode]').value.trim() || undefined,
         attributes: JSON.parse(row.dataset.variantKey),
         retailPrice: toMinor(row.querySelector('[data-variant-price]').value, currencyDecimals(currency)),
         reorderPoint: row.querySelector('[data-variant-reorder]').value,
-      })) : [{ sku: form.get('variantSku'), barcode: form.get('variantBarcode') || undefined, retailPrice: toMinor(form.get('price'), currencyDecimals(currency)), reorderPoint: String(form.get('reorderPoint')) }];
+      })) : [{ sku: String(form.get('variantSku') || `${form.get('sku')}-01`).trim(), barcode: form.get('variantBarcode') || undefined, retailPrice: toMinor(form.get('price'), currencyDecimals(currency)), reorderPoint: String(form.get('reorderPoint')) }];
       await api('/api/products', { method: 'POST', body: JSON.stringify({ name: form.get('name'), sku: form.get('sku'), itemKind: 'PRODUCT', categoryId: form.get('categoryId') || undefined, brand: form.get('brand') || undefined, description: form.get('description') || undefined, imagePath: form.get('imagePath') || undefined, options, hasVariants: rows.length > 0, variants }) });
       await loadData(state.data.selectedStoreId);
       state.query = '';
       render();
-      toast('تم حفظ المنتج ونسخه في قاعدة البيانات');
+      toast('تم حفظ الموديل وجميع ألوانه ومقاساته في الكتالوج');
     } catch (error) { toast(error.message, 'error'); submit.disabled = false; }
   });
 }
@@ -1174,9 +1695,42 @@ function bindInventory() {
 
 function showInventoryProductDetails(product) {
   const modal = document.querySelector('#modal-root');
-  const variants = product.variants.filter((variant) => variant.isActive);
+  const matrix = extractProductMatrix(product);
+  const variants = matrix.activeVariants;
   const total = variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n);
-  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="inventory-product-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">تفاصيل المخزون</span><h2 id="inventory-product-title">${escapeHtml(product.name)}</h2><p>إجمالي الرصيد: <strong>${total}</strong> قطعة · ${variants.length} تركيبة</p></div><button type="button" class="modal-close" data-close-inventory-details aria-label="إغلاق">×</button></div>${variants.length ? `<div class="table-scroll"><table><thead><tr><th>التركيبة</th><th>SKU</th><th>الكمية</th><th>حد التنبيه</th><th>متوسط التكلفة</th><th>الحالة</th>${state.data.capabilities.canManageCatalog ? '<th>الإجراء</th>' : ''}</tr></thead><tbody>${variants.map((variant) => { const label = Object.entries(variant.attributes ?? {}).map(([key, value]) => `${product.options?.find((option) => option.key === key)?.name ?? key}: ${value}`).join(' · ') || 'النسخة الأساسية'; const low = BigInt(variant.quantity) <= BigInt(variant.reorderPoint); const removeAction = state.data.capabilities.canManageCatalog ? `<td>${BigInt(variant.quantity) === 0n ? `<button type="button" class="text-action product-delete" data-remove-variant="${variant.id}">حذف</button>` : '<small>صفّر الرصيد أولًا للحذف</small>'}</td>` : ''; return `<tr><td><strong>${escapeHtml(label)}</strong></td><td><span class="sku-code">${escapeHtml(variant.sku)}</span></td><td><strong>${variant.quantity}</strong></td><td>${variant.reorderPoint}</td><td>${variant.wac ? money(variant.wac) : '—'}</td><td>${low ? '<span class="status-pill status-low">مخزون منخفض</span>' : '<span class="status-pill status-complete">متوفر</span>'}</td>${removeAction}</tr>`; }).join('')}</tbody></table></div>` : '<div class="empty-row">لا توجد تركيبات نشطة لهذا المنتج.</div>'}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-inventory-details>إغلاق</button></div></section></div>`;
+  const matrixGridHtml = matrix.isMatrix ? `
+    <div class="matrix-section-box">
+      <div class="matrix-quick-toolbar">
+        <span><strong>مصفوفة الألوان × المقاسات للموديل (${escapeHtml(product.sku)})</strong></span>
+        <span>إجمالي الرصيد: <strong>${total} قطعة</strong></span>
+      </div>
+      <div class="table-scroll">
+        <table class="variant-matrix-table stock-2d-matrix">
+          <thead>
+            <tr>
+              <th>اللون \\ المقاس</th>
+              ${matrix.sizes.map((size) => `<th>مقاس ${escapeHtml(size)}</th>`).join('')}
+              <th>إجمالي اللون</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${matrix.colors.map((color) => {
+              let rowTotal = 0n;
+              const cells = matrix.sizes.map((size) => {
+                const variant = matrix.matrixMap.get(`${color}:::${size}`);
+                if (!variant) return '<td class="matrix-empty-cell">—</td>';
+                const qty = BigInt(variant.quantity);
+                rowTotal += qty;
+                const low = qty <= BigInt(variant.reorderPoint);
+                return `<td class="stock-matrix-cell ${qty === 0n ? 'cell-zero' : low ? 'cell-low' : 'cell-ok'}" title="${escapeHtml(variant.sku)}"><strong>${variant.quantity}</strong><small>${escapeHtml(variant.sku)}</small></td>`;
+              }).join('');
+              return `<tr><td><strong>${escapeHtml(color)}</strong></td>${cells}<td class="table-total"><strong>${rowTotal}</strong></td></tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>` : '';
+  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="inventory-product-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">تفاصيل الموديل والمقاسات</span><h2 id="inventory-product-title">${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2><p>إجمالي الرصيد: <strong>${total}</strong> قطعة · ${variants.length} فرع (لون/مقاس)</p></div><button type="button" class="modal-close" data-close-inventory-details aria-label="إغلاق">×</button></div>${matrixGridHtml}${variants.length ? `<details class="compact-disclosure" ${matrix.isMatrix ? '' : 'open'}><summary><span>القائمة التفصيلية للفروع والأكواد (SKUs)</span><span>${variants.length} فرع</span></summary><div class="disclosure-content"><div class="table-scroll"><table><thead><tr><th>التركيبة</th><th>SKU</th><th>الكمية</th><th>حد التنبيه</th><th>متوسط التكلفة</th><th>الحالة</th>${state.data.capabilities.canManageCatalog ? '<th>الإجراء</th>' : ''}</tr></thead><tbody>${variants.map((variant) => { const label = Object.entries(variant.attributes ?? {}).map(([key, value]) => `${product.options?.find((option) => option.key === key)?.name ?? key}: ${value}`).join(' · ') || 'النسخة الأساسية'; const low = BigInt(variant.quantity) <= BigInt(variant.reorderPoint); const removeAction = state.data.capabilities.canManageCatalog ? `<td>${BigInt(variant.quantity) === 0n ? `<button type="button" class="text-action product-delete" data-remove-variant="${variant.id}">حذف</button>` : '<small>صفّر الرصيد أولًا للحذف</small>'}</td>` : ''; return `<tr><td><strong>${escapeHtml(label)}</strong></td><td><span class="sku-code">${escapeHtml(variant.sku)}</span></td><td><strong>${variant.quantity}</strong></td><td>${variant.reorderPoint}</td><td>${variant.wac ? money(variant.wac) : '—'}</td><td>${low ? '<span class="status-pill status-low">مخزون منخفض</span>' : '<span class="status-pill status-complete">متوفر</span>'}</td>${removeAction}</tr>`; }).join('')}</tbody></table></div></div></details>` : '<div class="empty-row">لا توجد تركيبات نشطة لهذا المنتج.</div>'}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-inventory-details>إغلاق</button></div></section></div>`;
   modal.querySelectorAll('[data-close-inventory-details]').forEach((button) => button.addEventListener('click', () => { modal.innerHTML = ''; }));
   modal.querySelectorAll('[data-remove-variant]').forEach((button) => button.addEventListener('click', async () => {
     button.disabled = true;
@@ -1202,10 +1756,17 @@ function bindPos() {
   document.querySelectorAll('[data-pick-product]').forEach((button) => button.addEventListener('click', () => {
     const product = state.data.products.find((item) => item.id === button.dataset.pickProduct);
     if (!product) return;
-    const variants = product.variants.filter((variant) => variant.isActive);
+    const matrix = extractProductMatrix(product);
+    const variants = matrix.activeVariants;
     if (variants.length === 1) { addToCart(variants[0].id); return; }
     const modal = document.querySelector('#modal-root');
-    modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card" role="dialog" aria-modal="true"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">اختيار التركيبة</span><h2>${escapeHtml(product.name)}</h2></div><button class="modal-close" data-close-modal>×</button></div><div class="form-stack">${variants.map((variant) => { const label = Object.entries(variant.attributes ?? {}).map(([key, value]) => `${product.options?.find((option) => option.key === key)?.name ?? key}: ${value}`).join(' · ') || variant.sku; const unavailable = product.itemKind === 'PRODUCT' && BigInt(variant.quantity) <= 0n; return `<button class="button button-secondary" data-pos-variant="${variant.id}" ${unavailable ? 'disabled' : ''}>${escapeHtml(label)} · ${escapeHtml(variant.sku)} · ${money(variant.price)} · متاح ${variant.quantity}</button>`; }).join('')}</div></section></div>`;
+    const groupedHtml = matrix.isMatrix ? `<div class="pos-matrix-picker">${matrix.colors.map((color) => `<div class="pos-color-group"><div class="pos-color-title"><span>اللون: <strong>${escapeHtml(color)}</strong></span><small>اختر المقاس لإضافته للفاتورة</small></div><div class="pos-size-grid">${matrix.sizes.map((size) => {
+      const variant = matrix.matrixMap.get(`${color}:::${size}`);
+      if (!variant) return '';
+      const unavailable = product.itemKind === 'PRODUCT' && BigInt(variant.quantity) <= 0n;
+      return `<button type="button" class="pos-size-tile ${unavailable ? 'tile-empty' : ''}" data-pos-variant="${variant.id}" ${unavailable ? 'disabled' : ''}><strong>مقاس ${escapeHtml(size)}</strong><span>${money(variant.price)}</span><small>${unavailable ? 'نفد' : `متاح ${variant.quantity}`}</small></button>`;
+    }).join('')}</div></div>`).join('')}</div>` : `<div class="form-stack">${variants.map((variant) => { const label = Object.entries(variant.attributes ?? {}).map(([key, value]) => `${product.options?.find((option) => option.key === key)?.name ?? key}: ${value}`).join(' · ') || variant.sku; const unavailable = product.itemKind === 'PRODUCT' && BigInt(variant.quantity) <= 0n; return `<button class="button button-secondary" data-pos-variant="${variant.id}" ${unavailable ? 'disabled' : ''}>${escapeHtml(label)} · ${escapeHtml(variant.sku)} · ${money(variant.price)} · متاح ${variant.quantity}</button>`; }).join('')}</div>`;
+    modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">اختيار اللون والمقاس — كود الموديل ${escapeHtml(product.sku)}</span><h2>${escapeHtml(product.name)}</h2></div><button class="modal-close" data-close-modal>×</button></div>${groupedHtml}</section></div>`;
     modal.querySelector('[data-close-modal]').addEventListener('click', () => { modal.innerHTML = ''; });
     modal.querySelectorAll('[data-pos-variant]').forEach((choice) => choice.addEventListener('click', () => { const id = choice.dataset.posVariant; modal.innerHTML = ''; addToCart(id); }));
   }));
