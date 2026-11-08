@@ -23,5 +23,6 @@ export * from './database/repositories/sqlite-recurring-expense.repository.js';
 export * from './database/repositories/sqlite-supplier-return.repository.js';
 export * from './database/repositories/sqlite-audit-log.repository.js';
 export * from './database/repositories/accounting-journal.executor.js';
+export * from './database/repositories/stock-movement.executor.js';
 export * from './sync/sqlite-outbox.repository.js';
 export * from './hardware/index.js';

@@ -45,6 +45,7 @@ import {
   recoverPendingSqliteRestore,
   EscPosReceiptPrinter,
   postJournalEntry,
+  applyStockMovementInTransaction,
 } from '@retailos/infrastructure';
 import { CreateProductSchema, CreateUserSchema, UpdateProductSchema } from '@retailos/shared';
 import { z } from 'zod';
@@ -161,28 +162,81 @@ const CreateStoreSchema = z.object({ name: z.string().min(2).max(100).trim(), co
 const InventoryTransferSchema = z.object({ fromStoreId: z.string().uuid(), toStoreId: z.string().uuid(), variantId: z.string().uuid(), quantity: z.string().regex(/^[1-9]\d{0,8}$/) });
 const ShiftCloseSchema = z.object({ storeId: z.string().uuid(), idempotencyKey: z.string().uuid(), actualCashAmount: z.string().regex(/^-?\d{1,15}$/), notes: z.string().max(300).trim().optional() });
 const CloseAccountingPeriodSchema = z.object({ periodId: z.string().min(1).max(120).trim() });
+const TreasuryTransferSchema = z.object({
+  storeId: z.string().uuid(),
+  idempotencyKey: z.string().uuid(),
+  fromAccount: z.enum(['1010', '1015', '1020']),
+  toAccount: z.enum(['1010', '1015', '1020']),
+  amount: z.string().regex(/^[1-9]\d{0,14}$/),
+  notes: z.string().max(300).trim().optional(),
+});
+const InventoryDamageSchema = z.object({
+  storeId: z.string().uuid(),
+  idempotencyKey: z.string().uuid(),
+  variantId: z.string().uuid(),
+  quantity: z.string().regex(/^[1-9]\d{0,8}$/),
+  reason: z.string().max(300).trim().optional(),
+});
+const InventoryAdjustSchema = z.object({
+  storeId: z.string().uuid(),
+  idempotencyKey: z.string().uuid(),
+  variantId: z.string().uuid(),
+  targetQuantity: z.string().regex(/^\d{1,9}$/),
+  unitCost: z.string().regex(/^\d{1,15}$/).optional(),
+  reason: z.string().max(300).trim().optional(),
+});
 
-async function computeDrawerBookBalanceMinor(conn, tenantId, storeId) {
+async function computeTreasuryBalancesMinor(conn, tenantId, storeId) {
   const rows = await conn
     .selectFrom('journal_lines')
     .innerJoin('journal_entries', 'journal_entries.id', 'journal_lines.journal_entry_id')
     .innerJoin('accounts', 'accounts.id', 'journal_lines.account_id')
-    .select(['journal_lines.entry_type as side', 'journal_lines.amount as amount'])
+    .select(['accounts.account_code as code', 'journal_lines.entry_type as side', 'journal_lines.amount as amount'])
     .where('journal_entries.tenant_id', '=', tenantId)
     .where('journal_entries.store_id', '=', storeId)
     .where('journal_entries.status', '=', 'POSTED')
-    .where('accounts.account_code', '=', '1010')
+    .where('accounts.account_code', 'in', ['1010', '1015', '1020'])
     .execute();
-  let balance = 0n;
+  let drawer = 0n;
+  let safe = 0n;
+  let bank = 0n;
   for (const row of rows) {
     const amt = BigInt(row.amount);
-    balance += row.side === 'DEBIT' ? amt : -amt;
+    const delta = row.side === 'DEBIT' ? amt : -amt;
+    if (row.code === '1010') drawer += delta;
+    else if (row.code === '1015') safe += delta;
+    else if (row.code === '1020') bank += delta;
   }
-  return balance;
+  return { drawer, safe, bank };
+}
+
+async function computeDrawerBookBalanceMinor(conn, tenantId, storeId) {
+  const { drawer } = await computeTreasuryBalancesMinor(conn, tenantId, storeId);
+  return drawer;
 }
 const failedLogins = new Map();
 const MAX_FAILED_LOGINS = 6;
 const LOCK_WINDOW_MS = 10 * 60 * 1000;
+const MAX_FAILED_KEYS = 2000;
+
+function pruneFailedLogins() {
+  const now = Date.now();
+  for (const [k, v] of failedLogins.entries()) {
+    if (now - v.startedAt >= LOCK_WINDOW_MS) failedLogins.delete(k);
+  }
+  while (failedLogins.size > MAX_FAILED_KEYS) {
+    const oldestKey = failedLogins.keys().next().value;
+    if (!oldestKey) break;
+    failedLogins.delete(oldestKey);
+  }
+}
+
+function escapeCsvCell(value) {
+  const str = String(value ?? '');
+  const sanitized = /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
+  if (/[",\r\n]/.test(sanitized)) return `"${sanitized.replaceAll('"', '""')}"`;
+  return sanitized;
+}
 
 function json(res, status, value, extraHeaders = {}) {
   res.writeHead(status, {
@@ -199,6 +253,9 @@ function securityHeaders() {
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
     'Referrer-Policy': 'no-referrer',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
+    'Cross-Origin-Opener-Policy': 'same-origin',
+    'Cross-Origin-Resource-Policy': 'same-origin',
     'Content-Security-Policy': "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
   };
 }
@@ -502,7 +559,7 @@ async function currentData(ctx, url) {
     throw Object.assign(new Error('الفرع المحدد غير متاح لهذا المستخدم'), { status: 403 });
   }
   const products = await catalog.listProducts(ctx);
-  const variants = (await Promise.all(products.map((product) => variantRepo.listByProduct(ctx, product.id)))).flat();
+  const variants = await variantRepo.listByTenant(ctx);
   const positions = await inventory.listByStore(ctx, storeId);
   const positionByVariant = new Map(positions.map((position) => [position.variantId, position]));
   const productData = products.map((product) => ({
@@ -558,15 +615,24 @@ async function currentData(ctx, url) {
     .orderBy('customer_returns.created_at', 'desc').limit(100).execute() : [];
   const journalHeaders = canViewAccounting ? await db.selectFrom('journal_entries').selectAll()
     .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId)
-    .orderBy('entry_date', 'desc').orderBy('created_at', 'desc').execute() : [];
-  const accountingEntries = await Promise.all(journalHeaders.map(async (entry) => {
-    const lines = await db.selectFrom('journal_lines').innerJoin('accounts', 'accounts.id', 'journal_lines.account_id')
-      .select(['journal_lines.entry_type as side', 'journal_lines.amount as amount', 'journal_lines.currency as currency', 'journal_lines.memo as memo', 'accounts.account_code as accountCode', 'accounts.account_name as accountName'])
-      .where('journal_lines.journal_entry_id', '=', entry.id).orderBy('journal_lines.created_at').execute();
+    .orderBy('entry_date', 'desc').orderBy('created_at', 'desc').limit(200).execute() : [];
+  const allJournalLines = journalHeaders.length
+    ? await db.selectFrom('journal_lines').innerJoin('accounts', 'accounts.id', 'journal_lines.account_id')
+      .select(['journal_lines.journal_entry_id as entryId', 'journal_lines.entry_type as side', 'journal_lines.amount as amount', 'journal_lines.currency as currency', 'journal_lines.memo as memo', 'accounts.account_code as accountCode', 'accounts.account_name as accountName'])
+      .where('journal_lines.journal_entry_id', 'in', journalHeaders.map((entry) => entry.id)).orderBy('journal_lines.created_at').execute()
+    : [];
+  const linesByEntryId = new Map();
+  for (const line of allJournalLines) {
+    const bucket = linesByEntryId.get(line.entryId) ?? [];
+    bucket.push(line);
+    linesByEntryId.set(line.entryId, bucket);
+  }
+  const accountingEntries = journalHeaders.map((entry) => {
+    const lines = linesByEntryId.get(entry.id) ?? [];
     const debit = lines.filter((line) => line.side === 'DEBIT').reduce((sum, line) => sum + BigInt(line.amount), 0n);
     const credit = lines.filter((line) => line.side === 'CREDIT').reduce((sum, line) => sum + BigInt(line.amount), 0n);
     return { id: entry.id, entryNumber: entry.entry_number, date: entry.entry_date, sourceType: entry.source_type, description: lines[0]?.memo?.split(' — ')[0] ?? entry.source_type, debitTotal: debit.toString(), creditTotal: credit.toString(), balanced: debit === credit, lines: lines.map((line) => ({ side: line.side, accountCode: line.accountCode, accountName: line.accountName, amount: moneyJson(Money.fromMinor(BigInt(line.amount), line.currency)), memo: line.memo })) };
-  }));
+  });
   const canViewExpenses = ctx.hasPermission(Permissions.EXPENSES_DIRECT_CREATE) || canViewAccounting;
   const expenseRows = canViewExpenses ? await db.selectFrom('operating_expense_records').innerJoin('expense_categories', 'expense_categories.id', 'operating_expense_records.category_id')
     .select(['operating_expense_records.id as id', 'operating_expense_records.expense_date as date', 'operating_expense_records.amount as amount', 'operating_expense_records.currency as currency', 'operating_expense_records.payment_method as paymentMethod', 'operating_expense_records.notes as notes', 'operating_expense_records.reference_number as referenceNumber', 'expense_categories.name as category'])
@@ -620,9 +686,10 @@ async function currentData(ctx, url) {
   const managedUsers = canManageUsers ? await userRepo.listByTenant(ctx) : [];
   const canCloseShift = ctx.hasPermission(Permissions.POS_DRAWER_OPEN);
   const canClosePeriod = ctx.hasPermission(Permissions.SETTINGS_MANAGE);
-  const drawerBookBalanceMinor = (canViewAccounting || canCloseShift)
-    ? await computeDrawerBookBalanceMinor(db, ctx.tenantId, storeId)
+  const treasuryMinor = (canViewAccounting || canCloseShift)
+    ? await computeTreasuryBalancesMinor(db, ctx.tenantId, storeId)
     : null;
+  const drawerBookBalanceMinor = treasuryMinor ? treasuryMinor.drawer : null;
   const accountingPeriods = canViewAccounting
     ? await db.selectFrom('accounting_periods').selectAll().where('tenant_id', '=', ctx.tenantId).orderBy('start_date', 'desc').execute()
     : [];
@@ -639,6 +706,11 @@ async function currentData(ctx, url) {
     accountingEntries,
     accountingPeriods: accountingPeriods.map((period) => ({ id: period.id, name: period.name, startDate: period.start_date, endDate: period.end_date, status: period.status, closedAt: period.closed_at })),
     drawerBookBalance: drawerBookBalanceMinor !== null ? moneyJson(Money.fromMinor(drawerBookBalanceMinor, tenant.currency)) : null,
+    treasuryBalances: treasuryMinor ? {
+      drawer: moneyJson(Money.fromMinor(treasuryMinor.drawer, tenant.currency)),
+      safe: moneyJson(Money.fromMinor(treasuryMinor.safe, tenant.currency)),
+      bank: moneyJson(Money.fromMinor(treasuryMinor.bank, tenant.currency)),
+    } : null,
     expenses: expenseRows.map((expense) => ({ ...expense, amount: moneyJson(Money.fromMinor(BigInt(expense.amount), expense.currency)) })),
     capabilities: { canViewAccounting, canViewExpenses, canCreateExpenses: ctx.hasPermission(Permissions.EXPENSES_DIRECT_CREATE), canRefund: ctx.hasPermission(Permissions.POS_REFUND), canViewSales, canViewInventory: ctx.hasPermission(Permissions.INVENTORY_ADJUST), canTransferInventory: ctx.hasPermission(Permissions.INVENTORY_TRANSFER), canManageCatalog, canManageStores: ctx.hasPermission(Permissions.STORES_MANAGE), canCloseShift, canClosePeriod, canManageBackups: ctx.hasPermission(Permissions.SYSTEM_BACKUP_MANAGE), canManageUsers, canViewAuditLogs: ctx.hasPermission(Permissions.AUDIT_LOG_VIEW), cashierMode: ctx.roleId === 'CASHIER' },
     lowStock,
@@ -783,7 +855,9 @@ async function handleApi(req, res, url) {
     }
     const state = await setupState();
     if (!state.configured) throw Object.assign(new Error('أكمل إعداد النظام أولاً'), { status: 409 });
-    const key = `${body.username.trim().toLowerCase()}`;
+    pruneFailedLogins();
+    const normalizedUsername = body.username.trim().toLowerCase();
+    const key = normalizedUsername;
     const failures = failedLogins.get(key) ?? { count: 0, startedAt: Date.now() };
     if (Date.now() - failures.startedAt < LOCK_WINDOW_MS && failures.count >= MAX_FAILED_LOGINS) {
       throw Object.assign(new Error('محاولات كثيرة. انتظر عشر دقائق ثم حاول مرة أخرى.'), { status: 429 });
@@ -798,13 +872,35 @@ async function handleApi(req, res, url) {
     } catch {
       const next = Date.now() - failures.startedAt < LOCK_WINDOW_MS ? failures : { count: 0, startedAt: Date.now() };
       failedLogins.set(key, { count: next.count + 1, startedAt: next.startedAt });
+      const tenants = await tenantRepo.listAll();
+      if (tenants[0]) {
+        const matchedUser = await userRepo.findByUsername(tenants[0].id, normalizedUsername);
+        const sysCtx = new ScopedExecutionContext({ tenantId: tenants[0].id, userId: 'system', roleId: 'OWNER', permissions: new Set(['*']), correlationId: randomUUID() });
+        await recordAudit(sysCtx, {
+          storeId: matchedUser?.storeId ?? null,
+          actorUserId: matchedUser?.id ?? null,
+          actorUsername: matchedUser?.username ?? normalizedUsername,
+          actorRole: matchedUser?.role ?? 'UNKNOWN',
+          action: 'AUTH_LOGIN_FAILED',
+          entityType: 'SESSION',
+          entityId: matchedUser?.id ?? null,
+          summary: `محاولة تسجيل دخول فاشلة للحساب (${normalizedUsername})`,
+          metadata: { attemptCount: next.count + 1 },
+        });
+      }
       throw Object.assign(new Error('اسم المستخدم أو كلمة المرور غير صحيحة'), { status: 401 });
     }
   }
 
   if (method === 'POST' && path === '/api/logout') {
     const token = readCookie(req, 'retailos_session');
-    if (token) await auth.logout(token);
+    if (token) {
+      try {
+        const logoutCtx = await auth.validateSession(token);
+        await recordAudit(logoutCtx, { action: 'AUTH_LOGOUT', entityType: 'SESSION', entityId: logoutCtx.userId, summary: 'تسجيل خروج من الجلسة' });
+      } catch { /* Session already expired or invalid */ }
+      await auth.logout(token);
+    }
     return json(res, 200, { ok: true }, { 'Set-Cookie': 'retailos_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0' });
   }
 
@@ -813,6 +909,70 @@ async function handleApi(req, res, url) {
   if (method === 'GET' && path === '/api/reports/profit-loss') return json(res, 200, await profitLossReport(ctx, url));
   if (method === 'GET' && path === '/api/reports/top-products') return json(res, 200, await topProductsReport(ctx, url));
   if (method === 'GET' && path === '/api/reports/purchases') return json(res, 200, await purchaseSupplierReport(ctx, url));
+
+  if (method === 'GET' && path === '/api/reports/export.csv') {
+    const exportType = url.searchParams.get('type') ?? 'sales';
+    const stores = await storeRepo.listByTenant(ctx);
+    const requestedStore = url.searchParams.get('storeId');
+    const storeId = ctx.storeId ?? requestedStore ?? stores[0]?.id;
+    if (!storeId || !stores.some((s) => s.id === storeId)) throw Object.assign(new Error('الفرع غير متاح'), { status: 403 });
+    let rows = [];
+    if (exportType === 'sales') {
+      ctx.assertPermission(Permissions.REPORTS_DAILY_VIEW);
+      const salesList = await saleRepo.listByStore(ctx, storeId, 500);
+      rows.push(['رقم الفاتورة', 'التاريخ', 'العميل', 'الإجمالي', 'المدفوع', 'الحالة']);
+      for (const s of salesList) {
+        rows.push([s.saleNumber, s.createdAt.toISOString(), s.customerName ?? 'عميل نقدي', s.total.toDecimalString(), s.paidTotal.toDecimalString(), s.status]);
+      }
+    } else if (exportType === 'inventory') {
+      ctx.assertPermission(Permissions.INVENTORY_VIEW);
+      const products = await catalog.listProducts(ctx);
+      const variants = await variantRepo.listByTenant(ctx);
+      const positions = await inventory.listByStore(ctx, storeId);
+      const posByVar = new Map(positions.map((p) => [p.variantId, p]));
+      const productById = new Map(products.map((p) => [p.id, p]));
+      const canSeeWac = ctx.hasPermission(Permissions.REPORTS_COGS_VIEW);
+      rows.push(['المنتج', 'كود النسخة (SKU)', 'الباركود', 'الكمية المتاحة', 'حد إعادة الطلب', 'سعر البيع', ...(canSeeWac ? ['متوسط التكلفة (WAC)'] : [])]);
+      for (const v of variants) {
+        const prod = productById.get(v.productId);
+        const pos = posByVar.get(v.id);
+        rows.push([
+          prod?.name ?? '',
+          v.sku,
+          v.barcode ?? '',
+          (pos?.quantityOnHand ?? 0n).toString(),
+          v.reorderPoint.toString(),
+          v.retailPrice.toDecimalString(),
+          ...(canSeeWac ? [(pos?.wacCost ?? Money.zero(v.retailPrice.currency.code)).toDecimalString()] : []),
+        ]);
+      }
+    } else if (exportType === 'accounting') {
+      ctx.assertPermission(Permissions.REPORTS_FINANCIAL_VIEW);
+      const headers = await db.selectFrom('journal_entries').selectAll().where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).orderBy('entry_date', 'desc').limit(500).execute();
+      rows.push(['رقم القيد', 'التاريخ', 'المصدر', 'الحالة']);
+      for (const h of headers) {
+        rows.push([h.entry_number, h.entry_date, h.source_type, h.status]);
+      }
+    } else if (exportType === 'audit') {
+      ctx.assertPermission(Permissions.AUDIT_LOG_VIEW);
+      const entries = await auditLogs.list(ctx, { storeId, limit: 500 });
+      rows.push(['التسلسل', 'التاريخ', 'المستخدم', 'الدور', 'الإجراء', 'الملخص', 'البصمة (SHA-256)']);
+      for (const e of entries) {
+        rows.push([String(e.sequenceNo), e.createdAt, e.actorUsername, e.actorRole, e.action, e.summary, e.entryHash]);
+      }
+    } else {
+      throw Object.assign(new Error('نوع التقرير غير مدعوم'), { status: 400 });
+    }
+    const csvContent = '\uFEFF' + rows.map((r) => r.map(escapeCsvCell).join(',')).join('\r\n');
+    res.writeHead(200, {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="retailos-${exportType}-${new Date().toISOString().slice(0, 10)}.csv"`,
+      'Cache-Control': 'no-store',
+      ...securityHeaders(),
+    });
+    res.end(csvContent);
+    return;
+  }
 
   if (method === 'GET' && path === '/api/audit-logs') {
     if (!ctx.hasPermission(Permissions.AUDIT_LOG_VIEW)) throw Object.assign(new Error('غير مصرح بعرض سجل المراجعة والأمان'), { status: 403 });
@@ -1200,6 +1360,153 @@ async function handleApi(req, res, url) {
     return json(res, 201, { id: transferId, transferred: true, quantity: body.quantity, outMovementId: result.out.movementId, inMovementId: result.in.movementId });
   }
 
+  if (method === 'POST' && path === '/api/inventory/damage') {
+    ctx.assertPermission(Permissions.INVENTORY_ADJUST);
+    const body = validate(InventoryDamageSchema, await readJson(req));
+    if (ctx.storeId && ctx.storeId !== body.storeId) throw Object.assign(new Error('الفرع غير متاح لهذا المستخدم'), { status: 403 });
+    const tenant = await tenantRepo.findById(ctx.tenantId);
+    if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
+    const variant = await variantRepo.findById(ctx, body.variantId);
+    if (!variant) throw Object.assign(new Error('المنتج غير موجود'), { status: 404 });
+    const qty = BigInt(body.quantity);
+    const movementId = randomUUID();
+    const damageResult = await db.transaction().execute(async (trx) => {
+      const movement = await applyStockMovementInTransaction(trx, ctx, {
+        id: movementId,
+        storeId: body.storeId,
+        variantId: variant.id,
+        currency: tenant.currency,
+        movementType: 'DAMAGE_WRITE_OFF',
+        quantityDelta: -qty,
+        sourceType: 'DAMAGE',
+        sourceId: body.idempotencyKey,
+        allowNegativeStock: tenant.allowNegativeStock,
+      });
+      const totalLossMinor = movement.unitCost.amount * qty;
+      if (totalLossMinor > 0n) {
+        await postJournalEntry(trx, ctx, {
+          storeId: body.storeId,
+          currency: tenant.currency,
+          date: new Date(),
+          sourceType: 'ADJUSTMENT',
+          sourceId: movement.id,
+          idempotencyKey: `inventory-damage:${body.idempotencyKey}`,
+          description: `إعدام بضاعة تالفة (${variant.sku})${body.reason ? ` - ${body.reason}` : ''}`,
+          lines: [
+            { accountCode: '5090', side: 'DEBIT', amount: totalLossMinor, memo: 'خسائر وتوالف مخزون بالتكلفة المرجحة' },
+            { accountCode: '1300', side: 'CREDIT', amount: totalLossMinor, memo: 'تخفيض قيمة المخزون بالتالف' },
+          ],
+        });
+      }
+      return { movement, totalLossMinor };
+    });
+    await recordAudit(ctx, { storeId: body.storeId, action: 'INVENTORY_DAMAGE_RECORDED', entityType: 'STOCK_MOVEMENT', entityId: damageResult.movement.id, summary: `تسجيل تالف مخزني (${variant.sku} - كمية ${body.quantity})`, metadata: { variantId: variant.id, sku: variant.sku, quantity: body.quantity, lossAmount: damageResult.totalLossMinor.toString(), reason: body.reason ?? '' } });
+    return json(res, 201, {
+      id: damageResult.movement.id,
+      resultingQuantity: damageResult.movement.resultingQuantity.toString(),
+      lossAmount: moneyJson(Money.fromMinor(damageResult.totalLossMinor, tenant.currency)),
+    });
+  }
+
+  if (method === 'POST' && path === '/api/inventory/adjust') {
+    ctx.assertPermission(Permissions.INVENTORY_ADJUST);
+    const body = validate(InventoryAdjustSchema, await readJson(req));
+    if (ctx.storeId && ctx.storeId !== body.storeId) throw Object.assign(new Error('الفرع غير متاح لهذا المستخدم'), { status: 403 });
+    const tenant = await tenantRepo.findById(ctx.tenantId);
+    if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
+    const variant = await variantRepo.findById(ctx, body.variantId);
+    if (!variant) throw Object.assign(new Error('المنتج غير موجود'), { status: 404 });
+    const targetQty = BigInt(body.targetQuantity);
+    const currentPos = await inventoryRepo.getPosition(ctx, body.storeId, variant.id);
+    const currentQty = currentPos?.quantityOnHand ?? 0n;
+    const delta = targetQty - currentQty;
+    if (delta === 0n) throw Object.assign(new Error('الكمية الفعلية مطابقة للرصيد الحالي ولا تحتاج تسوية'), { status: 400 });
+    const unitCostMoney = delta > 0n
+      ? Money.fromMinor(BigInt(body.unitCost ?? (currentPos?.wacCost.amount ?? 0n).toString()), tenant.currency)
+      : undefined;
+    if (delta > 0n && (!unitCostMoney || unitCostMoney.amount <= 0n)) {
+      throw Object.assign(new Error('الزيادة المخزنية تتطلب تحديد تكلفة الوحدة'), { status: 400 });
+    }
+    const movementId = randomUUID();
+    const adjustResult = await db.transaction().execute(async (trx) => {
+      const movement = await applyStockMovementInTransaction(trx, ctx, {
+        id: movementId,
+        storeId: body.storeId,
+        variantId: variant.id,
+        currency: tenant.currency,
+        movementType: 'INVENTORY_ADJUSTMENT',
+        quantityDelta: delta,
+        unitCost: unitCostMoney,
+        sourceType: 'ADJUSTMENT',
+        sourceId: body.idempotencyKey,
+        allowNegativeStock: tenant.allowNegativeStock,
+      });
+      const absQty = delta > 0n ? delta : -delta;
+      const valuationDelta = movement.unitCost.amount * absQty;
+      if (valuationDelta > 0n) {
+        await postJournalEntry(trx, ctx, {
+          storeId: body.storeId,
+          currency: tenant.currency,
+          date: new Date(),
+          sourceType: 'ADJUSTMENT',
+          sourceId: movement.id,
+          idempotencyKey: `inventory-adjust:${body.idempotencyKey}`,
+          description: `تسوية جرد مخزني (${variant.sku})${body.reason ? ` - ${body.reason}` : ''}`,
+          lines: delta > 0n
+            ? [
+                { accountCode: '1300', side: 'DEBIT', amount: valuationDelta, memo: 'زيادة رصيد المخزون نتيجة جرد فعلي' },
+                { accountCode: '5090', side: 'CREDIT', amount: valuationDelta, memo: 'فروق جرد مخزني موجبة' },
+              ]
+            : [
+                { accountCode: '5090', side: 'DEBIT', amount: valuationDelta, memo: 'عجز جرد مخزني بالتكلفة المرجحة' },
+                { accountCode: '1300', side: 'CREDIT', amount: valuationDelta, memo: 'تخفيض رصيد المخزون نتيجة جرد فعلي' },
+              ],
+        });
+      }
+      return { movement, delta, valuationDelta };
+    });
+    await recordAudit(ctx, { storeId: body.storeId, action: 'INVENTORY_ADJUSTED', entityType: 'STOCK_MOVEMENT', entityId: adjustResult.movement.id, summary: `تسوية جرد مخزني (${variant.sku}) من ${currentQty} إلى ${targetQty}`, metadata: { variantId: variant.id, sku: variant.sku, previousQuantity: currentQty.toString(), targetQuantity: targetQty.toString(), delta: delta.toString(), reason: body.reason ?? '' } });
+    return json(res, 201, {
+      id: adjustResult.movement.id,
+      previousQuantity: currentQty.toString(),
+      resultingQuantity: adjustResult.movement.resultingQuantity.toString(),
+      delta: delta.toString(),
+    });
+  }
+
+  if (method === 'POST' && path === '/api/accounting/treasury-transfer') {
+    ctx.assertPermission(Permissions.POS_DRAWER_OPEN);
+    const body = validate(TreasuryTransferSchema, await readJson(req));
+    if (ctx.storeId && ctx.storeId !== body.storeId) throw Object.assign(new Error('الفرع غير متاح لهذا المستخدم'), { status: 403 });
+    if (body.fromAccount === body.toAccount) throw Object.assign(new Error('لا يمكن التحويل لنفس الحساب'), { status: 400 });
+    const tenant = await tenantRepo.findById(ctx.tenantId);
+    if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
+    const amountMinor = BigInt(body.amount);
+    const accountLabels = { '1010': 'درج النقدية', '1015': 'الخزينة الرئيسية', '1020': 'البنك والتحصيل الإلكتروني' };
+    await db.transaction().execute(async (trx) => {
+      await postJournalEntry(trx, ctx, {
+        storeId: body.storeId,
+        currency: tenant.currency,
+        date: new Date(),
+        sourceType: 'TRANSFER',
+        sourceId: body.idempotencyKey,
+        idempotencyKey: `treasury-transfer:${body.idempotencyKey}`,
+        description: `تحويل نقدية من ${accountLabels[body.fromAccount]} إلى ${accountLabels[body.toAccount]}${body.notes ? ` (${body.notes})` : ''}`,
+        lines: [
+          { accountCode: body.toAccount, side: 'DEBIT', amount: amountMinor, memo: `استلام تحويل من ${accountLabels[body.fromAccount]}` },
+          { accountCode: body.fromAccount, side: 'CREDIT', amount: amountMinor, memo: `صرف تحويل إلى ${accountLabels[body.toAccount]}` },
+        ],
+      });
+    });
+    await recordAudit(ctx, { storeId: body.storeId, action: 'TREASURY_TRANSFERRED', entityType: 'TREASURY', entityId: body.idempotencyKey, summary: `تحويل مالي من ${accountLabels[body.fromAccount]} إلى ${accountLabels[body.toAccount]} بقيمة (${body.amount})`, metadata: { fromAccount: body.fromAccount, toAccount: body.toAccount, amount: body.amount, notes: body.notes ?? '' } });
+    return json(res, 201, {
+      transferred: true,
+      fromAccount: body.fromAccount,
+      toAccount: body.toAccount,
+      amount: moneyJson(Money.fromMinor(amountMinor, tenant.currency)),
+    });
+  }
+
   if (method === 'POST' && path === '/api/accounting/shift-close') {
     ctx.assertPermission(Permissions.POS_DRAWER_OPEN);
     const body = validate(ShiftCloseSchema, await readJson(req));
@@ -1323,6 +1630,12 @@ const server = createServer(async (req, res) => {
 
 const walCheckpointTimer = setInterval(() => {
   database.checkpointPassive();
+  pruneFailedLogins();
+  void db
+    .deleteFrom('sessions')
+    .where((eb) => eb.or([eb('is_revoked', '=', 1), eb('expires_at', '<', new Date().toISOString())]))
+    .execute()
+    .catch(() => undefined);
 }, 5 * 60 * 1000);
 walCheckpointTimer.unref();
 

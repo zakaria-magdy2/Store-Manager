@@ -199,7 +199,7 @@ rules in [`docs/QUALITY_GATES.md`](QUALITY_GATES.md).
     - **Phase 2**: Argon2id password hashing, SHA-256 session management, RBAC matrix, and multi-tenant isolation.
     - **Phase 3**: Universal catalog (categories, products, variants, JSON attributes), WAC inventory engine, tenant negative-stock policy, and DB-enforced append-only stock ledger.
     - **Phase 4**: POS Checkout, Fast Cart, ESC/POS receipt formatter, cash drawer & barcode scanner drivers, and Arabic RTL local store web app (`apps/web`).
-    - **Phase 5**: Integrated double-entry accounting sub-ledger, supplier purchases/payments/returns, customer returns, direct & recurring monthly expenses, Z-Report shift closing, and accounting period locking.
-    - **Phase 6**: AES-256-GCM encrypted SQLite online backups, 4-stage atomic restore & rollback recovery, dynamic migration validation (`001`–`018`), and `SqliteUnitOfWork`.
-    - **Phase 7**: 8-Tier P&L & cash-flow reports, top products/suppliers analytics, and SHA-256 hash-chained tamper-evident `audit_logs`.
-    - **Phase 8**: `SqliteOutboxRepository` & `OutboxSyncWorker` CDC synchronization, `DesktopHostSupervisor` & context-isolated IPC security policy (`apps/desktop`), and 75/75 automated unit, integration, and E2E tests passing.
+    - **Phase 5**: Integrated double-entry accounting sub-ledger, supplier purchases/payments/returns, customer returns, direct & recurring monthly expenses, 3-tier cash treasury transfers (`1010` Drawer / `1015` Safe / `1020` Bank), inventory damage write-offs & stock adjustments, Z-Report shift closing, monthly (`YYYY-MM`) accounting period locking, and SQLite trigger-enforced immutable general ledger (`019_enterprise_accounting_and_indexes`).
+    - **Phase 6**: AES-256-GCM encrypted SQLite online backups, 4-stage atomic restore & rollback recovery, dynamic migration validation (`001`–`019`), and `SqliteUnitOfWork`.
+    - **Phase 7**: 8-Tier P&L & cash-flow reports, top products/suppliers analytics, UTF-8 BOM CSV exports (`sales`, `inventory`, `accounting`, `audit`) with formula-injection sanitization, and SHA-256 hash-chained tamper-evident `audit_logs`.
+    - **Phase 8**: `SqliteOutboxRepository` & `OutboxSyncWorker` CDC synchronization, `DesktopHostSupervisor` & context-isolated IPC security policy (`apps/desktop`), and 76/76 automated unit, integration, and E2E tests passing.

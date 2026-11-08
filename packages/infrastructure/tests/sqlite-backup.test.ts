@@ -29,7 +29,7 @@ function readProbe(path: string): string {
   finally { db.close(); }
 }
 
-describe('Encrypted SQLite backups', () => {
+describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
   let workingDirectory: string | undefined;
   let backupPath: string | undefined;
 

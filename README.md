@@ -11,9 +11,9 @@
 - **Zero Floating-Point Financials**: Exact currency arithmetic using `bigint` minor units with Half-Even (Banker's) Rounding.
 - **Enterprise-Grade Security**: Separate company installations and databases, Argon2id password hashing (`@node-rs/argon2`), and cryptographically random session tokens (SHA-256 hashed in storage).
 - **Universal Product Catalog**: Products, nested categories, and sellable variants with validated JSON attributes — apparel, grocery, electronics, and pharmacy share one schema.
-- **WAC Inventory with Immutable Ledger**: Weighted Average Cost valuation with exact integer arithmetic, immutable cost snapshots on every issue, atomic inter-store transfers, and a database-enforced append-only `stock_movements` ledger.
-- **Supplier & Financial Sub-Ledger**: Multi-line supplier invoices, supplier payments, supplier returns (with `5090` WAC variance accounting), linked customer returns, direct daily expenses, recurring monthly obligations, cash drawer Z-Report shift closing, and accounting period locking — all posting balanced double-entry journal entries atomically.
-- **Encrypted Disaster Recovery & Tamper-Evident Audit Chain**: AES-256-GCM online SQLite backups, 4-stage atomic swap & rollback recovery, SHA-256 hash-chained append-only `audit_logs`, Outbox CDC sync worker, and Desktop Host security supervisor.
+- **WAC Inventory with Immutable Ledger**: Weighted Average Cost valuation with exact integer arithmetic, immutable cost snapshots on every issue, atomic inter-store transfers, damage/shrinkage write-offs (`DAMAGE_OUT`), physical stock count adjustments (`ADJUSTMENT_IN`/`ADJUSTMENT_OUT`), and a database-enforced append-only `stock_movements` ledger.
+- **Supplier & Financial Sub-Ledger**: Multi-line supplier invoices, supplier payments, supplier returns (with `5090` WAC variance accounting), linked customer returns, direct daily expenses, recurring monthly obligations, 3-tier cash treasury management (`1010` Drawer, `1015` Safe, `1020` Bank), cash drawer Z-Report shift closing, monthly (`YYYY-MM`) accounting period locking, and SQLite trigger-enforced immutable `journal_entries` & `journal_lines` — all posting balanced double-entry journal entries atomically.
+- **Encrypted Disaster Recovery & Tamper-Evident Audit Chain**: AES-256-GCM online SQLite backups, 4-stage atomic swap & rollback recovery, SHA-256 hash-chained append-only `audit_logs`, UTF-8 BOM CSV report exports with formula-injection protection, Outbox CDC sync worker, and Desktop Host security supervisor.
 
 ---
 

@@ -443,6 +443,58 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.equal(shiftClose.payload.status, 'SHORTAGE');
   assert.equal(shiftClose.payload.variance.amount, '-500');
 
+  const treasuryTransfer = await request('/api/accounting/treasury-transfer', {
+    method: 'POST',
+    body: {
+      idempotencyKey: 'c920d366-b4f2-4a2b-86d1-8fd73493bd3f',
+      storeId,
+      fromAccount: '1010',
+      toAccount: '1015',
+      amount: '3000',
+      notes: 'توريد نقدية للخزينة الرئيسية',
+    },
+  });
+  assert.equal(treasuryTransfer.response.status, 201, JSON.stringify(treasuryTransfer.payload));
+  assert.equal(treasuryTransfer.payload.transferred, true);
+
+  const damageWriteOff = await request('/api/inventory/damage', {
+    method: 'POST',
+    body: {
+      idempotencyKey: '79a7f375-52cf-491d-a0f6-6c260d1f0a11',
+      storeId,
+      variantId: variant.id,
+      quantity: '1',
+      reason: 'تلف عبوة أثناء العرض',
+    },
+  });
+  assert.equal(damageWriteOff.response.status, 201, JSON.stringify(damageWriteOff.payload));
+  assert.equal(damageWriteOff.payload.resultingQuantity, '1');
+  assert.equal(damageWriteOff.payload.lossAmount.amount, '8200');
+
+  const stockAdjust = await request('/api/inventory/adjust', {
+    method: 'POST',
+    body: {
+      idempotencyKey: '18b8d570-3b31-4287-9f64-7fd3d291a022',
+      storeId,
+      variantId: variant.id,
+      targetQuantity: '2',
+      unitCost: '8200',
+      reason: 'فائض جرد فعلي',
+    },
+  });
+  assert.equal(stockAdjust.response.status, 201, JSON.stringify(stockAdjust.payload));
+  assert.equal(stockAdjust.payload.resultingQuantity, '2');
+  assert.equal(stockAdjust.payload.delta, '1');
+
+  const csvResponse = await fetch(`${baseUrl}/api/reports/export.csv?type=inventory&storeId=${storeId}`, {
+    headers: { Origin: baseUrl, Cookie: cookie },
+  });
+  assert.equal(csvResponse.status, 200);
+  const csvBuffer = Buffer.from(await csvResponse.arrayBuffer());
+  assert.deepEqual([...csvBuffer.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
+  const csvText = csvBuffer.toString('utf8');
+  assert.ok(csvText.includes('COFFEE-TEST-1'));
+
   assert.ok(beforeCloseData.payload.accountingPeriods.length >= 1);
   const periodClose = await request('/api/accounting/periods/close', {
     method: 'POST',
@@ -453,10 +505,22 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.equal(periodClose.response.status, 200, JSON.stringify(periodClose.payload));
   assert.equal(periodClose.payload.status, 'CLOSED');
 
+  const blockedClosedPeriodPost = await request('/api/accounting/treasury-transfer', {
+    method: 'POST',
+    body: {
+      idempotencyKey: '6d20d366-b4f2-4a2b-86d1-8fd73493bd99',
+      storeId,
+      fromAccount: '1010',
+      toAccount: '1015',
+      amount: '1000',
+    },
+  });
+  assert.equal(blockedClosedPeriodPost.response.status, 409);
+
   const auditLogResponse = await request(`/api/audit-logs?storeId=${storeId}&limit=100`);
   assert.equal(auditLogResponse.response.status, 200, JSON.stringify(auditLogResponse.payload));
   assert.equal(auditLogResponse.payload.chainVerification.valid, true);
-  assert.ok(auditLogResponse.payload.chainVerification.checkedCount >= 14);
+  assert.ok(auditLogResponse.payload.chainVerification.checkedCount >= 17);
   const loggedActions = new Set(auditLogResponse.payload.entries.map((entry) => entry.action));
   for (const expectedAction of [
     'OWNER_SETUP',
@@ -472,6 +536,9 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
     'STORE_CREATED',
     'INVENTORY_TRANSFERRED',
     'SHIFT_CLOSED',
+    'TREASURY_TRANSFERRED',
+    'INVENTORY_DAMAGE_RECORDED',
+    'INVENTORY_ADJUSTED',
     'ACCOUNTING_PERIOD_CLOSED',
   ]) {
     assert.ok(loggedActions.has(expectedAction), `Expected audit log to contain ${expectedAction}`);

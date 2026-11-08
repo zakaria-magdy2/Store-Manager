@@ -547,4 +547,97 @@ describe('Financial & Accounting SQLite Integration Tests (Phase 5)', () => {
       }),
     ).rejects.toThrow(/مبلغ السداد أكبر من المتبقي على الالتزام/);
   });
+
+  it('enforces monthly accounting periods, closed-period lock, and database-level journal immutability', async () => {
+    const db = dbManager.getDb();
+    const expenseRepo = new SqliteExpenseRepository(db);
+
+    // 1. Record an expense in October 2026 -> creates monthly period 2026-10
+    await expenseRepo.record(ctx, {
+      id: 'exp-oct-1',
+      idempotencyKey: 'idem-exp-oct-1',
+      storeId: 'store-fin-1',
+      categoryCode: 'UTILITIES',
+      amount: 15000n,
+      currency: 'EGP',
+      paymentMethod: 'CASH_DRAWER',
+      expenseDate: '2026-10-15',
+      notes: 'فاتورة كهرباء أكتوبر',
+    });
+
+    const octPeriod = await db
+      .selectFrom('accounting_periods')
+      .selectAll()
+      .where('tenant_id', '=', 'tenant-fin-1')
+      .where('name', '=', '2026-10')
+      .executeTakeFirstOrThrow();
+    expect(octPeriod.start_date).toBe('2026-10-01');
+    expect(octPeriod.end_date).toBe('2026-10-31');
+    expect(octPeriod.status).toBe('OPEN');
+
+    // 2. Close October 2026 period
+    await db
+      .updateTable('accounting_periods')
+      .set({
+        status: 'CLOSED',
+        closed_at: '2026-11-01T00:00:00.000Z',
+        closed_by_user_id: 'user-fin-1',
+      })
+      .where('id', '=', octPeriod.id)
+      .execute();
+
+    // 3. Reopening or deleting a CLOSED accounting period must be blocked by SQLite trigger
+    await expect(
+      db
+        .updateTable('accounting_periods')
+        .set({ status: 'OPEN' })
+        .where('id', '=', octPeriod.id)
+        .execute(),
+    ).rejects.toThrow(/AccountingPeriodClosed/);
+
+    // 4. Posting into closed October 2026 must fail, while posting into November 2026 succeeds
+    await expect(
+      expenseRepo.record(ctx, {
+        id: 'exp-oct-2',
+        idempotencyKey: 'idem-exp-oct-2',
+        storeId: 'store-fin-1',
+        categoryCode: 'UTILITIES',
+        amount: 5000n,
+        currency: 'EGP',
+        paymentMethod: 'CASH_DRAWER',
+        expenseDate: '2026-10-20',
+      }),
+    ).rejects.toThrow(/الفترة المحاسبية مقفلة/);
+
+    await expenseRepo.record(ctx, {
+      id: 'exp-nov-1',
+      idempotencyKey: 'idem-exp-nov-1',
+      storeId: 'store-fin-1',
+      categoryCode: 'UTILITIES',
+      amount: 18000n,
+      currency: 'EGP',
+      paymentMethod: 'CASH_DRAWER',
+      expenseDate: '2026-11-05',
+    });
+
+    // 5. Mutating or deleting journal_lines or journal_entries must be rejected by SQLite triggers
+    const journalEntry = await db
+      .selectFrom('journal_entries')
+      .selectAll()
+      .where('tenant_id', '=', 'tenant-fin-1')
+      .where('source_id', '=', 'exp-nov-1')
+      .executeTakeFirstOrThrow();
+
+    await expect(
+      db
+        .updateTable('journal_lines')
+        .set({ amount: 99999n })
+        .where('journal_entry_id', '=', journalEntry.id)
+        .execute(),
+    ).rejects.toThrow(/journal_lines is append-only/);
+
+    await expect(
+      db.deleteFrom('journal_entries').where('id', '=', journalEntry.id).execute(),
+    ).rejects.toThrow(/journal_entries is append-only/);
+  });
 });

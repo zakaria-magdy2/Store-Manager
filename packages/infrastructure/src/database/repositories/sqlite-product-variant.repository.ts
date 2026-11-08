@@ -58,6 +58,17 @@ export class SqliteProductVariantRepository implements ProductVariantRepository 
     return rows.map((row) => this.toEntity(row));
   }
 
+  public async listByTenant(ctx: ExecutionContext): Promise<ProductVariant[]> {
+    const rows = await this.db
+      .selectFrom('product_variants')
+      .selectAll()
+      .where('tenant_id', '=', ctx.tenantId)
+      .orderBy('sku', 'asc')
+      .execute();
+
+    return rows.map((row) => this.toEntity(row));
+  }
+
   public async save(ctx: ExecutionContext, variant: ProductVariant): Promise<void> {
     if (variant.tenantId !== ctx.tenantId) {
       throw new Error(

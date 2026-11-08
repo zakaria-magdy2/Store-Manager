@@ -20,6 +20,7 @@ import * as employeeProfiles from './migrations/015_employee_profiles.js';
 import * as productsRequireStock from './migrations/016_products_require_stock.js';
 import * as productVariantsMetadata from './migrations/017_product_variants_metadata.js';
 import * as auditLogs from './migrations/018_audit_logs.js';
+import * as enterpriseAccountingAndIndexes from './migrations/019_enterprise_accounting_and_indexes.js';
 
 const MIGRATION_REGISTRY: Record<string, Migration> = {
   '001_initial_foundation': {
@@ -93,6 +94,10 @@ const MIGRATION_REGISTRY: Record<string, Migration> = {
   '018_audit_logs': {
     up: auditLogs.up,
     down: auditLogs.down,
+  },
+  '019_enterprise_accounting_and_indexes': {
+    up: enterpriseAccountingAndIndexes.up,
+    down: enterpriseAccountingAndIndexes.down,
   },
 };
 

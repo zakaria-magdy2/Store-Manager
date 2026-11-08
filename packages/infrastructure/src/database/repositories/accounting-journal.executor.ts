@@ -64,13 +64,17 @@ export async function postJournalEntry(
   if (period && period.status !== 'OPEN') throw conflict('الفترة المحاسبية مقفلة ولا تقبل قيودًا جديدة');
   if (!period) {
     const year = input.date.getUTCFullYear();
-    const startDate = year + '-01-01', endDate = year + '-12-31';
+    const month = input.date.getUTCMonth() + 1;
+    const ym = `${year}-${String(month).padStart(2, '0')}`;
+    const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    const startDate = `${ym}-01`;
+    const endDate = `${ym}-${String(daysInMonth).padStart(2, '0')}`;
     const overlapping = await trx.selectFrom('accounting_periods').select('id').where('tenant_id', '=', ctx.tenantId)
       .where('start_date', '<=', endDate).where('end_date', '>=', startDate).executeTakeFirst();
     if (overlapping) throw conflict('تعذر إنشاء فترة محاسبية بسبب تداخل الفترات');
-    const periodId = ctx.tenantId + ':period:' + year;
+    const periodId = `${ctx.tenantId}:period:${ym}`;
     await trx.insertInto('accounting_periods').values({
-      id: periodId, tenant_id: ctx.tenantId, name: String(year), start_date: startDate, end_date: endDate,
+      id: periodId, tenant_id: ctx.tenantId, name: ym, start_date: startDate, end_date: endDate,
       status: 'OPEN', closed_at: null, closed_by_user_id: null,
     }).execute();
     period = await trx.selectFrom('accounting_periods').selectAll().where('id', '=', periodId).executeTakeFirstOrThrow();
