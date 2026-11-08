@@ -934,9 +934,27 @@ async function currentData(ctx, url) {
   const accountingPeriods = canViewAccounting
     ? await db.selectFrom('accounting_periods').selectAll().where('tenant_id', '=', ctx.tenantId).orderBy('start_date', 'desc').execute()
     : [];
+
+  const todayDateStr = new Date().toISOString().slice(0, 10);
+  const rawDatabase = database.getRawDatabase();
+  const todayAttendanceRows = rawDatabase.prepare(
+    "SELECT actor_user_id AS userId, actor_username AS username, created_at AS createdAt, summary FROM audit_logs WHERE tenant_id = ? AND action = 'ATTENDANCE_CHECK_IN' AND substr(created_at, 1, 10) = ? ORDER BY sequence_no DESC"
+  ).all(ctx.tenantId, todayDateStr);
+  const userCheckedInRecord = todayAttendanceRows.find((r) => r.userId === ctx.userId);
+  const userCheckedInToday = Boolean(userCheckedInRecord);
+  const userCheckInTime = userCheckedInRecord?.createdAt ?? null;
+
   return {
     company: { name: tenant.name, currency: tenant.currency },
     user: { id: ctx.userId, fullName: signedInUser?.fullName ?? '', role: ctx.roleId, storeId: ctx.storeId ?? null },
+    todayAttendance: todayAttendanceRows.map((r) => ({
+      userId: r.userId,
+      username: r.username,
+      createdAt: r.createdAt,
+      summary: r.summary,
+    })),
+    userCheckedInToday,
+    userCheckInTime,
     stores: stores.map((store) => ({ id: store.id, name: store.name, code: store.code, address: store.address ?? null, phone: store.phone ?? null })),
     users: managedUsers.map((user) => ({ id: user.id, username: user.username, fullName: user.fullName, phone: user.phone ?? null, employmentStartDate: user.employmentStartDate, role: user.role, storeId: user.storeId ?? null, isActive: user.isActive, createdAt: user.createdAt.toISOString() })),
     selectedStoreId: storeId,
@@ -1225,6 +1243,31 @@ async function handleApi(req, res, url) {
       auditLogs.verifyChain(ctx),
     ]);
     return json(res, 200, { entries, chainVerification });
+  }
+
+  if (method === 'POST' && path === '/api/attendance/check-in') {
+    const todayDateStr = new Date().toISOString().slice(0, 10);
+    const rawDatabase = database.getRawDatabase();
+    const existing = rawDatabase.prepare(
+      "SELECT id, created_at AS createdAt FROM audit_logs WHERE tenant_id = ? AND actor_user_id = ? AND action = 'ATTENDANCE_CHECK_IN' AND substr(created_at, 1, 10) = ? LIMIT 1"
+    ).get(ctx.tenantId, ctx.userId, todayDateStr);
+    if (existing) {
+      return json(res, 200, { ok: true, alreadyCheckedIn: true, checkInAt: existing.createdAt });
+    }
+    const user = await userRepo.findById(ctx, ctx.userId);
+    const checkInTime = new Date().toISOString();
+    await recordAudit(ctx, {
+      storeId: ctx.storeId ?? null,
+      actorUserId: ctx.userId,
+      actorUsername: user?.username ?? 'user',
+      actorRole: ctx.roleId,
+      action: 'ATTENDANCE_CHECK_IN',
+      entityType: 'USER',
+      entityId: ctx.userId,
+      summary: `تسجيل حضور: ${user?.fullName ?? user?.username ?? ''} (${user?.username ?? ''})`,
+      metadata: { checkInAt: checkInTime },
+    });
+    return json(res, 201, { ok: true, alreadyCheckedIn: false, checkInAt: checkInTime });
   }
 
   if (method === 'GET' && path === '/api/backups/daily') {
