@@ -841,7 +841,7 @@ async function currentData(ctx, url) {
       lowVariantCount: lowVariants.length,
     } : null;
   }).filter(Boolean);
-  const canViewSales = ctx.hasPermission(Permissions.REPORTS_DAILY_VIEW);
+  const canViewSales = ctx.hasPermission(Permissions.REPORTS_DAILY_VIEW) || ctx.roleId === 'CASHIER';
   const canViewAccounting = ctx.hasPermission(Permissions.REPORTS_FINANCIAL_VIEW);
   const allTenantUsers = await db.selectFrom('users')
     .select(['id', 'username', 'full_name as fullName', 'role'])
@@ -979,7 +979,7 @@ async function currentData(ctx, url) {
       bank: moneyJson(Money.fromMinor(treasuryMinor.bank, tenant.currency)),
     } : null,
     expenses: expenseRows.map((expense) => ({ ...expense, amount: moneyJson(Money.fromMinor(BigInt(expense.amount), expense.currency)) })),
-    capabilities: { canViewAccounting, canViewExpenses, canCreateExpenses: ctx.hasPermission(Permissions.EXPENSES_DIRECT_CREATE), canRefund: ctx.hasPermission(Permissions.POS_REFUND), canViewSales, canViewInventory: ctx.hasPermission(Permissions.INVENTORY_ADJUST), canTransferInventory: ctx.hasPermission(Permissions.INVENTORY_TRANSFER), canManageCatalog, canManageStores: ctx.hasPermission(Permissions.STORES_MANAGE), canCloseShift, canClosePeriod, canManageBackups: ctx.hasPermission(Permissions.SYSTEM_BACKUP_MANAGE), canManageUsers, canViewAuditLogs: ctx.hasPermission(Permissions.AUDIT_LOG_VIEW), cashierMode: ctx.roleId === 'CASHIER' },
+    capabilities: { canViewAccounting, canViewExpenses, canCreateExpenses: ctx.hasPermission(Permissions.EXPENSES_DIRECT_CREATE), canRefund: ctx.hasPermission(Permissions.POS_REFUND), canReturnSale: ctx.hasPermission(Permissions.POS_REFUND) || ctx.roleId === 'CASHIER', canViewSales, canViewInventory: ctx.hasPermission(Permissions.INVENTORY_VIEW), canTransferInventory: ctx.hasPermission(Permissions.INVENTORY_TRANSFER), canManageCatalog, canManageStores: ctx.hasPermission(Permissions.STORES_MANAGE), canCloseShift, canClosePeriod, canManageBackups: ctx.hasPermission(Permissions.SYSTEM_BACKUP_MANAGE), canManageUsers, canViewAuditLogs: ctx.hasPermission(Permissions.AUDIT_LOG_VIEW), cashierMode: ctx.roleId === 'CASHIER' },
     lowStock,
     sales,
     customerReturns: customerReturnRows.map((item) => ({ ...item, refundAmount: moneyJson(Money.fromMinor(BigInt(item.refundAmount), item.currency)) })),
@@ -1004,7 +1004,7 @@ async function handleApi(req, res, url) {
 
   if (method === 'GET' && path === '/api/sales') {
     const ctx = await requireContext(req);
-    if (!ctx.hasPermission(Permissions.REPORTS_DAILY_VIEW)) throw Object.assign(new Error('غير مصرح بعرض سجل المبيعات'), { status: 403 });
+    if (!ctx.hasPermission(Permissions.REPORTS_DAILY_VIEW) && ctx.roleId !== 'CASHIER') throw Object.assign(new Error('غير مصرح بعرض سجل المبيعات'), { status: 403 });
     const stores = await storeRepo.listByTenant(ctx);
     const requestedStore = url.searchParams.get('storeId');
     const storeId = ctx.storeId ?? requestedStore ?? stores[0]?.id;
@@ -1049,7 +1049,7 @@ async function handleApi(req, res, url) {
   const saleDetailMatch = method === 'GET' ? path.match(/^\/api\/sales\/([0-9a-f-]+)$/i) : null;
   if (saleDetailMatch) {
     const ctx = await requireContext(req);
-    if (!ctx.hasPermission(Permissions.REPORTS_DAILY_VIEW)) throw Object.assign(new Error('غير مصرح بعرض تفاصيل الفاتورة'), { status: 403 });
+    if (!ctx.hasPermission(Permissions.REPORTS_DAILY_VIEW) && ctx.roleId !== 'CASHIER') throw Object.assign(new Error('غير مصرح بعرض تفاصيل الفاتورة'), { status: 403 });
     const sale = await saleRepo.findById(ctx, saleDetailMatch[1]);
     if (!sale) throw Object.assign(new Error('الفاتورة غير موجودة'), { status: 404 });
     const cashier = await userRepo.findById(ctx, sale.cashierUserId);
@@ -1648,7 +1648,9 @@ async function handleApi(req, res, url) {
 
   const returnMatch = method === 'POST' ? path.match(/^\/api\/sales\/([0-9a-f-]+)\/returns$/i) : null;
   if (returnMatch) {
-    ctx.assertPermission(Permissions.POS_REFUND);
+    if (!ctx.hasPermission(Permissions.POS_REFUND) && ctx.roleId !== 'CASHIER') {
+      ctx.assertPermission(Permissions.POS_REFUND);
+    }
     const body = validate(CustomerReturnSchema, await readJson(req));
     const result = await returns.record(ctx, { id: randomUUID(), idempotencyKey: body.idempotencyKey,
       storeId: body.storeId, originalSaleId: returnMatch[1], paymentMethod: body.paymentMethod,
