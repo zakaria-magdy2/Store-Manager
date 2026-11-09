@@ -1054,7 +1054,12 @@ async function handleApi(req, res, url) {
     if (!sale) throw Object.assign(new Error('الفاتورة غير موجودة'), { status: 404 });
     const cashier = await userRepo.findById(ctx, sale.cashierUserId);
     const returned = await db.selectFrom('customer_returns').select(['id', 'return_number as returnNumber', 'refund_amount as refundAmount', 'currency', 'payment_method as paymentMethod', 'created_at as createdAt']).where('tenant_id', '=', ctx.tenantId).where('store_id', '=', sale.storeId).where('original_sale_id', '=', sale.id).orderBy('created_at', 'asc').execute();
-    return json(res, 200, { payload: { ...saleJson(sale), cashierName: cashier?.fullName ?? 'غير معروف', returns: returned.map((item) => ({ ...item, refundAmount: moneyJson(Money.fromMinor(BigInt(item.refundAmount), item.currency)) })) } });
+    const returnedItems = await db.selectFrom('customer_return_items').innerJoin('customer_returns', 'customer_returns.id', 'customer_return_items.return_id').select(['customer_return_items.original_sale_item_id as itemId', 'customer_return_items.quantity as quantity']).where('customer_return_items.tenant_id', '=', ctx.tenantId).where('customer_returns.store_id', '=', sale.storeId).where('customer_returns.original_sale_id', '=', sale.id).execute();
+    const returnedMap = new Map();
+    for (const r of returnedItems) returnedMap.set(r.itemId, (returnedMap.get(r.itemId) ?? 0n) + BigInt(r.quantity));
+    const saleData = saleJson(sale);
+    saleData.items = saleData.items.map((item) => ({ ...item, returnableQuantity: item.type === 'SALE' ? (BigInt(item.quantity) - (returnedMap.get(item.id) ?? 0n)).toString() : '0' }));
+    return json(res, 200, { payload: { ...saleData, cashierName: cashier?.fullName ?? 'غير معروف', returns: returned.map((item) => ({ ...item, refundAmount: moneyJson(Money.fromMinor(BigInt(item.refundAmount), item.currency)) })) } });
   }
 
   const saleReceiptMatch = method === 'GET' ? path.match(/^\/api\/sales\/([0-9a-f-]+)\/receipt$/i) : null;

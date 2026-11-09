@@ -413,10 +413,11 @@ function showEmployeeDetails(user) {
   const att = (state.data.todayAttendance ?? []).find((a) => a.userId === user.id);
   const isEmp = user.role === 'CASHIER';
   const attText = isEmp ? (att ? `✓ حاضر اليوم (${new Date(att.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })})` : 'لم يحضر اليوم بعد') : 'إدارة / مالك';
-  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card employee-profile-card" role="dialog" aria-modal="true" aria-labelledby="employee-profile-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">ملف الموظف</span><h2 id="employee-profile-title">${escapeHtml(user.fullName)}</h2></div><button type="button" class="modal-close" data-close-employee aria-label="إغلاق">×</button></div><div class="employee-profile-meta"><div><small>اسم المستخدم</small><strong>${escapeHtml(user.username)}</strong></div><div><small>الدور</small><strong>${userRoleLabel(user.role)}</strong></div><div><small>الفرع</small><strong>${escapeHtml(storeName)}</strong></div><div><small>حالة الحساب</small><strong class="${user.isActive ? 'profile-active' : 'profile-inactive'}">${user.isActive ? 'نشط' : 'موقوف'}</strong></div><div><small>حضور اليوم</small><strong>${attText}</strong></div><div><small>تاريخ إضافة الحساب</small><strong>${employeeDateLabel(user.createdAt, true)}</strong></div><div><small>\u0645\u062f\u0629 \u0627\u0644\u0639\u0645\u0644</small><strong>${employeeTenure(user.employmentStartDate)}</strong></div></div><form id="employee-profile-form" data-user-id="${user.id}" class="employee-profile-form"><label><span>رقم الهاتف</span><input name="phone" type="tel" maxlength="32" autocomplete="tel" value="${escapeHtml(user.phone ?? '')}" placeholder="لم يُسجل رقم هاتف"></label><label><span>تاريخ بدء العمل</span><input name="employmentStartDate" type="date" required value="${escapeHtml(user.employmentStartDate ?? '')}"></label><div class="modal-actions"><button type="button" class="button button-secondary" data-close-employee>إغلاق</button><button type="button" class="button button-secondary" id="employee-modal-att-btn">📅 سجل الحضور</button><button type="submit" class="button button-primary">حفظ التفاصيل</button></div></form></section></div>`;
+  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card employee-profile-card" role="dialog" aria-modal="true" aria-labelledby="employee-profile-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">ملف الموظف</span><h2 id="employee-profile-title">${escapeHtml(user.fullName)}</h2></div><button type="button" class="modal-close" data-close-employee aria-label="إغلاق">×</button></div><div class="employee-profile-body"><div class="employee-profile-meta"><div class="employee-meta-item"><small>اسم المستخدم</small><strong>${escapeHtml(user.username)}</strong></div><div class="employee-meta-item"><small>الدور الوظيفي</small><strong>${userRoleLabel(user.role)}</strong></div><div class="employee-meta-item"><small>الفرع المعين به</small><strong>${escapeHtml(storeName)}</strong></div><div class="employee-meta-item"><small>حالة الحساب</small><strong class="${user.isActive ? 'profile-active' : 'profile-inactive'}">${user.isActive ? 'نشط ومفعل' : 'موقوف'}</strong></div><div class="employee-meta-item"><small>حضور اليوم</small><strong style="color:${att ? '#15803d' : '#b45309'};">${attText}</strong></div><div class="employee-meta-item"><small>تاريخ الانضمام</small><strong>${employeeDateLabel(user.createdAt, true)}</strong></div><div class="employee-meta-item employee-meta-wide"><small>مدة العمل في المتجر</small><strong>${employeeTenure(user.employmentStartDate)}</strong></div></div><form id="employee-profile-form" data-user-id="${user.id}" class="form-stack"><div class="form-grid"><label><span>رقم الهاتف</span><input name="phone" type="tel" maxlength="32" autocomplete="tel" value="${escapeHtml(user.phone ?? '')}" placeholder="لم يُسجل رقم هاتف"></label><label><span>تاريخ بدء العمل الفعلي</span><input name="employmentStartDate" type="date" required value="${escapeHtml(user.employmentStartDate ?? '')}"></label></div><div class="modal-actions" style="margin-top:10px;"><button type="button" class="button button-secondary" data-close-employee>إغلاق</button><button type="button" class="button button-secondary" id="employee-modal-att-btn">📅 سجل الحضور</button><button type="submit" class="button button-primary">حفظ بيانات الموظف</button></div></form></div></section></div>`;
   root.querySelectorAll('[data-close-employee]').forEach((element) => element.addEventListener('click', (event) => {
     if (element === event.target || element.tagName === 'BUTTON') root.innerHTML = '';
   }));
+  root.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('click', (e) => { if (e.target === backdrop) root.innerHTML = ''; }));
   root.querySelector('#employee-modal-att-btn')?.addEventListener('click', () => {
     showAttendanceHistoryModal(user.id, user.fullName);
   });
@@ -751,7 +752,210 @@ function salesView() {
   const today = new Date().toISOString().slice(0, 10);
   const from = state.salesFrom ?? today;
   const to = state.salesTo ?? today;
-  return `<div class="page-heading-row"><div><p class="page-lead">كل فواتير البيع محفوظة. اختر فترة أو ابحث برقم الفاتورة أو اسم المنتج، وافتح أي فاتورة لعرض تفاصيلها.</p></div><button class="button button-primary" data-page="pos">${icon('plus', 18)} بيع جديد</button></div><section class="panel recent-panel"><form id="sales-history-search" class="sales-filter-bar"><label>من تاريخ<input type="date" name="from" value="${from}" required></label><label>إلى تاريخ<input type="date" name="to" value="${to}" required></label><label class="sales-filter-search">بحث في الفواتير<input name="search" value="${escapeHtml(state.salesHistorySearch)}" placeholder="رقم الفاتورة أو المنتج"></label><button class="button button-primary" type="submit">تطبيق الفلتر</button></form><div class="panel-heading"><div><h3>فواتير البيع</h3><p>${sales.length} من ${state.salesHistoryTotal} فاتورة في الفترة</p></div></div>${sales.length ? `${salesTable(sales)}${sales.length < state.salesHistoryTotal ? '<div class="sales-history-more"><button class="button button-secondary" id="sales-history-more">عرض فواتير أقدم</button></div>' : ''}` : `<div class="empty-chart"><div class="empty-illustration">${icon('chart', 28)}</div><strong>${state.salesHistorySearch ? 'لا توجد فواتير مطابقة' : 'لا توجد مبيعات في الفترة المحددة'}</strong><button class="button button-primary" data-page="pos">ابدأ البيع</button></div>`}</section><details class="panel compact-disclosure"><summary><span>المرتجعات</span><span class="status-pill status-complete">${returns.length} مرتجع</span></summary><div class="disclosure-content">${returns.length ? `<div class="table-scroll"><table><thead><tr><th>رقم المرتجع</th><th>الفاتورة</th><th>التاريخ</th><th>طريقة الرد</th><th>المبلغ</th></tr></thead><tbody>${returns.map((item) => `<tr><td>${escapeHtml(item.returnNumber)}</td><td>${escapeHtml(item.saleNumber)}</td><td>${new Date(item.createdAt).toLocaleString('ar-EG')}</td><td>${methodLabel(item.paymentMethod)}</td><td class="table-total">${money({ amount: item.refundAmount, currency: item.currency, decimals: currencyDecimals(item.currency) })}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">لا توجد مرتجعات مسجلة.</div>'}</div></details>`;
+  return `
+    <div class="page-heading-row">
+      <div>
+        <p class="page-lead">كل فواتير البيع محفوظة. اختر فترة أو ابحث برقم الفاتورة أو اسم المنتج، وافتح أي فاتورة لعرض تفاصيلها أو تسجيل مرتجع.</p>
+      </div>
+      <button class="button button-primary" data-page="pos">${icon('plus', 18)} بيع جديد</button>
+    </div>
+
+    <section class="panel recent-panel">
+      <form id="sales-history-search" class="sales-filter-bar">
+        <label>من تاريخ<input type="date" name="from" value="${from}" required></label>
+        <label>إلى تاريخ<input type="date" name="to" value="${to}" required></label>
+        <label class="sales-filter-search">بحث في الفواتير<input name="search" value="${escapeHtml(state.salesHistorySearch)}" placeholder="رقم الفاتورة أو المنتج"></label>
+        <button class="button button-primary" type="submit">تطبيق الفلتر</button>
+      </form>
+      <div class="panel-heading">
+        <div>
+          <h3>فواتير البيع</h3>
+          <p>${sales.length} من ${state.salesHistoryTotal} فاتورة في الفترة</p>
+        </div>
+      </div>
+      ${sales.length ? `${salesTable(sales)}${sales.length < state.salesHistoryTotal ? '<div class="sales-history-more"><button class="button button-secondary" id="sales-history-more">عرض فواتير أقدم</button></div>' : ''}` : `<div class="empty-chart"><div class="empty-illustration">${icon('chart', 28)}</div><strong>${state.salesHistorySearch ? 'لا توجد فواتير مطابقة' : 'لا توجد مبيعات في الفترة المحددة'}</strong><button class="button button-primary" data-page="pos">ابدأ البيع</button></div>`}
+    </section>
+
+    <div style="margin: 32px 0 16px; border-top: 2px dashed var(--line); padding-top: 20px;">
+      <div class="panel-heading" style="margin-bottom: 10px;">
+        <div>
+          <h3 style="font-size: 15px; font-weight: 800; color: var(--ink);">↩️ سجل فواتير المرتجعات السابقة</h3>
+          <p style="font-size: 11px; color: var(--muted);">كل عمليات الاسترجاع المسجلة على فواتير المبيعات مع المبالغ المستردة والمخزون المرتجع</p>
+        </div>
+        <span class="status-pill status-complete">${returns.length} حركة مرتجع</span>
+      </div>
+    </div>
+
+    <details class="panel compact-disclosure" ${returns.length ? 'open' : ''}>
+      <summary>
+        <span>عرض جدول المرتجعات التفصيلي</span>
+        <span class="status-pill status-complete">${returns.length} مرتجع</span>
+      </summary>
+      <div class="disclosure-content">
+        ${returns.length ? `
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>رقم المرتجع</th>
+                  <th>الفاتورة الأصلية</th>
+                  <th>تاريخ وتوقيت المرتجع</th>
+                  <th>طريقة رد المبلغ</th>
+                  <th>المبلغ المسترد</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${returns.map((item) => `
+                  <tr>
+                    <td><strong>${escapeHtml(item.returnNumber)}</strong></td>
+                    <td><span class="sku-code">${escapeHtml(item.saleNumber)}</span></td>
+                    <td>${new Date(item.createdAt).toLocaleString('ar-EG')}</td>
+                    <td><span class="payment-chip">${methodLabel(item.paymentMethod)}</span></td>
+                    <td class="table-total" style="color:var(--rose,#be123c);">${money({ amount: item.refundAmount, currency: item.currency, decimals: currencyDecimals(item.currency) })}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        ` : '<div class="empty-row">لا توجد مرتجعات مسجلة في هذا المتجر حتى الآن.</div>'}
+      </div>
+    </details>
+  `;
+}
+
+function supplierReturnItemModal(purchase, itemId, itemName, returnableQty) {
+  supplierModal(
+    `<p>إرجاع للتاجر: <strong>${escapeHtml(itemName)}</strong><br>الكمية المتاحة للإرجاع: <strong>${returnableQty} قطعة</strong>. سيتم تقليل رصيد حساب التاجر بسعر الشراء وإخراج القطع من المخزن.</p>
+    <label>الكمية المراد إرجاعها
+      <input name="quantity" type="number" min="1" max="${returnableQty}" step="1" value="1" required autofocus>
+    </label>
+    <input type="hidden" name="storeId" value="${state.data.selectedStoreId}">
+    <input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`,
+    'supplier-return-form',
+    `/api/purchases/${purchase.id}/returns`,
+    (data) => ({
+      idempotencyKey: data.idempotencyKey,
+      storeId: data.storeId,
+      items: [{ purchaseItemId: itemId, quantity: data.quantity }],
+    }),
+    'تم تسجيل المرتجع وتحديث المخزون ورصيد التاجر بنجاح'
+  );
+}
+
+function groupPurchaseItemsByModel(purchase, productsCatalog) {
+  const modelMap = new Map();
+  for (const item of purchase.items ?? []) {
+    const parentProduct = (productsCatalog ?? []).find((p) => p.name === item.productName || (p.variants ?? []).some((v) => v.sku === item.sku));
+    const modelKey = parentProduct ? parentProduct.id : (item.productName || item.sku);
+    const modelName = parentProduct ? parentProduct.name : item.productName;
+    const modelSku = parentProduct ? parentProduct.sku : (item.sku.split('-')[0] || item.sku);
+
+    let group = modelMap.get(modelKey);
+    if (!group) {
+      group = {
+        key: modelKey,
+        product: parentProduct,
+        name: modelName,
+        modelSku,
+        items: [],
+        totalQuantity: 0n,
+        totalReturnable: 0n,
+        totalCostMinor: 0n,
+        currency: item.unitCost.currency,
+        decimals: item.unitCost.decimals,
+      };
+      modelMap.set(modelKey, group);
+    }
+
+    const qty = BigInt(item.quantity);
+    const cost = BigInt(item.unitCost.amount);
+    group.items.push(item);
+    group.totalQuantity += qty;
+    group.totalReturnable += BigInt(item.returnableQuantity ?? item.quantity);
+    group.totalCostMinor += qty * cost;
+  }
+  return [...modelMap.values()];
+}
+
+function showPurchaseModelVariantsModal(modelGroup, purchase, supplier) {
+  const root = getModalRoot();
+  const currency = modelGroup.currency;
+  const decimals = modelGroup.decimals;
+
+  root.innerHTML = `
+    <div class="modal-backdrop">
+      <section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="purchase-model-breakdown-title">
+        <div class="modal-heading">
+          <div>
+            <span class="eyebrow eyebrow-dark">فاتورة شراء: ${escapeHtml(purchase.invoiceNumber || purchase.id.slice(0, 8))} · التاجر: ${escapeHtml(supplier.name)}</span>
+            <h2 id="purchase-model-breakdown-title">${escapeHtml(modelGroup.name)} (كود الموديل: ${escapeHtml(modelGroup.modelSku)})</h2>
+            <p>إجمالي المستلم من هذا الموديل: <strong>${modelGroup.totalQuantity} قطعة</strong> · التكلفة: <strong>${money({ amount: modelGroup.totalCostMinor.toString(), currency, decimals })}</strong></p>
+          </div>
+          <button type="button" class="modal-close" data-close-breakdown>×</button>
+        </div>
+
+        <div class="modal-body" style="padding:16px 20px;">
+          <div class="table-scroll">
+            <table class="invoice-table">
+              <thead>
+                <tr>
+                  <th>اللون والمقاس الفرعي</th>
+                  <th>كود الفرع (SKU)</th>
+                  <th style="text-align:center;">الكمية المستلمة</th>
+                  <th>تكلفة القطعة</th>
+                  <th>الإجمالي</th>
+                  <th>المتاح للإرجاع</th>
+                  <th>إجراء</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${modelGroup.items.map((item) => {
+                  const matchedVariant = modelGroup.product?.variants?.find((v) => v.sku === item.sku);
+                  const attrLabel = matchedVariant
+                    ? Object.entries(matchedVariant.attributes ?? {}).map(([k, val]) => `${modelGroup.product.options?.find((o) => o.key === k)?.name ?? k}: ${val}`).join(' · ')
+                    : item.sku;
+                  const canReturn = BigInt(item.returnableQuantity ?? item.quantity) > 0n;
+                  const itemLineTotal = (BigInt(item.quantity) * BigInt(item.unitCost.amount)).toString();
+                  return `
+                    <tr>
+                      <td><strong>${escapeHtml(attrLabel || 'النسخة الأساسية')}</strong></td>
+                      <td><span class="sku-code">${escapeHtml(item.sku)}</span></td>
+                      <td style="text-align:center;"><strong>${item.quantity}</strong> قطعة</td>
+                      <td>${money(item.unitCost)}</td>
+                      <td class="table-total">${money({ amount: itemLineTotal, currency, decimals })}</td>
+                      <td>${item.returnableQuantity} قطعة</td>
+                      <td>
+                        ${canReturn ? `
+                          <button type="button" class="text-action return-supplier-item-btn" data-purchase="${purchase.id}" data-item="${item.id}" data-name="${escapeHtml(attrLabel)}" data-quantity="${item.returnableQuantity}" style="color:var(--rose,#be123c);font-weight:700;">
+                            ↩️ إرجاع للتاجر
+                          </button>
+                        ` : '<span style="color:var(--muted);font-size:11px;">تم الإرجاع</span>'}
+                      </td>
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="button button-secondary" data-close-breakdown>إغلاق</button>
+        </div>
+      </section>
+    </div>
+  `;
+
+  const close = () => { root.innerHTML = ''; };
+  root.querySelectorAll('[data-close-breakdown]').forEach((b) => b.addEventListener('click', close));
+  root.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); }));
+
+  root.querySelectorAll('.return-supplier-item-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      close();
+      supplierReturnItemModal(purchase, btn.dataset.item, btn.dataset.name, btn.dataset.quantity);
+    });
+  });
 }
 
 function suppliersView() {
@@ -789,7 +993,125 @@ function suppliersView() {
   const totalDueAll = allFilteredPurchases.reduce((sum, p) => sum + BigInt(p.remainingAmount.amount), 0n).toString();
   const amount = (value) => money({ amount: value, currency, decimals: currencyDecimals(currency) });
 
-  const purchaseDisclosure = (supplier, purchase) => `<details class="purchase-disclosure"><summary><span class="invoice-number">${escapeHtml(purchase.invoiceNumber || `PUR-${purchase.id.slice(0, 8).toUpperCase()}`)}</span><span>${new Intl.DateTimeFormat('ar-EG', { dateStyle: 'medium' }).format(new Date(purchase.purchasedAt))}</span><span>المسؤول: <strong>${escapeHtml(purchase.createdByName || 'المسؤول')}</strong></span><strong>${money(purchase.totalAmount)}</strong><span class="status-pill ${BigInt(purchase.remainingAmount.amount) ? 'status-low' : 'status-complete'}">${BigInt(purchase.remainingAmount.amount) ? `متبقي ${money(purchase.remainingAmount)}` : 'مسددة'}</span></summary><div class="purchase-detail-content"><div class="invoice-detail-meta"><span>التاجر: ${escapeHtml(supplier.name)}</span><span>المسؤول المستلم: <strong>${escapeHtml(purchase.createdByName || 'المسؤول')}</strong></span><span>المدفوع: ${money(purchase.paidAmount)}</span><span>المتبقي: ${money(purchase.remainingAmount)}</span></div><div class="table-scroll"><table><thead><tr><th>المنتج</th><th>كود النسخة</th><th>الكمية</th><th>تكلفة الوحدة</th><th>الإرجاع</th></tr></thead><tbody>${purchase.items.map((item) => `<tr><td>${escapeHtml(item.productName)}</td><td>${escapeHtml(item.sku)}</td><td>${item.quantity}</td><td>${money(item.unitCost)}</td><td>${BigInt(item.returnableQuantity) > 0n ? `<button class="text-action return-supplier-item" data-purchase="${purchase.id}" data-item="${item.id}" data-quantity="${item.returnableQuantity}">إرجاع ${item.returnableQuantity}</button>` : 'غير متاح'}</td></tr>`).join('')}</tbody></table></div><div class="purchase-detail-actions"><button type="button" class="button button-secondary button-sm print-purchase-labels" data-purchase-id="${purchase.id}">🏷️ طباعة باركود الفاتورة للعلب</button>${BigInt(purchase.remainingAmount.amount) ? `<button class="button button-secondary pay-purchase" data-purchase="${purchase.id}" data-remaining="${purchase.remainingAmount.amount}">تسجيل سداد</button>` : '<span class="status-pill status-complete">الفاتورة مسددة</span>'}</div>${purchase.payments.length || purchase.returns.length ? `<details class="compact-disclosure"><summary><span>حركات الفاتورة</span><span>${purchase.payments.length} سداد · ${purchase.returns.length} مرتجع</span></summary><div class="disclosure-content">${purchase.payments.map((payment) => `<div class="invoice-history-row">سداد ${money(payment.amount)} بواسطة <strong>${escapeHtml(payment.createdByName || 'المسؤول')}</strong> · ${methodLabel(payment.paymentMethod)} · ${escapeHtml(payment.referenceNumber || 'بدون مرجع')} · ${new Date(payment.paidAt).toLocaleDateString('ar-EG')}</div>`).join('')}${purchase.returns.map((item) => `<div class="invoice-history-row">مرتجع ${escapeHtml(item.returnNumber)} · ${money(item.creditAmount)} · ${new Date(item.createdAt).toLocaleDateString('ar-EG')}</div>`).join('')}</div></details>` : ''}</div></details>`;
+  const purchaseDisclosure = (supplier, purchase) => {
+    const modelGroups = groupPurchaseItemsByModel(purchase, state.data.products);
+    const isPaid = !BigInt(purchase.remainingAmount.amount);
+    const invoiceLabel = purchase.invoiceNumber || `PUR-${purchase.id.slice(0, 8).toUpperCase()}`;
+    const dateFormatted = new Intl.DateTimeFormat('ar-EG', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(purchase.purchasedAt));
+    const totalPieces = modelGroups.reduce((sum, g) => sum + g.totalQuantity, 0n);
+
+    return `
+      <details class="purchase-disclosure">
+        <summary>
+          <div style="display:flex;align-items:center;gap:12px;">
+            <span class="invoice-number" style="font-size:14px;font-weight:800;">${escapeHtml(invoiceLabel)}</span>
+            <span style="font-size:12px;color:var(--muted);">${dateFormatted}</span>
+          </div>
+          <div>
+            <span style="font-size:12px;color:var(--muted);">المستلم: <strong>${escapeHtml(purchase.createdByName || 'المسؤول')}</strong></span>
+            <span style="font-size:12px;color:var(--muted);margin-inline-start:10px;">(<strong>${totalPieces} قطعة</strong> في ${modelGroups.length} موديل)</span>
+          </div>
+          <strong style="font-size:15px;color:var(--ink);">${money(purchase.totalAmount)}</strong>
+          <span class="status-pill ${isPaid ? 'status-complete' : 'status-low'}" style="font-weight:700;">
+            ${isPaid ? '✓ مسددة بالكامل' : `متبقي ${money(purchase.remainingAmount)}`}
+          </span>
+        </summary>
+
+        <div class="purchase-detail-content">
+          <div class="invoice-detail-meta" style="margin-bottom:14px;">
+            <span>التاجر: <strong>${escapeHtml(supplier.name)}</strong></span>
+            <span>المسؤول: <strong>${escapeHtml(purchase.createdByName || 'المسؤول')}</strong></span>
+            <span>المدفوع: <strong style="color:#15803d;">${money(purchase.paidAmount)}</strong></span>
+            <span>المتبقي: <strong style="color:${isPaid ? '#15803d' : '#be123c'};">${money(purchase.remainingAmount)}</strong></span>
+            ${purchase.notes ? `<span>ملاحظات: ${escapeHtml(purchase.notes)}</span>` : ''}
+          </div>
+
+          <div class="table-scroll">
+            <table class="invoice-table" style="margin:8px 0 14px;">
+              <thead>
+                <tr>
+                  <th>الموديل الأساسي / المنتج</th>
+                  <th style="text-align:center;">إجمالي الكمية</th>
+                  <th>متوسط التكلفة للقطعة</th>
+                  <th>إجمالي تكلفة الموديل</th>
+                  <th>المقاسات والألوان الفرعية</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${modelGroups.map((group) => {
+                  const avgCost = group.totalQuantity > 0n ? (group.totalCostMinor / group.totalQuantity).toString() : '0';
+                  return `
+                    <tr>
+                      <td>
+                        <div style="display:flex;align-items:center;gap:10px;">
+                          <span class="product-avatar" style="width:34px;height:34px;border-radius:9px;background:var(--purple-soft);color:var(--purple);font-size:14px;font-weight:800;display:grid;place-items:center;">
+                            ${escapeHtml(group.name.slice(0, 1))}
+                          </span>
+                          <div>
+                            <strong style="font-size:13.5px;color:var(--ink);">${escapeHtml(group.name)}</strong>
+                            <div style="font-size:11px;color:var(--muted);">كود الموديل: <span class="sku-code">${escapeHtml(group.modelSku)}</span> · ${group.items.length} فرع (مقاس/لون)</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td style="text-align:center;">
+                        <strong style="font-size:14px;color:var(--brand);">${group.totalQuantity}</strong> قطعة
+                      </td>
+                      <td>${money({ amount: avgCost, currency: group.currency, decimals: group.decimals })}</td>
+                      <td class="table-total">${money({ amount: group.totalCostMinor.toString(), currency: group.currency, decimals: group.decimals })}</td>
+                      <td>
+                        <button type="button" class="button button-secondary button-sm view-model-sizes-btn" data-purchase-id="${purchase.id}" data-model-key="${group.key}" style="font-size:11.5px;padding:4px 12px;height:32px;">
+                          🔍 عرض المقاسات والألوان (${group.items.length})
+                        </button>
+                      </td>
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+
+          <div class="purchase-detail-actions" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;padding:12px 0;border-top:1px solid var(--line);">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <button type="button" class="button button-secondary button-sm print-purchase-labels" data-purchase-id="${purchase.id}">
+                🏷️ طباعة باركود العلب للفاتورة
+              </button>
+              ${!isPaid ? `
+                <button type="button" class="button button-primary button-sm pay-purchase" data-purchase="${purchase.id}" data-remaining="${purchase.remainingAmount.amount}">
+                  💳 تسجيل سداد للتاجر
+                </button>
+              ` : '<span class="status-pill status-complete">✓ الفاتورة مسددة بالكامل</span>'}
+            </div>
+            <div style="font-size:12px;color:var(--muted);">
+              ${purchase.payments.length ? `<span>تم تسجيل ${purchase.payments.length} دفعة سداد</span>` : ''}
+              ${purchase.returns.length ? `<span style="margin-inline-start:8px;">· تم تسجيل ${purchase.returns.length} مرتجع</span>` : ''}
+            </div>
+          </div>
+
+          ${purchase.payments.length || purchase.returns.length ? `
+            <details class="compact-disclosure" style="margin-top:10px;border-radius:10px;border:1px solid var(--line);background:var(--surface-soft);">
+              <summary style="padding:10px 14px;font-size:12px;font-weight:700;">
+                <span>سجل حركات السداد والمرتجعات (${purchase.payments.length + purchase.returns.length} حركة)</span>
+              </summary>
+              <div class="disclosure-content" style="padding:4px 14px 12px;">
+                ${purchase.payments.map((p) => `
+                  <div class="invoice-history-row" style="display:flex;justify-content:space-between;padding:7px 0;font-size:12px;">
+                    <span>سداد ${methodLabel(p.paymentMethod)} بواسطة <strong>${escapeHtml(p.createdByName || 'المسؤول')}</strong> · ${new Date(p.paidAt).toLocaleDateString('ar-EG')}</span>
+                    <strong style="color:#15803d;">${money(p.amount)}</strong>
+                  </div>
+                `).join('')}
+                ${purchase.returns.map((r) => `
+                  <div class="invoice-history-row" style="display:flex;justify-content:space-between;padding:7px 0;font-size:12px;color:var(--rose,#be123c);">
+                    <span>مرتجع ${escapeHtml(r.returnNumber)} · ${new Date(r.createdAt).toLocaleDateString('ar-EG')}</span>
+                    <strong>${money(r.creditAmount)}</strong>
+                  </div>
+                `).join('')}
+              </div>
+            </details>
+          ` : ''}
+        </div>
+      </details>
+    `;
+  };
 
   return `
     <div class="page-heading-row">
@@ -950,18 +1272,23 @@ function profitLossView() {
     </div>
 
     <section class="panel compact-filter-panel">
-      <form id="profit-loss-filter" class="smart-filter-bar" style="grid-template-columns:repeat(2,minmax(140px,1fr)) auto;">
-        <label><span>من تاريخ</span><input id="report-from" type="date" value="${from}" required></label>
-        <label><span>إلى تاريخ</span><input id="report-to" type="date" value="${to}" required></label>
-        <button class="button button-primary" type="submit">تحديث التقرير</button>
-      </form>
-      <div class="smart-pills-bar">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
         <div class="quick-date-pills">
-          <button type="button" class="date-preset-chip" data-preset="today">اليوم</button>
-          <button type="button" class="date-preset-chip" data-preset="week">هذا الأسبوع</button>
-          <button type="button" class="date-preset-chip" data-preset="month">هذا الشهر</button>
-          <button type="button" class="date-preset-chip" data-preset="year">هذا العام</button>
+          <button type="button" class="date-preset-chip ${from === today && to === today ? 'active' : ''}" data-pl-range="today">اليوم</button>
+          <button type="button" class="date-preset-chip" data-pl-range="7d">آخر 7 أيام</button>
+          <button type="button" class="date-preset-chip" data-pl-range="30d">آخر 30 يوم</button>
+          <button type="button" class="date-preset-chip" data-pl-range="month">هذا الشهر</button>
+          <button type="button" class="date-preset-chip" data-pl-range="year">هذا العام</button>
         </div>
+        <form id="profit-loss-filter" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0;">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin:0;font-weight:700;color:var(--ink);">من:
+            <input id="report-from" type="date" value="${from}" required style="height:34px;padding:0 8px;border-radius:6px;border:1px solid var(--line-strong);background:var(--surface);color:var(--ink);font-weight:700;">
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin:0;font-weight:700;color:var(--ink);">إلى:
+            <input id="report-to" type="date" value="${to}" required style="height:34px;padding:0 8px;border-radius:6px;border:1px solid var(--line-strong);background:var(--surface);color:var(--ink);font-weight:700;">
+          </label>
+          <button class="button button-primary button-sm" type="submit">تحديث</button>
+        </form>
       </div>
     </section>
 
@@ -981,12 +1308,11 @@ function topProductsView() {
   const currency = state.data.company.currency;
   const decimals = currencyDecimals(currency);
   const analyticsSections = [
-    ['all', 'نظرة شاملة (كل الإحصائيات المختصرة)'],
-    ['most_purchased', 'أكثر المنتجات طلبًا واستلامًا من التجار (الوارد)'],
-    ['top_selling', 'الأكثر مبيعًا وربحية وهوامش الموديلات'],
-    ['sizes_colors', 'إحصائيات المقاسات والألوان الأكثر طلبًا'],
-    ['suppliers', 'إحصائيات التجار والموردين والمسحوبات'],
-    ['inventory_health', 'تقييم المخزون والمنتجات الراكدة والنواقص'],
+    ['all', 'نظرة شاملة'],
+    ['top_selling', 'الأكثر مبيعاً وربحية'],
+    ['most_purchased', 'الأكثر طلباً من التجار'],
+    ['sizes_colors', 'المقاسات والألوان'],
+    ['inventory_health', 'المخزون والراكد'],
   ];
 
   const products = stats?.products ?? [];
@@ -1067,21 +1393,30 @@ function topProductsView() {
     : section === 'inventory_health' ? inventoryHealthBlock
     : `${mostPurchasedBlock}${topSellingBlock}${sizesColorsBlock}${suppliersBlock}${inventoryHealthBlock}`;
 
-  return `<div class="page-heading-row"><div><p class="page-lead">مركز الإحصائيات والتقارير الذكية: اختر نوع الإحصائية من القائمة المنسدلة أو الفلاتر السريعة بالأسفل.</p></div><button class="button button-secondary button-sm" data-page="reports">فتح الأرباح والخسائر ←</button></div>
+  return `<div class="page-heading-row"><div><p class="page-lead">إحصائيات المبيعات، الأرباح، وحركة الموديلات والمقاسات الأكثر طلباً في المتجر.</p></div><button class="button button-secondary button-sm" data-page="reports">فتح الأرباح والخسائر ←</button></div>
     <section class="panel compact-filter-panel">
-      <form id="analytics-filter" class="smart-filter-bar">
-        <label class="smart-dropdown-label"><span>نوع الإحصائية</span><select id="analytics-section-select" class="smart-section-select">${analyticsSections.map(([id, label]) => `<option value="${id}" ${section === id ? 'selected' : ''}>📈 ${label}</option>`).join('')}</select></label>
-        <label><span>من تاريخ</span><input name="from" id="analytics-from" type="date" value="${from}" required></label>
-        <label><span>إلى تاريخ</span><input name="to" id="analytics-to" type="date" value="${to}" required></label>
-        <button class="button button-primary" type="submit">تطبيق</button>
-      </form>
-      <div class="smart-pills-bar">
-        <div class="section-pills">${analyticsSections.map(([id, label]) => `<button type="button" class="section-pill ${section === id ? 'active' : ''}" data-analytics-section="${id}">${label.split(' (')[0]}</button>`).join('')}</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
         <div class="quick-date-pills">
           <button type="button" class="date-preset-chip" data-analytics-range="7d">7 أيام</button>
           <button type="button" class="date-preset-chip" data-analytics-range="30d">30 يوم</button>
           <button type="button" class="date-preset-chip" data-analytics-range="month">هذا الشهر</button>
           <button type="button" class="date-preset-chip" data-analytics-range="year">السنة</button>
+        </div>
+        <form id="analytics-filter" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0;">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin:0;font-weight:700;color:var(--ink);">من:
+            <input name="from" id="analytics-from" type="date" value="${from}" required style="height:34px;padding:0 8px;border-radius:6px;border:1px solid var(--line-strong);background:var(--surface);color:var(--ink);font-weight:700;">
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin:0;font-weight:700;color:var(--ink);">إلى:
+            <input name="to" id="analytics-to" type="date" value="${to}" required style="height:34px;padding:0 8px;border-radius:6px;border:1px solid var(--line-strong);background:var(--surface);color:var(--ink);font-weight:700;">
+          </label>
+          <button class="button button-primary button-sm" type="submit">تطبيق</button>
+        </form>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:10px;border-top:1px solid var(--line);">
+        <span style="font-size:12px;font-weight:700;color:var(--muted);margin-inline-end:4px;">القسم:</span>
+        <div class="section-pills">
+          ${analyticsSections.map(([id, label]) => `<button type="button" class="section-pill ${section === id ? 'active' : ''}" data-analytics-section="${id}">${label}</button>`).join('')}
         </div>
       </div>
     </section>
@@ -1116,13 +1451,18 @@ function monthlyExpensesView() {
 }
 
 function posView() {
+  const selectedCategory = state.posCategory ?? null;
   const query = state.query.trim().toLowerCase();
-  const products = state.data.products.filter((product) => product.isActive).map((product) => ({ ...product, matrix: extractProductMatrix(product), variants: product.variants.filter((variant) => variant.isActive) })).filter((product) => product.variants.length && (!query || `${product.name} ${product.sku} ${product.brand ?? ''} ${product.variants.map((variant) => `${variant.sku} ${variant.barcode ?? ''} ${Object.values(variant.attributes ?? {}).join(' ')}`).join(' ')}`.toLowerCase().includes(query)));
+  const products = state.data.products
+    .filter((product) => product.isActive)
+    .filter((product) => !selectedCategory || product.categoryId === selectedCategory)
+    .map((product) => ({ ...product, matrix: extractProductMatrix(product), variants: product.variants.filter((variant) => variant.isActive) }))
+    .filter((product) => product.variants.length && (!query || `${product.name} ${product.sku} ${product.brand ?? ''} ${product.variants.map((variant) => `${variant.sku} ${variant.barcode ?? ''} ${Object.values(variant.attributes ?? {}).join(' ')}`).join(' ')}`.toLowerCase().includes(query)));
   const totalMinor = state.cart.reduce((sum, item) => sum + BigInt(item.price.amount) * BigInt(item.quantity), 0n);
   const currency = state.data.company.currency;
   const decimals = state.cart[0]?.price.decimals ?? currencyDecimals(currency);
   const total = { amount: totalMinor.toString(), currency, decimals };
-  return `<div class="pos-layout"><section class="pos-catalog"><div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="ابحث باسم الموديل أو كود الموديل أو الباركود" value="${escapeHtml(state.query)}" autofocus><kbd>Enter</kbd></label><div class="pos-category-row"><button class="category-chip active">كل الموديلات <span>${products.length}</span></button>${state.data.categories.slice(0, 5).map((category) => `<button class="category-chip">${escapeHtml(category.name)}</button>`).join('')}</div><div class="pos-products">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const allSamePrice = new Set(product.variants.map((variant) => variant.price.amount)).size === 1; const price = allSamePrice ? money(product.variants[0].price) : 'أسعار متعددة'; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${product.itemKind === 'PRODUCT' && stock <= 0n ? 'disabled' : ''}><span class="pos-product-art art-${index % 6}">${icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${price}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${state.cart.length ? state.cart.map((item) => `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art">${icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button data-qty="${item.variantId}" data-delta="-1">−</button><span>${item.quantity}</span><button data-qty="${item.variantId}" data-delta="1">+</button></div><strong>${money({ ...item.price, amount: (BigInt(item.price.amount) * BigInt(item.quantity)).toString() })}</strong></div></div>`).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة أو امسح الباركود عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong>${state.cart.reduce((sum, item) => sum + item.quantity, 0)}</strong></div><div><span>الخصم</span><strong>${money({ ...total, amount: '0' })}</strong></div><div class="cart-grand-total"><span>الإجمالي المستحق</span><strong>${money(total)}</strong></div></div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}"><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button" ${state.cart.length && !state.isSaving ? '' : 'disabled'}><span>إتمام البيع</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
+  return `<div class="pos-layout"><section class="pos-catalog"><div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="ابحث باسم الموديل أو كود الموديل أو الباركود" value="${escapeHtml(state.query)}" autofocus><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="">كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}">${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const allSamePrice = new Set(product.variants.map((variant) => variant.price.amount)).size === 1; const price = allSamePrice ? money(product.variants[0].price) : 'أسعار متعددة'; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${product.itemKind === 'PRODUCT' && stock <= 0n ? 'disabled' : ''}><span class="pos-product-art art-${index % 6}">${icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${price}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${state.cart.length ? state.cart.map((item) => `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art">${icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button data-qty="${item.variantId}" data-delta="-1">−</button><span>${item.quantity}</span><button data-qty="${item.variantId}" data-delta="1">+</button></div><strong>${money({ ...item.price, amount: (BigInt(item.price.amount) * BigInt(item.quantity)).toString() })}</strong></div></div>`).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة أو امسح الباركود عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong>${state.cart.reduce((sum, item) => sum + item.quantity, 0)}</strong></div><div><span>الخصم</span><strong>${money({ ...total, amount: '0' })}</strong></div><div class="cart-grand-total"><span>الإجمالي المستحق</span><strong>${money(total)}</strong></div></div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}"><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button" ${state.cart.length && !state.isSaving ? '' : 'disabled'}><span>إتمام البيع</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
 }
 
 function supplierModal(html, formId, endpoint, convert = (data) => data, successMessage = 'تم حفظ الحركة في سجل التاجر') {
@@ -1505,6 +1845,16 @@ function bindSuppliers() {
   };
   document.querySelector('#new-purchase')?.addEventListener('click', () => purchase());
   document.querySelectorAll('.purchase-for-supplier').forEach((button) => button.addEventListener('click', () => purchase(button.dataset.supplier)));
+  document.querySelectorAll('.view-model-sizes-btn').forEach((button) => button.addEventListener('click', () => {
+    const purchaseId = button.dataset.purchaseId;
+    const modelKey = button.dataset.modelKey;
+    const supplier = state.data.suppliers.find((s) => s.purchases.some((p) => p.id === purchaseId));
+    const purchase = supplier?.purchases.find((p) => p.id === purchaseId);
+    if (!purchase) return;
+    const groups = groupPurchaseItemsByModel(purchase, state.data.products);
+    const group = groups.find((g) => g.key === modelKey);
+    if (group) showPurchaseModelVariantsModal(group, purchase, supplier);
+  }));
   document.querySelectorAll('.print-purchase-labels').forEach((button) => button.addEventListener('click', () => {
     const purchaseRecord = state.data.suppliers.flatMap((supplier) => supplier.purchases).find((item) => item.id === button.dataset.purchaseId);
     if (purchaseRecord) showBarcodeLabelsModal({ purchase: purchaseRecord });
@@ -1608,24 +1958,211 @@ function showSaleDetails(sale) {
   const totalReturned = sale.returns.reduce((sum, item) => sum + BigInt(item.refundAmount.amount), 0n).toString();
   const hasDiscount = sale.discountTotal && BigInt(sale.discountTotal.amount) > 0n;
   const hasChange = sale.changeGiven && BigInt(sale.changeGiven.amount) > 0n;
+  const canReturn = state.data.capabilities.canRefund && (sale.items ?? []).some((item) => BigInt(item.returnableQuantity ?? item.quantity ?? '0') > 0n);
 
-  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card invoice-detail-card" role="dialog" aria-modal="true"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">فاتورة مبيعات المتجر</span><h2>فاتورة #${escapeHtml(sale.saleNumber)}</h2></div><button class="modal-close" data-close-modal>×</button></div><div class="invoice-meta-badges"><div class="invoice-meta-badge"><small>تاريخ وتوقيت الفاتورة</small><strong>${new Intl.DateTimeFormat('ar-EG', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(sale.createdAt))}</strong></div><div class="invoice-meta-badge"><small>الكاشير المسؤول</small><strong>${escapeHtml(sale.cashierName)}</strong></div><div class="invoice-meta-badge"><small>العميل</small><strong>${escapeHtml(sale.customerName || 'عميل نقدي')}</strong></div></div><div class="table-scroll" style="margin:14px 0;"><table class="invoice-table"><thead><tr><th>الصنف / الموديل</th><th>كود القطعة</th><th style="text-align:center;">الكمية</th><th>سعر الوحدة</th>${hasDiscount ? '<th>الخصم</th>' : ''}<th>الإجمالي</th></tr></thead><tbody>${sale.items.map((item) => `<tr><td><strong>${escapeHtml(item.name)}</strong></td><td><span class="sku-code">${escapeHtml(item.sku)}</span></td><td style="text-align:center;"><strong>${item.quantity}</strong></td><td>${money(item.unitPrice)}</td>${hasDiscount ? `<td>${money({ ...item.netRevenue, amount: (BigInt(item.lineDiscount?.amount ?? '0') + BigInt(item.cartDiscountShare?.amount ?? '0')).toString() })}</td>` : ''}<td class="table-total">${money(item.netRevenue)}</td></tr>`).join('')}</tbody></table></div><div class="invoice-clean-summary">${hasDiscount ? `<div class="summary-line"><span>الإجمالي قبل الخصم:</span><span>${money(sale.subtotal)}</span></div><div class="summary-line" style="color:var(--rose,#be123c);"><span>قيمة الخصم:</span><strong>- ${money(sale.discountTotal)}</strong></div>` : ''}<div class="summary-line main-total"><span>إجمالي الفاتورة المطلوب:</span><strong class="grand-amount">${money(sale.total)}</strong></div><div class="summary-line payment-line"><span>طريقة السداد:</span><span class="payment-badge">${sale.payments.map((p) => `${methodLabel(p.method)}: ${money(p.amount)}`).join(' · ')}</span></div>${hasChange ? `<div class="summary-line change-line"><span>المتبقي للعميل (الباقي):</span><strong>${money(sale.changeGiven)}</strong></div>` : ''}</div>${sale.returns.length ? `<div style="margin-top:14px;padding:12px;background:var(--surface-soft);border:1px solid var(--line);border-radius:10px;"><strong style="color:var(--rose,#be123c);font-size:13px;display:block;margin-bottom:6px;">المرتجعات المسجلة:</strong>${sale.returns.map((item) => `<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0;"><span>${escapeHtml(item.returnNumber)} · ${methodLabel(item.paymentMethod)}</span><strong>${money(item.refundAmount)}</strong></div>`).join('')}<div style="border-top:1px dashed var(--line);margin-top:6px;padding-top:6px;display:flex;justify-content:space-between;font-weight:700;"><span>إجمالي المرتجع:</span><strong>${money({ ...sale.total, amount: totalReturned })}</strong></div></div>` : ''}<div class="modal-actions" style="margin-top:16px;"><button class="button button-secondary" data-close-modal>إغلاق</button><button class="button button-primary" type="button" data-print-invoice>🖨️ طباعة الفاتورة</button></div></section></div>`;
+  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card invoice-detail-card" role="dialog" aria-modal="true"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">فاتورة مبيعات المتجر</span><h2>فاتورة #${escapeHtml(sale.saleNumber)}</h2></div><button class="modal-close" data-close-modal>×</button></div><div class="invoice-meta-badges"><div class="invoice-meta-badge"><small>تاريخ وتوقيت الفاتورة</small><strong>${new Intl.DateTimeFormat('ar-EG', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(sale.createdAt))}</strong></div><div class="invoice-meta-badge"><small>الكاشير المسؤول</small><strong>${escapeHtml(sale.cashierName)}</strong></div><div class="invoice-meta-badge"><small>العميل</small><strong>${escapeHtml(sale.customerName || 'عميل نقدي')}</strong></div></div><div class="table-scroll" style="margin:14px 0;"><table class="invoice-table"><thead><tr><th>الصنف / الموديل</th><th>كود القطعة</th><th style="text-align:center;">الكمية</th><th>سعر الوحدة</th>${hasDiscount ? '<th>الخصم</th>' : ''}<th>الإجمالي</th></tr></thead><tbody>${sale.items.map((item) => `<tr><td><strong>${escapeHtml(item.name)}</strong></td><td><span class="sku-code">${escapeHtml(item.sku)}</span></td><td style="text-align:center;"><strong>${item.quantity}</strong></td><td>${money(item.unitPrice)}</td>${hasDiscount ? `<td>${money({ ...item.netRevenue, amount: (BigInt(item.lineDiscount?.amount ?? '0') + BigInt(item.cartDiscountShare?.amount ?? '0')).toString() })}</td>` : ''}<td class="table-total">${money(item.netRevenue)}</td></tr>`).join('')}</tbody></table></div><div class="invoice-clean-summary">${hasDiscount ? `<div class="summary-line"><span>الإجمالي قبل الخصم:</span><span>${money(sale.subtotal)}</span></div><div class="summary-line" style="color:var(--rose,#be123c);"><span>قيمة الخصم:</span><strong>- ${money(sale.discountTotal)}</strong></div>` : ''}<div class="summary-line main-total"><span>إجمالي الفاتورة المطلوب:</span><strong class="grand-amount">${money(sale.total)}</strong></div><div class="summary-line payment-line"><span>طريقة السداد:</span><span class="payment-badge">${sale.payments.map((p) => `${methodLabel(p.method)}: ${money(p.amount)}`).join(' · ')}</span></div>${hasChange ? `<div class="summary-line change-line"><span>المتبقي للعميل (الباقي):</span><strong>${money(sale.changeGiven)}</strong></div>` : ''}</div>${sale.returns.length ? `<div style="margin-top:14px;padding:12px;background:var(--surface-soft);border:1px solid var(--line);border-radius:10px;"><strong style="color:var(--rose,#be123c);font-size:13px;display:block;margin-bottom:6px;">المرتجعات المسجلة:</strong>${sale.returns.map((item) => `<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0;"><span>${escapeHtml(item.returnNumber)} · ${methodLabel(item.paymentMethod)}</span><strong>${money(item.refundAmount)}</strong></div>`).join('')}<div style="border-top:1px dashed var(--line);margin-top:6px;padding-top:6px;display:flex;justify-content:space-between;font-weight:700;"><span>إجمالي المرتجع:</span><strong>${money({ ...sale.total, amount: totalReturned })}</strong></div></div>` : ''}<div class="modal-actions" style="margin-top:16px;"><button class="button button-secondary" data-close-modal>إغلاق</button>${canReturn ? '<button class="button button-secondary" type="button" id="invoice-start-return-btn" style="color:var(--rose,#be123c);border-color:var(--rose,#be123c);font-weight:700;">↩️ عمل مرتجع من هذه الفاتورة</button>' : ''}<button class="button button-primary" type="button" data-print-invoice>🖨️ طباعة الفاتورة</button></div></section></div>`;
   root.querySelectorAll('[data-close-modal]').forEach((button) => button.addEventListener('click', () => { root.innerHTML = ''; }));
   root.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('click', (e) => { if (e.target === backdrop) root.innerHTML = ''; }));
-  root.querySelector('[data-print-invoice]').addEventListener('click', () => void showThermalReceiptModal(sale.id));
+  root.querySelector('[data-print-invoice]')?.addEventListener('click', () => void showThermalReceiptModal(sale.id));
+  root.querySelector('#invoice-start-return-btn')?.addEventListener('click', () => {
+    openSaleReturnModal(sale);
+  });
+}
+
+async function openSaleReturnModal(saleOrId) {
+  let sale = typeof saleOrId === 'object' && saleOrId ? saleOrId : null;
+  const saleId = typeof saleOrId === 'string' ? saleOrId : sale?.id;
+  if (!sale || !sale.items || !sale.items[0] || sale.items[0].returnableQuantity === undefined) {
+    try {
+      const res = await api(`/api/sales/${encodeURIComponent(saleId)}`);
+      sale = res.payload;
+    } catch (err) {
+      toast(err.message, 'error');
+      return;
+    }
+  }
+
+  const returnableItems = (sale.items ?? []).filter((item) => BigInt(item.returnableQuantity ?? '0') > 0n);
+  if (!returnableItems.length) {
+    toast('جميع أصناف هذه الفاتورة تم إرجاعها بالفعل', 'error');
+    return;
+  }
+
+  const root = getModalRoot();
+  const currency = sale.total?.currency || state.data.company.currency;
+  const decimals = sale.total?.decimals ?? currencyDecimals(currency);
+
+  root.innerHTML = `
+    <div class="modal-backdrop">
+      <section class="modal-card invoice-detail-card" role="dialog" aria-modal="true" aria-labelledby="return-modal-title">
+        <div class="modal-heading">
+          <div>
+            <span class="eyebrow eyebrow-dark">إرجاع مبيعات · إرجاع قطعة معينة أو الفاتورة</span>
+            <h2 id="return-modal-title">تسجيل مرتجع من فاتورة #${escapeHtml(sale.saleNumber)}</h2>
+            <p>حدد عدد القطع المراد إرجاعها لكل صنف (يمكن إرجاع قطعة واحدة فقط) مع طريقة رد المبلغ.</p>
+          </div>
+          <button type="button" class="modal-close" data-close-return>×</button>
+        </div>
+
+        <form id="sale-return-form" class="modal-form">
+          <div class="table-scroll" style="margin-bottom:14px;">
+            <table class="invoice-table return-items-table">
+              <thead>
+                <tr>
+                  <th>الصنف / الموديل</th>
+                  <th>الكمية المشتراة</th>
+                  <th>المتاح للإرجاع</th>
+                  <th>سعر القطعة</th>
+                  <th style="min-width:140px;text-align:center;">الكمية المراد إرجاعها</th>
+                  <th>المبلغ المسترد</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${returnableItems.map((item) => `
+                  <tr>
+                    <td>
+                      <strong>${escapeHtml(item.name)}</strong>
+                      <div style="font-size:10.5px;color:var(--muted);">${escapeHtml(item.sku)}</div>
+                    </td>
+                    <td>${item.quantity} قطعة</td>
+                    <td><strong style="color:var(--brand);">${item.returnableQuantity} قطعة</strong></td>
+                    <td>${money(item.unitPrice)}</td>
+                    <td style="text-align:center;">
+                      <div class="quantity-control" style="display:inline-flex;margin:auto;">
+                        <button type="button" data-return-step="-1" data-item-id="${item.id}">−</button>
+                        <input type="number" name="qty:${item.id}" data-item-id="${item.id}" min="0" max="${item.returnableQuantity}" step="1" value="0" style="width:50px;height:26px;text-align:center;font-weight:800;border:0;background:transparent;">
+                        <button type="button" data-return-step="1" data-item-id="${item.id}">+</button>
+                      </div>
+                    </td>
+                    <td class="table-total" data-item-refund="${item.id}">0 ${currency}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+
+          <div class="invoice-clean-summary">
+            <div class="summary-line">
+              <span>إجمالي القطع المحددة للإرجاع:</span>
+              <strong id="return-total-pieces" style="font-size:15px;color:var(--rose,#be123c);">0 قطعة</strong>
+            </div>
+            <div class="summary-line main-total">
+              <span>إجمالي المبلغ المسترد للعميل:</span>
+              <strong class="grand-amount" id="return-total-amount" style="color:var(--rose,#be123c);">0 ${currency}</strong>
+            </div>
+            <div class="form-grid" style="margin-top:12px;">
+              <label>
+                <span>طريقة رد المبلغ للعميل</span>
+                <select name="paymentMethod" required style="height:40px;">
+                  <option value="CASH">نقدي (من درج النقدية)</option>
+                  <option value="CARD">بطاقة</option>
+                  <option value="MOBILE">محفظة إلكترونية</option>
+                  <option value="OTHER">أخرى</option>
+                </select>
+              </label>
+              <label>
+                <span>سبب الإرجاع / ملاحظات (اختياري)</span>
+                <input name="notes" placeholder="مقاس غير مناسب، استبدال، إلخ" style="height:40px;">
+              </label>
+            </div>
+          </div>
+
+          <div class="modal-actions" style="margin-top:16px;">
+            <button type="button" class="button button-secondary" data-close-return>إلغاء</button>
+            <button type="submit" class="button button-primary" id="confirm-sale-return-btn" disabled style="background:var(--rose,#be123c);border-color:var(--rose,#be123c);">
+              تأكيد إرجاع القطع ورد المبلغ
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  `;
+
+  const close = () => { root.innerHTML = ''; };
+  root.querySelectorAll('[data-close-return]').forEach((b) => b.addEventListener('click', close));
+  root.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); }));
+
+  const form = root.querySelector('#sale-return-form');
+  const confirmBtn = root.querySelector('#confirm-sale-return-btn');
+  const totalPiecesEl = root.querySelector('#return-total-pieces');
+  const totalAmountEl = root.querySelector('#return-total-amount');
+
+  const updateCalculations = () => {
+    let totalPieces = 0n;
+    let totalMinor = 0n;
+    returnableItems.forEach((item) => {
+      const input = form.querySelector(`input[name="qty:${item.id}"]`);
+      const val = Math.max(0, Math.min(Number(item.returnableQuantity), Math.floor(Number(input.value) || 0)));
+      input.value = val;
+      const qty = BigInt(val);
+      const price = BigInt(item.unitPrice.amount);
+      const lineMinor = qty * price;
+      totalPieces += qty;
+      totalMinor += lineMinor;
+      const lineRefundEl = root.querySelector(`[data-item-refund="${item.id}"]`);
+      if (lineRefundEl) lineRefundEl.textContent = money({ amount: lineMinor.toString(), currency, decimals });
+    });
+
+    totalPiecesEl.textContent = `${totalPieces} قطعة`;
+    totalAmountEl.textContent = money({ amount: totalMinor.toString(), currency, decimals });
+    confirmBtn.disabled = totalPieces <= 0n;
+    confirmBtn.textContent = totalPieces > 0n
+      ? `↩️ تأكيد إرجاع (${totalPieces} قطعة) بمبلغ ${money({ amount: totalMinor.toString(), currency, decimals })}`
+      : 'حدد قطعة واحدة على الأقل للإرجاع';
+  };
+
+  root.querySelectorAll('[data-return-step]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const input = form.querySelector(`input[name="qty:${btn.dataset.itemId}"]`);
+      const step = Number(btn.dataset.returnStep);
+      input.value = Math.max(0, Math.min(Number(input.max), (Number(input.value) || 0) + step));
+      updateCalculations();
+    });
+  });
+
+  form.querySelectorAll('input[type="number"]').forEach((input) => {
+    input.addEventListener('input', updateCalculations);
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    confirmBtn.disabled = true;
+    try {
+      const items = returnableItems
+        .map((item) => ({
+          originalSaleItemId: item.id,
+          quantity: form.querySelector(`input[name="qty:${item.id}"]`).value,
+        }))
+        .filter((item) => BigInt(item.quantity) > 0n);
+
+      if (!items.length) throw new Error('حدد صنفًا واحدًا على الأقل للمرتجع');
+
+      const body = {
+        idempotencyKey: crypto.randomUUID(),
+        storeId: state.data.selectedStoreId,
+        paymentMethod: form.elements.namedItem('paymentMethod').value,
+        items,
+      };
+
+      await api(`/api/sales/${encodeURIComponent(sale.id)}/returns`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+
+      await loadData(state.data.selectedStoreId);
+      close();
+      render();
+      toast('تم تسجيل المرتجع بنجاح وتحديث أرصدة المخزون والمبلغ');
+    } catch (err) {
+      toast(err.message, 'error');
+      confirmBtn.disabled = false;
+    }
+  });
 }
 
 function bindReturns() {
   document.querySelectorAll('.start-return').forEach((button) => button.addEventListener('click', () => {
-    const sale = state.data.sales.find((item) => item.id === button.dataset.sale);
-    if (!sale) return;
-    const returnable = sale.items.filter((item) => BigInt(item.returnableQuantity ?? '0') > 0n);
-    const rows = returnable.map((item) => `<div class="form-grid"><span>${escapeHtml(item.name)} · ${escapeHtml(item.sku)} · ${money(item.unitPrice)}</span><label>الكمية (المتاح ${item.returnableQuantity})<input name="qty:${item.id}" type="number" min="0" max="${item.returnableQuantity}" step="1" value="0"></label></div>`).join('');
-    supplierModal(`<p>الفاتورة الأصلية: <strong>${escapeHtml(sale.saleNumber)}</strong>. المبلغ المسترد يُحسب من سعر البيع والخصم المسجلين في الفاتورة.</p>${rows}<label>طريقة رد المبلغ<select name="paymentMethod"><option value="CASH">نقدي</option><option value="CARD">بطاقة</option><option value="MOBILE">محفظة</option><option value="OTHER">أخرى</option></select></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'return-form', `/api/sales/${sale.id}/returns`, (data) => {
-      const items = returnable.map((item) => ({ originalSaleItemId: item.id, quantity: data[`qty:${item.id}`] ?? '0' })).filter((item) => BigInt(item.quantity) > 0n);
-      if (!items.length) throw new Error('حدد صنفًا واحدًا على الأقل للمرتجع');
-      return { idempotencyKey: data.idempotencyKey, storeId: data.storeId, paymentMethod: data.paymentMethod, items };
-    }, 'تم تسجيل المرتجع ورد المخزون والمبلغ');
+    openSaleReturnModal(button.dataset.sale);
   }));
 }
 
@@ -2703,6 +3240,10 @@ function bindPos() {
     const match = state.data.products.flatMap((product) => product.variants.map((variant) => ({ ...variant, productName: product.name, productId: product.id }))).find((variant) => variant.barcode?.toLowerCase() === term || variant.sku.toLowerCase() === term);
     if (match) { addToCart(match.id); }
   });
+  document.querySelectorAll('[data-pos-cat]').forEach((chip) => chip.addEventListener('click', () => {
+    state.posCategory = chip.dataset.posCat || null;
+    render();
+  }));
   document.querySelectorAll('[data-pick-product]').forEach((button) => button.addEventListener('click', () => {
     const product = state.data.products.find((item) => item.id === button.dataset.pickProduct);
     if (!product) return;
