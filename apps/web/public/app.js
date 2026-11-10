@@ -21,6 +21,12 @@ const state = {
   salesHistorySearch: '',
   salesFrom: null,
   salesTo: null, auditLogs: null, auditChainVerification: null, auditLogsKey: null, plSection: 'overview', analyticsSection: 'all', dailyBackups: null, dailyBackupsKey: null,
+  expenseSection: 'monthly',
+  financialMap: null,
+  financialMapKey: null,
+  financialMapRange: 'all',
+  growthForecast: null,
+  growthForecastKey: null,
 };
 
 function getModalRoot() {
@@ -99,12 +105,12 @@ const navItems = [
   { id: 'sales', label: 'المبيعات', icon: 'chart' },
   { id: 'suppliers', label: 'التجار والمشتريات', icon: 'users' },
   { id: 'expenses', label: 'المصروفات', icon: 'wallet' },
-  { id: 'monthly-expenses', label: 'الالتزامات الشهرية', icon: 'chart' },
+  { id: 'financial-map', label: 'الخريطة المالية', icon: 'chart' },
   { id: 'reports', label: 'الأرباح والخسائر', icon: 'chart' },
   { id: 'top-products', label: 'التقارير والإحصائيات', icon: 'chart' },
   { id: 'users', label: 'المستخدمون', icon: 'users' },
 ];
-const extraPageTitles = { backups: 'النسخ الاحتياطي اليومي والاستعادة', 'audit-logs': 'سجل المراجعة والأمان' };
+const extraPageTitles = { backups: 'النسخ الاحتياطي اليومي والاستعادة', 'audit-logs': 'سجل المراجعة والأمان', 'monthly-expenses': 'الالتزامات الشهرية', 'financial-map': 'الخريطة المالية ومسار الأرباح' };
 
 function icon(name, size = 20) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] ?? ''}</svg>`;
@@ -318,7 +324,7 @@ function shellView() {
   const monthlyDueCount = (state.data.monthlyExpenses ?? []).filter((m) => m.actual && BigInt(m.actual.remainingAmount.amount) > 0n).length;
   const totalAlertsCount = lowStockCount + suppliersDebtCount + monthlyDueCount;
 
-  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item" role="menuitem" href="mailto:support@retailos.local">${icon('help', 17)}<span>\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u0627\u0644\u062f\u0639\u0645</span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${attendanceControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>⌘ K</kbd></label><button class="icon-button notification-button" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount ? '<i></i>' : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${pageView()}</section></main>`;
+  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'financial-map' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item" role="menuitem" href="mailto:support@retailos.local">${icon('help', 17)}<span>\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u0627\u0644\u062f\u0639\u0645</span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${attendanceControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>⌘ K</kbd></label><button class="icon-button notification-button" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount ? '<i></i>' : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${pageView()}</section></main>`;
 }
 
 function roleLabel(role) {
@@ -341,7 +347,8 @@ function pageView() {
   if (state.page === 'sales') return salesView();
   if (state.page === 'suppliers') return suppliersView();
   if (state.page === 'expenses' && state.data.capabilities.canViewExpenses) return expensesView();
-  if (state.page === 'monthly-expenses' && state.data.capabilities.canViewMonthlyExpenses) return monthlyExpensesView();
+  if (state.page === 'monthly-expenses' && state.data.capabilities.canViewMonthlyExpenses) return expensesView();
+  if (state.page === 'financial-map' && state.data.capabilities.canViewAccounting) return financialMapView();
   if (state.page === 'accounting' && state.data.capabilities.canViewAccounting) return accountingView();
   if (state.page === 'reports' && state.data.capabilities.canViewAccounting) return profitLossView();
   if (state.page === 'top-products' && state.data.capabilities.canViewSales) return topProductsView();
@@ -1022,6 +1029,11 @@ function showPurchaseModelVariantsModal(modelGroup, purchase, supplier) {
 function suppliersView() {
   const suppliers = state.data.suppliers;
   const currency = state.data.company.currency;
+  document.querySelector('#btn-pl-to-financial-map')?.addEventListener('click', () => {
+    state.page = 'financial-map';
+    render();
+  });
+  if (!state.growthForecast) void loadGrowthForecast();
   const today = new Date().toISOString().slice(0, 10);
   const preset = state.supplierDatePreset ?? 'all';
   const from = state.supplierFrom ?? '';
@@ -1283,6 +1295,11 @@ function suppliersView() {
 }
 
 function profitLossView() {
+  document.querySelector('#btn-pl-to-financial-map')?.addEventListener('click', () => {
+    state.page = 'financial-map';
+    render();
+  });
+  if (!state.growthForecast) void loadGrowthForecast();
   const today = new Date().toISOString().slice(0, 10);
   const from = state.reportFrom ?? today, to = state.reportTo ?? today;
   const report = state.report;
@@ -1369,7 +1386,14 @@ function profitLossView() {
       <div>
         <p class="page-lead">ملخص مباشر وواضح لأرباح المتجر بعد خصم تكلفة البضاعة والمصروفات، بدون أي تعقيد.</p>
       </div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <button type="button" class="button button-secondary" id="btn-pl-to-financial-map" style="font-weight:700;">
+          ${icon('chart', 16)} 🧭 الخريطة المالية وسجل التدفق
+        </button>
+      </div>
     </div>
+
+    ${growthForecastWidget(state.growthForecast, currency)}
 
     <section class="panel compact-filter-panel">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
@@ -1401,6 +1425,11 @@ function profitLossView() {
 function topProductsView() {
   const stats = state.productStats;
   const vendors = state.supplierStats;
+  document.querySelector('#btn-pl-to-financial-map')?.addEventListener('click', () => {
+    state.page = 'financial-map';
+    render();
+  });
+  if (!state.growthForecast) void loadGrowthForecast();
   const today = new Date().toISOString().slice(0, 10);
   const from = state.analyticsFrom ?? (() => { const date = new Date(); date.setUTCDate(date.getUTCDate() - 29); return date.toISOString().slice(0, 10); })();
   const to = state.analyticsTo ?? today;
@@ -1527,12 +1556,8 @@ function topProductsView() {
         </div>
       </div>
     </section>
-        </span>
-        <div class="pro-filter-pills">
-          ${analyticsSections.map(([id, label]) => `<button type="button" class="pro-filter-pill ${section === id ? 'active' : ''}" data-analytics-section="${id}">${label}</button>`).join('')}
-        </div>
-      </div>
-    </section>
+
+    ${growthForecastWidget(state.growthForecast, currency)}
     ${!stats || !vendors ? '<section class="panel"><div class="empty-row">جاري تحميل الإحصائيات...</div></section>' : `
       <div class="compact-kpi-grid">
         <article class="compact-kpi-card"><div class="compact-kpi-top"><span>أكثر موديل طلبناه من التجار</span><span class="kpi-tag kpi-tag-teal">الوارد</span></div><strong class="compact-kpi-value">${stats.topPurchasedByUnits ? escapeHtml(stats.topPurchasedByUnits.name) : '—'}</strong><small>${stats.topPurchasedByUnits ? `طلبنا ${stats.topPurchasedByUnits.unitsOrdered} قطعة (صافي ${stats.topPurchasedByUnits.netUnitsReceived})` : 'لا توجد مشتريات في الفترة'}</small></article>
@@ -1543,142 +1568,537 @@ function topProductsView() {
       ${selectedContent}
     `}`;
 }
-function expensesView() {
-  const expenses = state.data.expenses;
-  const currency = state.data.company.currency;
-  const total = expenses.reduce((sum, expense) => sum + BigInt(expense.amount.amount), 0n).toString();
-  const categoryTotal = new Map();
-  for (const expense of expenses) categoryTotal.set(expense.category, (categoryTotal.get(expense.category) ?? 0n) + BigInt(expense.amount.amount));
-  const sortedCategories = [...categoryTotal].sort((a, b) => a[1] > b[1] ? -1 : 1);
-  return `<div class="page-heading-row"><div><p class="page-lead">ملخص المصروفات المسجلة، مع تفاصيل كل حركة عند فتحها.</p></div>${state.data.capabilities.canCreateExpenses ? '<button class="button button-primary" id="new-expense">تسجيل مصروف</button>' : ''}</div><div class="inventory-summary"><div class="inventory-summary-card"><span class="summary-badge summary-amber">${icon('wallet', 18)}</span><div><small>إجمالي المصروفات المحملة</small><strong>${money({ amount: total, currency, decimals: currencyDecimals(currency) })}</strong></div></div><div class="inventory-summary-card"><span class="summary-badge summary-indigo">${icon('chart', 18)}</span><div><small>عدد الحركات</small><strong>${expenses.length}</strong></div></div><div class="inventory-summary-card"><span class="summary-badge summary-teal">${icon('box', 18)}</span><div><small>أعلى بند</small><strong>${sortedCategories.length ? escapeHtml(sortedCategories[0][0]) : '—'}</strong></div></div></div><section class="panel"><div class="panel-heading"><div><h3>سجل المصروفات</h3><p>آخر ${expenses.length} حركة من أصل السجل المتاح</p></div></div>${expenses.length ? `<div class="expense-list">${expenses.map((expense) => `<details class="compact-disclosure expense-disclosure"><summary><span><strong>${escapeHtml(expense.category)}</strong><small>${escapeHtml(expense.date)}</small></span><div style="display:flex;align-items:center;gap:12px;"><strong>${money(expense.amount)}</strong><span class="disclosure-chevron" style="width:28px;height:28px;" aria-hidden="true">${icon('chevron', 14)}</span></div></summary><div class="disclosure-content"><div class="invoice-detail-meta"><span>طريقة الدفع: ${expense.paymentMethod === 'CASH_DRAWER' ? 'درج النقدية' : expense.paymentMethod === 'CASH_SAFE' ? 'الخزينة' : 'تحويل بنكي'}</span><span>الملاحظات: ${escapeHtml(expense.notes || '—')}</span><span>المرجع: ${escapeHtml(expense.referenceNumber || '—')}</span></div></div></details>`).join('')}</div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('wallet', 28)}</div><strong>لا توجد مصروفات مسجلة</strong><p>أضف الإيجار أو المرافق أو مصروفات التشغيل اليومية.</p></div>`}</section>`;
+function growthForecastWidget(forecast, currency) {
+  if (!forecast) return '';
+  const decimals = currencyDecimals(currency);
+  const format = (v) => money({ amount: v, currency, decimals });
+
+  const { currentMonth, previousMonth, comparison, forecast: fc } = forecast;
+  const isUp = comparison.isGrowth;
+  const growthSign = comparison.growthPercent >= 0 ? '+' : '';
+  const forecastSign = fc.forecastGrowthPercent >= 0 ? '+' : '';
+
+  return `
+    <div class="growth-forecast-widget">
+      <!-- Card 1: Month over Month Growth Comparison -->
+      <article class="growth-card ${isUp ? 'growth-positive' : 'growth-negative'}">
+        <div class="growth-card-top">
+          <span class="growth-badge ${isUp ? 'badge-up' : 'badge-down'}">
+            ${isUp ? '▲ نمو في المبيعات' : '▼ تراجع في المبيعات'} (${growthSign}${comparison.growthPercent}%)
+          </span>
+          <span style="font-size:11.5px;color:var(--muted);font-weight:700;">
+            ${escapeHtml(currentMonth.name)} مقارنة بـ ${escapeHtml(previousMonth.name)}
+          </span>
+        </div>
+
+        <div>
+          <h4 class="growth-headline">
+            ${isUp
+              ? `أنت بعت الشهر ده أكثر من الشهر اللي فات بنسبة <span style="color:#15803d;">${growthSign}${comparison.growthPercent}%</span> 🎉`
+              : `أنت بعت الشهر ده أقل من الشهر اللي فات بنسبة <span style="color:#be123c;">${comparison.growthPercent}%</span>`
+            }
+          </h4>
+          <p style="margin:4px 0 0;font-size:12px;color:var(--muted);">
+            ${isUp ? 'أداء رائع ومبيعات تصاعدية مستمرة!' : 'يمكنك تنشيط المبيعات وتقديم عروض لتحقيق النمو.'}
+          </p>
+        </div>
+
+        <div class="growth-details-row">
+          <div class="growth-sub-item">
+            <small>مبيعات الشهر الحالي (${currentMonth.daysElapsed} يوم)</small>
+            <strong style="color:#15803d;">${format(currentMonth.revenue)}</strong>
+          </div>
+          <div class="growth-sub-item">
+            <small>مبيعات الشهر السابق كاملاً</small>
+            <strong>${format(previousMonth.revenue)}</strong>
+          </div>
+          <div class="growth-sub-item">
+            <small>متوسط وتيرة البيع اليومي</small>
+            <strong>${format(currentMonth.dailyAverage)} / يوم</strong>
+          </div>
+        </div>
+      </article>
+
+      <!-- Card 2: Smart Next-Month Forecast -->
+      <article class="growth-card forecast-card">
+        <div class="growth-card-top">
+          <span class="growth-badge badge-forecast">
+            🔮 توقعات الذكاء المالي لشهر ${escapeHtml(fc.nextMonthName)}
+          </span>
+          <span class="status-pill status-complete" style="font-size:11px;font-weight:750;">
+            ${escapeHtml(fc.statusText)}
+          </span>
+        </div>
+
+        <div>
+          <h4 class="growth-headline">
+            متوقع الشهر الجاي تبيع بنسبة <span style="color:var(--purple);">${forecastSign}${fc.forecastGrowthPercent}%</span> بمبيعات تقديرية <span style="color:var(--purple);">${format(fc.projectedRevenue)}</span>
+          </h4>
+          <p style="margin:4px 0 0;font-size:12px;color:var(--muted);">
+            محسوبة ذكياً بناءً على وتيرة بيعك اليومية (${format(currentMonth.dailyAverage)}/يوم) ومعدل النمو الحالي.
+          </p>
+        </div>
+
+        <div class="growth-details-row">
+          <div class="growth-sub-item">
+            <small>توقع إجمالي نهاية هذا الشهر</small>
+            <strong style="color:var(--purple);">${format(currentMonth.projectedMonthEnd)}</strong>
+          </div>
+          <div class="growth-sub-item">
+            <small>المبيعات المتوقعة للشهر القادم</small>
+            <strong style="color:var(--purple);">${format(fc.projectedRevenue)}</strong>
+          </div>
+          <div class="growth-sub-item">
+            <small>وتيرة البيع اليومي المستهدفة</small>
+            <strong>${format(fc.dailyExpectedPace)} / يوم</strong>
+          </div>
+        </div>
+      </article>
+    </div>
+  `;
 }
-function monthlyExpensesView() {
-  const items = state.data.monthlyExpenses;
-  const period = state.data.monthlyPeriod;
+
+async function loadGrowthForecast() {
+  const storeId = state.data?.selectedStoreId;
+  const key = `${storeId}:growth`;
+  if (state.growthForecastKey === key && state.growthForecast) return state.growthForecast;
+  try {
+    state.growthForecastKey = key;
+    const result = await api(`/api/reports/growth-forecast?storeId=${encodeURIComponent(storeId)}`);
+    state.growthForecast = result;
+    render();
+    return result;
+  } catch (e) {
+    state.growthForecastKey = null;
+    return null;
+  }
+}
+
+async function loadFinancialMap(preset = state.financialMapRange || 'all') {
+  const storeId = state.data?.selectedStoreId;
+  document.querySelector('#btn-pl-to-financial-map')?.addEventListener('click', () => {
+    state.page = 'financial-map';
+    render();
+  });
+  if (!state.growthForecast) void loadGrowthForecast();
+  const today = new Date().toISOString().slice(0, 10);
+  let from = '', to = '';
+
+  if (preset === 'today') {
+    from = today; to = today;
+  } else if (preset === 'week') {
+    const d = new Date(); d.setUTCDate(d.getUTCDate() - 7); from = d.toISOString().slice(0, 10); to = today;
+  } else if (preset === 'month') {
+    const d = new Date(); d.setUTCDate(1); from = d.toISOString().slice(0, 10); to = today;
+  }
+
+  const query = new URLSearchParams({ storeId });
+  if (from) query.set('from', from);
+  if (to) query.set('to', to);
+
+  const key = `${storeId}:${from}:${to}`;
+  if (state.financialMapKey === key && state.financialMap) return state.financialMap;
+
+  try {
+    state.financialMapKey = key;
+    state.financialMapRange = preset;
+    const result = await api(`/api/reports/financial-map?${query.toString()}`);
+    state.financialMap = result;
+    render();
+    return result;
+  } catch (e) {
+    state.financialMapKey = null;
+    toast(e.message, 'error');
+    return null;
+  }
+}
+
+function financialMapView() {
+  const mapData = state.financialMap;
   const currency = state.data.company.currency;
   const decimals = currencyDecimals(currency);
   const format = (value) => money({ amount: value, currency, decimals });
+
+  if (!mapData) {
+    void loadFinancialMap();
+    return `<div class="panel empty-chart" style="padding:60px 20px;"><div class="empty-illustration">${icon('chart', 32)}</div><strong>جاري إعداد الخريطة المالية ومسار تدفق الأرباح...</strong><p>يتم تجميع كافة عمليات البيع وسداد التجار والمصروفات بالترتيب الزمني.</p></div>`;
+  }
+
+  const { summary, timeline, range } = mapData;
+  const activePreset = state.financialMapRange || 'all';
+
+  return `
+    <div class="page-heading-row">
+      <div>
+        <p class="page-lead">الخريطة المالية: مسار تدفق الأرباح خطوة بخطوة من أول عملية بيع وسداد فواتير التجار والمصروفات حتى الوصول للمكسب الحالي.</p>
+      </div>
+      <div>
+        <button type="button" class="button button-secondary" data-page="reports">عرض تقرير الأرباح والخسائر ←</button>
+      </div>
+    </div>
+
+    <section class="pro-filter-card" style="margin-bottom:18px;">
+      <div class="pro-filter-row">
+        <div class="pro-filter-pills">
+          <span style="font-size:12px;font-weight:700;color:var(--muted);display:inline-flex;align-items:center;gap:6px;">
+            ${icon('filter', 15)} تصفية الحركات:
+          </span>
+          <button type="button" class="pro-filter-pill ${activePreset === 'all' ? 'active' : ''}" data-fm-preset="all">كل الحركات</button>
+          <button type="button" class="pro-filter-pill ${activePreset === 'today' ? 'active' : ''}" data-fm-preset="today">اليوم</button>
+          <button type="button" class="pro-filter-pill ${activePreset === 'week' ? 'active' : ''}" data-fm-preset="week">هذا الأسبوع</button>
+          <button type="button" class="pro-filter-pill ${activePreset === 'month' ? 'active' : ''}" data-fm-preset="month">هذا الشهر</button>
+        </div>
+        <form id="fm-date-filter" class="pro-date-inputs">
+          <div class="pro-input-wrap">
+            <label>${icon('calendar', 14)} من:</label>
+            <input type="date" name="from" value="${range?.from ?? ''}">
+          </div>
+          <div class="pro-input-wrap">
+            <label>${icon('calendar', 14)} إلى:</label>
+            <input type="date" name="to" value="${range?.to ?? ''}">
+          </div>
+          <button type="submit" class="button button-primary button-sm" style="height:38px;padding:0 14px;">تطبيق</button>
+        </form>
+      </div>
+    </section>
+
+    <div class="fm-card-grid">
+      <div class="fm-kpi-card">
+        <small>🛒 إجمالي المبيعات المحصلة (+)</small>
+        <strong style="color:#15803d;">+${format(summary.totalSales)}</strong>
+        <small style="color:var(--muted);">مجمل ربح البضاعة: ${format(summary.totalGrossProfit)}</small>
+      </div>
+      <div class="fm-kpi-card">
+        <small>💳 سداد دفعات للتجار (-)</small>
+        <strong style="color:#be123c;">-${format(summary.totalSupplierPaid)}</strong>
+        <small style="color:var(--muted);">يخصم من المكسب المتوفر</small>
+      </div>
+      <div class="fm-kpi-card">
+        <small>🏢 المصروفات المسددة (-)</small>
+        <strong style="color:#be123c;">-${format(summary.totalExpensesPaid)}</strong>
+        <small style="color:var(--muted);">إيجار ومصروفات تشغيلية</small>
+      </div>
+      <div class="fm-kpi-card fm-kpi-profit">
+        <small style="color:var(--purple);font-weight:750;">💰 صافي المكسب المتوفر الفعلي (=)</small>
+        <strong>${format(summary.realizedCashProfit)}</strong>
+        <small style="color:var(--muted);">المعادلة: المبيعات - المسدد للتجار - المصروفات - المرتجعات</small>
+      </div>
+    </div>
+
+    <section class="panel compact-panel">
+      <div class="panel-heading">
+        <div>
+          <h3 style="font-size:16px;font-weight:800;color:var(--ink);">🧭 المسار المالي خطوة بخطوة (كيف وصلت لهذا الرقم)</h3>
+          <p>تسلسل الحركات المالية بالترتيب مع إظهار رصيدك في كل خطوة وصولاً للمبلغ الحالي (${timeline.length} حركة مسجلة)</p>
+        </div>
+      </div>
+
+      ${timeline.length ? `
+        <div class="table-scroll analytics-scroll-box" style="max-height:650px;">
+          <table class="compact-table fm-timeline-table">
+            <thead>
+              <tr>
+                <th>نوع الحركة</th>
+                <th>البيان والتفاصيل</th>
+                <th>التاريخ والوقت</th>
+                <th>المسؤول والطرف</th>
+                <th style="text-align:left;">المبلغ</th>
+                <th style="text-align:center;">الرصيد التراكمي في هذه اللحظة</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${timeline.map((item) => {
+                const isSale = item.type === 'SALE';
+                const isSupplier = item.type === 'SUPPLIER_PAYMENT';
+                const isExpense = item.type === 'EXPENSE';
+                const badgeClass = isSale ? 'fm-sale' : isSupplier ? 'fm-supplier' : isExpense ? 'fm-expense' : 'fm-return';
+                const badgeIcon = isSale ? '🛒' : isSupplier ? '💳' : isExpense ? '🏢' : '↩️';
+                const flowColor = isSale ? '#15803d' : '#be123c';
+                const flowSign = isSale ? '+' : '-';
+                const flowAmount = isSale ? item.amountIn : item.amountOut;
+                const formattedDate = new Intl.DateTimeFormat('ar-EG', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(item.timestamp));
+
+                return `
+                  <tr>
+                    <td>
+                      <span class="fm-badge ${badgeClass}">
+                        <span>${badgeIcon}</span> ${escapeHtml(item.category)}
+                      </span>
+                    </td>
+                    <td>
+                      <strong style="font-size:13.5px;color:var(--ink);">${escapeHtml(item.title)}</strong>
+                      <div style="font-size:11.5px;color:var(--muted);margin-top:2px;">${escapeHtml(item.details)}</div>
+                    </td>
+                    <td>
+                      <span style="font-size:12px;color:var(--ink-soft);">${formattedDate}</span>
+                    </td>
+                    <td>
+                      <strong>${escapeHtml(item.party)}</strong>
+                      <div style="font-size:11px;color:var(--muted);">بواسطة: ${escapeHtml(item.actor)}</div>
+                    </td>
+                    <td style="text-align:left;">
+                      <strong style="font-size:14px;color:${flowColor};">${flowSign} ${format(flowAmount)}</strong>
+                    </td>
+                    <td style="text-align:center;">
+                      <span class="running-chip">
+                        الرصيد بعد الحركة: ${format(item.runningCash)}
+                      </span>
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      ` : `
+        <div class="empty-chart" style="padding:40px 15px;">
+          <div class="empty-illustration">${icon('chart', 28)}</div>
+          <strong>لا توجد حركات مالية في الفترة المحددة</strong>
+          <p>سجل مبيعات أو مصروفات أو سداد فواتير تجار لتظهر في الخريطة المالية.</p>
+        </div>
+      `}
+    </section>
+  `;
+}
+
+function expensesView() {
+  const items = state.data.monthlyExpenses ?? [];
+  const period = state.data.monthlyPeriod;
+  const expenses = state.data.expenses ?? [];
+  const currency = state.data.company.currency;
+  const decimals = currencyDecimals(currency);
+  const format = (value) => money({ amount: value, currency, decimals });
+
+  const activeTab = state.expenseSection || 'monthly';
+  const daysInMonth = period ? new Date(period.year, period.month, 0).getDate() : 30;
+
   const confirmed = items.filter((item) => item.actual);
   const due = confirmed.reduce((sum, item) => sum + BigInt(item.actual.remainingAmount.amount), 0n).toString();
   const accrued = confirmed.reduce((sum, item) => sum + BigInt(item.actual.amount.amount), 0n).toString();
-  const daysInMonth = new Date(period.year, period.month, 0).getDate();
+  const totalPaidMonthly = confirmed.reduce((sum, item) => sum + BigInt(item.actual.paidAmount.amount), 0n).toString();
+  const totalDailyShare = confirmed.reduce((sum, item) => sum + (BigInt(item.actual.amount.amount) / BigInt(daysInMonth)), 0n).toString();
 
-  return `<div class="page-heading-row">
-    <div>
-      <p class="page-lead">إدارة التزامات شهر ${String(period.month).padStart(2, '0')} / ${period.year} (${daysInMonth} يوم). يتم تقسيم المصروف على أيام الشهر ويمكنك سداد نصيب اليوم أو أي مبلغ تختاره حسب إيراد اليوم.</p>
-    </div>
-    ${state.data.capabilities.canConfirmMonthlyExpenses ? '<button class="button button-primary" id="new-monthly-obligation">+ إضافة التزام شهري (إيجار/مرافق)</button>' : ''}
-  </div>
+  const totalDirectExpenses = expenses.reduce((sum, item) => sum + BigInt(item.amount.amount), 0n).toString();
 
-  <div class="inventory-summary" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
-    <div class="inventory-summary-card">
-      <span class="summary-badge summary-indigo">${icon('chart', 18)}</span>
-      <div><small>إجمالي التزامات الشهر</small><strong>${format(accrued)}</strong></div>
-    </div>
-    <div class="inventory-summary-card">
-      <span class="summary-badge summary-amber">${icon('wallet', 18)}</span>
-      <div><small>المتبقي غير المسدد</small><strong style="color:${BigInt(due) > 0n ? '#be123c' : '#15803d'};">${format(due)}</strong></div>
-    </div>
-    <div class="inventory-summary-card">
-      <span class="summary-badge summary-teal">${icon('bell', 18)}</span>
-      <div><small>عدد البنود المسجلة</small><strong>${items.length} التزام</strong></div>
-    </div>
-  </div>
+  let monthlySectionHtml = '';
+  if (activeTab === 'monthly' || activeTab === 'all') {
+    monthlySectionHtml = `
+      <section class="panel" style="margin-bottom:20px;padding:20px 22px;">
+        <div class="panel-heading" style="margin-bottom:14px;">
+          <div>
+            <h3 style="font-size:16px;font-weight:800;color:var(--ink);">🏢 الالتزامات الشهرية والإيجار (مقسم يوماً بيوم)</h3>
+            <p>يتم تقسيم الإيجار والالتزامات على ${daysInMonth} يوماً لتسديد نصيب اليوم بسهولة. لا يُخصم أي مبلغ من الفلوس أو المكسب إلا عند الضغط على زر السداد الفعلي.</p>
+          </div>
+          ${state.data.capabilities.canConfirmMonthlyExpenses ? '<button type="button" class="button button-primary button-sm" id="new-monthly-obligation">+ إضافة التزام شهري (إيجار/مرافق)</button>' : ''}
+        </div>
 
-  ${items.length ? items.map((item) => {
-    let dailyCardHtml = '';
-    let payButtonHtml = '';
-    let paymentsHistoryHtml = '';
-
-    if (item.actual) {
-      const actualAmountMinor = BigInt(item.actual.amount.amount);
-      const remainingMinor = BigInt(item.actual.remainingAmount.amount);
-      const dailyMinor = actualAmountMinor / BigInt(daysInMonth);
-      const suggestedMinor = remainingMinor < dailyMinor ? remainingMinor : dailyMinor;
-      const digits = suggestedMinor.toString().padStart(decimals + 1, '0');
-      const suggestedFormatted = decimals ? `${digits.slice(0, -decimals)}.${digits.slice(-decimals)}` : digits;
-
-      dailyCardHtml = `
-        <div class="inventory-summary" style="margin: 14px 0 10px; grid-template-columns: repeat(4, minmax(0, 1fr));">
+        <div class="inventory-summary" style="grid-template-columns: repeat(4, minmax(0, 1fr));margin-bottom:16px;">
           <div class="inventory-summary-card">
-            <small>المبلغ الشهري المثبت</small>
-            <strong>${money(item.actual.amount)}</strong>
-            <small style="color:var(--muted);">كامل الشهر (${daysInMonth} يوم)</small>
+            <span class="summary-badge summary-indigo">${icon('chart', 18)}</span>
+            <div><small>إجمالي التزامات الشهر</small><strong>${format(accrued)}</strong></div>
           </div>
           <div class="inventory-summary-card" style="background:#f0fdf4;border-color:#bbf7d0;">
-            <small style="color:#166534;font-weight:700;">نصيب اليوم المتوقع</small>
-            <strong style="color:#15803d;">${money({ amount: dailyMinor.toString(), currency, decimals })}</strong>
-            <small style="color:#166534;">تقسيم الـ ${daysInMonth} يوم</small>
+            <span class="summary-badge summary-teal" style="background:#dcfce7;color:#15803d;">${icon('wallet', 18)}</span>
+            <div><small style="color:#166534;font-weight:700;">نصيب اليوم المطلوب سداده</small><strong style="color:#15803d;">${format(totalDailyShare)}</strong></div>
           </div>
           <div class="inventory-summary-card">
-            <small>المدفوع فعلياً حتى الآن</small>
-            <strong style="color:#15803d;">${money(item.actual.paidAmount)}</strong>
-            <small style="color:var(--muted);">${item.actual.payments.length} دفعة مسجلة</small>
+            <span class="summary-badge summary-teal">${icon('check', 18)}</span>
+            <div><small>تم سداده حتى الآن</small><strong style="color:#15803d;">${format(totalPaidMonthly)}</strong></div>
           </div>
           <div class="inventory-summary-card">
-            <small>المتبقي للشهر</small>
-            <strong style="color:${remainingMinor > 0n ? '#be123c' : '#15803d'};">${money(item.actual.remainingAmount)}</strong>
-            <small style="color:${remainingMinor > 0n ? '#be123c' : 'var(--muted)'};">${remainingMinor > 0n ? 'مستحق السداد' : '✓ تم سداد الشهر بالكامل'}</small>
+            <span class="summary-badge summary-amber">${icon('wallet', 18)}</span>
+            <div><small>المتبقي غير المسدد</small><strong style="color:${BigInt(due) > 0n ? '#be123c' : '#15803d'};">${format(due)}</strong></div>
           </div>
         </div>
-      `;
 
-      if (state.data.capabilities.canPayMonthlyExpenses && remainingMinor > 0n) {
-        payButtonHtml = `
-          <div style="margin: 12px 0 6px;">
-            <button class="button button-primary pay-monthly" data-actual="${item.actual.id}" data-remaining="${item.actual.remainingAmount.amount}" data-daily="${suggestedFormatted}" data-name="${escapeHtml(item.name)}">
-              💳 سداد اليوم (${suggestedFormatted} ${currency}) أو أي دفعة تناسب الإيراد
-            </button>
-          </div>
-        `;
-      }
+        ${items.length ? items.map((item) => {
+          let dailyCardHtml = '';
+          let payButtonHtml = '';
+          let paymentsHistoryHtml = '';
 
-      if (item.actual.payments.length) {
-        paymentsHistoryHtml = `
-          <details class="compact-disclosure" style="margin-top:10px;border-radius:10px;border:1px solid var(--line);background:var(--surface-soft);">
-            <summary style="padding:10px 14px;font-size:12px;font-weight:700;">
-              <span>سجل دفعات السداد المسجلة (${item.actual.payments.length} دفعة)</span>
-              <span class="disclosure-chevron" style="width:26px;height:26px;">${icon('chevron', 14)}</span>
-            </summary>
-            <div class="disclosure-content" style="padding:4px 14px 12px;">
-              ${item.actual.payments.map((p) => `
-                <div class="invoice-history-row" style="display:flex;justify-content:space-between;padding:7px 0;font-size:12px;">
-                  <span>سداد ${p.method === 'CASH_DRAWER' ? 'من درج النقدية' : p.method === 'CASH_SAFE' ? 'من الخزينة' : 'تحويل بنكي'}${p.referenceNumber ? ` · ${escapeHtml(p.referenceNumber)}` : ''} · ${new Date(p.paidAt).toLocaleDateString('ar-EG')}</span>
-                  <strong style="color:#15803d;">${money(p.amount)}</strong>
+          if (item.actual) {
+            const actualAmountMinor = BigInt(item.actual.amount.amount);
+            const remainingMinor = BigInt(item.actual.remainingAmount.amount);
+            const dailyMinor = actualAmountMinor / BigInt(daysInMonth);
+            const suggestedMinor = remainingMinor < dailyMinor ? remainingMinor : dailyMinor;
+            const digits = suggestedMinor.toString().padStart(decimals + 1, '0');
+            const suggestedFormatted = decimals ? `${digits.slice(0, -decimals)}.${digits.slice(-decimals)}` : digits;
+
+            dailyCardHtml = `
+              <div class="inventory-summary" style="margin: 12px 0; grid-template-columns: repeat(4, minmax(0, 1fr));">
+                <div class="inventory-summary-card">
+                  <small>المبلغ الشهري المثبت</small>
+                  <strong>${money(item.actual.amount)}</strong>
+                  <small style="color:var(--muted);">كامل الشهر (${daysInMonth} يوم)</small>
                 </div>
-              `).join('')}
-            </div>
-          </details>
-        `;
-      }
-    }
+                <div class="inventory-summary-card" style="background:#f0fdf4;border-color:#bbf7d0;">
+                  <small style="color:#166534;font-weight:700;">نصيب اليوم المتوقع</small>
+                  <strong style="color:#15803d;">${money({ amount: dailyMinor.toString(), currency, decimals })}</strong>
+                  <small style="color:#166534;">تقسيم الـ ${daysInMonth} يوم</small>
+                </div>
+                <div class="inventory-summary-card">
+                  <small>المدفوع فعلياً حتى الآن</small>
+                  <strong style="color:#15803d;">${money(item.actual.paidAmount)}</strong>
+                  <small style="color:var(--muted);">${item.actual.payments.length} دفعة مسجلة</small>
+                </div>
+                <div class="inventory-summary-card">
+                  <small>المتبقي للشهر</small>
+                  <strong style="color:${remainingMinor > 0n ? '#be123c' : '#15803d'};">${money(item.actual.remainingAmount)}</strong>
+                  <small style="color:${remainingMinor > 0n ? '#be123c' : 'var(--muted)'};">${remainingMinor > 0n ? 'مستحق السداد' : '✓ تم سداد الشهر بالكامل'}</small>
+                </div>
+              </div>
+            `;
 
-    return `
-      <section class="panel supplier-card" style="padding:18px 20px;">
-        <div class="panel-heading" style="padding:0 0 10px;margin-bottom:0;border-bottom:1px solid var(--line);">
-          <div>
-            <h3 style="font-size:16px;font-weight:800;color:var(--ink);">${escapeHtml(item.name)}</h3>
-            <p>${escapeHtml(item.category)} · موعد الاستحقاق الشهري يوم ${item.dueDay} في الشهر</p>
+            if (state.data.capabilities.canPayMonthlyExpenses && remainingMinor > 0n) {
+              payButtonHtml = `
+                <div style="margin: 12px 0 6px;">
+                  <button type="button" class="button button-primary pay-monthly" data-actual="${item.actual.id}" data-remaining="${item.actual.remainingAmount.amount}" data-daily="${suggestedFormatted}" data-name="${escapeHtml(item.name)}" style="height:42px;font-size:12.5px;font-weight:750;box-shadow:0 4px 12px rgba(89,72,216,0.25);">
+                    💳 سداد نصيب اليوم (${suggestedFormatted} ${currency}) أو أي دفعة تناسب الإيراد
+                  </button>
+                </div>
+              `;
+            }
+
+            if (item.actual.payments.length) {
+              paymentsHistoryHtml = `
+                <details class="compact-disclosure" style="margin-top:10px;border-radius:10px;border:1px solid var(--line);background:var(--surface-soft);">
+                  <summary style="padding:10px 14px;font-size:12px;font-weight:700;">
+                    <span>سجل دفعات السداد المسجلة لهذا الالتزام (${item.actual.payments.length} دفعة)</span>
+                    <span class="disclosure-chevron" style="width:26px;height:26px;">${icon('chevron', 14)}</span>
+                  </summary>
+                  <div class="disclosure-content" style="padding:4px 14px 12px;">
+                    ${item.actual.payments.map((p) => `
+                      <div class="invoice-history-row" style="display:flex;justify-content:space-between;padding:8px 0;font-size:12px;">
+                        <span>سداد ${p.method === 'CASH_DRAWER' ? 'من درج النقدية' : p.method === 'CASH_SAFE' ? 'من الخزينة' : 'تحويل بنكي'}${p.referenceNumber ? ` · ${escapeHtml(p.referenceNumber)}` : ''} · ${new Date(p.paidAt).toLocaleDateString('ar-EG')}</span>
+                        <strong style="color:#15803d;">${money(p.amount)}</strong>
+                      </div>
+                    `).join('')}
+                  </div>
+                </details>
+              `;
+            }
+          }
+
+          return `
+            <div class="panel supplier-card" style="padding:16px 18px;margin-bottom:14px;background:var(--surface-soft);border:1px solid var(--line);border-radius:12px;">
+              <div class="panel-heading" style="padding:0 0 10px;margin-bottom:0;border-bottom:1px solid var(--line);">
+                <div>
+                  <h4 style="margin:0;font-size:15.5px;font-weight:800;color:var(--ink);">${escapeHtml(item.name)}</h4>
+                  <p style="margin:3px 0 0;font-size:11.5px;color:var(--muted);">${escapeHtml(item.category)} · موعد الاستحقاق الشهري يوم ${item.dueDay} في الشهر</p>
+                </div>
+                ${item.actual ? `<span class="status-pill ${item.actual.status === 'PAID' ? 'status-complete' : 'status-low'}" style="font-weight:700;">${item.actual.status === 'PAID' ? '✓ مسدد بالكامل' : item.actual.status === 'PARTIALLY_PAID' ? 'مدفوع جزئيًا' : 'مستحق'}</span>` : '<span class="status-pill status-low">لم يتم تأكيد قيمة هذا الشهر</span>'}
+              </div>
+              ${dailyCardHtml}
+              ${payButtonHtml}
+              ${!item.actual && state.data.capabilities.canConfirmMonthlyExpenses ? `
+                <div style="margin-top:14px;">
+                  <button type="button" class="button button-primary confirm-monthly" data-obligation="${item.id}">تأكيد إجمالي المبلغ للشهر (مثلاً 4000 جنيه إيجار)</button>
+                </div>
+              ` : ''}
+              ${paymentsHistoryHtml}
+            </div>
+          `;
+        }).join('') : `
+          <div class="empty-chart" style="padding:24px 10px;">
+            <div class="empty-illustration">${icon('wallet', 28)}</div>
+            <strong>لا توجد التزامات شهرية مسجلة بعد</strong>
+            <p>أضف التزامك الشهري (مثل إيجار المحل 4000 جنيه أو الكهرباء) ليقوم النظام بتقسيمه يوماً بيوم وتتمكن من سداد نصيب اليوم بسهولة.</p>
+            ${state.data.capabilities.canConfirmMonthlyExpenses ? '<button type="button" class="button button-primary button-sm" id="new-monthly-obligation" style="margin-top:10px;">+ إضافة التزام شهري جديد</button>' : ''}
           </div>
-          ${item.actual ? `<span class="status-pill ${item.actual.status === 'PAID' ? 'status-complete' : 'status-low'}" style="font-weight:700;">${item.actual.status === 'PAID' ? '✓ مسدد بالكامل' : item.actual.status === 'PARTIALLY_PAID' ? 'مدفوع جزئيًا' : 'مستحق'}</span>` : '<span class="status-pill status-low">لم يتم تأكيد قيمة هذا الشهر</span>'}
-        </div>
-        ${dailyCardHtml}
-        ${payButtonHtml}
-        ${!item.actual && state.data.capabilities.canConfirmMonthlyExpenses ? `
-          <div style="margin-top:14px;">
-            <button class="button button-primary confirm-monthly" data-obligation="${item.id}">تأكيد إجمالي المبلغ للشهر (مثلاً 4000 جنيه إيجار)</button>
-          </div>
-        ` : ''}
-        ${paymentsHistoryHtml}
+        `}
       </section>
     `;
-  }).join('') : `
-    <section class="panel empty-chart">
-      <div class="empty-illustration">${icon('chart', 28)}</div>
-      <strong>لا توجد التزامات شهرية</strong>
-      <p>أضف الإيجار أو المرتبات أو أي التزام ثابت، ثم حدد قيمته الإجمالية للشهر ليتم تقسيمه وسداده يوماً بيوم.</p>
-    </section>
-  `}`;
+  }
+
+  let dailySectionHtml = '';
+  if (activeTab === 'daily' || activeTab === 'all') {
+    dailySectionHtml = `
+      <section class="panel" style="margin-bottom:20px;padding:20px 22px;">
+        <div class="panel-heading" style="margin-bottom:14px;">
+          <div>
+            <h3 style="font-size:16px;font-weight:800;color:var(--ink);">☕ المصروفات اليومية والنثرية السريعة</h3>
+            <p>المصروفات النثرية اليومية (شاي، بوفيه، نقل، صيانة، مستلزمات تشغيل...).</p>
+          </div>
+          ${state.data.capabilities.canCreateExpenses ? '<button type="button" class="button button-primary button-sm" id="new-expense">+ تسجيل مصروف يومي</button>' : ''}
+        </div>
+
+        <div class="inventory-summary" style="grid-template-columns: repeat(3, minmax(0, 1fr));margin-bottom:16px;">
+          <div class="inventory-summary-card">
+            <span class="summary-badge summary-amber">${icon('wallet', 18)}</span>
+            <div><small>إجمالي المصروفات اليومية</small><strong>${format(totalDirectExpenses)}</strong></div>
+          </div>
+          <div class="inventory-summary-card">
+            <span class="summary-badge summary-indigo">${icon('chart', 18)}</span>
+            <div><small>عدد الحركات اليومية</small><strong>${expenses.length} حركة</strong></div>
+          </div>
+          <div class="inventory-summary-card">
+            <span class="summary-badge summary-teal">${icon('box', 18)}</span>
+            <div><small>أعلى بند مصروفات</small><strong>${expenses.length ? escapeHtml(expenses[0].category) : '—'}</strong></div>
+          </div>
+        </div>
+
+        ${expenses.length ? `
+          <div class="expense-list">
+            ${expenses.map((expense) => `
+              <details class="compact-disclosure expense-disclosure" style="margin-bottom:8px;border-radius:10px;border:1px solid var(--line);">
+                <summary style="padding:12px 16px;">
+                  <span>
+                    <strong style="font-size:13.5px;color:var(--ink);">${escapeHtml(expense.category)}</strong>
+                    <small>${escapeHtml(expense.date)} · ${expense.paymentMethod === 'CASH_DRAWER' ? 'درج النقدية' : expense.paymentMethod === 'CASH_SAFE' ? 'الخزينة' : 'تحويل بنكي'}</small>
+                  </span>
+                  <div style="display:flex;align-items:center;gap:12px;">
+                    <strong style="font-size:14.5px;color:#be123c;">${money(expense.amount)}</strong>
+                    <span class="disclosure-chevron" style="width:28px;height:28px;" aria-hidden="true">${icon('chevron', 14)}</span>
+                  </div>
+                </summary>
+                <div class="disclosure-content" style="padding:8px 16px 14px;">
+                  <div class="invoice-detail-meta">
+                    <span>طريقة الدفع: <strong>${expense.paymentMethod === 'CASH_DRAWER' ? 'درج النقدية' : expense.paymentMethod === 'CASH_SAFE' ? 'الخزينة' : 'تحويل بنكي'}</strong></span>
+                    <span>الملاحظات: ${escapeHtml(expense.notes || 'لا توجد ملاحظات')}</span>
+                    <span>المرجع: <span class="sku-code">${escapeHtml(expense.referenceNumber || '—')}</span></span>
+                  </div>
+                </div>
+              </details>
+            `).join('')}
+          </div>
+        ` : `
+          <div class="empty-chart" style="padding:24px 10px;">
+            <div class="empty-illustration">${icon('wallet', 28)}</div>
+            <strong>لا توجد مصروفات يومية مسجلة بعد</strong>
+            <p>سجّل مصروفات اليوم مثل الشاي، النقل، أو الصيانة ليتم خصمها من نقدية الدرج.</p>
+          </div>
+        `}
+      </section>
+    `;
+  }
+
+  return `
+    <div class="page-heading-row">
+      <div>
+        <p class="page-lead">إدارة المصروفات اليومية والالتزامات الشهرية (الإيجار مقسم يوماً بيوم). تُخصم المبالغ من الفلوس والمكسب فقط عند سدادها الفعلي.</p>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <button type="button" class="button button-secondary" id="btn-open-financial-map">${icon('chart', 16)} 🧭 الخريطة المالية للأرباح</button>
+        ${state.data.capabilities.canConfirmMonthlyExpenses ? '<button type="button" class="button button-secondary" id="new-monthly-obligation">+ إضافة التزام شهري</button>' : ''}
+        ${state.data.capabilities.canCreateExpenses ? '<button type="button" class="button button-primary" id="new-expense">+ تسجيل مصروف يومي</button>' : ''}
+      </div>
+    </div>
+
+    <div class="expense-unified-tabs">
+      <button type="button" class="expense-tab-btn ${activeTab === 'monthly' ? 'active' : ''}" data-exp-tab="monthly">
+        🏢 الالتزامات الشهرية والإيجار اليومي
+      </button>
+      <button type="button" class="expense-tab-btn ${activeTab === 'daily' ? 'active' : ''}" data-exp-tab="daily">
+        ☕ المصروفات اليومية والنثرية
+      </button>
+      <button type="button" class="expense-tab-btn ${activeTab === 'all' ? 'active' : ''}" data-exp-tab="all">
+        📜 عرض كل المصروفات معاً
+      </button>
+    </div>
+
+    ${monthlySectionHtml}
+    ${dailySectionHtml}
+  `;
 }
 
 function posView() {
@@ -1724,7 +2144,44 @@ function supplierModal(html, formId, endpoint, convert = (data) => data, success
   });
 }
 
+function bindFinancialMap() {
+  document.querySelectorAll('[data-fm-preset]').forEach((btn) => btn.addEventListener('click', () => {
+    state.financialMapRange = btn.dataset.fmPreset;
+    state.financialMapKey = null;
+    void loadFinancialMap(btn.dataset.fmPreset);
+  }));
+
+  document.querySelector('#fm-date-filter')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    const from = fd.get('from');
+    const to = fd.get('to');
+    const storeId = state.data?.selectedStoreId;
+    const query = new URLSearchParams({ storeId });
+    if (from) query.set('from', from);
+    if (to) query.set('to', to);
+    state.financialMapRange = 'custom';
+    state.financialMapKey = `${storeId}:${from}:${to}`;
+    void api(`/api/reports/financial-map?${query.toString()}`).then((res) => {
+      state.financialMap = res;
+      render();
+    }).catch((err) => toast(err.message, 'error'));
+  });
+}
+
 function bindExpenses() {
+  bindMonthlyExpenses();
+
+  document.querySelectorAll('[data-exp-tab]').forEach((btn) => btn.addEventListener('click', () => {
+    state.expenseSection = btn.dataset.expTab;
+    render();
+  }));
+
+  document.querySelector('#btn-open-financial-map')?.addEventListener('click', () => {
+    state.page = 'financial-map';
+    render();
+  });
+
   document.querySelector('#new-expense')?.addEventListener('click', () => {
     const decimals = currencyDecimals(state.data.company.currency);
     const date = new Date().toISOString().slice(0, 10);
@@ -2685,8 +3142,8 @@ function bindShell() {
   if (state.page === 'suppliers') bindSuppliers();
   if (state.page === 'sales') { bindReturns(); bindSalesHistory(); }
   bindSaleInvoiceButtons();
-  if (state.page === 'monthly-expenses') bindMonthlyExpenses();
-  if (state.page === 'expenses') bindExpenses();
+  if (state.page === 'monthly-expenses' || state.page === 'expenses') bindExpenses();
+  if (state.page === 'financial-map') bindFinancialMap();
   if (state.page === 'reports') bindProfitLoss();
   if (state.page === 'top-products') bindTopProducts();
   if (state.page === 'backups') bindBackups();
@@ -2805,6 +3262,7 @@ function bindTopProducts() {
     state.analyticsKey = null;
     render();
   });
+  if (!state.growthForecast) void loadGrowthForecast();
   const today = new Date().toISOString().slice(0, 10);
   state.analyticsTo ??= today;
   if (!state.analyticsFrom) { const start = new Date(); start.setUTCDate(start.getUTCDate() - 29); state.analyticsFrom = start.toISOString().slice(0, 10); }
@@ -2832,6 +3290,11 @@ function bindProfitLoss() {
     state.plSection = btn.dataset.plSection;
     render();
   }));
+  document.querySelector('#btn-pl-to-financial-map')?.addEventListener('click', () => {
+    state.page = 'financial-map';
+    render();
+  });
+  if (!state.growthForecast) void loadGrowthForecast();
   const today = new Date().toISOString().slice(0, 10);
   state.reportFrom ??= today;
   state.reportTo ??= today;

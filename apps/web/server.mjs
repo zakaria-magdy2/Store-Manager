@@ -742,6 +742,354 @@ async function purchaseSupplierReport(ctx, url) {
   return { range: { from: fromValue, to: toValue }, topBySpend: bySpend[0] ?? null, topByInvoices: byInvoices[0] ?? null, suppliers: bySpend };
 }
 
+async function financialMapReport(ctx, url) {
+  if (!ctx.hasPermission(Permissions.REPORTS_FINANCIAL_VIEW) && !ctx.hasPermission(Permissions.REPORTS_DAILY_VIEW) && ctx.roleId !== 'OWNER' && ctx.roleId !== 'STORE_MANAGER') {
+    throw Object.assign(new Error('غير مصرح بعرض الخريطة المالية'), { status: 403 });
+  }
+  const requestedStore = url.searchParams.get('storeId');
+  const stores = await storeRepo.listByTenant(ctx);
+  const storeId = ctx.storeId ?? requestedStore ?? stores[0]?.id;
+  if (!storeId || !stores.some((s) => s.id === storeId)) throw Object.assign(new Error('الفرع غير متاح'), { status: 403 });
+  const tenant = await tenantRepo.findById(ctx.tenantId);
+  if (!tenant) throw Object.assign(new Error('الشركة غير موجودة'), { status: 404 });
+  const currency = tenant.currency;
+
+  const rawDb = database.getRawDatabase();
+  const from = url.searchParams.get('from') || '';
+  const to = url.searchParams.get('to') || '';
+
+  const userRows = await db.selectFrom('users').select(['id', 'full_name as fullName', 'username']).where('tenant_id', '=', ctx.tenantId).execute();
+  const userMap = new Map(userRows.map((u) => [u.id, u.fullName || u.username]));
+
+  // 1. Sales
+  let salesSql = `
+    SELECT s.id, s.sale_number, s.created_at, s.customer_name, s.cashier_user_id,
+      (SELECT sp.method FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id LIMIT 1) AS payment_method,
+      COALESCE((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS revenue,
+      COALESCE((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS gross_profit
+    FROM sales s
+    WHERE s.tenant_id = ? AND s.store_id = ? AND s.status = 'COMPLETED'
+  `;
+  const salesParams = [ctx.tenantId, storeId];
+  if (from) { salesSql += ` AND substr(s.created_at, 1, 10) >= ?`; salesParams.push(from); }
+  if (to) { salesSql += ` AND substr(s.created_at, 1, 10) <= ?`; salesParams.push(to); }
+  salesSql += ` ORDER BY s.created_at ASC LIMIT 400`;
+  const salesRows = rawDb.prepare(salesSql).all(...salesParams);
+
+  // 2. Supplier purchases initial payments
+  let supInitSql = `
+    SELECT p.id, p.invoice_number, p.purchased_at as created_at, p.initial_paid_amount as amount, p.created_by_user_id, s.name as supplier_name
+    FROM supplier_purchases p
+    INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
+    WHERE p.tenant_id = ? AND p.store_id = ? AND p.initial_paid_amount > 0
+  `;
+  const supInitParams = [ctx.tenantId, storeId];
+  if (from) { supInitSql += ` AND substr(p.purchased_at, 1, 10) >= ?`; supInitParams.push(from); }
+  if (to) { supInitSql += ` AND substr(p.purchased_at, 1, 10) <= ?`; supInitParams.push(to); }
+  supInitSql += ` ORDER BY p.purchased_at ASC LIMIT 200`;
+  const supInitRows = rawDb.prepare(supInitSql).all(...supInitParams);
+
+  // 3. Supplier installment payments
+  let supPaySql = `
+    SELECT sp.id, p.invoice_number, sp.paid_at as created_at, sp.amount, sp.payment_method, sp.created_by_user_id, s.name as supplier_name
+    FROM supplier_payments sp
+    INNER JOIN supplier_purchases p ON p.id = sp.purchase_id AND p.tenant_id = sp.tenant_id
+    INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
+    WHERE sp.tenant_id = ? AND p.store_id = ?
+  `;
+  const supPayParams = [ctx.tenantId, storeId];
+  if (from) { supPaySql += ` AND substr(sp.paid_at, 1, 10) >= ?`; supPayParams.push(from); }
+  if (to) { supPaySql += ` AND substr(sp.paid_at, 1, 10) <= ?`; supPayParams.push(to); }
+  supPaySql += ` ORDER BY sp.paid_at ASC LIMIT 300`;
+  const supPayRows = rawDb.prepare(supPaySql).all(...supPayParams);
+
+  // 4. Operating Expenses
+  let expSql = `
+    SELECT oer.id, oer.expense_date as created_at, oer.amount, oer.payment_method, oer.notes, oer.expense_type, oer.created_by_user_id,
+      COALESCE(ec.name, 'مصروف تشغيلي') AS category_name,
+      COALESCE(reo.name, 'التزام شهري') AS obligation_name
+    FROM operating_expense_records oer
+    LEFT JOIN expense_categories ec ON ec.id = oer.category_id AND ec.tenant_id = oer.tenant_id
+    LEFT JOIN monthly_expense_actuals mea ON mea.id = oer.monthly_actual_id AND mea.tenant_id = oer.tenant_id
+    LEFT JOIN recurring_expense_obligations reo ON reo.id = mea.obligation_id AND reo.tenant_id = oer.tenant_id
+    WHERE oer.tenant_id = ? AND oer.store_id = ?
+  `;
+  const expParams = [ctx.tenantId, storeId];
+  if (from) { expSql += ` AND substr(oer.expense_date, 1, 10) >= ?`; expParams.push(from); }
+  if (to) { expSql += ` AND substr(oer.expense_date, 1, 10) <= ?`; expParams.push(to); }
+  expSql += ` ORDER BY oer.expense_date ASC LIMIT 300`;
+  const expRows = rawDb.prepare(expSql).all(...expParams);
+
+  // 5. Customer Returns
+  let retSql = `
+    SELECT cr.id, cr.return_number, cr.created_at, cr.refund_amount, cr.payment_method, cr.created_by_user_id
+    FROM customer_returns cr
+    WHERE cr.tenant_id = ? AND cr.store_id = ?
+  `;
+  const retParams = [ctx.tenantId, storeId];
+  if (from) { retSql += ` AND substr(cr.created_at, 1, 10) >= ?`; retParams.push(from); }
+  if (to) { retSql += ` AND substr(cr.created_at, 1, 10) <= ?`; retParams.push(to); }
+  retSql += ` ORDER BY cr.created_at ASC LIMIT 200`;
+  const retRows = rawDb.prepare(retSql).all(...retParams);
+
+  const timeline = [];
+
+  for (const s of salesRows) {
+    const rev = BigInt(s.revenue ?? 0);
+    const profit = BigInt(s.gross_profit ?? 0);
+    timeline.push({
+      id: s.id,
+      timestamp: s.created_at,
+      type: 'SALE',
+      category: 'بيع',
+      title: `فاتورة بيع #${s.sale_number}`,
+      reference: s.sale_number,
+      party: s.customer_name || 'عميل نقدي',
+      actor: userMap.get(s.cashier_user_id) || 'الكاشير',
+      amountIn: rev.toString(),
+      amountOut: '0',
+      profitImpact: profit.toString(),
+      details: `إيراد: ${Money.fromMinor(rev, currency).toDecimalString()} ${currency} · ربح البيع: ${Money.fromMinor(profit, currency).toDecimalString()} ${currency}`,
+    });
+  }
+
+  for (const p of supInitRows) {
+    const amt = BigInt(p.amount ?? 0);
+    timeline.push({
+      id: `${p.id}-init`,
+      timestamp: p.created_at,
+      type: 'SUPPLIER_PAYMENT',
+      category: 'سداد تاجر',
+      title: `دفعة نقدية عند استلام فاتورة شراء #${p.invoice_number || p.id.slice(0, 8)}`,
+      reference: p.invoice_number,
+      party: `التاجر: ${p.supplier_name}`,
+      actor: userMap.get(p.created_by_user_id) || 'المسؤول',
+      amountIn: '0',
+      amountOut: amt.toString(),
+      profitImpact: (-amt).toString(),
+      details: `دفعة سداد نقدية للتاجر ${p.supplier_name} - يخصم من المكسب المتاح`,
+    });
+  }
+
+  for (const p of supPayRows) {
+    const amt = BigInt(p.amount ?? 0);
+    timeline.push({
+      id: p.id,
+      timestamp: p.created_at,
+      type: 'SUPPLIER_PAYMENT',
+      category: 'سداد تاجر',
+      title: `سداد للتاجر: ${p.supplier_name} (فاتورة #${p.invoice_number || ''})`,
+      reference: p.invoice_number,
+      party: `التاجر: ${p.supplier_name}`,
+      actor: userMap.get(p.created_by_user_id) || 'المسؤول',
+      amountIn: '0',
+      amountOut: amt.toString(),
+      profitImpact: (-amt).toString(),
+      details: `سداد دفعة من حساب التاجر ${p.supplier_name} - يخصم من المكسب المتاح`,
+    });
+  }
+
+  for (const e of expRows) {
+    const amt = BigInt(e.amount ?? 0);
+    const isMonthly = e.expense_type === 'MONTHLY_RECURRING_PAYMENT';
+    const label = isMonthly ? `سداد ${e.obligation_name}` : `مصروف: ${e.category_name}`;
+    timeline.push({
+      id: e.id,
+      timestamp: e.created_at,
+      type: 'EXPENSE',
+      category: isMonthly ? 'التزام شهري' : 'مصروف يومي',
+      title: label,
+      reference: e.notes || label,
+      party: isMonthly ? e.obligation_name : e.category_name,
+      actor: userMap.get(e.created_by_user_id) || 'المسؤول',
+      amountIn: '0',
+      amountOut: amt.toString(),
+      profitImpact: (-amt).toString(),
+      details: e.notes || (isMonthly ? 'سداد قسط التزام شهري (إيجار/مرافق)' : 'مصروف تشغيل يومي'),
+    });
+  }
+
+  for (const r of retRows) {
+    const amt = BigInt(r.refund_amount ?? 0);
+    timeline.push({
+      id: r.id,
+      timestamp: r.created_at,
+      type: 'CUSTOMER_RETURN',
+      category: 'مرتجع للعميل',
+      title: `مرتجع بيع #${r.return_number}`,
+      reference: r.return_number,
+      party: 'عميل مرتجع',
+      actor: userMap.get(r.created_by_user_id) || 'الكاشير',
+      amountIn: '0',
+      amountOut: amt.toString(),
+      profitImpact: (-amt).toString(),
+      details: `استرداد نقدي لعميل مقابل بضاعة مرتجعة`,
+    });
+  }
+
+  timeline.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
+
+  let runningCashMinor = 0n;
+  let runningProfitMinor = 0n;
+  let totalSalesMinor = 0n;
+  let totalGrossProfitMinor = 0n;
+  let totalSupplierPaidMinor = 0n;
+  let totalExpensesMinor = 0n;
+  let totalRefundsMinor = 0n;
+
+  for (const item of timeline) {
+    const inAmt = BigInt(item.amountIn);
+    const outAmt = BigInt(item.amountOut);
+    const pImpact = BigInt(item.profitImpact);
+
+    runningCashMinor += inAmt - outAmt;
+    runningProfitMinor += pImpact;
+
+    if (item.type === 'SALE') {
+      totalSalesMinor += inAmt;
+      totalGrossProfitMinor += BigInt(item.profitImpact);
+    } else if (item.type === 'SUPPLIER_PAYMENT') {
+      totalSupplierPaidMinor += outAmt;
+    } else if (item.type === 'EXPENSE') {
+      totalExpensesMinor += outAmt;
+    } else if (item.type === 'CUSTOMER_RETURN') {
+      totalRefundsMinor += outAmt;
+    }
+
+    item.runningCash = runningCashMinor.toString();
+    item.runningProfit = runningProfitMinor.toString();
+  }
+
+  const realizedCashProfitMinor = totalSalesMinor - totalSupplierPaidMinor - totalExpensesMinor - totalRefundsMinor;
+
+  return {
+    currency,
+    range: { from, to },
+    summary: {
+      totalSales: totalSalesMinor.toString(),
+      totalGrossProfit: totalGrossProfitMinor.toString(),
+      totalSupplierPaid: totalSupplierPaidMinor.toString(),
+      totalExpensesPaid: totalExpensesMinor.toString(),
+      totalRefunds: totalRefundsMinor.toString(),
+      realizedCashProfit: realizedCashProfitMinor.toString(),
+      runningFinalCash: runningCashMinor.toString(),
+      eventsCount: timeline.length,
+    },
+    timeline: timeline.reverse(), // Newest first for display, with running totals already calculated
+  };
+}
+
+async function growthForecastReport(ctx, url) {
+  if (!ctx.hasPermission(Permissions.REPORTS_FINANCIAL_VIEW) && !ctx.hasPermission(Permissions.REPORTS_DAILY_VIEW) && ctx.roleId !== 'OWNER' && ctx.roleId !== 'STORE_MANAGER') {
+    throw Object.assign(new Error('غير مصرح بعرض تقارير النمو'), { status: 403 });
+  }
+  const requestedStore = url.searchParams.get('storeId');
+  const stores = await storeRepo.listByTenant(ctx);
+  const storeId = ctx.storeId ?? requestedStore ?? stores[0]?.id;
+  if (!storeId || !stores.some((s) => s.id === storeId)) throw Object.assign(new Error('الفرع غير متاح'), { status: 403 });
+  const tenant = await tenantRepo.findById(ctx.tenantId);
+  if (!tenant) throw Object.assign(new Error('الشركة غير موجودة'), { status: 404 });
+  const currency = tenant.currency;
+
+  const rawDb = database.getRawDatabase();
+  const now = new Date();
+  const currentYear = now.getUTCFullYear();
+  const currentMonth = now.getUTCMonth() + 1;
+  const currentDay = now.getUTCDate();
+  const daysInCurrentMonth = new Date(currentYear, currentMonth, 0).getDate();
+
+  const prevMonthDate = new Date(Date.UTC(currentYear, currentMonth - 2, 1));
+  const prevYear = prevMonthDate.getUTCFullYear();
+  const prevMonth = prevMonthDate.getUTCMonth() + 1;
+  const daysInPrevMonth = new Date(prevYear, prevMonth, 0).getDate();
+
+  const curPrefix = `${currentYear}-${String(currentMonth).padStart(2, '0')}`;
+  const prevPrefix = `${prevYear}-${String(prevMonth).padStart(2, '0')}`;
+
+  const curSalesRow = rawDb.prepare(`
+    SELECT COUNT(s.id) as salesCount,
+      COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as revenue,
+      COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as profit
+    FROM sales s
+    WHERE s.tenant_id = ? AND s.store_id = ? AND s.status = 'COMPLETED' AND substr(s.created_at, 1, 7) = ?
+  `).get(ctx.tenantId, storeId, curPrefix);
+
+  const prevSalesRow = rawDb.prepare(`
+    SELECT COUNT(s.id) as salesCount,
+      COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as revenue,
+      COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as profit
+    FROM sales s
+    WHERE s.tenant_id = ? AND s.store_id = ? AND s.status = 'COMPLETED' AND substr(s.created_at, 1, 7) = ?
+  `).get(ctx.tenantId, storeId, prevPrefix);
+
+  const curRevenue = BigInt(curSalesRow?.revenue ?? 0);
+  const curProfit = BigInt(curSalesRow?.profit ?? 0);
+  const curCount = Number(curSalesRow?.salesCount ?? 0);
+
+  const prevRevenue = BigInt(prevSalesRow?.revenue ?? 0);
+  const prevProfit = BigInt(prevSalesRow?.profit ?? 0);
+  const prevCount = Number(prevSalesRow?.salesCount ?? 0);
+
+  const daysElapsed = Math.max(1, currentDay);
+  const dailyRunRateMinor = curRevenue / BigInt(daysElapsed);
+  const projectedMonthEndRevenueMinor = dailyRunRateMinor * BigInt(daysInCurrentMonth);
+
+  let growthPercent = 0;
+  if (prevRevenue > 0n) {
+    growthPercent = Number((projectedMonthEndRevenueMinor - prevRevenue) * 10000n / prevRevenue) / 100;
+  } else if (curRevenue > 0n) {
+    growthPercent = 100;
+  }
+
+  const trendFactor = Math.max(-0.2, Math.min(0.4, (growthPercent / 100) * 0.5));
+  const projectedNextMonthMinor = BigInt(Math.round(Number(projectedMonthEndRevenueMinor) * (1 + trendFactor)));
+  const nextMonthGrowthPercent = Number(Math.round(trendFactor * 1000) / 10);
+
+  const arMonths = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
+  const curMonthName = `${arMonths[currentMonth - 1]} ${currentYear}`;
+  const prevMonthName = `${arMonths[prevMonth - 1]} ${prevYear}`;
+  const nextMonthIdx = currentMonth % 12;
+  const nextMonthYear = currentMonth === 12 ? currentYear + 1 : currentYear;
+  const nextMonthName = `${arMonths[nextMonthIdx]} ${nextMonthYear}`;
+
+  return {
+    currency,
+    currentMonth: {
+      year: currentYear,
+      month: currentMonth,
+      name: curMonthName,
+      daysInMonth: daysInCurrentMonth,
+      daysElapsed,
+      revenue: curRevenue.toString(),
+      profit: curProfit.toString(),
+      salesCount: curCount,
+      dailyAverage: dailyRunRateMinor.toString(),
+      projectedMonthEnd: projectedMonthEndRevenueMinor.toString(),
+    },
+    previousMonth: {
+      year: prevYear,
+      month: prevMonth,
+      name: prevMonthName,
+      daysInMonth: daysInPrevMonth,
+      revenue: prevRevenue.toString(),
+      profit: prevProfit.toString(),
+      salesCount: prevCount,
+    },
+    comparison: {
+      growthPercent,
+      isGrowth: growthPercent >= 0,
+      diffRevenue: (projectedMonthEndRevenueMinor - prevRevenue).toString(),
+    },
+    forecast: {
+      nextMonthName,
+      projectedRevenue: projectedNextMonthMinor.toString(),
+      forecastGrowthPercent: nextMonthGrowthPercent,
+      dailyExpectedPace: (projectedNextMonthMinor / 30n).toString(),
+      statusText: growthPercent >= 15 ? 'أداء نمو تصاعدي قوي 🚀' : growthPercent >= 0 ? 'أداء مستقر وإيجابي 📈' : 'يحتاج إلى تنشيط للمبيعات 💡',
+    },
+  };
+}
+
 function requireSameOrigin(req) {
   const reqOrigin = req.headers.origin;
   const host = req.headers.host;
@@ -1188,6 +1536,8 @@ async function handleApi(req, res, url) {
   if (method === 'GET' && path === '/api/reports/profit-loss') return json(res, 200, await profitLossReport(ctx, url));
   if (method === 'GET' && path === '/api/reports/top-products') return json(res, 200, await topProductsReport(ctx, url));
   if (method === 'GET' && path === '/api/reports/purchases') return json(res, 200, await purchaseSupplierReport(ctx, url));
+  if (method === 'GET' && path === '/api/reports/financial-map') return json(res, 200, await financialMapReport(ctx, url));
+  if (method === 'GET' && path === '/api/reports/growth-forecast') return json(res, 200, await growthForecastReport(ctx, url));
 
   if (method === 'GET' && path === '/api/reports/export.csv') {
     const exportType = url.searchParams.get('type') ?? 'sales';
