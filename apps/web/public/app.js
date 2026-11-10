@@ -156,11 +156,15 @@ function mutationLabel(path, method) {
 
 function money(value) {
   if (!value) return '—';
-  const minor = BigInt(value.amount);
-  const decimals = value.decimals;
+  if (typeof value === 'object' && value.amount && typeof value.amount === 'object') {
+    value = value.amount;
+  }
+  const rawAmount = typeof value === 'object' ? value.amount : value;
+  const minor = BigInt(String(rawAmount ?? '0').replace(/\..*$/, ''));
+  const decimals = Number(value?.decimals ?? 2);
   const digits = minor < 0n ? (-minor).toString().padStart(decimals + 1, '0') : minor.toString().padStart(decimals + 1, '0');
   const amount = decimals === 0 ? digits : `${digits.slice(0, -decimals)}.${digits.slice(-decimals)}`;
-  return `${amount} ${value.currency}`;
+  return `${amount} ${value?.currency ?? 'EGP'}`.trim();
 }
 
 function decimalPrice(value) {
@@ -348,13 +352,12 @@ function auditLogsView() {
 }
 
 function usersView() {
-  const allowedRoles = state.data.user.role === 'OWNER' ? ['CASHIER', 'STORE_MANAGER', 'AUDITOR', 'OWNER'] : ['CASHIER'];
   const todayAttendance = state.data.todayAttendance ?? [];
   const activeUsersCount = (state.data.users ?? []).filter((u) => u.isActive).length;
   const presentCount = todayAttendance.length;
 
   const rows = (state.data.users ?? []).map((user) => {
-    const roleOptions = allowedRoles.map((role) => `<option value="${role}" ${user.role === role ? 'selected' : ''}>${userRoleLabel(role)}</option>`).join('');
+    const isOwner = user.role === 'OWNER';
     const storeOptions = `${state.data.user.role === 'OWNER' ? `<option value="" ${!user.storeId ? 'selected' : ''}>كل الفروع</option>` : ''}${state.data.stores.map((store) => `<option value="${store.id}" ${user.storeId === store.id ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}`;
     const att = todayAttendance.find((a) => a.userId === user.id);
     const isEmp = user.role === 'CASHIER';
@@ -365,11 +368,14 @@ function usersView() {
       : `<span class="status-pill" style="opacity:0.65;font-size:11.5px;">${userRoleLabel(user.role)}</span>`;
     const historyBtn = `<button type="button" class="button button-secondary button-sm view-attendance-btn" data-user-id="${user.id}" data-user-name="${escapeHtml(user.fullName)}" style="font-size:11.5px;padding:3px 9px;">📅 سجل الحضور</button>`;
 
-    return `<tr><td><button type="button" class="user-detail-button" data-user-details="${user.id}">${escapeHtml(user.fullName)}<small>عرض الملف</small></button></td><td><span class="sku-code">${escapeHtml(user.username)}</span></td><td><span class="status-pill" style="font-size:11.5px;">${userRoleLabel(user.role)}</span></td><td>${attBadge}</td><td><span class="status-pill ${user.isActive ? 'status-complete' : 'status-low'}">${user.isActive ? 'نشط' : 'موقوف'}</span></td><td>${historyBtn}</td><td><form class="user-update-form" data-user-id="${user.id}"><select name="role" aria-label="صلاحية المستخدم">${roleOptions}</select><select name="storeId" aria-label="فرع المستخدم">${storeOptions}</select><label class="user-active-toggle"><input type="checkbox" name="isActive" ${user.isActive ? 'checked' : ''}>نشط</label><button class="button button-secondary" type="submit">حفظ</button></form></td></tr>`;
+    const roleField = isOwner
+      ? '<span class="status-pill status-complete" style="font-weight:700;">مالك النظام</span><input type="hidden" name="role" value="OWNER">'
+      : '<select name="role" aria-label="صلاحية المستخدم"><option value="CASHIER" selected>كاشير</option></select>';
+
+    return `<tr><td><button type="button" class="user-detail-button" data-user-details="${user.id}">${escapeHtml(user.fullName)}<small>عرض الملف</small></button></td><td><span class="sku-code">${escapeHtml(user.username)}</span></td><td><span class="status-pill" style="font-size:11.5px;">${userRoleLabel(user.role)}</span></td><td>${attBadge}</td><td><span class="status-pill ${user.isActive ? 'status-complete' : 'status-low'}">${user.isActive ? 'نشط' : 'موقوف'}</span></td><td>${historyBtn}</td><td><form class="user-update-form" data-user-id="${user.id}">${roleField}<select name="storeId" aria-label="فرع المستخدم">${storeOptions}</select><label class="user-active-toggle"><input type="checkbox" name="isActive" ${user.isActive ? 'checked' : ''}>نشط</label><button class="button button-secondary" type="submit">حفظ</button></form></td></tr>`;
   }).join('');
-  const roleOptions = allowedRoles.map((role) => `<option value="${role}">${userRoleLabel(role)}</option>`).join('');
   const storeOptions = state.data.stores.map((store) => `<option value="${store.id}">${escapeHtml(store.name)}</option>`).join('');
-  return `<div class="page-heading-row"><div><p class="page-lead">أنشئ حسابات الموظفين وحدد صلاحياتهم وتابع مواعيد حضورهم اليومية.</p></div></div>
+  return `<div class="page-heading-row"><div><p class="page-lead">إدارة حسابات الكاشير ومتابعة مواعيد الحضور اليومية في المتجر.</p></div></div>
     <div class="inventory-summary" style="margin-bottom:14px;">
       <div class="inventory-summary-card">
         <span class="summary-badge summary-indigo">${icon('users', 18)}</span>
@@ -381,14 +387,16 @@ function usersView() {
       </div>
     </div>
     <section class="panel user-create-panel">
-      <div class="user-create-heading"><span class="user-create-icon">${icon('users', 22)}</span><div><span class="eyebrow eyebrow-dark">إدارة الفريق</span><h3>إضافة موظف جديد</h3><p>أنشئ بيانات الدخول وحدد دور الموظف والفرع الذي يعمل فيه.</p></div></div>
+      <div class="user-create-heading"><span class="user-create-icon">${icon('users', 22)}</span><div><span class="eyebrow eyebrow-dark">إدارة الكاشير</span><h3>إضافة كاشير جديد</h3><p>أنشئ بيانات دخول الكاشير للمتجر ونقطة البيع والمخزون.</p></div></div>
       <form id="user-create-form" class="user-create-form">
         <label><span>الاسم الكامل</span><input name="fullName" required minlength="2" maxlength="100" placeholder="مثال: أحمد محمد" autocomplete="name"></label>
-        <label><span>رقم الهاتف</span><input name="phone" type="tel" maxlength="32" autocomplete="tel" placeholder="مثال: 01012345678"></label>        <label><span>اسم المستخدم</span><input name="username" required minlength="3" maxlength="30" pattern="[a-z0-9_]+" autocomplete="username" placeholder="ahmed_01"><small>أحرف إنجليزية صغيرة وأرقام وشرطة سفلية فقط.</small></label>
-        <label><span>كلمة المرور المؤقتة</span><input name="password" type="password" required minlength="12" maxlength="128" autocomplete="new-password" placeholder="12 حرفًا على الأقل"><small>كلمة قوية، ويمكن للموظف تغييرها من قائمة الحساب.</small></label>
-        <label><span>الدور والصلاحية</span><select name="role" required>${roleOptions}</select><small>الكاشير يبيع فقط، والمدير لديه صلاحيات الإدارة.</small></label>
+        <label><span>رقم الهاتف</span><input name="phone" type="tel" maxlength="32" autocomplete="tel" placeholder="مثال: 01012345678"></label>
+        <label><span>اسم المستخدم</span><input name="username" required minlength="3" maxlength="30" pattern="[a-z0-9_]+" autocomplete="username" placeholder="ahmed_01"><small>أحرف إنجليزية صغيرة وأرقام وشرطة سفلية فقط.</small></label>
+        <label><span>كلمة المرور المؤقتة</span><input name="password" type="password" required minlength="12" maxlength="128" autocomplete="new-password" placeholder="12 حرفًا على الأقل"><small>كلمة قوية، ويمكن للموظف تغييرها من حسابه.</small></label>
+        <label><span>الدور والصلاحية</span><select name="role" required><option value="CASHIER" selected>كاشير (نقطة البيع والمخزون والمبيعات)</option></select><small>النظام محدد لمالك المتجر والكاشير فقط.</small></label>
         <label><span>الفرع</span><select name="storeId" id="user-store-select">${state.data.user.role === 'OWNER' ? '<option value="">كل الفروع</option>' : ''}${storeOptions}</select></label>
-        <label><span>تاريخ بدء العمل</span><input name="employmentStartDate" type="date" value="${new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10)}" required></label>        <div class="user-create-actions"><span>تأكد من اختيار الفرع المناسب قبل إنشاء الحساب.</span><button class="button button-primary" type="submit">${icon('plus', 17)} إنشاء حساب الموظف</button></div>
+        <label><span>تاريخ بدء العمل</span><input name="employmentStartDate" type="date" value="${new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10)}" required></label>
+        <div class="user-create-actions"><span>تأكد من اختيار الفرع المناسب قبل إنشاء الحساب.</span><button class="button button-primary" type="submit">${icon('plus', 17)} إنشاء حساب الكاشير</button></div>
       </form>
     </section>
     <section class="panel products-panel"><div class="panel-heading"><div><h3>الموظفون ومتابعة الحضور</h3><p>${(state.data.users ?? []).length} حساب مسجل</p></div></div>${rows ? `<div class="table-scroll"><table><thead><tr><th>الاسم</th><th>المستخدم</th><th>الدور</th><th>حضور اليوم</th><th>الحالة</th><th>سجل الحضور</th><th>الإدارة</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-row">لا يوجد مستخدمون</div>`}</section>`;
@@ -549,7 +557,7 @@ function dashboardView() {
 }
 
 function salesTable(sales) {
-  return `<div class="table-scroll"><table><thead><tr><th>رقم الفاتورة</th><th>التاريخ</th><th>الكاشير / البائع</th><th>الأصناف</th><th>الدفع</th><th>الإجمالي</th><th>الحالة</th><th></th></tr></thead><tbody>${sales.map((sale) => `<tr><td><button class="invoice-id invoice-open" data-sale-open="${sale.id}">${escapeHtml(sale.saleNumber)}</button></td><td>${new Intl.DateTimeFormat('ar-EG', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' }).format(new Date(sale.createdAt))}</td><td><span class="sku-code" style="font-weight:600;">${escapeHtml(sale.cashierName || 'كاشير')}</span></td><td>${sale.items.reduce((sum, item) => sum + Number(item.quantity), 0)} قطعة</td><td><span class="payment-chip">${sale.payments.map((payment) => methodLabel(payment.method)).join(' + ')}</span></td><td class="table-total">${money(sale.total)}</td><td><span class="status-pill status-complete">مكتملة</span></td><td>${(state.data.capabilities.canRefund || state.data.capabilities.canReturnSale || state.data.capabilities.cashierMode) && sale.items.some((item) => BigInt(item.returnableQuantity ?? '0') > 0n) ? `<button class="text-action start-return" data-sale="${sale.id}">مرتجع</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
+  return `<div class="table-scroll"><table><thead><tr><th>رقم الفاتورة</th><th>التاريخ</th><th>الكاشير / البائع</th><th>الأصناف</th><th>الدفع</th><th>الإجمالي</th><th>الحالة</th><th></th></tr></thead><tbody>${(sales ?? []).map((sale) => `<tr><td><button class="invoice-id invoice-open" data-sale-open="${sale.id}">${escapeHtml(sale.saleNumber)}</button></td><td>${new Intl.DateTimeFormat('ar-EG', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' }).format(new Date(sale.createdAt))}</td><td><span class="sku-code" style="font-weight:600;">${escapeHtml(sale.cashierName || 'كاشير')}</span></td><td>${(sale.items ?? []).reduce((sum, item) => sum + Number(item.quantity || 0), 0)} قطعة</td><td><span class="payment-chip">${(sale.payments ?? []).map((payment) => methodLabel(payment.method)).join(' + ')}</span></td><td class="table-total">${money(sale.total)}</td><td><span class="status-pill status-complete">مكتملة</span></td><td>${(state.data.capabilities.canRefund || state.data.capabilities.canReturnSale || state.data.capabilities.cashierMode) && (sale.items ?? []).some((item) => BigInt(item.returnableQuantity ?? '0') > 0n) ? `<button class="text-action start-return" data-sale="${sale.id}">مرتجع</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
 }
 
 function methodLabel(method) {
@@ -754,11 +762,11 @@ function inventoryView() {
 }
 
 function salesView() {
-  const returns = state.data.customerReturns;
-  const sales = state.salesHistory ?? state.data.sales;
-  const today = new Date().toISOString().slice(0, 10);
-  const from = state.salesFrom ?? today;
-  const to = state.salesTo ?? today;
+  const returns = state.data.customerReturns ?? [];
+  const sales = state.salesHistory ?? state.data.sales ?? [];
+  const totalCount = state.salesHistoryTotal ?? state.data.sales?.length ?? sales.length;
+  const from = state.salesFrom ?? '';
+  const to = state.salesTo ?? '';
   return `
     <div class="page-heading-row">
       <div>
@@ -769,18 +777,18 @@ function salesView() {
 
     <section class="panel recent-panel">
       <form id="sales-history-search" class="sales-filter-bar">
-        <label>من تاريخ<input type="date" name="from" value="${from}" required></label>
-        <label>إلى تاريخ<input type="date" name="to" value="${to}" required></label>
-        <label class="sales-filter-search">بحث في الفواتير<input name="search" value="${escapeHtml(state.salesHistorySearch)}" placeholder="رقم الفاتورة أو المنتج"></label>
+        <label>من تاريخ<input type="date" name="from" value="${from}"></label>
+        <label>إلى تاريخ<input type="date" name="to" value="${to}"></label>
+        <label class="sales-filter-search">بحث في الفواتير<input name="search" value="${escapeHtml(state.salesHistorySearch ?? '')}" placeholder="رقم الفاتورة أو المنتج"></label>
         <button class="button button-primary" type="submit">تطبيق الفلتر</button>
       </form>
       <div class="panel-heading">
         <div>
           <h3>فواتير البيع</h3>
-          <p>${sales.length} من ${state.salesHistoryTotal} فاتورة في الفترة</p>
+          <p>${sales.length} من ${totalCount} فاتورة</p>
         </div>
       </div>
-      ${sales.length ? `${salesTable(sales)}${sales.length < state.salesHistoryTotal ? '<div class="sales-history-more"><button class="button button-secondary" id="sales-history-more">عرض فواتير أقدم</button></div>' : ''}` : `<div class="empty-chart"><div class="empty-illustration">${icon('chart', 28)}</div><strong>${state.salesHistorySearch ? 'لا توجد فواتير مطابقة' : 'لا توجد مبيعات في الفترة المحددة'}</strong><button class="button button-primary" data-page="pos">ابدأ البيع</button></div>`}
+      ${sales.length ? `${salesTable(sales)}${sales.length < totalCount ? '<div class="sales-history-more"><button class="button button-secondary" id="sales-history-more">عرض فواتير أقدم</button></div>' : ''}` : `<div class="empty-chart"><div class="empty-illustration">${icon('chart', 28)}</div><strong>${state.salesHistorySearch ? 'لا توجد فواتير مطابقة للبحث' : 'لا توجد مبيعات مسجلة في هذه الفترة'}</strong><button class="button button-primary" data-page="pos">ابدأ البيع</button></div>`}
     </section>
 
     <div style="margin: 32px 0 16px; border-top: 2px dashed var(--line); padding-top: 20px;">
@@ -818,7 +826,7 @@ function salesView() {
                     <td><span class="sku-code">${escapeHtml(item.saleNumber)}</span></td>
                     <td>${new Date(item.createdAt).toLocaleString('ar-EG')}</td>
                     <td><span class="payment-chip">${methodLabel(item.paymentMethod)}</span></td>
-                    <td class="table-total" style="color:var(--rose,#be123c);">${money({ amount: item.refundAmount, currency: item.currency, decimals: currencyDecimals(item.currency) })}</td>
+                    <td class="table-total" style="color:var(--rose,#be123c);">${money(typeof item.refundAmount === 'object' ? item.refundAmount : { amount: item.refundAmount, currency: item.currency, decimals: currencyDecimals(item.currency) })}</td>
                   </tr>
                 `).join('')}
               </tbody>
@@ -1922,33 +1930,55 @@ async function bindSalesHistory() {
   searchForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const filters = new FormData(searchForm);
-    state.salesHistorySearch = String(filters.get('search') ?? '').trim();
-    state.salesFrom = String(filters.get('from') ?? '');
-    state.salesTo = String(filters.get('to') ?? '');
-    if (state.salesFrom > state.salesTo) { toast('تاريخ البداية لازم يكون قبل تاريخ النهاية', 'error'); return; }
+    const search = String(filters.get('search') ?? '').trim();
+    const from = String(filters.get('from') ?? '').trim();
+    const to = String(filters.get('to') ?? '').trim();
+    if ((from && !to) || (!from && to)) {
+      toast('يجب تحديد تاريخي البداية والنهاية معاً أو تركهما فارغين', 'error');
+      return;
+    }
+    if (from && to && from > to) {
+      toast('تاريخ البداية لازم يكون قبل تاريخ النهاية', 'error');
+      return;
+    }
+    state.salesHistorySearch = search;
+    state.salesFrom = from;
+    state.salesTo = to;
     state.salesHistory = [];
     state.salesHistoryTotal = 0;
     await fetchSalesHistory(0, false);
   });
-  if (state.salesHistory === null) {
-    state.salesHistory = [];
-    await fetchSalesHistory(0, false);
-    return;
-  }
+
   document.querySelector('#sales-history-more')?.addEventListener('click', async (event) => {
-    const button = event.currentTarget; button.disabled = true;
-    await fetchSalesHistory(state.salesHistory.length, true, button);
+    const button = event.currentTarget;
+    button.disabled = true;
+    const currentLength = (state.salesHistory ?? state.data.sales ?? []).length;
+    await fetchSalesHistory(currentLength, true, button);
   });
 }
 
 async function fetchSalesHistory(offset, append, button = null) {
   try {
-    const params = new URLSearchParams({ storeId: state.data.selectedStoreId, offset: String(offset), limit: '100', search: state.salesHistorySearch, from: state.salesFrom ?? new Date().toISOString().slice(0, 10), to: state.salesTo ?? new Date().toISOString().slice(0, 10) });
+    const searchVal = (state.salesHistorySearch ?? '').trim();
+    const queryObj = {
+      storeId: state.data.selectedStoreId,
+      offset: String(offset),
+      limit: '100',
+    };
+    if (searchVal) queryObj.search = searchVal;
+    if (state.salesFrom && state.salesTo) {
+      queryObj.from = state.salesFrom;
+      queryObj.to = state.salesTo;
+    }
+    const params = new URLSearchParams(queryObj);
     const result = await api(`/api/sales?${params.toString()}`);
-    state.salesHistory = append ? [...state.salesHistory, ...result.payload.sales] : result.payload.sales;
+    state.salesHistory = append ? [...(state.salesHistory ?? []), ...result.payload.sales] : result.payload.sales;
     state.salesHistoryTotal = result.payload.total;
     render();
-  } catch (error) { toast(error.message, 'error'); if (button) button.disabled = false; }
+  } catch (error) {
+    toast(error.message, 'error');
+    if (button) button.disabled = false;
+  }
 }
 
 function bindSaleInvoiceButtons() {
@@ -1962,7 +1992,7 @@ function bindSaleInvoiceButtons() {
 
 function showSaleDetails(sale) {
   const root = getModalRoot();
-  const totalReturned = sale.returns.reduce((sum, item) => sum + BigInt(item.refundAmount.amount), 0n).toString();
+  const totalReturned = (sale.returns ?? []).reduce((sum, item) => sum + BigInt(typeof item.refundAmount === 'object' ? item.refundAmount.amount : item.refundAmount || '0'), 0n).toString();
   const hasDiscount = sale.discountTotal && BigInt(sale.discountTotal.amount) > 0n;
   const hasChange = sale.changeGiven && BigInt(sale.changeGiven.amount) > 0n;
   const canReturn = (state.data.capabilities.canRefund || state.data.capabilities.canReturnSale || state.data.capabilities.cashierMode) && (sale.items ?? []).some((item) => BigInt(item.returnableQuantity ?? item.quantity ?? '0') > 0n);
@@ -3313,6 +3343,11 @@ async function doCheckout() {
     const result = await api('/api/checkout', { method: 'POST', body: JSON.stringify({ storeId: state.data.selectedStoreId, idempotencyKey: crypto.randomUUID(), items: state.cart.map((item) => ({ variantId: item.variantId, quantity: String(item.quantity) })), payment: { method: state.paymentMethod, amount: totalMinor } }) });
     state.cart = [];
     state.isSaving = false;
+    state.salesHistory = null;
+    state.salesHistoryTotal = undefined;
+    state.salesHistorySearch = '';
+    state.salesFrom = '';
+    state.salesTo = '';
     await loadData(state.data.selectedStoreId);
     state.page = 'pos';
     render();
