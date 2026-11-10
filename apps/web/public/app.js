@@ -1864,240 +1864,145 @@ function financialMapView() {
 function expensesView() {
   const items = state.data.monthlyExpenses ?? [];
   const period = state.data.monthlyPeriod;
-  const expenses = state.data.expenses ?? [];
   const currency = state.data.company.currency;
   const decimals = currencyDecimals(currency);
   const format = (value) => money({ amount: value, currency, decimals });
-
-  const activeTab = state.expenseSection || 'monthly';
   const daysInMonth = period ? new Date(period.year, period.month, 0).getDate() : 30;
 
   const confirmed = items.filter((item) => item.actual);
   const due = confirmed.reduce((sum, item) => sum + BigInt(item.actual.remainingAmount.amount), 0n).toString();
   const accrued = confirmed.reduce((sum, item) => sum + BigInt(item.actual.amount.amount), 0n).toString();
-  const totalPaidMonthly = confirmed.reduce((sum, item) => sum + BigInt(item.actual.paidAmount.amount), 0n).toString();
-  const totalDailyShare = confirmed.reduce((sum, item) => sum + (BigInt(item.actual.amount.amount) / BigInt(daysInMonth)), 0n).toString();
-
-  const totalDirectExpenses = expenses.reduce((sum, item) => sum + BigInt(item.amount.amount), 0n).toString();
-
-  let monthlySectionHtml = '';
-  if (activeTab === 'monthly' || activeTab === 'all') {
-    monthlySectionHtml = `
-      <section class="panel" style="margin-bottom:20px;padding:20px 22px;">
-        <div class="panel-heading" style="margin-bottom:14px;">
-          <div>
-            <h3 style="font-size:16px;font-weight:800;color:var(--ink);">🏢 الالتزامات الشهرية والإيجار (مقسم يوماً بيوم)</h3>
-            <p>يتم تقسيم الإيجار والالتزامات على ${daysInMonth} يوماً لتسديد نصيب اليوم بسهولة. لا يُخصم أي مبلغ من الفلوس أو المكسب إلا عند الضغط على زر السداد الفعلي.</p>
-          </div>
-          ${state.data.capabilities.canConfirmMonthlyExpenses ? '<button type="button" class="button button-primary button-sm" id="new-monthly-obligation">+ إضافة التزام شهري (إيجار/مرافق)</button>' : ''}
-        </div>
-
-        <div class="inventory-summary" style="grid-template-columns: repeat(4, minmax(0, 1fr));margin-bottom:16px;">
-          <div class="inventory-summary-card">
-            <span class="summary-badge summary-indigo">${icon('chart', 18)}</span>
-            <div><small>إجمالي التزامات الشهر</small><strong>${format(accrued)}</strong></div>
-          </div>
-          <div class="inventory-summary-card" style="background:#f0fdf4;border-color:#bbf7d0;">
-            <span class="summary-badge summary-teal" style="background:#dcfce7;color:#15803d;">${icon('wallet', 18)}</span>
-            <div><small style="color:#166534;font-weight:700;">نصيب اليوم المطلوب سداده</small><strong style="color:#15803d;">${format(totalDailyShare)}</strong></div>
-          </div>
-          <div class="inventory-summary-card">
-            <span class="summary-badge summary-teal">${icon('check', 18)}</span>
-            <div><small>تم سداده حتى الآن</small><strong style="color:#15803d;">${format(totalPaidMonthly)}</strong></div>
-          </div>
-          <div class="inventory-summary-card">
-            <span class="summary-badge summary-amber">${icon('wallet', 18)}</span>
-            <div><small>المتبقي غير المسدد</small><strong style="color:${BigInt(due) > 0n ? '#be123c' : '#15803d'};">${format(due)}</strong></div>
-          </div>
-        </div>
-
-        ${items.length ? items.map((item) => {
-          let dailyCardHtml = '';
-          let payButtonHtml = '';
-          let paymentsHistoryHtml = '';
-
-          if (item.actual) {
-            const actualAmountMinor = BigInt(item.actual.amount.amount);
-            const remainingMinor = BigInt(item.actual.remainingAmount.amount);
-            const dailyMinor = actualAmountMinor / BigInt(daysInMonth);
-            const suggestedMinor = remainingMinor < dailyMinor ? remainingMinor : dailyMinor;
-            const digits = suggestedMinor.toString().padStart(decimals + 1, '0');
-            const suggestedFormatted = decimals ? `${digits.slice(0, -decimals)}.${digits.slice(-decimals)}` : digits;
-
-            dailyCardHtml = `
-              <div class="inventory-summary" style="margin: 12px 0; grid-template-columns: repeat(4, minmax(0, 1fr));">
-                <div class="inventory-summary-card">
-                  <small>المبلغ الشهري المثبت</small>
-                  <strong>${money(item.actual.amount)}</strong>
-                  <small style="color:var(--muted);">كامل الشهر (${daysInMonth} يوم)</small>
-                </div>
-                <div class="inventory-summary-card" style="background:#f0fdf4;border-color:#bbf7d0;">
-                  <small style="color:#166534;font-weight:700;">نصيب اليوم المتوقع</small>
-                  <strong style="color:#15803d;">${money({ amount: dailyMinor.toString(), currency, decimals })}</strong>
-                  <small style="color:#166534;">تقسيم الـ ${daysInMonth} يوم</small>
-                </div>
-                <div class="inventory-summary-card">
-                  <small>المدفوع فعلياً حتى الآن</small>
-                  <strong style="color:#15803d;">${money(item.actual.paidAmount)}</strong>
-                  <small style="color:var(--muted);">${item.actual.payments.length} دفعة مسجلة</small>
-                </div>
-                <div class="inventory-summary-card">
-                  <small>المتبقي للشهر</small>
-                  <strong style="color:${remainingMinor > 0n ? '#be123c' : '#15803d'};">${money(item.actual.remainingAmount)}</strong>
-                  <small style="color:${remainingMinor > 0n ? '#be123c' : 'var(--muted)'};">${remainingMinor > 0n ? 'مستحق السداد' : '✓ تم سداد الشهر بالكامل'}</small>
-                </div>
-              </div>
-            `;
-
-            if (state.data.capabilities.canPayMonthlyExpenses && remainingMinor > 0n) {
-              payButtonHtml = `
-                <div style="margin: 12px 0 6px;">
-                  <button type="button" class="button button-primary pay-monthly" data-actual="${item.actual.id}" data-remaining="${item.actual.remainingAmount.amount}" data-daily="${suggestedFormatted}" data-name="${escapeHtml(item.name)}" style="height:42px;font-size:12.5px;font-weight:750;box-shadow:0 4px 12px rgba(89,72,216,0.25);">
-                    💳 سداد نصيب اليوم (${suggestedFormatted} ${currency}) أو أي دفعة تناسب الإيراد
-                  </button>
-                </div>
-              `;
-            }
-
-            if (item.actual.payments.length) {
-              paymentsHistoryHtml = `
-                <details class="compact-disclosure" style="margin-top:10px;border-radius:10px;border:1px solid var(--line);background:var(--surface-soft);">
-                  <summary style="padding:10px 14px;font-size:12px;font-weight:700;">
-                    <span>سجل دفعات السداد المسجلة لهذا الالتزام (${item.actual.payments.length} دفعة)</span>
-                    <span class="disclosure-chevron" style="width:26px;height:26px;">${icon('chevron', 14)}</span>
-                  </summary>
-                  <div class="disclosure-content" style="padding:4px 14px 12px;">
-                    ${item.actual.payments.map((p) => `
-                      <div class="invoice-history-row" style="display:flex;justify-content:space-between;padding:8px 0;font-size:12px;">
-                        <span>سداد ${p.method === 'CASH_DRAWER' ? 'من درج النقدية' : p.method === 'CASH_SAFE' ? 'من الخزينة' : 'تحويل بنكي'}${p.referenceNumber ? ` · ${escapeHtml(p.referenceNumber)}` : ''} · ${new Date(p.paidAt).toLocaleDateString('ar-EG')}</span>
-                        <strong style="color:#15803d;">${money(p.amount)}</strong>
-                      </div>
-                    `).join('')}
-                  </div>
-                </details>
-              `;
-            }
-          }
-
-          return `
-            <div class="panel supplier-card" style="padding:16px 18px;margin-bottom:14px;background:var(--surface-soft);border:1px solid var(--line);border-radius:12px;">
-              <div class="panel-heading" style="padding:0 0 10px;margin-bottom:0;border-bottom:1px solid var(--line);">
-                <div>
-                  <h4 style="margin:0;font-size:15.5px;font-weight:800;color:var(--ink);">${escapeHtml(item.name)}</h4>
-                  <p style="margin:3px 0 0;font-size:11.5px;color:var(--muted);">${escapeHtml(item.category)} · موعد الاستحقاق الشهري يوم ${item.dueDay} في الشهر</p>
-                </div>
-                ${item.actual ? `<span class="status-pill ${item.actual.status === 'PAID' ? 'status-complete' : 'status-low'}" style="font-weight:700;">${item.actual.status === 'PAID' ? '✓ مسدد بالكامل' : item.actual.status === 'PARTIALLY_PAID' ? 'مدفوع جزئيًا' : 'مستحق'}</span>` : '<span class="status-pill status-low">لم يتم تأكيد قيمة هذا الشهر</span>'}
-              </div>
-              ${dailyCardHtml}
-              ${payButtonHtml}
-              ${!item.actual && state.data.capabilities.canConfirmMonthlyExpenses ? `
-                <div style="margin-top:14px;">
-                  <button type="button" class="button button-primary confirm-monthly" data-obligation="${item.id}">تأكيد إجمالي المبلغ للشهر (مثلاً 4000 جنيه إيجار)</button>
-                </div>
-              ` : ''}
-              ${paymentsHistoryHtml}
-            </div>
-          `;
-        }).join('') : `
-          <div class="empty-chart" style="padding:24px 10px;">
-            <div class="empty-illustration">${icon('wallet', 28)}</div>
-            <strong>لا توجد التزامات شهرية مسجلة بعد</strong>
-            <p>أضف التزامك الشهري (مثل إيجار المحل 4000 جنيه أو الكهرباء) ليقوم النظام بتقسيمه يوماً بيوم وتتمكن من سداد نصيب اليوم بسهولة.</p>
-            ${state.data.capabilities.canConfirmMonthlyExpenses ? '<button type="button" class="button button-primary button-sm" id="new-monthly-obligation" style="margin-top:10px;">+ إضافة التزام شهري جديد</button>' : ''}
-          </div>
-        `}
-      </section>
-    `;
-  }
-
-  let dailySectionHtml = '';
-  if (activeTab === 'daily' || activeTab === 'all') {
-    dailySectionHtml = `
-      <section class="panel" style="margin-bottom:20px;padding:20px 22px;">
-        <div class="panel-heading" style="margin-bottom:14px;">
-          <div>
-            <h3 style="font-size:16px;font-weight:800;color:var(--ink);">☕ المصروفات اليومية والنثرية السريعة</h3>
-            <p>المصروفات النثرية اليومية (شاي، بوفيه، نقل، صيانة، مستلزمات تشغيل...).</p>
-          </div>
-          ${state.data.capabilities.canCreateExpenses ? '<button type="button" class="button button-primary button-sm" id="new-expense">+ تسجيل مصروف يومي</button>' : ''}
-        </div>
-
-        <div class="inventory-summary" style="grid-template-columns: repeat(3, minmax(0, 1fr));margin-bottom:16px;">
-          <div class="inventory-summary-card">
-            <span class="summary-badge summary-amber">${icon('wallet', 18)}</span>
-            <div><small>إجمالي المصروفات اليومية</small><strong>${format(totalDirectExpenses)}</strong></div>
-          </div>
-          <div class="inventory-summary-card">
-            <span class="summary-badge summary-indigo">${icon('chart', 18)}</span>
-            <div><small>عدد الحركات اليومية</small><strong>${expenses.length} حركة</strong></div>
-          </div>
-          <div class="inventory-summary-card">
-            <span class="summary-badge summary-teal">${icon('box', 18)}</span>
-            <div><small>أعلى بند مصروفات</small><strong>${expenses.length ? escapeHtml(expenses[0].category) : '—'}</strong></div>
-          </div>
-        </div>
-
-        ${expenses.length ? `
-          <div class="expense-list">
-            ${expenses.map((expense) => `
-              <details class="compact-disclosure expense-disclosure" style="margin-bottom:8px;border-radius:10px;border:1px solid var(--line);">
-                <summary style="padding:12px 16px;">
-                  <span>
-                    <strong style="font-size:13.5px;color:var(--ink);">${escapeHtml(expense.category)}</strong>
-                    <small>${escapeHtml(expense.date)} · ${expense.paymentMethod === 'CASH_DRAWER' ? 'درج النقدية' : expense.paymentMethod === 'CASH_SAFE' ? 'الخزينة' : 'تحويل بنكي'}</small>
-                  </span>
-                  <div style="display:flex;align-items:center;gap:12px;">
-                    <strong style="font-size:14.5px;color:#be123c;">${money(expense.amount)}</strong>
-                    <span class="disclosure-chevron" style="width:28px;height:28px;" aria-hidden="true">${icon('chevron', 14)}</span>
-                  </div>
-                </summary>
-                <div class="disclosure-content" style="padding:8px 16px 14px;">
-                  <div class="invoice-detail-meta">
-                    <span>طريقة الدفع: <strong>${expense.paymentMethod === 'CASH_DRAWER' ? 'درج النقدية' : expense.paymentMethod === 'CASH_SAFE' ? 'الخزينة' : 'تحويل بنكي'}</strong></span>
-                    <span>الملاحظات: ${escapeHtml(expense.notes || 'لا توجد ملاحظات')}</span>
-                    <span>المرجع: <span class="sku-code">${escapeHtml(expense.referenceNumber || '—')}</span></span>
-                  </div>
-                </div>
-              </details>
-            `).join('')}
-          </div>
-        ` : `
-          <div class="empty-chart" style="padding:24px 10px;">
-            <div class="empty-illustration">${icon('wallet', 28)}</div>
-            <strong>لا توجد مصروفات يومية مسجلة بعد</strong>
-            <p>سجّل مصروفات اليوم مثل الشاي، النقل، أو الصيانة ليتم خصمها من نقدية الدرج.</p>
-          </div>
-        `}
-      </section>
-    `;
-  }
+  const totalPaid = confirmed.reduce((sum, item) => sum + BigInt(item.actual.paidAmount.amount), 0n).toString();
 
   return `
     <div class="page-heading-row">
       <div>
-        <p class="page-lead">إدارة المصروفات اليومية والالتزامات الشهرية (الإيجار مقسم يوماً بيوم). تُخصم المبالغ من الفلوس والمكسب فقط عند سدادها الفعلي.</p>
+        <p class="page-lead">إدارة الالتزامات والمصروفات (الإيجار، المرتبات، والمصروفات). تُخصم المبالغ من المكسب والسيولة فقط عند سدادها الفعلي.</p>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-        <button type="button" class="button button-secondary" id="btn-open-financial-map">${icon('chart', 16)} 🧭 الخريطة المالية للأرباح</button>
-        ${state.data.capabilities.canConfirmMonthlyExpenses ? '<button type="button" class="button button-secondary" id="new-monthly-obligation">+ إضافة التزام شهري</button>' : ''}
-        ${state.data.capabilities.canCreateExpenses ? '<button type="button" class="button button-primary" id="new-expense">+ تسجيل مصروف يومي</button>' : ''}
+        ${state.data.capabilities.canConfirmMonthlyExpenses ? '<button type="button" class="button button-secondary" id="new-monthly-obligation">+ إضافة التزام (إيجار/مرافق)</button>' : ''}
+        ${state.data.capabilities.canCreateExpenses ? '<button type="button" class="button button-primary" id="new-expense">+ إضافة مصروف</button>' : ''}
       </div>
     </div>
 
-    <div class="expense-unified-tabs">
-      <button type="button" class="expense-tab-btn ${activeTab === 'monthly' ? 'active' : ''}" data-exp-tab="monthly">
-        🏢 الالتزامات الشهرية والإيجار اليومي
-      </button>
-      <button type="button" class="expense-tab-btn ${activeTab === 'daily' ? 'active' : ''}" data-exp-tab="daily">
-        ☕ المصروفات اليومية والنثرية
-      </button>
-      <button type="button" class="expense-tab-btn ${activeTab === 'all' ? 'active' : ''}" data-exp-tab="all">
-        📜 عرض كل المصروفات معاً
-      </button>
+    <div class="inventory-summary" style="grid-template-columns: repeat(3, minmax(0, 1fr));margin-bottom:20px;">
+      <div class="inventory-summary-card">
+        <span class="summary-badge summary-indigo">${icon('chart', 18)}</span>
+        <div><small>إجمالي التزامات الشهر (الإيجار)</small><strong>${format(accrued)}</strong></div>
+      </div>
+      <div class="inventory-summary-card">
+        <span class="summary-badge summary-teal" style="background:#dcfce7;color:#15803d;">${icon('check', 18)}</span>
+        <div><small>المسدد حتى الآن</small><strong style="color:#15803d;">${format(totalPaid)}</strong></div>
+      </div>
+      <div class="inventory-summary-card">
+        <span class="summary-badge summary-amber">${icon('wallet', 18)}</span>
+        <div><small>الباقي (المتبقي غير المسدد)</small><strong style="color:${BigInt(due) > 0n ? '#be123c' : '#15803d'};">${format(due)}</strong></div>
+      </div>
     </div>
 
-    ${monthlySectionHtml}
-    ${dailySectionHtml}
+    ${items.length ? items.map((item) => {
+      let dailyCardHtml = '';
+      let payButtonHtml = '';
+      let paymentsHistoryHtml = '';
+
+      if (item.actual) {
+        const actualAmountMinor = BigInt(item.actual.amount.amount);
+        const remainingMinor = BigInt(item.actual.remainingAmount.amount);
+        const dailyMinor = actualAmountMinor / BigInt(daysInMonth);
+        const suggestedMinor = remainingMinor < dailyMinor ? remainingMinor : dailyMinor;
+        const digits = suggestedMinor.toString().padStart(decimals + 1, '0');
+        const suggestedFormatted = decimals ? `${digits.slice(0, -decimals)}.${digits.slice(-decimals)}` : digits;
+
+        dailyCardHtml = `
+          <div class="inventory-summary" style="margin: 14px 0 12px; grid-template-columns: repeat(4, minmax(0, 1fr));">
+            <div class="inventory-summary-card">
+              <small>قيمة الإيجار للشهر (${daysInMonth} يوم)</small>
+              <strong>${money(item.actual.amount)}</strong>
+              <small style="color:var(--muted);">كامل المبلغ المثبت</small>
+            </div>
+            <div class="inventory-summary-card" style="background:#f0fdf4;border-color:#bbf7d0;">
+              <small style="color:#166534;font-weight:700;">المفروض يندفع النهاردة (نصيب اليوم)</small>
+              <strong style="color:#15803d;">${money({ amount: dailyMinor.toString(), currency, decimals })}</strong>
+              <small style="color:#166534;">تقسيم الإيجار على ${daysInMonth} يوم</small>
+            </div>
+            <div class="inventory-summary-card">
+              <small>المسدد حتى الآن</small>
+              <strong style="color:#15803d;">${money(item.actual.paidAmount)}</strong>
+              <small style="color:var(--muted);">${item.actual.payments.length} دفعة مسجلة ومخصومة</small>
+            </div>
+            <div class="inventory-summary-card">
+              <small>الباقي (المتبقي)</small>
+              <strong style="color:${remainingMinor > 0n ? '#be123c' : '#15803d'};">${money(item.actual.remainingAmount)}</strong>
+              <small style="color:${remainingMinor > 0n ? '#be123c' : 'var(--muted)'};">${remainingMinor > 0n ? 'مستحق السداد' : '✓ تم سداد الشهر بالكامل'}</small>
+            </div>
+          </div>
+        `;
+
+        if (state.data.capabilities.canPayMonthlyExpenses && remainingMinor > 0n) {
+          payButtonHtml = `
+            <div style="margin: 14px 0 6px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+              <button type="button" class="button button-primary pay-monthly"
+                      data-actual="${item.actual.id}"
+                      data-remaining="${item.actual.remainingAmount.amount}"
+                      data-daily="${suggestedFormatted}"
+                      data-name="${escapeHtml(item.name)}"
+                      style="font-size:13.5px;font-weight:800;padding:10px 22px;border-radius:10px;box-shadow:0 4px 14px rgba(89,72,216,0.22);">
+                💳 سداد (المفروض النهاردة: ${suggestedFormatted} ${currency})
+              </button>
+              <span style="font-size:12px;color:var(--muted);font-weight:600;">
+                💡 عند الضغط، سيظهر مبلغ اليوم تلقائياً (${suggestedFormatted})، وتقدر تمسحه وتكتب أي مبلغ تقدر تدفعه النهاردة وهيتم خصمه فوراً من الباقي ومن المكسب.
+              </span>
+            </div>
+          `;
+        }
+
+        if (item.actual.payments.length) {
+          paymentsHistoryHtml = `
+            <details class="compact-disclosure" style="margin-top:12px;border-radius:10px;border:1px solid var(--line);background:var(--surface-soft);">
+              <summary style="padding:10px 14px;font-size:12px;font-weight:700;">
+                <span>سجل دفعات السداد المسجلة (${item.actual.payments.length} دفعة)</span>
+                <span class="disclosure-chevron" style="width:26px;height:26px;">${icon('chevron', 14)}</span>
+              </summary>
+              <div class="disclosure-content" style="padding:4px 14px 12px;">
+                ${item.actual.payments.map((p) => `
+                  <div class="invoice-history-row" style="display:flex;justify-content:space-between;padding:8px 0;font-size:12.5px;">
+                    <span>سداد ${p.method === 'CASH_DRAWER' ? 'من درج النقدية' : p.method === 'CASH_SAFE' ? 'من الخزينة' : 'تحويل بنكي'}${p.referenceNumber ? ` · ${escapeHtml(p.referenceNumber)}` : ''} · ${new Date(p.paidAt).toLocaleDateString('ar-EG')}</span>
+                    <strong style="color:#15803d;">${money(p.amount)}</strong>
+                  </div>
+                `).join('')}
+              </div>
+            </details>
+          `;
+        }
+      }
+
+      return `
+        <section class="panel supplier-card" style="padding:18px 20px;margin-bottom:18px;">
+          <div class="panel-heading" style="padding:0 0 12px;margin-bottom:0;border-bottom:1px solid var(--line);">
+            <div>
+              <h3 style="margin:0;font-size:16px;font-weight:800;color:var(--ink);">${escapeHtml(item.name)}</h3>
+              <p style="margin:3px 0 0;font-size:12px;color:var(--muted);">${escapeHtml(item.category)} · موعد الاستحقاق الشهري يوم ${item.dueDay} في الشهر</p>
+            </div>
+            ${item.actual ? `<span class="status-pill ${item.actual.status === 'PAID' ? 'status-complete' : 'status-low'}" style="font-weight:700;">${item.actual.status === 'PAID' ? '✓ مسدد بالكامل' : item.actual.status === 'PARTIALLY_PAID' ? 'مدفوع جزئيًا' : 'مستحق'}</span>` : '<span class="status-pill status-low">لم يتم تأكيد قيمة هذا الشهر</span>'}
+          </div>
+          ${dailyCardHtml}
+          ${payButtonHtml}
+          ${!item.actual && state.data.capabilities.canConfirmMonthlyExpenses ? `
+            <div style="margin-top:14px;">
+              <button type="button" class="button button-primary confirm-monthly" data-obligation="${item.id}">تأكيد إجمالي المبلغ للشهر (مثلاً 4000 جنيه إيجار)</button>
+            </div>
+          ` : ''}
+          ${paymentsHistoryHtml}
+        </section>
+      `;
+    }).join('') : `
+      <section class="panel empty-chart">
+        <div class="empty-illustration">${icon('wallet', 28)}</div>
+        <strong>لا توجد التزامات مسجلة بعد</strong>
+        <p>أضف التزامك (مثل إيجار المحل 4000 جنيه أو المرتبات) ليقوم النظام بتقسيمه يوماً بيوم وتتمكن من سداد نصيب اليوم بسهولة.</p>
+        ${state.data.capabilities.canConfirmMonthlyExpenses ? '<button type="button" class="button button-primary" id="new-monthly-obligation" style="margin-top:12px;">+ إضافة التزام جديد</button>' : ''}
+      </section>
+    `}
   `;
 }
 
@@ -2171,16 +2076,6 @@ function bindFinancialMap() {
 
 function bindExpenses() {
   bindMonthlyExpenses();
-
-  document.querySelectorAll('[data-exp-tab]').forEach((btn) => btn.addEventListener('click', () => {
-    state.expenseSection = btn.dataset.expTab;
-    render();
-  }));
-
-  document.querySelector('#btn-open-financial-map')?.addEventListener('click', () => {
-    state.page = 'financial-map';
-    render();
-  });
 
   document.querySelector('#new-expense')?.addEventListener('click', () => {
     const decimals = currencyDecimals(state.data.company.currency);
@@ -2918,32 +2813,45 @@ function bindMonthlyExpenses() {
     const decimals = currencyDecimals(state.data.company.currency), digits = BigInt(button.dataset.remaining).toString().padStart(decimals + 1, '0');
     const maxAmount = decimals ? `${digits.slice(0, -decimals)}.${digits.slice(-decimals)}` : digits;
     const dailySuggested = button.dataset.daily || '';
-    const name = button.dataset.name || 'الالتزام الشهري';
+    const name = button.dataset.name || 'الإيجار';
     supplierModal(`
-      <p style="font-size:13px;line-height:1.7;">
-        سداد التزام: <strong>${escapeHtml(name)}</strong><br>
-        المتبقي الإجمالي لهذا الشهر: <strong>${money({ amount: button.dataset.remaining, currency: state.data.company.currency, decimals })}</strong><br>
-        <span style="font-size:12px;color:var(--muted);">نصيب اليوم المحسوب: <strong>${dailySuggested} ${state.data.company.currency}</strong> (يمكنك سداد نصيب اليوم أو تعديل الرقم ودفع أي مبلغ يناسب إيراد المحل).</span>
-      </p>
-      <label>مبلغ السداد اليوم (${state.data.company.currency})
-        <input name="amount" inputmode="decimal" value="${dailySuggested}" max="${maxAmount}" required autofocus style="font-weight:800;font-size:15px;">
+      <div style="background:var(--surface-soft);padding:14px 16px;border-radius:12px;border:1px solid var(--line);margin-bottom:14px;">
+        <div style="font-size:15px;font-weight:800;color:var(--ink);margin-bottom:8px;">سداد: <strong>${escapeHtml(name)}</strong></div>
+        <div style="display:flex;justify-content:space-between;font-size:13px;color:var(--muted);margin-bottom:6px;">
+          <span>الباقي الكلي المطلوب للشهر:</span>
+          <strong style="color:#be123c;font-size:14px;">${money({ amount: button.dataset.remaining, currency: state.data.company.currency, decimals })}</strong>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#166534;background:#f0fdf4;padding:8px 12px;border-radius:8px;border:1px solid #bbf7d0;">
+          <span>السعر المفروض تدفعه النهاردة (الإيجار ÷ 30 يوم):</span>
+          <strong style="font-size:15px;font-weight:800;">${dailySuggested} ${state.data.company.currency}</strong>
+        </div>
+      </div>
+
+      <label style="font-weight:700;font-size:13.5px;color:var(--ink);">المبلغ اللي هتدفعه النهاردة (${state.data.company.currency}):
+        <input name="amount" inputmode="decimal" value="${dailySuggested}" max="${maxAmount}" required autofocus style="font-weight:800;font-size:18px;height:46px;color:var(--purple);padding:0 12px;margin-top:6px;">
+        <small style="color:var(--muted);font-weight:600;display:block;margin-top:6px;line-height:1.5;">
+          ✍️ كتبنا لك في الخانة السعر اللي المفروض تدفعه النهاردة (${dailySuggested} ${state.data.company.currency}). لو مش معاك المبلغ ده أو حابب تدفع رقم تاني، امسحه واكتب الرقم اللي تقدر تدفعه النهاردة، وسيتم خصمه فوراً من السعر الكلي وإضافته للمسدد وتحديث الباقي وخصمه من المكسب.
+        </small>
       </label>
-      <label>طريقة الدفع (الخصم من)
-        <select name="paymentMethod">
+
+      <label style="font-weight:700;font-size:13px;margin-top:12px;color:var(--ink);">طريقة الدفع (الخصم من):
+        <select name="paymentMethod" style="height:42px;">
           <option value="CASH_DRAWER">درج النقدية (الكاشير)</option>
           <option value="CASH_SAFE">الخزينة</option>
           <option value="BANK_TRANSFER">تحويل بنكي</option>
         </select>
       </label>
-      <label>ملاحظات السداد (اختياري)
-        <input name="referenceNumber" maxlength="80" value="سداد دفعة اليوم">
+
+      <label style="font-weight:700;font-size:13px;margin-top:8px;color:var(--ink);">ملاحظات السداد (اختياري):
+        <input name="referenceNumber" maxlength="80" value="سداد دفعة اليوم" style="height:38px;">
       </label>
+
       <input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">
     `,
     'monthly-payment-form',
     `/api/monthly-expenses/${button.dataset.actual}/payments`,
     (data) => ({ ...data, amount: toMinor(data.amount, decimals) }),
-    'تم تسجيل السداد بنجاح وخصمه من الحسابات وتحديث المتبقي');
+    'تم سداد المبلغ وخصمه من الإجمالي ومن المكسب وتحديث الباقي بنجاح');
   }));
 }
 
