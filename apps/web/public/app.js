@@ -1864,6 +1864,7 @@ function financialMapView() {
 function expensesView() {
   const items = state.data.monthlyExpenses ?? [];
   const period = state.data.monthlyPeriod;
+  const expenses = state.data.expenses ?? [];
   const currency = state.data.company.currency;
   const decimals = currencyDecimals(currency);
   const format = (value) => money({ amount: value, currency, decimals });
@@ -1873,6 +1874,7 @@ function expensesView() {
   const due = confirmed.reduce((sum, item) => sum + BigInt(item.actual.remainingAmount.amount), 0n).toString();
   const accrued = confirmed.reduce((sum, item) => sum + BigInt(item.actual.amount.amount), 0n).toString();
   const totalPaid = confirmed.reduce((sum, item) => sum + BigInt(item.actual.paidAmount.amount), 0n).toString();
+  const totalDirectExpenses = expenses.reduce((sum, item) => sum + BigInt(item.amount.amount), 0n).toString();
 
   return `
     <div class="page-heading-row">
@@ -1880,23 +1882,27 @@ function expensesView() {
         <p class="page-lead">إدارة الالتزامات والمصروفات (الإيجار، المرتبات، والمصروفات). تُخصم المبالغ من المكسب والسيولة فقط عند سدادها الفعلي.</p>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-        ${state.data.capabilities.canConfirmMonthlyExpenses ? '<button type="button" class="button button-secondary" id="new-monthly-obligation">+ إضافة التزام (إيجار/مرافق)</button>' : ''}
-        ${state.data.capabilities.canCreateExpenses ? '<button type="button" class="button button-primary" id="new-expense">+ إضافة مصروف</button>' : ''}
+        <button type="button" class="button button-secondary" id="new-monthly-obligation">+ إضافة التزام (إيجار/مرتبات)</button>
+        <button type="button" class="button button-primary" id="new-expense">+ إضافة مصروف (كهرباء/نثريات)</button>
       </div>
     </div>
 
-    <div class="inventory-summary" style="grid-template-columns: repeat(3, minmax(0, 1fr));margin-bottom:20px;">
+    <div class="inventory-summary" style="grid-template-columns: repeat(4, minmax(0, 1fr));margin-bottom:20px;">
       <div class="inventory-summary-card">
         <span class="summary-badge summary-indigo">${icon('chart', 18)}</span>
-        <div><small>إجمالي التزامات الشهر (الإيجار)</small><strong>${format(accrued)}</strong></div>
+        <div><small>إجمالي الإيجار والالتزامات</small><strong>${format(accrued)}</strong></div>
       </div>
       <div class="inventory-summary-card">
         <span class="summary-badge summary-teal" style="background:#dcfce7;color:#15803d;">${icon('check', 18)}</span>
-        <div><small>المسدد حتى الآن</small><strong style="color:#15803d;">${format(totalPaid)}</strong></div>
+        <div><small>المسدد من الالتزامات</small><strong style="color:#15803d;">${format(totalPaid)}</strong></div>
       </div>
       <div class="inventory-summary-card">
         <span class="summary-badge summary-amber">${icon('wallet', 18)}</span>
-        <div><small>الباقي (المتبقي غير المسدد)</small><strong style="color:${BigInt(due) > 0n ? '#be123c' : '#15803d'};">${format(due)}</strong></div>
+        <div><small>الباقي غير المسدد</small><strong style="color:${BigInt(due) > 0n ? '#be123c' : '#15803d'};">${format(due)}</strong></div>
+      </div>
+      <div class="inventory-summary-card">
+        <span class="summary-badge summary-amber" style="background:#fee2e2;color:#be123c;">${icon('wallet', 18)}</span>
+        <div><small>المصروفات المباشرة المسجلة</small><strong style="color:#be123c;">${format(totalDirectExpenses)}</strong></div>
       </div>
     </div>
 
@@ -1938,7 +1944,7 @@ function expensesView() {
           </div>
         `;
 
-        if (state.data.capabilities.canPayMonthlyExpenses && remainingMinor > 0n) {
+        if (remainingMinor > 0n) {
           payButtonHtml = `
             <div style="margin: 14px 0 6px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
               <button type="button" class="button button-primary pay-monthly"
@@ -1946,11 +1952,11 @@ function expensesView() {
                       data-remaining="${item.actual.remainingAmount.amount}"
                       data-daily="${suggestedFormatted}"
                       data-name="${escapeHtml(item.name)}"
-                      style="font-size:13.5px;font-weight:800;padding:10px 22px;border-radius:10px;box-shadow:0 4px 14px rgba(89,72,216,0.22);">
+                      style="font-size:14px;font-weight:800;padding:12px 24px;border-radius:10px;box-shadow:0 4px 14px rgba(89,72,216,0.22);cursor:pointer;">
                 💳 سداد (المفروض النهاردة: ${suggestedFormatted} ${currency})
               </button>
-              <span style="font-size:12px;color:var(--muted);font-weight:600;">
-                💡 عند الضغط، سيظهر مبلغ اليوم تلقائياً (${suggestedFormatted})، وتقدر تمسحه وتكتب أي مبلغ تقدر تدفعه النهاردة وهيتم خصمه فوراً من الباقي ومن المكسب.
+              <span style="font-size:12.5px;color:var(--muted);font-weight:600;">
+                💡 عند الضغط، سيظهر مبلغ اليوم تلقائياً (${suggestedFormatted} ${currency})، وتقدر تمسحه وتكتب أي مبلغ تقدر تدفعه النهاردة وهيتم خصمه فوراً من الباقي ومن المكسب.
               </span>
             </div>
           `;
@@ -1987,9 +1993,9 @@ function expensesView() {
           </div>
           ${dailyCardHtml}
           ${payButtonHtml}
-          ${!item.actual && state.data.capabilities.canConfirmMonthlyExpenses ? `
+          ${!item.actual ? `
             <div style="margin-top:14px;">
-              <button type="button" class="button button-primary confirm-monthly" data-obligation="${item.id}">تأكيد إجمالي المبلغ للشهر (مثلاً 4000 جنيه إيجار)</button>
+              <button type="button" class="button button-primary confirm-monthly" data-obligation="${item.id}" style="font-size:13.5px;font-weight:750;padding:10px 20px;">تأكيد إجمالي المبلغ للشهر (مثلاً 4000 جنيه إيجار)</button>
             </div>
           ` : ''}
           ${paymentsHistoryHtml}
@@ -2000,9 +2006,51 @@ function expensesView() {
         <div class="empty-illustration">${icon('wallet', 28)}</div>
         <strong>لا توجد التزامات مسجلة بعد</strong>
         <p>أضف التزامك (مثل إيجار المحل 4000 جنيه أو المرتبات) ليقوم النظام بتقسيمه يوماً بيوم وتتمكن من سداد نصيب اليوم بسهولة.</p>
-        ${state.data.capabilities.canConfirmMonthlyExpenses ? '<button type="button" class="button button-primary" id="new-monthly-obligation" style="margin-top:12px;">+ إضافة التزام جديد</button>' : ''}
+        <button type="button" class="button button-primary" id="empty-new-monthly-obligation" style="margin-top:12px;">+ إضافة التزام جديد</button>
       </section>
     `}
+
+    <!-- سجل المصروفات المباشرة والنثرية (مثل الكهرباء والصيانة) -->
+    <section class="panel compact-panel" style="margin-top:24px;">
+      <div class="panel-heading">
+        <div>
+          <h3 style="font-size:16px;font-weight:800;color:var(--ink);">سجل المصروفات المباشرة المسجلة (${expenses.length} مصروف)</h3>
+          <p>المصروفات التي تم تسجيلها (كهرباء، مستلزمات، فواتير، صيانة...).</p>
+        </div>
+        <button type="button" class="button button-primary button-sm" id="new-expense-table-btn">+ إضافة مصروف جديد</button>
+      </div>
+
+      ${expenses.length ? `
+        <div class="table-scroll">
+          <table class="compact-table">
+            <thead>
+              <tr>
+                <th>التاريخ</th>
+                <th>التصنيف</th>
+                <th>البيان والملاحظات</th>
+                <th>طريقة الدفع</th>
+                <th style="text-align:left;">المبلغ</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${expenses.map((expense) => `
+                <tr>
+                  <td><strong>${escapeHtml(expense.date)}</strong></td>
+                  <td><span class="status-pill status-complete" style="font-size:11.5px;font-weight:700;">${escapeHtml(expense.category)}</span></td>
+                  <td><strong>${escapeHtml(expense.notes || 'مصروف مباشر')}</strong>${expense.referenceNumber ? ` · <span class="sku-code">${escapeHtml(expense.referenceNumber)}</span>` : ''}</td>
+                  <td>${expense.paymentMethod === 'CASH_DRAWER' ? 'درج النقدية' : expense.paymentMethod === 'CASH_SAFE' ? 'الخزينة' : 'تحويل بنكي'}</td>
+                  <td style="text-align:left;" class="table-total" style="color:#be123c;font-weight:800;">${money(expense.amount)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      ` : `
+        <div class="empty-row" style="padding:24px;text-align:center;">
+          لا توجد مصروفات مباشرة مسجلة بعد. اضغط على «إضافة مصروف» لتسجيل الكهرباء أو النثريات.
+        </div>
+      `}
+    </section>
   `;
 }
 
@@ -2077,11 +2125,14 @@ function bindFinancialMap() {
 function bindExpenses() {
   bindMonthlyExpenses();
 
-  document.querySelector('#new-expense')?.addEventListener('click', () => {
+  const openExpenseModal = () => {
     const decimals = currencyDecimals(state.data.company.currency);
     const date = new Date().toISOString().slice(0, 10);
-    supplierModal(`<label>تصنيف المصروف<select name="categoryCode"><option value="RENT">إيجار المحل</option><option value="UTILITIES">مرافق وفواتير</option><option value="TRANSPORT">نقل ومواصلات</option><option value="MAINTENANCE">صيانة</option><option value="SUPPLIES">مستلزمات تشغيل</option><option value="OTHER">مصروفات أخرى</option></select></label><div class="form-grid"><label>المبلغ (${state.data.company.currency})<input name="amount" inputmode="decimal" required></label><label>تاريخ المصروف<input name="expenseDate" type="date" value="${date}" required></label></div><label>طريقة الدفع<select name="paymentMethod"><option value="CASH_DRAWER">درج النقدية</option><option value="CASH_SAFE">الخزينة</option><option value="BANK_TRANSFER">تحويل بنكي</option></select></label><label>ملاحظات<input name="notes" maxlength="500"></label><label>رقم مرجعي<input name="referenceNumber" maxlength="80"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'expense-form', '/api/expenses', (data) => ({ ...data, amount: toMinor(data.amount, decimals) }), 'تم تسجيل المصروف والقيد المحاسبي');
-  });
+    supplierModal(`<label>تصنيف المصروف<select name="categoryCode"><option value="UTILITIES">مرافق وفواتير (كهرباء/ماء/إنترنت)</option><option value="RENT">إيجار المحل</option><option value="TRANSPORT">نقل ومواصلات</option><option value="MAINTENANCE">صيانة</option><option value="SUPPLIES">مستلزمات تشغيل</option><option value="OTHER">مصروفات أخرى</option></select></label><div class="form-grid"><label>المبلغ (${state.data.company.currency})<input name="amount" inputmode="decimal" required autofocus></label><label>تاريخ المصروف<input name="expenseDate" type="date" value="${date}" required></label></div><label>طريقة الدفع<select name="paymentMethod"><option value="CASH_DRAWER">درج النقدية</option><option value="CASH_SAFE">الخزينة</option><option value="BANK_TRANSFER">تحويل بنكي</option></select></label><label>ملاحظات وبيان المصروف (كهرباء، بوفيه...)<input name="notes" maxlength="500" placeholder="مثال: فاتورة كهرباء"></label><label>رقم مرجعي (اختياري)<input name="referenceNumber" maxlength="80"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'expense-form', '/api/expenses', (data) => ({ ...data, amount: toMinor(data.amount, decimals) }), 'تم تسجيل المصروف بنجاح وخصمه من الخزينة والمكسب');
+  };
+
+  document.querySelector('#new-expense')?.addEventListener('click', openExpenseModal);
+  document.querySelector('#new-expense-table-btn')?.addEventListener('click', openExpenseModal);
 }
 
 function bindSuppliers() {
@@ -2802,7 +2853,7 @@ function bindReturns() {
 }
 
 function bindMonthlyExpenses() {
-  document.querySelector('#new-monthly-obligation')?.addEventListener('click', () => {
+  document.querySelector('#new-monthly-obligation, #empty-new-monthly-obligation')?.addEventListener('click', () => {
     supplierModal(`<label>اسم الالتزام<input name="name" required minlength="2" maxlength="120" placeholder="إيجار المحل"></label><label>التصنيف<select name="categoryCode"><option value="RENT">إيجار</option><option value="UTILITIES">مرافق وفواتير</option><option value="TRANSPORT">نقل ومواصلات</option><option value="MAINTENANCE">صيانة</option><option value="SUPPLIES">مستلزمات تشغيل</option><option value="OTHER">أخرى</option></select></label><label>يوم الاستحقاق<input name="dueDay" type="number" min="1" max="31" value="1" required></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'monthly-obligation-form', '/api/recurring-expenses', (data) => ({ ...data, dueDay: Number(data.dueDay) }), 'تم إضافة الالتزام الشهري');
   });
   document.querySelectorAll('.confirm-monthly').forEach((button) => button.addEventListener('click', () => {
