@@ -51,6 +51,11 @@ const icons = {
   moon: '<path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5 8.5 8.5 0 1 0 20.5 14.2Z"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/>',
   more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+  chevron: '<path d="m6 9 6 6 6-6"/>',
+  filter: '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>',
+  calendar: '<rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
+  check: '<polyline points="20 6 9 17 4 12"/>',
+  x: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
 };
 
 function getTheme() {
@@ -775,13 +780,28 @@ function salesView() {
       <button class="button button-primary" data-page="pos">${icon('plus', 18)} بيع جديد</button>
     </div>
 
-    <section class="panel recent-panel">
-      <form id="sales-history-search" class="sales-filter-bar">
-        <label>من تاريخ<input type="date" name="from" value="${from}"></label>
-        <label>إلى تاريخ<input type="date" name="to" value="${to}"></label>
-        <label class="sales-filter-search">بحث في الفواتير<input name="search" value="${escapeHtml(state.salesHistorySearch ?? '')}" placeholder="رقم الفاتورة أو المنتج"></label>
-        <button class="button button-primary" type="submit">تطبيق الفلتر</button>
+    <section class="pro-filter-card">
+      <form id="sales-history-search" class="pro-filter-row">
+        <div class="pro-search-wrap">
+          ${icon('search', 16)}
+          <input name="search" value="${escapeHtml(state.salesHistorySearch ?? '')}" placeholder="ابحث برقم الفاتورة أو اسم الموديل أو الكود...">
+        </div>
+        <div class="pro-date-inputs">
+          <div class="pro-input-wrap">
+            <label>${icon('calendar', 14)} من:</label>
+            <input type="date" name="from" value="${from}">
+          </div>
+          <div class="pro-input-wrap">
+            <label>${icon('calendar', 14)} إلى:</label>
+            <input type="date" name="to" value="${to}">
+          </div>
+          <button class="button button-primary button-sm" type="submit" style="height:38px;padding:0 16px;">تطبيق الفلتر</button>
+          ${from || to || (state.salesHistorySearch ?? '').trim() ? '<button type="button" id="reset-sales-filter" class="text-action" style="font-size:12px;color:var(--rose,#be123c);font-weight:700;">مسح الفلتر</button>' : ''}
+        </div>
       </form>
+    </section>
+
+    <section class="panel recent-panel">
       <div class="panel-heading">
         <div>
           <h3>فواتير البيع</h3>
@@ -802,9 +822,12 @@ function salesView() {
     </div>
 
     <details class="panel compact-disclosure" ${returns.length ? 'open' : ''}>
-      <summary>
-        <span>عرض جدول المرتجعات التفصيلي</span>
-        <span class="status-pill status-complete">${returns.length} مرتجع</span>
+      <summary style="padding:12px 18px;">
+        <span style="font-size:13.5px;font-weight:750;color:var(--ink);">عرض جدول المرتجعات التفصيلي</span>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span class="status-pill status-complete">${returns.length} مرتجع</span>
+          <span class="disclosure-chevron" aria-hidden="true">${icon('chevron', 16)}</span>
+        </div>
       </summary>
       <div class="disclosure-content">
         ${returns.length ? `
@@ -1016,33 +1039,48 @@ function suppliersView() {
     const totalPieces = modelGroups.reduce((sum, g) => sum + g.totalQuantity, 0n);
 
     return `
-      <details class="purchase-disclosure">
-        <summary>
-          <div style="display:flex;align-items:center;gap:12px;">
-            <span class="invoice-number" style="font-size:14px;font-weight:800;">${escapeHtml(invoiceLabel)}</span>
-            <span style="font-size:12px;color:var(--muted);">${dateFormatted}</span>
+      <details class="purchase-card">
+        <summary class="purchase-summary-row">
+          <div class="purchase-summary-info">
+            <span class="purchase-inv-tag">${icon('box', 14)} ${escapeHtml(invoiceLabel)}</span>
+            <span class="purchase-date-pill">${icon('calendar', 14)} ${dateFormatted}</span>
+            <span class="purchase-meta-pill">المستلم: <strong>${escapeHtml(purchase.createdByName || 'المسؤول')}</strong></span>
+            <span class="purchase-meta-pill"><strong>${totalPieces} قطعة</strong> في ${modelGroups.length} موديل</span>
           </div>
-          <div>
-            <span style="font-size:12px;color:var(--muted);">المستلم: <strong>${escapeHtml(purchase.createdByName || 'المسؤول')}</strong></span>
-            <span style="font-size:12px;color:var(--muted);margin-inline-start:10px;">(<strong>${totalPieces} قطعة</strong> في ${modelGroups.length} موديل)</span>
+          <div class="purchase-summary-finances">
+            <div class="purchase-summary-total">
+              <small>إجمالي الفاتورة</small>
+              <strong>${money(purchase.totalAmount)}</strong>
+            </div>
+            <span class="status-pill ${isPaid ? 'status-complete' : 'status-low'}" style="font-weight:700;">
+              ${isPaid ? '✓ مسددة بالكامل' : `متبقي ${money(purchase.remainingAmount)}`}
+            </span>
+            <span class="disclosure-chevron" aria-hidden="true">${icon('chevron', 16)}</span>
           </div>
-          <strong style="font-size:15px;color:var(--ink);">${money(purchase.totalAmount)}</strong>
-          <span class="status-pill ${isPaid ? 'status-complete' : 'status-low'}" style="font-weight:700;">
-            ${isPaid ? '✓ مسددة بالكامل' : `متبقي ${money(purchase.remainingAmount)}`}
-          </span>
         </summary>
 
-        <div class="purchase-detail-content">
-          <div class="invoice-detail-meta" style="margin-bottom:14px;">
-            <span>التاجر: <strong>${escapeHtml(supplier.name)}</strong></span>
-            <span>المسؤول: <strong>${escapeHtml(purchase.createdByName || 'المسؤول')}</strong></span>
-            <span>المدفوع: <strong style="color:#15803d;">${money(purchase.paidAmount)}</strong></span>
-            <span>المتبقي: <strong style="color:${isPaid ? '#15803d' : '#be123c'};">${money(purchase.remainingAmount)}</strong></span>
-            ${purchase.notes ? `<span>ملاحظات: ${escapeHtml(purchase.notes)}</span>` : ''}
+        <div class="purchase-card-body">
+          <div class="purchase-finances-grid">
+            <div class="purchase-finance-box">
+              <small>المورد / التاجر</small>
+              <strong>${escapeHtml(supplier.name)}</strong>
+            </div>
+            <div class="purchase-finance-box paid">
+              <small>المدفوع للتاجر</small>
+              <strong>${money(purchase.paidAmount)}</strong>
+            </div>
+            <div class="purchase-finance-box ${isPaid ? 'paid' : 'due'}">
+              <small>المتبقي للتاجر</small>
+              <strong>${money(purchase.remainingAmount)}</strong>
+            </div>
+            <div class="purchase-finance-box">
+              <small>المسؤول والملاحظات</small>
+              <strong style="font-size:13px;">${escapeHtml(purchase.createdByName || 'المسؤول')}${purchase.notes ? ` · ${escapeHtml(purchase.notes)}` : ''}</strong>
+            </div>
           </div>
 
           <div class="table-scroll">
-            <table class="invoice-table" style="margin:8px 0 14px;">
+            <table class="invoice-table" style="margin:4px 0;">
               <thead>
                 <tr>
                   <th>الموديل الأساسي / المنتج</th>
@@ -1059,17 +1097,17 @@ function suppliersView() {
                     <tr>
                       <td>
                         <div style="display:flex;align-items:center;gap:10px;">
-                          <span class="product-avatar" style="width:34px;height:34px;border-radius:9px;background:var(--purple-soft);color:var(--purple);font-size:14px;font-weight:800;display:grid;place-items:center;">
+                          <span class="product-avatar" style="width:36px;height:36px;border-radius:10px;background:var(--purple-soft);color:var(--purple);font-size:14px;font-weight:800;display:grid;place-items:center;">
                             ${escapeHtml(group.name.slice(0, 1))}
                           </span>
                           <div>
                             <strong style="font-size:13.5px;color:var(--ink);">${escapeHtml(group.name)}</strong>
-                            <div style="font-size:11px;color:var(--muted);">كود الموديل: <span class="sku-code">${escapeHtml(group.modelSku)}</span> · ${group.items.length} فرع (مقاس/لون)</div>
+                            <div style="font-size:11px;color:var(--muted);margin-top:2px;">كود الموديل: <span class="sku-code">${escapeHtml(group.modelSku)}</span> · ${group.items.length} فرع (مقاس/لون)</div>
                           </div>
                         </div>
                       </td>
                       <td style="text-align:center;">
-                        <strong style="font-size:14px;color:var(--brand);">${group.totalQuantity}</strong> قطعة
+                        <span class="status-pill status-complete" style="font-size:12.5px;font-weight:800;">${group.totalQuantity} قطعة</span>
                       </td>
                       <td>${money({ amount: avgCost, currency: group.currency, decimals: group.decimals })}</td>
                       <td class="table-total">${money({ amount: group.totalCostMinor.toString(), currency: group.currency, decimals: group.decimals })}</td>
@@ -1085,8 +1123,8 @@ function suppliersView() {
             </table>
           </div>
 
-          <div class="purchase-detail-actions" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;padding:12px 0;border-top:1px solid var(--line);">
-            <div style="display:flex;align-items:center;gap:8px;">
+          <div class="purchase-detail-actions">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
               <button type="button" class="button button-secondary button-sm print-purchase-labels" data-purchase-id="${purchase.id}">
                 🏷️ طباعة باركود العلب للفاتورة
               </button>
@@ -1096,16 +1134,17 @@ function suppliersView() {
                 </button>
               ` : '<span class="status-pill status-complete">✓ الفاتورة مسددة بالكامل</span>'}
             </div>
-            <div style="font-size:12px;color:var(--muted);">
+            <div style="font-size:12px;color:var(--muted);font-weight:600;">
               ${purchase.payments.length ? `<span>تم تسجيل ${purchase.payments.length} دفعة سداد</span>` : ''}
               ${purchase.returns.length ? `<span style="margin-inline-start:8px;">· تم تسجيل ${purchase.returns.length} مرتجع</span>` : ''}
             </div>
           </div>
 
           ${purchase.payments.length || purchase.returns.length ? `
-            <details class="compact-disclosure" style="margin-top:10px;border-radius:10px;border:1px solid var(--line);background:var(--surface-soft);">
+            <details class="compact-disclosure" style="margin-top:8px;border-radius:10px;border:1px solid var(--line);background:var(--surface-soft);">
               <summary style="padding:10px 14px;font-size:12px;font-weight:700;">
                 <span>سجل حركات السداد والمرتجعات (${purchase.payments.length + purchase.returns.length} حركة)</span>
+                <span class="disclosure-chevron" style="width:26px;height:26px;">${icon('chevron', 14)}</span>
               </summary>
               <div class="disclosure-content" style="padding:4px 14px 12px;">
                 ${purchase.payments.map((p) => `
@@ -1139,23 +1178,28 @@ function suppliersView() {
       </div>
     </div>
 
-    <section class="panel compact-filter-panel" style="margin-bottom:14px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-        <div class="quick-date-pills">
-          <button type="button" class="date-preset-chip ${preset === 'all' ? 'active' : ''}" data-sup-preset="all">كل الفواتير</button>
-          <button type="button" class="date-preset-chip ${preset === 'today' ? 'active' : ''}" data-sup-preset="today">اليوم</button>
-          <button type="button" class="date-preset-chip ${preset === 'week' ? 'active' : ''}" data-sup-preset="week">هذا الأسبوع</button>
-          <button type="button" class="date-preset-chip ${preset === 'month' ? 'active' : ''}" data-sup-preset="month">هذا الشهر</button>
+    <section class="pro-filter-card">
+      <div class="pro-filter-row">
+        <div class="pro-filter-pills">
+          <span style="font-size:12px;font-weight:700;color:var(--muted);display:inline-flex;align-items:center;gap:6px;">
+            ${icon('filter', 15)} تصفية الفواتير:
+          </span>
+          <button type="button" class="pro-filter-pill ${preset === 'all' ? 'active' : ''}" data-sup-preset="all">كل الفواتير</button>
+          <button type="button" class="pro-filter-pill ${preset === 'today' ? 'active' : ''}" data-sup-preset="today">اليوم</button>
+          <button type="button" class="pro-filter-pill ${preset === 'week' ? 'active' : ''}" data-sup-preset="week">هذا الأسبوع</button>
+          <button type="button" class="pro-filter-pill ${preset === 'month' ? 'active' : ''}" data-sup-preset="month">هذا الشهر</button>
         </div>
-        <form id="supplier-date-filter" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0;">
-          <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin:0;font-weight:600;">من:
-            <input type="date" name="from" value="${from}" style="height:34px;padding:0 8px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--ink);">
-          </label>
-          <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin:0;font-weight:600;">إلى:
-            <input type="date" name="to" value="${to}" style="height:34px;padding:0 8px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--ink);">
-          </label>
-          <button type="submit" class="button button-primary button-sm">تطبيق الفلتر</button>
-          ${from || to ? '<button type="button" class="text-action reset-sup-filter" style="font-size:11.5px;color:var(--rose,#be123c);">مسح الفلتر</button>' : ''}
+        <form id="supplier-date-filter" class="pro-date-inputs">
+          <div class="pro-input-wrap">
+            <label>${icon('calendar', 14)} من:</label>
+            <input type="date" name="from" value="${from}">
+          </div>
+          <div class="pro-input-wrap">
+            <label>${icon('calendar', 14)} إلى:</label>
+            <input type="date" name="to" value="${to}">
+          </div>
+          <button type="submit" class="button button-primary button-sm" style="height:38px;padding:0 14px;">تطبيق</button>
+          ${from || to ? '<button type="button" class="text-action reset-sup-filter" style="font-size:12px;color:var(--rose,#be123c);font-weight:700;">مسح</button>' : ''}
         </form>
       </div>
     </section>
@@ -1409,29 +1453,36 @@ function topProductsView() {
     : `${mostPurchasedBlock}${topSellingBlock}${sizesColorsBlock}${suppliersBlock}${inventoryHealthBlock}`;
 
   return `<div class="page-heading-row"><div><p class="page-lead">إحصائيات المبيعات، الأرباح، وحركة الموديلات والمقاسات الأكثر طلباً في المتجر.</p></div><button class="button button-secondary button-sm" data-page="reports">فتح الأرباح والخسائر ←</button></div>
-    <section class="panel compact-filter-panel">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
-        <div class="quick-date-pills">
-          <button type="button" class="date-preset-chip" data-analytics-range="7d">7 أيام</button>
-          <button type="button" class="date-preset-chip" data-analytics-range="30d">30 يوم</button>
-          <button type="button" class="date-preset-chip" data-analytics-range="month">هذا الشهر</button>
-          <button type="button" class="date-preset-chip" data-analytics-range="year">السنة</button>
+    <section class="pro-filter-card">
+      <div class="pro-filter-row" style="margin-bottom:12px;">
+        <div class="pro-filter-pills">
+          <span style="font-size:12px;font-weight:700;color:var(--muted);display:inline-flex;align-items:center;gap:6px;">
+            ${icon('calendar', 15)} الفترة الزمنية:
+          </span>
+          <button type="button" class="pro-filter-pill" data-analytics-range="7d">7 أيام</button>
+          <button type="button" class="pro-filter-pill" data-analytics-range="30d">30 يوم</button>
+          <button type="button" class="pro-filter-pill" data-analytics-range="month">هذا الشهر</button>
+          <button type="button" class="pro-filter-pill" data-analytics-range="year">السنة</button>
         </div>
-        <form id="analytics-filter" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0;">
-          <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin:0;font-weight:700;color:var(--ink);">من:
-            <input name="from" id="analytics-from" type="date" value="${from}" required style="height:34px;padding:0 8px;border-radius:6px;border:1px solid var(--line-strong);background:var(--surface);color:var(--ink);font-weight:700;">
-          </label>
-          <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin:0;font-weight:700;color:var(--ink);">إلى:
-            <input name="to" id="analytics-to" type="date" value="${to}" required style="height:34px;padding:0 8px;border-radius:6px;border:1px solid var(--line-strong);background:var(--surface);color:var(--ink);font-weight:700;">
-          </label>
-          <button class="button button-primary button-sm" type="submit">تطبيق</button>
+        <form id="analytics-filter" class="pro-date-inputs">
+          <div class="pro-input-wrap">
+            <label>${icon('calendar', 14)} من:</label>
+            <input name="from" id="analytics-from" type="date" value="${from}" required>
+          </div>
+          <div class="pro-input-wrap">
+            <label>${icon('calendar', 14)} إلى:</label>
+            <input name="to" id="analytics-to" type="date" value="${to}" required>
+          </div>
+          <button class="button button-primary button-sm" type="submit" style="height:38px;padding:0 16px;">تطبيق</button>
         </form>
       </div>
 
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:10px;border-top:1px solid var(--line);">
-        <span style="font-size:12px;font-weight:700;color:var(--muted);margin-inline-end:4px;">القسم:</span>
-        <div class="section-pills">
-          ${analyticsSections.map(([id, label]) => `<button type="button" class="section-pill ${section === id ? 'active' : ''}" data-analytics-section="${id}">${label}</button>`).join('')}
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-top:12px;border-top:1px solid var(--line);">
+        <span style="font-size:12px;font-weight:700;color:var(--muted);display:inline-flex;align-items:center;gap:6px;">
+          ${icon('filter', 15)} القسم المعروض:
+        </span>
+        <div class="pro-filter-pills">
+          ${analyticsSections.map(([id, label]) => `<button type="button" class="pro-filter-pill ${section === id ? 'active' : ''}" data-analytics-section="${id}">${label}</button>`).join('')}
         </div>
       </div>
     </section>
@@ -1452,7 +1503,7 @@ function expensesView() {
   const categoryTotal = new Map();
   for (const expense of expenses) categoryTotal.set(expense.category, (categoryTotal.get(expense.category) ?? 0n) + BigInt(expense.amount.amount));
   const sortedCategories = [...categoryTotal].sort((a, b) => a[1] > b[1] ? -1 : 1);
-  return `<div class="page-heading-row"><div><p class="page-lead">ملخص المصروفات المسجلة، مع تفاصيل كل حركة عند فتحها.</p></div>${state.data.capabilities.canCreateExpenses ? '<button class="button button-primary" id="new-expense">تسجيل مصروف</button>' : ''}</div><div class="inventory-summary"><div class="inventory-summary-card"><span class="summary-badge summary-amber">${icon('wallet', 18)}</span><div><small>إجمالي المصروفات المحملة</small><strong>${money({ amount: total, currency, decimals: currencyDecimals(currency) })}</strong></div></div><div class="inventory-summary-card"><span class="summary-badge summary-indigo">${icon('chart', 18)}</span><div><small>عدد الحركات</small><strong>${expenses.length}</strong></div></div><div class="inventory-summary-card"><span class="summary-badge summary-teal">${icon('box', 18)}</span><div><small>أعلى بند</small><strong>${sortedCategories.length ? escapeHtml(sortedCategories[0][0]) : '—'}</strong></div></div></div><section class="panel"><div class="panel-heading"><div><h3>سجل المصروفات</h3><p>آخر ${expenses.length} حركة من أصل السجل المتاح</p></div></div>${expenses.length ? `<div class="expense-list">${expenses.map((expense) => `<details class="compact-disclosure expense-disclosure"><summary><span><strong>${escapeHtml(expense.category)}</strong><small>${escapeHtml(expense.date)}</small></span><strong>${money(expense.amount)}</strong><span class="details-hint">التفاصيل</span></summary><div class="disclosure-content"><div class="invoice-detail-meta"><span>طريقة الدفع: ${expense.paymentMethod === 'CASH_DRAWER' ? 'درج النقدية' : expense.paymentMethod === 'CASH_SAFE' ? 'الخزينة' : 'تحويل بنكي'}</span><span>الملاحظات: ${escapeHtml(expense.notes || '—')}</span><span>المرجع: ${escapeHtml(expense.referenceNumber || '—')}</span></div></div></details>`).join('')}</div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('wallet', 28)}</div><strong>لا توجد مصروفات مسجلة</strong><p>أضف الإيجار أو المرافق أو مصروفات التشغيل اليومية.</p></div>`}</section>`;
+  return `<div class="page-heading-row"><div><p class="page-lead">ملخص المصروفات المسجلة، مع تفاصيل كل حركة عند فتحها.</p></div>${state.data.capabilities.canCreateExpenses ? '<button class="button button-primary" id="new-expense">تسجيل مصروف</button>' : ''}</div><div class="inventory-summary"><div class="inventory-summary-card"><span class="summary-badge summary-amber">${icon('wallet', 18)}</span><div><small>إجمالي المصروفات المحملة</small><strong>${money({ amount: total, currency, decimals: currencyDecimals(currency) })}</strong></div></div><div class="inventory-summary-card"><span class="summary-badge summary-indigo">${icon('chart', 18)}</span><div><small>عدد الحركات</small><strong>${expenses.length}</strong></div></div><div class="inventory-summary-card"><span class="summary-badge summary-teal">${icon('box', 18)}</span><div><small>أعلى بند</small><strong>${sortedCategories.length ? escapeHtml(sortedCategories[0][0]) : '—'}</strong></div></div></div><section class="panel"><div class="panel-heading"><div><h3>سجل المصروفات</h3><p>آخر ${expenses.length} حركة من أصل السجل المتاح</p></div></div>${expenses.length ? `<div class="expense-list">${expenses.map((expense) => `<details class="compact-disclosure expense-disclosure"><summary><span><strong>${escapeHtml(expense.category)}</strong><small>${escapeHtml(expense.date)}</small></span><div style="display:flex;align-items:center;gap:12px;"><strong>${money(expense.amount)}</strong><span class="disclosure-chevron" style="width:28px;height:28px;" aria-hidden="true">${icon('chevron', 14)}</span></div></summary><div class="disclosure-content"><div class="invoice-detail-meta"><span>طريقة الدفع: ${expense.paymentMethod === 'CASH_DRAWER' ? 'درج النقدية' : expense.paymentMethod === 'CASH_SAFE' ? 'الخزينة' : 'تحويل بنكي'}</span><span>الملاحظات: ${escapeHtml(expense.notes || '—')}</span><span>المرجع: ${escapeHtml(expense.referenceNumber || '—')}</span></div></div></details>`).join('')}</div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('wallet', 28)}</div><strong>لا توجد مصروفات مسجلة</strong><p>أضف الإيجار أو المرافق أو مصروفات التشغيل اليومية.</p></div>`}</section>`;
 }
 function monthlyExpensesView() {
   const items = state.data.monthlyExpenses;
@@ -1944,6 +1995,15 @@ async function bindSalesHistory() {
     state.salesHistorySearch = search;
     state.salesFrom = from;
     state.salesTo = to;
+    state.salesHistory = [];
+    state.salesHistoryTotal = 0;
+    await fetchSalesHistory(0, false);
+  });
+
+  document.querySelector('#reset-sales-filter')?.addEventListener('click', async () => {
+    state.salesHistorySearch = '';
+    state.salesFrom = '';
+    state.salesTo = '';
     state.salesHistory = [];
     state.salesHistoryTotal = 0;
     await fetchSalesHistory(0, false);
@@ -3251,7 +3311,7 @@ function showInventoryProductDetails(product) {
         </table>
       </div>
     </div>` : '';
-  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="inventory-product-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">تفاصيل الموديل والمقاسات</span><h2 id="inventory-product-title">${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2><p>إجمالي الرصيد: <strong>${total}</strong> قطعة · ${variants.length} فرع (لون/مقاس)</p></div><button type="button" class="modal-close" data-close-inventory-details aria-label="إغلاق">×</button></div>${matrixGridHtml}${variants.length ? `<details class="compact-disclosure" ${matrix.isMatrix ? '' : 'open'}><summary><span>القائمة التفصيلية للفروع والأكواد (SKUs)</span><span>${variants.length} فرع</span></summary><div class="disclosure-content"><div class="table-scroll"><table><thead><tr><th>التركيبة</th><th>SKU</th><th>الكمية</th><th>حد التنبيه</th><th>${state.data.capabilities.cashierMode ? 'سعر البيع' : 'متوسط التكلفة'}</th><th>الحالة</th>${state.data.capabilities.canManageCatalog ? '<th>الإجراء</th>' : ''}</tr></thead><tbody>${variants.map((variant) => { const label = formatVariantAttributes(product, variant.attributes, 'النسخة الأساسية'); const low = BigInt(variant.quantity) <= BigInt(variant.reorderPoint); const removeAction = state.data.capabilities.canManageCatalog ? `<td>${BigInt(variant.quantity) === 0n ? `<button type="button" class="text-action product-delete" data-remove-variant="${variant.id}">حذف</button>` : '<small>صفّر الرصيد أولًا للحذف</small>'}</td>` : ''; return `<tr><td><strong>${escapeHtml(label)}</strong></td><td><span class="sku-code">${escapeHtml(variant.sku)}</span></td><td><strong>${variant.quantity}</strong></td><td>${variant.reorderPoint}</td><td>${state.data.capabilities.cashierMode ? (variant.retailPrice ? money(variant.retailPrice) : '—') : (variant.wac ? money(variant.wac) : '—')}</td><td>${low ? '<span class="status-pill status-low">مخزون منخفض</span>' : '<span class="status-pill status-complete">متوفر</span>'}</td>${removeAction}</tr>`; }).join('')}</tbody></table></div></div></details>` : '<div class="empty-row">لا توجد تركيبات نشطة لهذا المنتج.</div>'}<div class="modal-actions">${state.data.capabilities.canManageCatalog ? `<button type="button" class="button button-secondary" id="inventory-edit-model-btn">توسيع/تعديل الألوان والمقاسات</button>` : ''}<button type="button" class="button button-primary" id="inventory-print-labels-btn">🏷️ طباعة باركود العلب</button><button type="button" class="button button-secondary" data-close-inventory-details>إغلاق</button></div></section></div>`;
+  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="inventory-product-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">تفاصيل الموديل والمقاسات</span><h2 id="inventory-product-title">${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2><p>إجمالي الرصيد: <strong>${total}</strong> قطعة · ${variants.length} فرع (لون/مقاس)</p></div><button type="button" class="modal-close" data-close-inventory-details aria-label="إغلاق">×</button></div>${matrixGridHtml}${variants.length ? `<details class="compact-disclosure" ${matrix.isMatrix ? '' : 'open'} style="margin: 10px 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden;"><summary style="padding: 12px 16px;"><span>القائمة التفصيلية للفروع والأكواد (SKUs)</span><div style="display:flex;align-items:center;gap:10px;"><span class="status-pill status-complete">${variants.length} فرع</span><span class="disclosure-chevron" style="width:28px;height:28px;" aria-hidden="true">${icon('chevron', 14)}</span></div></summary><div class="disclosure-content"><div class="table-scroll"><table><thead><tr><th>التركيبة</th><th>SKU</th><th>الكمية</th><th>حد التنبيه</th><th>${state.data.capabilities.cashierMode ? 'سعر البيع' : 'متوسط التكلفة'}</th><th>الحالة</th>${state.data.capabilities.canManageCatalog ? '<th>الإجراء</th>' : ''}</tr></thead><tbody>${variants.map((variant) => { const label = formatVariantAttributes(product, variant.attributes, 'النسخة الأساسية'); const low = BigInt(variant.quantity) <= BigInt(variant.reorderPoint); const removeAction = state.data.capabilities.canManageCatalog ? `<td>${BigInt(variant.quantity) === 0n ? `<button type="button" class="text-action product-delete" data-remove-variant="${variant.id}">حذف</button>` : '<small>صفّر الرصيد أولًا للحذف</small>'}</td>` : ''; return `<tr><td><strong>${escapeHtml(label)}</strong></td><td><span class="sku-code">${escapeHtml(variant.sku)}</span></td><td><strong>${variant.quantity}</strong></td><td>${variant.reorderPoint}</td><td>${state.data.capabilities.cashierMode ? (variant.retailPrice ? money(variant.retailPrice) : '—') : (variant.wac ? money(variant.wac) : '—')}</td><td>${low ? '<span class="status-pill status-low">مخزون منخفض</span>' : '<span class="status-pill status-complete">متوفر</span>'}</td>${removeAction}</tr>`; }).join('')}</tbody></table></div></div></details>` : '<div class="empty-row">لا توجد تركيبات نشطة لهذا المنتج.</div>'}<div class="modal-actions">${state.data.capabilities.canManageCatalog ? `<button type="button" class="button button-secondary" id="inventory-edit-model-btn">توسيع/تعديل الألوان والمقاسات</button>` : ''}<button type="button" class="button button-primary" id="inventory-print-labels-btn">🏷️ طباعة باركود العلب</button><button type="button" class="button button-secondary" data-close-inventory-details>إغلاق</button></div></section></div>`;
   modal.querySelectorAll('[data-close-inventory-details]').forEach((button) => button.addEventListener('click', () => { modal.innerHTML = ''; }));
   modal.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('click', (e) => { if (e.target === backdrop) modal.innerHTML = ''; }));
   modal.querySelector('#inventory-print-labels-btn')?.addEventListener('click', () => showBarcodeLabelsModal({ product }));
