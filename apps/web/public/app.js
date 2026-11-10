@@ -105,12 +105,12 @@ const navItems = [
   { id: 'sales', label: 'المبيعات', icon: 'chart' },
   { id: 'suppliers', label: 'التجار والمشتريات', icon: 'users' },
   { id: 'expenses', label: 'المصروفات', icon: 'wallet' },
-  { id: 'financial-map', label: 'الخريطة المالية', icon: 'chart' },
+  { id: 'financial-map', label: 'المسار المالي', icon: 'chart' },
   { id: 'reports', label: 'الأرباح والخسائر', icon: 'chart' },
   { id: 'top-products', label: 'التقارير والإحصائيات', icon: 'chart' },
   { id: 'users', label: 'المستخدمون', icon: 'users' },
 ];
-const extraPageTitles = { backups: 'النسخ الاحتياطي اليومي والاستعادة', 'audit-logs': 'سجل المراجعة والأمان', 'monthly-expenses': 'الالتزامات الشهرية', 'financial-map': 'الخريطة المالية ومسار الأرباح' };
+const extraPageTitles = { backups: 'النسخ الاحتياطي اليومي والاستعادة', 'audit-logs': 'سجل المراجعة والأمان', 'monthly-expenses': 'الالتزامات الشهرية', 'financial-map': 'المسار المالي وتدفق الأرباح' };
 
 function icon(name, size = 20) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] ?? ''}</svg>`;
@@ -185,6 +185,31 @@ function decimalPrice(value) {
   if (!decimals) return amount.toString();
   const digits = amount.toString().padStart(decimals + 1, '0');
   return `${digits.slice(0, -decimals)}.${digits.slice(-decimals)}`;
+}
+
+function formatDateTime(ts) {
+  if (!ts) return '—';
+  let str = String(ts).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+    const [y, m, d] = str.split('-').map(Number);
+    const date = new Date(y, m - 1, d);
+    return new Intl.DateTimeFormat('ar-EG', { year: 'numeric', month: 'numeric', day: 'numeric' }).format(date);
+  }
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(str)) {
+    str = str.replace(' ', 'T') + 'Z';
+  } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(str) && !str.endsWith('Z') && !/[+-]\d{2}/.test(str)) {
+    str = str + 'Z';
+  }
+  const date = new Date(str);
+  if (isNaN(date.getTime())) return String(ts);
+  return new Intl.DateTimeFormat('ar-EG', {
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: true
+  }).format(date);
 }
 
 function toMinor(decimal, decimals) {
@@ -1304,7 +1329,6 @@ function profitLossView() {
     state.page = 'financial-map';
     render();
   });
-  if (!state.growthForecast) void loadGrowthForecast();
   const today = new Date().toISOString().slice(0, 10);
   const from = state.reportFrom ?? today, to = state.reportTo ?? today;
   const report = state.report;
@@ -1393,12 +1417,10 @@ function profitLossView() {
       </div>
       <div style="display:flex;align-items:center;gap:10px;">
         <button type="button" class="button button-secondary" id="btn-pl-to-financial-map" style="font-weight:700;">
-          ${icon('chart', 16)} 🧭 الخريطة المالية وسجل التدفق
+          ${icon('chart', 16)} 🧭 المسار المالي
         </button>
       </div>
     </div>
-
-    ${growthForecastWidget(state.growthForecast, currency)}
 
     <section class="panel compact-filter-panel">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
@@ -1562,7 +1584,6 @@ function topProductsView() {
       </div>
     </section>
 
-    ${growthForecastWidget(state.growthForecast, currency)}
     ${!stats || !vendors ? '<section class="panel"><div class="empty-row">جاري تحميل الإحصائيات...</div></section>' : `
       <div class="compact-kpi-grid">
         <article class="compact-kpi-card"><div class="compact-kpi-top"><span>أكثر موديل طلبناه من التجار</span><span class="kpi-tag kpi-tag-teal">الوارد</span></div><strong class="compact-kpi-value">${stats.topPurchasedByUnits ? escapeHtml(stats.topPurchasedByUnits.name) : '—'}</strong><small>${stats.topPurchasedByUnits ? `طلبنا ${stats.topPurchasedByUnits.unitsOrdered} قطعة (صافي ${stats.topPurchasedByUnits.netUnitsReceived})` : 'لا توجد مشتريات في الفترة'}</small></article>
@@ -1571,6 +1592,7 @@ function topProductsView() {
         <article class="compact-kpi-card"><div class="compact-kpi-top"><span>أكثر مقاس ولون مطلوبين</span><span class="kpi-tag kpi-tag-amber">المقاسات</span></div><strong class="compact-kpi-value">${topSizes[0] ? `مقاس ${escapeHtml(topSizes[0].size)}` : '—'} ${topColors[0] ? `· ${escapeHtml(topColors[0].color)}` : ''}</strong><small>${topSizes[0] ? `${topSizes[0].unitsSold} قطعة لأعلى مقاس` : 'بيانات المقاسات والألوان'}</small></article>
       </div>
       ${selectedContent}
+      ${growthForecastWidget(state.growthForecast, currency)}
     `}`;
 }
 function growthForecastWidget(forecast, currency) {
@@ -1584,82 +1606,52 @@ function growthForecastWidget(forecast, currency) {
   const forecastSign = fc.forecastGrowthPercent >= 0 ? '+' : '';
 
   return `
-    <div class="growth-forecast-widget">
-      <!-- Card 1: Month over Month Growth Comparison -->
-      <article class="growth-card ${isUp ? 'growth-positive' : 'growth-negative'}">
-        <div class="growth-card-top">
-          <span class="growth-badge ${isUp ? 'badge-up' : 'badge-down'}">
-            ${isUp ? '▲ نمو في المبيعات' : '▼ تراجع في المبيعات'} (${growthSign}${comparison.growthPercent}%)
-          </span>
-          <span style="font-size:11.5px;color:var(--muted);font-weight:700;">
-            ${escapeHtml(currentMonth.name)} مقارنة بـ ${escapeHtml(previousMonth.name)}
-          </span>
-        </div>
-
+    <section class="panel compact-panel" style="margin-top:20px;">
+      <div class="panel-heading" style="padding:12px 18px;">
         <div>
-          <h4 class="growth-headline">
+          <h3 style="font-size:15px;font-weight:800;color:var(--ink);margin:0;">إحصائيات التقدم والتوقعات</h3>
+          <p style="margin:2px 0 0;font-size:11.5px;color:var(--muted);">مقارنة مبيعات هذا الشهر بالشهر السابق وتقدير مبيعات الشهر القادم.</p>
+        </div>
+      </div>
+
+      <div class="inventory-summary" style="padding:14px 18px;grid-template-columns: repeat(2, minmax(0, 1fr));gap:14px;">
+        <!-- مقارنة الشهر الحالي بالسابق -->
+        <div class="inventory-summary-card" style="padding:14px 16px;border-right:3px solid ${isUp ? '#15803d' : '#be123c'};background:var(--panel);">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+            <span style="font-size:12px;font-weight:700;color:var(--muted);">${escapeHtml(currentMonth.name)} مقارنة بـ ${escapeHtml(previousMonth.name)}</span>
+            <span class="status-pill ${isUp ? 'status-complete' : 'status-low'}" style="font-size:11px;font-weight:700;">
+              ${isUp ? '▲ نمو' : '▼ تراجع'} (${growthSign}${comparison.growthPercent}%)
+            </span>
+          </div>
+          <div style="font-size:14px;font-weight:800;color:var(--ink);margin-bottom:8px;">
             ${isUp
-              ? `أنت بعت الشهر ده أكثر من الشهر اللي فات بنسبة <span style="color:#15803d;">${growthSign}${comparison.growthPercent}%</span> 🎉`
+              ? `أنت بعت الشهر ده أكثر من الشهر اللي فات بنسبة <span style="color:#15803d;">${growthSign}${comparison.growthPercent}%</span>`
               : `أنت بعت الشهر ده أقل من الشهر اللي فات بنسبة <span style="color:#be123c;">${comparison.growthPercent}%</span>`
             }
-          </h4>
-          <p style="margin:4px 0 0;font-size:12px;color:var(--muted);">
-            ${isUp ? 'أداء رائع ومبيعات تصاعدية مستمرة!' : 'يمكنك تنشيط المبيعات وتقديم عروض لتحقيق النمو.'}
-          </p>
+          </div>
+          <div style="display:flex;gap:14px;font-size:11.5px;color:var(--muted);flex-wrap:wrap;">
+            <span>مبيعات هذا الشهر: <strong style="color:var(--ink);">${format(currentMonth.revenue)}</strong></span>
+            <span>الشهر السابق: <strong style="color:var(--ink);">${format(previousMonth.revenue)}</strong></span>
+            <span>المتوسط اليومي: <strong style="color:var(--ink);">${format(currentMonth.dailyAverage)}</strong></span>
+          </div>
         </div>
 
-        <div class="growth-details-row">
-          <div class="growth-sub-item">
-            <small>مبيعات الشهر الحالي (${currentMonth.daysElapsed} يوم)</small>
-            <strong style="color:#15803d;">${format(currentMonth.revenue)}</strong>
+        <!-- توقعات الشهر القادم -->
+        <div class="inventory-summary-card" style="padding:14px 16px;border-right:3px solid var(--purple);background:var(--panel);">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+            <span style="font-size:12px;font-weight:700;color:var(--muted);">توقعات شهر ${escapeHtml(fc.nextMonthName)}</span>
+            <span class="status-pill status-complete" style="font-size:11px;font-weight:700;">${escapeHtml(fc.statusText)}</span>
           </div>
-          <div class="growth-sub-item">
-            <small>مبيعات الشهر السابق كاملاً</small>
-            <strong>${format(previousMonth.revenue)}</strong>
+          <div style="font-size:14px;font-weight:800;color:var(--ink);margin-bottom:8px;">
+            متوقع الشهر الجاي تبيع بنسبة <span style="color:var(--purple);">${forecastSign}${fc.forecastGrowthPercent}%</span> (مبيعات تقديرية: <span style="color:var(--purple);">${format(fc.projectedRevenue)}</span>)
           </div>
-          <div class="growth-sub-item">
-            <small>متوسط وتيرة البيع اليومي</small>
-            <strong>${format(currentMonth.dailyAverage)} / يوم</strong>
-          </div>
-        </div>
-      </article>
-
-      <!-- Card 2: Smart Next-Month Forecast -->
-      <article class="growth-card forecast-card">
-        <div class="growth-card-top">
-          <span class="growth-badge badge-forecast">
-            🔮 توقعات الذكاء المالي لشهر ${escapeHtml(fc.nextMonthName)}
-          </span>
-          <span class="status-pill status-complete" style="font-size:11px;font-weight:750;">
-            ${escapeHtml(fc.statusText)}
-          </span>
-        </div>
-
-        <div>
-          <h4 class="growth-headline">
-            متوقع الشهر الجاي تبيع بنسبة <span style="color:var(--purple);">${forecastSign}${fc.forecastGrowthPercent}%</span> بمبيعات تقديرية <span style="color:var(--purple);">${format(fc.projectedRevenue)}</span>
-          </h4>
-          <p style="margin:4px 0 0;font-size:12px;color:var(--muted);">
-            محسوبة ذكياً بناءً على وتيرة بيعك اليومية (${format(currentMonth.dailyAverage)}/يوم) ومعدل النمو الحالي.
-          </p>
-        </div>
-
-        <div class="growth-details-row">
-          <div class="growth-sub-item">
-            <small>توقع إجمالي نهاية هذا الشهر</small>
-            <strong style="color:var(--purple);">${format(currentMonth.projectedMonthEnd)}</strong>
-          </div>
-          <div class="growth-sub-item">
-            <small>المبيعات المتوقعة للشهر القادم</small>
-            <strong style="color:var(--purple);">${format(fc.projectedRevenue)}</strong>
-          </div>
-          <div class="growth-sub-item">
-            <small>وتيرة البيع اليومي المستهدفة</small>
-            <strong>${format(fc.dailyExpectedPace)} / يوم</strong>
+          <div style="display:flex;gap:14px;font-size:11.5px;color:var(--muted);flex-wrap:wrap;">
+            <span>توقع نهاية هذا الشهر: <strong style="color:var(--ink);">${format(currentMonth.projectedMonthEnd)}</strong></span>
+            <span>الوتيرة اليومية المطلوبة: <strong style="color:var(--ink);">${format(fc.dailyExpectedPace)} / يوم</strong></span>
           </div>
         </div>
-      </article>
-    </div>
+      </div>
+    </section>
   `;
 }
 
@@ -1726,7 +1718,7 @@ function financialMapView() {
 
   if (!mapData) {
     void loadFinancialMap();
-    return `<div class="panel empty-chart" style="padding:60px 20px;"><div class="empty-illustration">${icon('chart', 32)}</div><strong>جاري إعداد الخريطة المالية ومسار تدفق الأرباح...</strong><p>يتم تجميع كافة عمليات البيع وسداد التجار والمصروفات بالترتيب الزمني.</p></div>`;
+    return `<div class="panel empty-chart" style="padding:60px 20px;"><div class="empty-illustration">${icon('chart', 32)}</div><strong>جاري إعداد المسار المالي وتدفق الأرباح...</strong><p>يتم تجميع كافة عمليات البيع وسداد التجار والمصروفات بالترتيب الزمني.</p></div>`;
   }
 
   const { summary, timeline, range } = mapData;
@@ -1735,7 +1727,7 @@ function financialMapView() {
   return `
     <div class="page-heading-row">
       <div>
-        <p class="page-lead">الخريطة المالية: مسار تدفق الأرباح خطوة بخطوة من أول عملية بيع وسداد فواتير التجار والمصروفات حتى الوصول للمكسب الحالي.</p>
+        <p class="page-lead">المسار المالي: تتبع تدفق الأرباح خطوة بخطوة بالترتيب الزمني من أول عملية وصولاً للمكسب الحالي.</p>
       </div>
       <div>
         <button type="button" class="button button-secondary" data-page="reports">عرض تقرير الأرباح والخسائر ←</button>
@@ -1794,7 +1786,7 @@ function financialMapView() {
       <div class="panel-heading">
         <div>
           <h3 style="font-size:16px;font-weight:800;color:var(--ink);">🧭 المسار المالي خطوة بخطوة (كيف وصلت لهذا الرقم)</h3>
-          <p>تسلسل الحركات المالية بالترتيب مع إظهار رصيدك في كل خطوة وصولاً للمبلغ الحالي (${timeline.length} حركة مسجلة)</p>
+          <p>تسلسل الحركات المالية بالترتيب الزمني (من البداية حتى الآن) مع إظهار رصيدك في كل خطوة وصولاً للمبلغ الحالي (${timeline.length} حركة مسجلة)</p>
         </div>
       </div>
 
@@ -1803,16 +1795,17 @@ function financialMapView() {
           <table class="compact-table fm-timeline-table">
             <thead>
               <tr>
+                <th style="width:40px;text-align:center;">#</th>
                 <th>نوع الحركة</th>
                 <th>البيان والتفاصيل</th>
                 <th>التاريخ والوقت</th>
                 <th>المسؤول والطرف</th>
                 <th style="text-align:left;">المبلغ</th>
-                <th style="text-align:center;">الرصيد التراكمي في هذه اللحظة</th>
+                <th style="text-align:center;">الرصيد بعد الحركة</th>
               </tr>
             </thead>
             <tbody>
-              ${timeline.map((item) => {
+              ${timeline.map((item, index) => {
                 const isSale = item.type === 'SALE';
                 const isSupplier = item.type === 'SUPPLIER_PAYMENT';
                 const isExpense = item.type === 'EXPENSE';
@@ -1821,10 +1814,11 @@ function financialMapView() {
                 const flowColor = isSale ? '#15803d' : '#be123c';
                 const flowSign = isSale ? '+' : '-';
                 const flowAmount = isSale ? item.amountIn : item.amountOut;
-                const formattedDate = new Intl.DateTimeFormat('ar-EG', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(item.timestamp));
+                const formattedDate = formatDateTime(item.timestamp);
 
                 return `
                   <tr>
+                    <td style="text-align:center;font-weight:800;color:var(--muted);font-size:12px;">#${index + 1}</td>
                     <td>
                       <span class="fm-badge ${badgeClass}">
                         <span>${badgeIcon}</span> ${escapeHtml(item.category)}
@@ -1835,7 +1829,7 @@ function financialMapView() {
                       <div style="font-size:11.5px;color:var(--muted);margin-top:2px;">${escapeHtml(item.details)}</div>
                     </td>
                     <td>
-                      <span style="font-size:12px;color:var(--ink-soft);">${formattedDate}</span>
+                      <span style="font-size:12px;color:var(--ink-soft);font-weight:600;">${formattedDate}</span>
                     </td>
                     <td>
                       <strong>${escapeHtml(item.party)}</strong>
@@ -1846,7 +1840,7 @@ function financialMapView() {
                     </td>
                     <td style="text-align:center;">
                       <span class="running-chip">
-                        الرصيد بعد الحركة: ${format(item.runningCash)}
+                        الرصيد: ${format(item.runningCash)}
                       </span>
                     </td>
                   </tr>
@@ -1859,7 +1853,7 @@ function financialMapView() {
         <div class="empty-chart" style="padding:40px 15px;">
           <div class="empty-illustration">${icon('chart', 28)}</div>
           <strong>لا توجد حركات مالية في الفترة المحددة</strong>
-          <p>سجل مبيعات أو مصروفات أو سداد فواتير تجار لتظهر في الخريطة المالية.</p>
+          <p>سجل مبيعات أو مصروفات أو سداد فواتير تجار لتظهر في المسار المالي.</p>
         </div>
       `}
     </section>

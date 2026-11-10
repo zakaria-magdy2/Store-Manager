@@ -744,7 +744,7 @@ async function purchaseSupplierReport(ctx, url) {
 
 async function financialMapReport(ctx, url) {
   if (!ctx.hasPermission(Permissions.REPORTS_FINANCIAL_VIEW) && !ctx.hasPermission(Permissions.REPORTS_DAILY_VIEW) && ctx.roleId !== 'OWNER' && ctx.roleId !== 'STORE_MANAGER') {
-    throw Object.assign(new Error('غير مصرح بعرض الخريطة المالية'), { status: 403 });
+    throw Object.assign(new Error('غير مصرح بعرض المسار المالي'), { status: 403 });
   }
   const requestedStore = url.searchParams.get('storeId');
   const stores = await storeRepo.listByTenant(ctx);
@@ -760,6 +760,22 @@ async function financialMapReport(ctx, url) {
 
   const userRows = await db.selectFrom('users').select(['id', 'full_name as fullName', 'username']).where('tenant_id', '=', ctx.tenantId).execute();
   const userMap = new Map(userRows.map((u) => [u.id, u.fullName || u.username]));
+
+  const toIsoTimestamp = (val, fallbackDate) => {
+    if (!val) return fallbackDate ? `${fallbackDate}T12:00:00.000Z` : new Date().toISOString();
+    if (val instanceof Date) return val.toISOString();
+    let str = String(val).trim();
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(str)) {
+      return str.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(str) ? str : `${str}Z`;
+    }
+    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(str)) {
+      return `${str.replace(' ', 'T')}Z`;
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+      return `${str}T12:00:00.000Z`;
+    }
+    return str;
+  };
 
   // 1. Sales
   let salesSql = `
@@ -778,7 +794,7 @@ async function financialMapReport(ctx, url) {
 
   // 2. Supplier purchases initial payments
   let supInitSql = `
-    SELECT p.id, p.invoice_number, p.purchased_at as created_at, p.initial_paid_amount as amount, p.created_by_user_id, s.name as supplier_name
+    SELECT p.id, p.invoice_number, COALESCE(p.purchased_at, p.created_at) as created_at, p.initial_paid_amount as amount, p.created_by_user_id, s.name as supplier_name
     FROM supplier_purchases p
     INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
     WHERE p.tenant_id = ? AND p.store_id = ? AND p.initial_paid_amount > 0
@@ -791,7 +807,7 @@ async function financialMapReport(ctx, url) {
 
   // 3. Supplier installment payments
   let supPaySql = `
-    SELECT sp.id, p.invoice_number, sp.paid_at as created_at, sp.amount, sp.payment_method, sp.created_by_user_id, s.name as supplier_name
+    SELECT sp.id, p.invoice_number, COALESCE(sp.paid_at, sp.created_at) as created_at, sp.amount, sp.payment_method, sp.created_by_user_id, s.name as supplier_name
     FROM supplier_payments sp
     INNER JOIN supplier_purchases p ON p.id = sp.purchase_id AND p.tenant_id = sp.tenant_id
     INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
@@ -803,9 +819,9 @@ async function financialMapReport(ctx, url) {
   supPaySql += ` ORDER BY sp.paid_at ASC LIMIT 300`;
   const supPayRows = rawDb.prepare(supPaySql).all(...supPayParams);
 
-  // 4. Operating Expenses
+  // 4. Operating Expenses (Using actual created_at timestamp instead of date-only)
   let expSql = `
-    SELECT oer.id, oer.expense_date as created_at, oer.amount, oer.payment_method, oer.notes, oer.expense_type, oer.created_by_user_id,
+    SELECT oer.id, COALESCE(oer.created_at, oer.expense_date) as created_at, oer.expense_date, oer.amount, oer.payment_method, oer.notes, oer.expense_type, oer.created_by_user_id,
       COALESCE(ec.name, 'مصروف تشغيلي') AS category_name,
       COALESCE(reo.name, 'التزام شهري') AS obligation_name
     FROM operating_expense_records oer
@@ -817,7 +833,7 @@ async function financialMapReport(ctx, url) {
   const expParams = [ctx.tenantId, storeId];
   if (from) { expSql += ` AND substr(oer.expense_date, 1, 10) >= ?`; expParams.push(from); }
   if (to) { expSql += ` AND substr(oer.expense_date, 1, 10) <= ?`; expParams.push(to); }
-  expSql += ` ORDER BY oer.expense_date ASC LIMIT 300`;
+  expSql += ` ORDER BY COALESCE(oer.created_at, oer.expense_date) ASC LIMIT 300`;
   const expRows = rawDb.prepare(expSql).all(...expParams);
 
   // 5. Customer Returns
@@ -839,7 +855,7 @@ async function financialMapReport(ctx, url) {
     const profit = BigInt(s.gross_profit ?? 0);
     timeline.push({
       id: s.id,
-      timestamp: s.created_at,
+      timestamp: toIsoTimestamp(s.created_at),
       type: 'SALE',
       category: 'بيع',
       title: `فاتورة بيع #${s.sale_number}`,
@@ -857,7 +873,7 @@ async function financialMapReport(ctx, url) {
     const amt = BigInt(p.amount ?? 0);
     timeline.push({
       id: `${p.id}-init`,
-      timestamp: p.created_at,
+      timestamp: toIsoTimestamp(p.created_at),
       type: 'SUPPLIER_PAYMENT',
       category: 'سداد تاجر',
       title: `دفعة نقدية عند استلام فاتورة شراء #${p.invoice_number || p.id.slice(0, 8)}`,
@@ -875,7 +891,7 @@ async function financialMapReport(ctx, url) {
     const amt = BigInt(p.amount ?? 0);
     timeline.push({
       id: p.id,
-      timestamp: p.created_at,
+      timestamp: toIsoTimestamp(p.created_at),
       type: 'SUPPLIER_PAYMENT',
       category: 'سداد تاجر',
       title: `سداد للتاجر: ${p.supplier_name} (فاتورة #${p.invoice_number || ''})`,
@@ -895,7 +911,7 @@ async function financialMapReport(ctx, url) {
     const label = isMonthly ? `سداد ${e.obligation_name}` : `مصروف: ${e.category_name}`;
     timeline.push({
       id: e.id,
-      timestamp: e.created_at,
+      timestamp: toIsoTimestamp(e.created_at, e.expense_date),
       type: 'EXPENSE',
       category: isMonthly ? 'التزام شهري' : 'مصروف يومي',
       title: label,
@@ -913,7 +929,7 @@ async function financialMapReport(ctx, url) {
     const amt = BigInt(r.refund_amount ?? 0);
     timeline.push({
       id: r.id,
-      timestamp: r.created_at,
+      timestamp: toIsoTimestamp(r.created_at),
       type: 'CUSTOMER_RETURN',
       category: 'مرتجع للعميل',
       title: `مرتجع بيع #${r.return_number}`,
@@ -975,7 +991,7 @@ async function financialMapReport(ctx, url) {
       runningFinalCash: runningCashMinor.toString(),
       eventsCount: timeline.length,
     },
-    timeline: timeline.reverse(), // Newest first for display, with running totals already calculated
+    timeline: timeline, // Chronological: oldest first as requested by the user
   };
 }
 
