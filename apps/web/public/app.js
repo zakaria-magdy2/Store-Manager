@@ -215,8 +215,13 @@ function toast(message, kind = 'success') {
   setTimeout(() => node.remove(), 3600);
 }
 
-async function loadData(storeId) {
-  const query = storeId ? `?storeId=${encodeURIComponent(storeId)}` : '';
+async function loadData(storeId, year = state.selectedExpenseYear, month = state.selectedExpenseMonth) {
+  const targetStore = storeId || state.data?.selectedStoreId;
+  const params = new URLSearchParams();
+  if (targetStore) params.set('storeId', targetStore);
+  if (year) params.set('year', String(year));
+  if (month) params.set('month', String(month));
+  const query = params.toString() ? `?${params.toString()}` : '';
   state.data = await api(`/api/data${query}`);
 }
 
@@ -1863,23 +1868,57 @@ function financialMapView() {
 
 function expensesView() {
   const items = state.data.monthlyExpenses ?? [];
-  const period = state.data.monthlyPeriod;
-  const expenses = state.data.expenses ?? [];
+  const period = state.data.monthlyPeriod || { year: new Date().getFullYear(), month: new Date().getMonth() + 1 };
+  const allExpenses = state.data.expenses ?? [];
   const currency = state.data.company.currency;
   const decimals = currencyDecimals(currency);
   const format = (value) => money({ amount: value, currency, decimals });
-  const daysInMonth = period ? new Date(period.year, period.month, 0).getDate() : 30;
+
+  const currentYear = Number(period.year);
+  const currentMonth = Number(period.month);
+  const daysInMonth = new Date(currentYear, currentMonth, 0).getDate();
+
+  const arabicMonths = [
+    'يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو',
+    'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'
+  ];
+  const monthName = arabicMonths[currentMonth - 1] || `شهر ${currentMonth}`;
+
+  // Month navigation calculation
+  let prevYear = currentYear, prevMonth = currentMonth - 1;
+  if (prevMonth < 1) { prevMonth = 12; prevYear -= 1; }
+  let nextYear = currentYear, nextMonth = currentMonth + 1;
+  if (nextMonth > 12) { nextMonth = 1; nextYear += 1; }
+
+  const now = new Date();
+  const isActualCurrentMonth = (currentYear === now.getFullYear() && currentMonth === (now.getMonth() + 1));
+
+  // Available months list
+  const availablePeriods = state.data.availableMonthlyPeriods || [];
+  const allMonthsMap = new Map();
+  allMonthsMap.set(`${currentYear}-${currentMonth}`, { year: currentYear, month: currentMonth });
+  allMonthsMap.set(`${now.getFullYear()}-${now.getMonth() + 1}`, { year: now.getFullYear(), month: now.getMonth() + 1 });
+  availablePeriods.forEach((p) => allMonthsMap.set(`${p.year}-${p.month}`, { year: Number(p.year), month: Number(p.month) }));
+  for (let i = 1; i <= 6; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    allMonthsMap.set(`${d.getFullYear()}-${d.getMonth() + 1}`, { year: d.getFullYear(), month: d.getMonth() + 1 });
+  }
+  const sortedMonths = Array.from(allMonthsMap.values()).sort((a, b) => (b.year - a.year) || (b.month - a.month));
+
+  // Filter direct expenses by current selected month
+  const monthPrefix = `${currentYear}-${String(currentMonth).padStart(2, '0')}`;
+  const currentMonthExpenses = allExpenses.filter((e) => (e.date || '').startsWith(monthPrefix));
 
   const confirmed = items.filter((item) => item.actual);
   const due = confirmed.reduce((sum, item) => sum + BigInt(item.actual.remainingAmount.amount), 0n).toString();
   const accrued = confirmed.reduce((sum, item) => sum + BigInt(item.actual.amount.amount), 0n).toString();
   const totalPaid = confirmed.reduce((sum, item) => sum + BigInt(item.actual.paidAmount.amount), 0n).toString();
-  const totalDirectExpenses = expenses.reduce((sum, item) => sum + BigInt(item.amount.amount), 0n).toString();
+  const totalDirectExpenses = currentMonthExpenses.reduce((sum, item) => sum + BigInt(item.amount.amount), 0n).toString();
 
   return `
     <div class="page-heading-row">
       <div>
-        <p class="page-lead">إدارة الالتزامات والمصروفات (الإيجار، المرتبات، والمصروفات). تُخصم المبالغ من المكسب والسيولة فقط عند سدادها الفعلي.</p>
+        <h2 style="margin:0;font-size:20px;font-weight:800;color:var(--ink);">المصروفات والالتزامات</h2>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
         <button type="button" class="button button-secondary" id="new-monthly-obligation">+ إضافة التزام (إيجار/مرتبات)</button>
@@ -1887,6 +1926,39 @@ function expensesView() {
       </div>
     </div>
 
+    <!-- شريط أرشيف وتصفح الشهور -->
+    <div class="panel" style="padding:10px 16px;margin-bottom:18px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;background:var(--surface);">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span style="font-size:20px;">📅</span>
+        <div>
+          <span style="font-size:12px;color:var(--muted);font-weight:700;">سجل شهر:</span>
+          <strong style="font-size:15px;color:var(--ink);margin-inline-start:4px;">${monthName} ${currentYear}</strong>
+          ${isActualCurrentMonth ? '<span class="status-pill status-complete" style="font-size:11px;margin-inline-start:8px;padding:2px 8px;">الشهر الجاري</span>' : '<span class="status-pill status-low" style="font-size:11px;margin-inline-start:8px;padding:2px 8px;">أرشيف سابق</span>'}
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <button type="button" class="button button-secondary button-sm" id="btn-prev-month" data-year="${prevYear}" data-month="${prevMonth}" style="font-size:12px;padding:4px 12px;">
+          ◀ السابق
+        </button>
+        <select id="expense-month-picker" class="field-select" style="height:32px;font-size:12.5px;font-weight:700;padding:0 8px;border-radius:8px;">
+          ${sortedMonths.map((p) => `
+            <option value="${p.year}-${p.month}" ${p.year === currentYear && p.month === currentMonth ? 'selected' : ''}>
+              ${arabicMonths[p.month - 1]} ${p.year}
+            </option>
+          `).join('')}
+        </select>
+        <button type="button" class="button button-secondary button-sm" id="btn-next-month" data-year="${nextYear}" data-month="${nextMonth}" style="font-size:12px;padding:4px 12px;">
+          التالي ▶
+        </button>
+        ${!isActualCurrentMonth ? `
+          <button type="button" class="button button-secondary button-sm" id="btn-current-month" data-year="${now.getFullYear()}" data-month="${now.getMonth() + 1}" style="font-size:12px;color:var(--purple);border-color:var(--purple);padding:4px 10px;">
+            العودة للشهر الحالي
+          </button>
+        ` : ''}
+      </div>
+    </div>
+
+    <!-- ملخص أرقام الشهر -->
     <div class="inventory-summary" style="grid-template-columns: repeat(4, minmax(0, 1fr));margin-bottom:20px;">
       <div class="inventory-summary-card">
         <span class="summary-badge summary-indigo">${icon('chart', 18)}</span>
@@ -1906,121 +1978,114 @@ function expensesView() {
       </div>
     </div>
 
-    ${items.length ? items.map((item) => {
-      let dailyCardHtml = '';
-      let payButtonHtml = '';
-      let paymentsHistoryHtml = '';
+    <!-- قائمة الالتزامات بنمط بطاقات التجار المصغرة -->
+    <div style="margin-bottom:14px;">
+      <h3 style="margin:0 0 10px;font-size:15px;font-weight:800;color:var(--ink);">الالتزامات الشهرية</h3>
+    </div>
 
+    ${items.length ? items.map((item) => {
       if (item.actual) {
         const actualAmountMinor = BigInt(item.actual.amount.amount);
         const remainingMinor = BigInt(item.actual.remainingAmount.amount);
         const dailyMinor = actualAmountMinor / BigInt(daysInMonth);
         const suggestedMinor = remainingMinor < dailyMinor ? remainingMinor : dailyMinor;
-        const digits = suggestedMinor.toString().padStart(decimals + 1, '0');
-        const suggestedFormatted = decimals ? `${digits.slice(0, -decimals)}.${digits.slice(-decimals)}` : digits;
+        const suggestedFormatted = decimalPrice({ amount: suggestedMinor.toString(), decimals });
 
-        dailyCardHtml = `
-          <div class="inventory-summary" style="margin: 14px 0 12px; grid-template-columns: repeat(4, minmax(0, 1fr));">
-            <div class="inventory-summary-card">
-              <small>قيمة الإيجار للشهر (${daysInMonth} يوم)</small>
-              <strong>${money(item.actual.amount)}</strong>
-              <small style="color:var(--muted);">كامل المبلغ المثبت</small>
-            </div>
-            <div class="inventory-summary-card" style="background:#f0fdf4;border-color:#bbf7d0;">
-              <small style="color:#166534;font-weight:700;">المفروض يندفع النهاردة (نصيب اليوم)</small>
-              <strong style="color:#15803d;">${money({ amount: dailyMinor.toString(), currency, decimals })}</strong>
-              <small style="color:#166534;">تقسيم الإيجار على ${daysInMonth} يوم</small>
-            </div>
-            <div class="inventory-summary-card">
-              <small>المسدد حتى الآن</small>
-              <strong style="color:#15803d;">${money(item.actual.paidAmount)}</strong>
-              <small style="color:var(--muted);">${item.actual.payments.length} دفعة مسجلة ومخصومة</small>
-            </div>
-            <div class="inventory-summary-card">
-              <small>الباقي (المتبقي)</small>
-              <strong style="color:${remainingMinor > 0n ? '#be123c' : '#15803d'};">${money(item.actual.remainingAmount)}</strong>
-              <small style="color:${remainingMinor > 0n ? '#be123c' : 'var(--muted)'};">${remainingMinor > 0n ? 'مستحق السداد' : '✓ تم سداد الشهر بالكامل'}</small>
-            </div>
-          </div>
-        `;
-
-        if (remainingMinor > 0n) {
-          payButtonHtml = `
-            <div style="margin: 14px 0 6px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-              <button type="button" class="button button-primary pay-monthly"
-                      data-actual="${item.actual.id}"
-                      data-remaining="${item.actual.remainingAmount.amount}"
-                      data-daily="${suggestedFormatted}"
-                      data-name="${escapeHtml(item.name)}"
-                      style="font-size:14px;font-weight:800;padding:12px 24px;border-radius:10px;box-shadow:0 4px 14px rgba(89,72,216,0.22);cursor:pointer;">
-                💳 سداد (المفروض النهاردة: ${suggestedFormatted} ${currency})
-              </button>
-              <span style="font-size:12.5px;color:var(--muted);font-weight:600;">
-                💡 عند الضغط، سيظهر مبلغ اليوم تلقائياً (${suggestedFormatted} ${currency})، وتقدر تمسحه وتكتب أي مبلغ تقدر تدفعه النهاردة وهيتم خصمه فوراً من الباقي ومن المكسب.
-              </span>
-            </div>
-          `;
-        }
-
-        if (item.actual.payments.length) {
-          paymentsHistoryHtml = `
-            <details class="compact-disclosure" style="margin-top:12px;border-radius:10px;border:1px solid var(--line);background:var(--surface-soft);">
-              <summary style="padding:10px 14px;font-size:12px;font-weight:700;">
-                <span>سجل دفعات السداد المسجلة (${item.actual.payments.length} دفعة)</span>
-                <span class="disclosure-chevron" style="width:26px;height:26px;">${icon('chevron', 14)}</span>
-              </summary>
-              <div class="disclosure-content" style="padding:4px 14px 12px;">
+        return `
+          <details class="supplier-card" style="margin-bottom:12px !important;">
+            <summary class="supplier-summary-bar" style="padding:12px 18px;">
+              <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                <span class="product-avatar" style="width:36px;height:36px;border-radius:10px;background:var(--purple-soft);color:var(--purple);font-size:15px;font-weight:800;display:grid;place-items:center;">
+                  ${escapeHtml(item.name.slice(0, 1))}
+                </span>
+                <div>
+                  <h3 style="margin:0;font-size:15px;font-weight:800;color:var(--ink);">${escapeHtml(item.name)}</h3>
+                  <p style="margin:2px 0 0;font-size:11.5px;color:var(--muted);">${escapeHtml(item.category)} · موعد الاستحقاق: يوم ${item.dueDay} في الشهر</p>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;margin-inline-start:6px;flex-wrap:wrap;">
+                  <span class="purchase-meta-pill">الإيجار: <strong>${money(item.actual.amount)}</strong></span>
+                  <span class="purchase-meta-pill" style="background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;">المقسومة (اليوم): <strong>${suggestedFormatted} ${currency}</strong></span>
+                  <span class="purchase-meta-pill" style="color:#15803d;">مسدد: <strong>${money(item.actual.paidAmount)}</strong></span>
+                  <span class="purchase-meta-pill" style="color:${remainingMinor > 0n ? '#be123c' : '#15803d'};">متبقي: <strong>${money(item.actual.remainingAmount)}</strong></span>
+                </div>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px;">
+                ${remainingMinor > 0n ? `
+                  <button type="button" class="button button-primary button-sm pay-monthly"
+                          data-actual="${item.actual.id}"
+                          data-remaining="${item.actual.remainingAmount.amount}"
+                          data-daily="${suggestedFormatted}"
+                          data-name="${escapeHtml(item.name)}"
+                          style="font-size:12px;padding:5px 16px;font-weight:700;">
+                    سداد
+                  </button>
+                ` : `<span class="status-pill status-complete" style="font-size:11.5px;padding:3px 8px;">✓ مسدد بالكامل</span>`}
+                ${item.actual.payments.length ? `<span class="disclosure-chevron" aria-hidden="true">${icon('chevron', 14)}</span>` : ''}
+              </div>
+            </summary>
+            ${item.actual.payments.length ? `
+              <div style="padding:10px 18px;background:var(--surface-soft);border-top:1px solid var(--line);">
+                <div style="font-size:12px;font-weight:700;color:var(--muted);margin-bottom:6px;">سجل الدفعات المسجلة لهذا الشهر (${item.actual.payments.length}):</div>
                 ${item.actual.payments.map((p) => `
-                  <div class="invoice-history-row" style="display:flex;justify-content:space-between;padding:8px 0;font-size:12.5px;">
-                    <span>سداد ${p.method === 'CASH_DRAWER' ? 'من درج النقدية' : p.method === 'CASH_SAFE' ? 'من الخزينة' : 'تحويل بنكي'}${p.referenceNumber ? ` · ${escapeHtml(p.referenceNumber)}` : ''} · ${new Date(p.paidAt).toLocaleDateString('ar-EG')}</span>
+                  <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;font-size:12px;border-bottom:1px dashed var(--line);">
+                    <span>سداد ${p.method === 'CASH_DRAWER' ? 'درج النقدية' : p.method === 'CASH_SAFE' ? 'الخزينة' : 'تحويل بنكي'}${p.referenceNumber ? ` · ${escapeHtml(p.referenceNumber)}` : ''} · ${new Date(p.paidAt).toLocaleDateString('ar-EG')}</span>
                     <strong style="color:#15803d;">${money(p.amount)}</strong>
                   </div>
                 `).join('')}
               </div>
-            </details>
-          `;
-        }
+            ` : ''}
+          </details>
+        `;
       }
 
+      const pastAmountDec = item.suggestedPastAmount ? decimalPrice(item.suggestedPastAmount) : '';
       return `
-        <section class="panel supplier-card" style="padding:18px 20px;margin-bottom:18px;">
-          <div class="panel-heading" style="padding:0 0 12px;margin-bottom:0;border-bottom:1px solid var(--line);">
-            <div>
-              <h3 style="margin:0;font-size:16px;font-weight:800;color:var(--ink);">${escapeHtml(item.name)}</h3>
-              <p style="margin:3px 0 0;font-size:12px;color:var(--muted);">${escapeHtml(item.category)} · موعد الاستحقاق الشهري يوم ${item.dueDay} في الشهر</p>
+        <details class="supplier-card" style="margin-bottom:12px !important;">
+          <summary class="supplier-summary-bar" style="padding:12px 18px;">
+            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+              <span class="product-avatar" style="width:36px;height:36px;border-radius:10px;background:var(--purple-soft);color:var(--purple);font-size:15px;font-weight:800;display:grid;place-items:center;">
+                ${escapeHtml(item.name.slice(0, 1))}
+              </span>
+              <div>
+                <h3 style="margin:0;font-size:15px;font-weight:800;color:var(--ink);">${escapeHtml(item.name)}</h3>
+                <p style="margin:2px 0 0;font-size:11.5px;color:var(--muted);">${escapeHtml(item.category)} · موعد الاستحقاق: يوم ${item.dueDay} في الشهر</p>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;margin-inline-start:6px;flex-wrap:wrap;">
+                <span class="purchase-meta-pill" style="color:var(--muted);">لم يتم تحديد قيمة شهر ${monthName}</span>
+              </div>
             </div>
-            ${item.actual ? `<span class="status-pill ${item.actual.status === 'PAID' ? 'status-complete' : 'status-low'}" style="font-weight:700;">${item.actual.status === 'PAID' ? '✓ مسدد بالكامل' : item.actual.status === 'PARTIALLY_PAID' ? 'مدفوع جزئيًا' : 'مستحق'}</span>` : '<span class="status-pill status-low">لم يتم تأكيد قيمة هذا الشهر</span>'}
-          </div>
-          ${dailyCardHtml}
-          ${payButtonHtml}
-          ${!item.actual ? `
-            <div style="margin-top:14px;">
-              <button type="button" class="button button-primary confirm-monthly" data-obligation="${item.id}" style="font-size:13.5px;font-weight:750;padding:10px 20px;">تأكيد إجمالي المبلغ للشهر (مثلاً 4000 جنيه إيجار)</button>
+            <div style="display:flex;align-items:center;gap:10px;">
+              <button type="button" class="button button-primary button-sm confirm-monthly"
+                      data-obligation="${item.id}"
+                      data-name="${escapeHtml(item.name)}"
+                      data-suggested="${pastAmountDec}"
+                      style="font-size:12px;padding:5px 14px;font-weight:700;">
+                تحديد قيمة الشهر
+              </button>
             </div>
-          ` : ''}
-          ${paymentsHistoryHtml}
-        </section>
+          </summary>
+        </details>
       `;
     }).join('') : `
-      <section class="panel empty-chart">
+      <section class="panel empty-chart" style="padding:28px;">
         <div class="empty-illustration">${icon('wallet', 28)}</div>
         <strong>لا توجد التزامات مسجلة بعد</strong>
-        <p>أضف التزامك (مثل إيجار المحل 4000 جنيه أو المرتبات) ليقوم النظام بتقسيمه يوماً بيوم وتتمكن من سداد نصيب اليوم بسهولة.</p>
+        <p>أضف التزامك (مثل إيجار المحل أو المرتبات) لتسجيله ومتابعته وسداده بسهولة.</p>
         <button type="button" class="button button-primary" id="empty-new-monthly-obligation" style="margin-top:12px;">+ إضافة التزام جديد</button>
       </section>
     `}
 
-    <!-- سجل المصروفات المباشرة والنثرية (مثل الكهرباء والصيانة) -->
+    <!-- سجل المصروفات المباشرة (مثل الكهرباء والصيانة) -->
     <section class="panel compact-panel" style="margin-top:24px;">
-      <div class="panel-heading">
+      <div class="panel-heading" style="padding:12px 18px;">
         <div>
-          <h3 style="font-size:16px;font-weight:800;color:var(--ink);">سجل المصروفات المباشرة المسجلة (${expenses.length} مصروف)</h3>
-          <p>المصروفات التي تم تسجيلها (كهرباء، مستلزمات، فواتير، صيانة...).</p>
+          <h3 style="font-size:15px;font-weight:800;color:var(--ink);margin:0;">سجل المصروفات المباشرة لشهر ${monthName} (${currentMonthExpenses.length} مصروف)</h3>
+          <p style="margin:2px 0 0;font-size:11.5px;color:var(--muted);">المصروفات التي تم تسجيلها (كهرباء، فواتير، مستلزمات، صيانة...).</p>
         </div>
-        <button type="button" class="button button-primary button-sm" id="new-expense-table-btn">+ إضافة مصروف جديد</button>
+        <button type="button" class="button button-primary button-sm" id="new-expense-table-btn" style="font-size:12px;padding:4px 14px;">+ إضافة مصروف جديد</button>
       </div>
 
-      ${expenses.length ? `
+      ${currentMonthExpenses.length ? `
         <div class="table-scroll">
           <table class="compact-table">
             <thead>
@@ -2033,7 +2098,7 @@ function expensesView() {
               </tr>
             </thead>
             <tbody>
-              ${expenses.map((expense) => `
+              ${currentMonthExpenses.map((expense) => `
                 <tr>
                   <td><strong>${escapeHtml(expense.date)}</strong></td>
                   <td><span class="status-pill status-complete" style="font-size:11.5px;font-weight:700;">${escapeHtml(expense.category)}</span></td>
@@ -2046,8 +2111,8 @@ function expensesView() {
           </table>
         </div>
       ` : `
-        <div class="empty-row" style="padding:24px;text-align:center;">
-          لا توجد مصروفات مباشرة مسجلة بعد. اضغط على «إضافة مصروف» لتسجيل الكهرباء أو النثريات.
+        <div class="empty-row" style="padding:22px;text-align:center;font-size:12.5px;color:var(--muted);">
+          لا توجد مصروفات مباشرة مسجلة في شهر ${monthName}. اضغط على «+ إضافة مصروف» لتسجيل فاتورة كهرباء أو صيانة.
         </div>
       `}
     </section>
@@ -2853,56 +2918,140 @@ function bindReturns() {
 }
 
 function bindMonthlyExpenses() {
-  document.querySelector('#new-monthly-obligation, #empty-new-monthly-obligation')?.addEventListener('click', () => {
-    supplierModal(`<label>اسم الالتزام<input name="name" required minlength="2" maxlength="120" placeholder="إيجار المحل"></label><label>التصنيف<select name="categoryCode"><option value="RENT">إيجار</option><option value="UTILITIES">مرافق وفواتير</option><option value="TRANSPORT">نقل ومواصلات</option><option value="MAINTENANCE">صيانة</option><option value="SUPPLIES">مستلزمات تشغيل</option><option value="OTHER">أخرى</option></select></label><label>يوم الاستحقاق<input name="dueDay" type="number" min="1" max="31" value="1" required></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'monthly-obligation-form', '/api/recurring-expenses', (data) => ({ ...data, dueDay: Number(data.dueDay) }), 'تم إضافة الالتزام الشهري');
+  // Month archive navigation
+  document.querySelector('#btn-prev-month')?.addEventListener('click', async (e) => {
+    const y = Number(e.currentTarget.dataset.year);
+    const m = Number(e.currentTarget.dataset.month);
+    state.selectedExpenseYear = y;
+    state.selectedExpenseMonth = m;
+    await loadData(state.data.selectedStoreId, y, m);
+    render();
   });
-  document.querySelectorAll('.confirm-monthly').forEach((button) => button.addEventListener('click', () => {
+
+  document.querySelector('#btn-next-month')?.addEventListener('click', async (e) => {
+    const y = Number(e.currentTarget.dataset.year);
+    const m = Number(e.currentTarget.dataset.month);
+    state.selectedExpenseYear = y;
+    state.selectedExpenseMonth = m;
+    await loadData(state.data.selectedStoreId, y, m);
+    render();
+  });
+
+  document.querySelector('#btn-current-month')?.addEventListener('click', async (e) => {
+    const y = Number(e.currentTarget.dataset.year);
+    const m = Number(e.currentTarget.dataset.month);
+    state.selectedExpenseYear = y;
+    state.selectedExpenseMonth = m;
+    await loadData(state.data.selectedStoreId, y, m);
+    render();
+  });
+
+  document.querySelector('#expense-month-picker')?.addEventListener('change', async (e) => {
+    const [y, m] = e.currentTarget.value.split('-').map(Number);
+    state.selectedExpenseYear = y;
+    state.selectedExpenseMonth = m;
+    await loadData(state.data.selectedStoreId, y, m);
+    render();
+  });
+
+  // Add obligation (supports setting initialAmount for current month in 1 step)
+  document.querySelector('#new-monthly-obligation, #empty-new-monthly-obligation')?.addEventListener('click', () => {
+    const decimals = currencyDecimals(state.data.company.currency);
+    supplierModal(`
+      <label style="font-weight:700;">اسم الالتزام
+        <input name="name" required minlength="2" maxlength="120" placeholder="مثال: إيجار المحل" autofocus>
+      </label>
+      <label style="font-weight:700;margin-top:10px;">التصنيف
+        <select name="categoryCode">
+          <option value="RENT">إيجار</option>
+          <option value="UTILITIES">مرافق وفواتير</option>
+          <option value="TRANSPORT">نقل ومواصلات</option>
+          <option value="MAINTENANCE">صيانة</option>
+          <option value="SUPPLIES">مستلزمات تشغيل</option>
+          <option value="OTHER">أخرى</option>
+        </select>
+      </label>
+      <div class="form-grid" style="margin-top:10px;">
+        <label style="font-weight:700;">مبلغ الشهر (${state.data.company.currency})
+          <input name="initialAmount" inputmode="decimal" placeholder="مثال: 4000">
+        </label>
+        <label style="font-weight:700;">يوم الاستحقاق في الشهر
+          <input name="dueDay" type="number" min="1" max="31" value="1" required>
+        </label>
+      </div>
+      <input type="hidden" name="storeId" value="${state.data.selectedStoreId}">
+      <input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">
+    `,
+    'monthly-obligation-form',
+    '/api/recurring-expenses',
+    (data) => ({
+      storeId: data.storeId,
+      categoryCode: data.categoryCode,
+      name: data.name,
+      dueDay: Number(data.dueDay),
+      initialAmount: data.initialAmount ? toMinor(data.initialAmount, decimals) : undefined,
+      idempotencyKey: data.idempotencyKey
+    }),
+    'تم إضافة الالتزام وتثبيت مبلغه بنجاح');
+  });
+
+  // Confirm monthly amount
+  document.querySelectorAll('.confirm-monthly').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
     const period = state.data.monthlyPeriod;
-    supplierModal(`<p>الشهر: <strong>${String(period.month).padStart(2, '0')} / ${period.year}</strong>. سيتم إثبات المبلغ كمصروف مستحق، ولن يُخصم مرة أخرى عند السداد.</p><label>المبلغ الفعلي (${state.data.company.currency})<input name="amount" inputmode="decimal" required></label><input type="hidden" name="year" value="${period.year}"><input type="hidden" name="month" value="${period.month}">`, 'monthly-actual-form', `/api/recurring-expenses/${button.dataset.obligation}/actual`, (data) => ({ year: Number(data.year), month: Number(data.month), amount: toMinor(data.amount, currencyDecimals(state.data.company.currency)) }), 'تم إثبات المصروف وقيده كمستحق');
+    const decimals = currencyDecimals(state.data.company.currency);
+    const name = button.dataset.name || 'الالتزام';
+    const suggested = button.dataset.suggested || '';
+
+    supplierModal(`
+      <div style="font-size:15px;font-weight:800;color:var(--ink);margin-bottom:12px;">تحديد قيمة ${escapeHtml(name)} لشهر <strong>${period.month} / ${period.year}</strong></div>
+      <label style="font-weight:700;font-size:13.5px;color:var(--ink);">إجمالي المبلغ للشهر (${state.data.company.currency}):
+        <input name="amount" inputmode="decimal" value="${suggested}" placeholder="مثال: 4000" required autofocus style="font-weight:800;font-size:18px;height:44px;color:var(--purple);padding:0 12px;margin-top:6px;">
+      </label>
+      <input type="hidden" name="year" value="${period.year}">
+      <input type="hidden" name="month" value="${period.month}">
+    `,
+    'monthly-actual-form',
+    `/api/recurring-expenses/${button.dataset.obligation}/actual`,
+    (data) => ({ year: Number(data.year), month: Number(data.month), amount: toMinor(data.amount, decimals) }),
+    'تم تحديد وتأكيد قيمة الشهر بنجاح');
   }));
-  document.querySelectorAll('.pay-monthly').forEach((button) => button.addEventListener('click', () => {
-    const decimals = currencyDecimals(state.data.company.currency), digits = BigInt(button.dataset.remaining).toString().padStart(decimals + 1, '0');
+
+  // Pay monthly (clean, minimal modal with daily share pre-filled)
+  document.querySelectorAll('.pay-monthly').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const decimals = currencyDecimals(state.data.company.currency);
+    const digits = BigInt(button.dataset.remaining).toString().padStart(decimals + 1, '0');
     const maxAmount = decimals ? `${digits.slice(0, -decimals)}.${digits.slice(-decimals)}` : digits;
     const dailySuggested = button.dataset.daily || '';
     const name = button.dataset.name || 'الإيجار';
+
     supplierModal(`
-      <div style="background:var(--surface-soft);padding:14px 16px;border-radius:12px;border:1px solid var(--line);margin-bottom:14px;">
-        <div style="font-size:15px;font-weight:800;color:var(--ink);margin-bottom:8px;">سداد: <strong>${escapeHtml(name)}</strong></div>
-        <div style="display:flex;justify-content:space-between;font-size:13px;color:var(--muted);margin-bottom:6px;">
-          <span>الباقي الكلي المطلوب للشهر:</span>
-          <strong style="color:#be123c;font-size:14px;">${money({ amount: button.dataset.remaining, currency: state.data.company.currency, decimals })}</strong>
-        </div>
-        <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#166534;background:#f0fdf4;padding:8px 12px;border-radius:8px;border:1px solid #bbf7d0;">
-          <span>السعر المفروض تدفعه النهاردة (الإيجار ÷ 30 يوم):</span>
-          <strong style="font-size:15px;font-weight:800;">${dailySuggested} ${state.data.company.currency}</strong>
-        </div>
+      <div style="font-size:15px;font-weight:800;color:var(--ink);margin-bottom:12px;">سداد: <strong>${escapeHtml(name)}</strong></div>
+
+      <label style="font-weight:700;font-size:13.5px;color:var(--ink);">المبلغ المراد سداده (${state.data.company.currency}):
+        <input name="amount" inputmode="decimal" value="${dailySuggested}" max="${maxAmount}" required autofocus style="font-weight:800;font-size:18px;height:44px;color:var(--purple);padding:0 12px;margin-top:6px;">
+      </label>
+
+      <div class="form-grid" style="margin-top:12px;">
+        <label style="font-weight:700;font-size:13px;color:var(--ink);">طريقة الدفع (الخصم من):
+          <select name="paymentMethod" style="height:40px;">
+            <option value="CASH_DRAWER">درج النقدية</option>
+            <option value="CASH_SAFE">الخزينة</option>
+            <option value="BANK_TRANSFER">تحويل بنكي</option>
+          </select>
+        </label>
+        <label style="font-weight:700;font-size:13px;color:var(--ink);">ملاحظات (اختياري):
+          <input name="referenceNumber" maxlength="80" value="سداد دفعة" style="height:40px;">
+        </label>
       </div>
-
-      <label style="font-weight:700;font-size:13.5px;color:var(--ink);">المبلغ اللي هتدفعه النهاردة (${state.data.company.currency}):
-        <input name="amount" inputmode="decimal" value="${dailySuggested}" max="${maxAmount}" required autofocus style="font-weight:800;font-size:18px;height:46px;color:var(--purple);padding:0 12px;margin-top:6px;">
-        <small style="color:var(--muted);font-weight:600;display:block;margin-top:6px;line-height:1.5;">
-          ✍️ كتبنا لك في الخانة السعر اللي المفروض تدفعه النهاردة (${dailySuggested} ${state.data.company.currency}). لو مش معاك المبلغ ده أو حابب تدفع رقم تاني، امسحه واكتب الرقم اللي تقدر تدفعه النهاردة، وسيتم خصمه فوراً من السعر الكلي وإضافته للمسدد وتحديث الباقي وخصمه من المكسب.
-        </small>
-      </label>
-
-      <label style="font-weight:700;font-size:13px;margin-top:12px;color:var(--ink);">طريقة الدفع (الخصم من):
-        <select name="paymentMethod" style="height:42px;">
-          <option value="CASH_DRAWER">درج النقدية (الكاشير)</option>
-          <option value="CASH_SAFE">الخزينة</option>
-          <option value="BANK_TRANSFER">تحويل بنكي</option>
-        </select>
-      </label>
-
-      <label style="font-weight:700;font-size:13px;margin-top:8px;color:var(--ink);">ملاحظات السداد (اختياري):
-        <input name="referenceNumber" maxlength="80" value="سداد دفعة اليوم" style="height:38px;">
-      </label>
 
       <input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">
     `,
     'monthly-payment-form',
     `/api/monthly-expenses/${button.dataset.actual}/payments`,
     (data) => ({ ...data, amount: toMinor(data.amount, decimals) }),
-    'تم سداد المبلغ وخصمه من الإجمالي ومن المكسب وتحديث الباقي بنجاح');
+    'تم تسجيل السداد وخصمه من الحسابات والمكسب');
   }));
 }
 

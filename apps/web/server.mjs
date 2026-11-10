@@ -149,7 +149,7 @@ const PurchaseSchema = z.object({ idempotencyKey: z.string().uuid(), supplierId:
 const SupplierPaymentSchema = z.object({ idempotencyKey: z.string().uuid(), amount: z.string().regex(/^[1-9]\d{0,14}$/), paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'CARD', 'MOBILE']), referenceNumber: z.string().max(80).trim().optional() });
 const ExpenseSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), categoryCode: z.enum(['RENT', 'UTILITIES', 'TRANSPORT', 'MAINTENANCE', 'SUPPLIES', 'OTHER']), amount: z.string().regex(/^[1-9]\d{0,14}$/), paymentMethod: z.enum(['CASH_DRAWER', 'CASH_SAFE', 'BANK_TRANSFER']), expenseDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), notes: z.string().max(500).trim().optional(), referenceNumber: z.string().max(80).trim().optional() });
 const CustomerReturnSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), paymentMethod: z.enum(['CASH', 'CARD', 'MOBILE', 'OTHER']), items: z.array(z.object({ originalSaleItemId: z.string().min(1).max(80), quantity: z.string().regex(/^[1-9]\d{0,8}$/) })).min(1).max(100) });
-const RecurringObligationSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), categoryCode: z.enum(['RENT', 'UTILITIES', 'TRANSPORT', 'MAINTENANCE', 'SUPPLIES', 'OTHER']), name: z.string().min(2).max(120).trim(), dueDay: z.number().int().min(1).max(31) });
+const RecurringObligationSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), categoryCode: z.enum(['RENT', 'UTILITIES', 'TRANSPORT', 'MAINTENANCE', 'SUPPLIES', 'OTHER']), name: z.string().min(2).max(120).trim(), dueDay: z.number().int().min(1).max(31), initialAmount: z.string().regex(/^[1-9]\d{0,14}$/).optional() });
 const MonthlyActualSchema = z.object({ year: z.number().int().min(2000).max(9999), month: z.number().int().min(1).max(12), amount: z.string().regex(/^[1-9]\d{0,14}$/) });
 const MonthlyPaymentSchema = z.object({ idempotencyKey: z.string().uuid(), amount: z.string().regex(/^[1-9]\d{0,14}$/), paymentMethod: z.enum(['CASH_DRAWER', 'CASH_SAFE', 'BANK_TRANSFER']), referenceNumber: z.string().max(80).trim().optional() });
 const SupplierReturnSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), items: z.array(z.object({ purchaseItemId: z.string().min(1).max(80), quantity: z.string().regex(/^[1-9]\d{0,8}$/) })).min(1).max(100) });
@@ -1255,7 +1255,10 @@ async function currentData(ctx, url) {
     return { id: supplier.id, name: supplier.name, phone: supplier.phone, notes: supplier.notes, purchases: entries, totalPurchased: entries.reduce((sum, item) => sum + BigInt(item.totalAmount.amount), 0n).toString(), totalPaid: entries.reduce((sum, item) => sum + BigInt(item.paidAmount.amount), 0n).toString(), balanceDue: entries.reduce((sum, item) => sum + BigInt(item.remainingAmount.amount), 0n).toString(), currency: tenant.currency };
   });
   const monthlyNow = new Date();
-  const monthlyYear = monthlyNow.getUTCFullYear(), monthlyMonth = monthlyNow.getUTCMonth() + 1;
+  const reqYear = Number(url.searchParams.get('year'));
+  const reqMonth = Number(url.searchParams.get('month'));
+  const monthlyYear = (reqYear >= 2020 && reqYear <= 2040) ? reqYear : monthlyNow.getUTCFullYear();
+  const monthlyMonth = (reqMonth >= 1 && reqMonth <= 12) ? reqMonth : (monthlyNow.getUTCMonth() + 1);
   const canViewMonthlyExpenses = ctx.hasPermission(Permissions.EXPENSES_MONTHLY_CONFIRM) || ctx.hasPermission(Permissions.EXPENSES_MONTHLY_PAY) || ctx.hasPermission(Permissions.REPORTS_MONTHLY_VIEW);
   const monthlyObligations = canViewMonthlyExpenses ? await db.selectFrom('recurring_expense_obligations')
     .innerJoin('expense_categories', 'expense_categories.id', 'recurring_expense_obligations.category_id')
@@ -1267,14 +1270,30 @@ async function currentData(ctx, url) {
   const monthlyPaymentRows = canViewMonthlyExpenses && monthlyActualRows.length ? await db.selectFrom('operating_expense_records').selectAll()
     .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).where('expense_type', '=', 'MONTHLY_RECURRING_PAYMENT')
     .where('monthly_actual_id', 'in', monthlyActualRows.map((actual) => actual.id)).orderBy('expense_date', 'desc').execute() : [];
+  const availableMonthsRows = canViewMonthlyExpenses ? await db.selectFrom('monthly_expense_actuals')
+    .select(['year', 'month'])
+    .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId)
+    .groupBy(['year', 'month'])
+    .orderBy('year', 'desc').orderBy('month', 'desc')
+    .execute() : [];
+  const allActualsForObligations = canViewMonthlyExpenses && monthlyObligations.length ? await db.selectFrom('monthly_expense_actuals')
+    .selectAll()
+    .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId)
+    .where('obligation_id', 'in', monthlyObligations.map((o) => o.id))
+    .orderBy('year', 'desc').orderBy('month', 'desc')
+    .execute() : [];
   const monthlyExpenses = monthlyObligations.map((obligation) => {
     const actual = monthlyActualRows.find((item) => item.obligation_id === obligation.id);
     const payments = actual ? monthlyPaymentRows.filter((item) => item.monthly_actual_id === actual.id) : [];
     const amount = actual ? BigInt(actual.amount) : 0n, paid = actual ? BigInt(actual.paid_amount) : 0n;
-    return { ...obligation, actual: actual ? { id: actual.id, year: actual.year, month: actual.month,
-      amount: moneyJson(Money.fromMinor(amount, actual.currency)), paidAmount: moneyJson(Money.fromMinor(paid, actual.currency)),
-      remainingAmount: moneyJson(Money.fromMinor(amount - paid, actual.currency)), status: actual.status,
-      payments: payments.map((item) => ({ id: item.id, amount: moneyJson(Money.fromMinor(BigInt(item.amount), item.currency)), method: item.payment_method, referenceNumber: item.reference_number, paidAt: item.expense_date })) } : null };
+    const latestPastActual = allActualsForObligations.find((item) => item.obligation_id === obligation.id);
+    const suggestedPastAmount = latestPastActual ? latestPastActual.amount : null;
+    return { ...obligation,
+      suggestedPastAmount: suggestedPastAmount ? moneyJson(Money.fromMinor(BigInt(suggestedPastAmount), tenant.currency)) : null,
+      actual: actual ? { id: actual.id, year: actual.year, month: actual.month,
+        amount: moneyJson(Money.fromMinor(amount, actual.currency)), paidAmount: moneyJson(Money.fromMinor(paid, actual.currency)),
+        remainingAmount: moneyJson(Money.fromMinor(amount - paid, actual.currency)), status: actual.status,
+        payments: payments.map((item) => ({ id: item.id, amount: moneyJson(Money.fromMinor(BigInt(item.amount), item.currency)), method: item.payment_method, referenceNumber: item.reference_number, paidAt: item.expense_date })) } : null };
   });
   const today = new Date().toISOString().slice(0, 10);
   const todaysSales = sales.filter((sale) => sale.createdAt.slice(0, 10) === today);
@@ -1353,6 +1372,7 @@ async function currentData(ctx, url) {
     customerReturns: customerReturnRows.map((item) => ({ ...item, refundAmount: moneyJson(Money.fromMinor(BigInt(item.refundAmount), item.currency)) })),
     monthlyExpenses,
     monthlyPeriod: { year: monthlyYear, month: monthlyMonth },
+    availableMonthlyPeriods: availableMonthsRows,
     summary: {
       todaySalesCount: canViewSales ? todaysSales.length : null,
       todayRevenue: canViewSales ? moneyJson(Money.fromMinor(BigInt(revenueMinor), tenant.currency)) : null,
@@ -1997,6 +2017,16 @@ async function handleApi(req, res, url) {
     const tenant = await tenantRepo.findById(ctx.tenantId);
     if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
     const id = await recurringExpenses.create(ctx, { ...body, id: randomUUID(), currency: tenant.currency });
+    if (body.initialAmount && BigInt(body.initialAmount) > 0n) {
+      const now = new Date();
+      await recurringExpenses.confirmActual(ctx, {
+        obligationId: id,
+        year: now.getUTCFullYear(),
+        month: now.getUTCMonth() + 1,
+        amount: BigInt(body.initialAmount),
+        confirmedAt: now
+      });
+    }
     return json(res, 201, { id });
   }
 
