@@ -622,7 +622,7 @@ function dashboardView() {
 }
 
 function salesTable(sales) {
-  return `<div class="table-scroll"><table><thead><tr><th>رقم الفاتورة</th><th>التاريخ</th><th>الكاشير / البائع</th><th>الأصناف</th><th>الدفع</th><th>الإجمالي</th><th>الحالة</th><th></th></tr></thead><tbody>${(sales ?? []).map((sale) => `<tr><td><button class="invoice-id invoice-open" data-sale-open="${sale.id}">${escapeHtml(sale.saleNumber)}</button></td><td>${new Intl.DateTimeFormat('ar-EG', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' }).format(new Date(sale.createdAt))}</td><td><span class="sku-code" style="font-weight:600;">${escapeHtml(sale.cashierName || 'كاشير')}</span></td><td>${(sale.items ?? []).reduce((sum, item) => sum + Number(item.quantity || 0), 0)} قطعة</td><td><span class="payment-chip">${(sale.payments ?? []).map((payment) => methodLabel(payment.method)).join(' + ')}</span></td><td class="table-total">${money(sale.total)}</td><td><span class="status-pill status-complete">مكتملة</span></td><td>${(state.data.capabilities.canRefund || state.data.capabilities.canReturnSale || state.data.capabilities.cashierMode) && (sale.items ?? []).some((item) => BigInt(item.returnableQuantity ?? '0') > 0n) ? `<button class="text-action start-return" data-sale="${sale.id}">مرتجع</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
+  return `<div class="sales-table-scroll-container"><table class="sales-table zebra-table"><thead><tr><th>رقم الفاتورة</th><th>التاريخ والوقت</th><th>الكاشير / البائع</th><th>الأصناف</th><th>طريقة الدفع</th><th>الإجمالي</th><th>الحالة</th><th></th></tr></thead><tbody>${(sales ?? []).map((sale) => `<tr><td><button class="invoice-id invoice-open" data-sale-open="${sale.id}">${escapeHtml(sale.saleNumber)}</button></td><td>${new Intl.DateTimeFormat('ar-EG', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' }).format(new Date(sale.createdAt))}</td><td><span class="sku-code" style="font-weight:600;">${escapeHtml(sale.cashierName || 'كاشير')}</span></td><td>${(sale.items ?? []).reduce((sum, item) => sum + Number(item.quantity || 0), 0)} قطعة</td><td><span class="payment-chip">${(sale.payments ?? []).map((payment) => methodLabel(payment.method)).join(' + ')}</span></td><td class="table-total">${money(sale.total)}</td><td><span class="status-pill status-complete">مكتملة</span></td><td>${(state.data.capabilities.canRefund || state.data.capabilities.canReturnSale || state.data.capabilities.cashierMode) && (sale.items ?? []).some((item) => BigInt(item.returnableQuantity ?? '0') > 0n) ? `<button class="text-action start-return" data-sale="${sale.id}">مرتجع</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
 }
 
 function methodLabel(method) {
@@ -830,8 +830,15 @@ function salesView() {
   const returns = state.data.customerReturns ?? [];
   const sales = state.salesHistory ?? state.data.sales ?? [];
   const totalCount = state.salesHistoryTotal ?? state.data.sales?.length ?? sales.length;
-  const from = state.salesFrom ?? '';
-  const to = state.salesTo ?? '';
+  const today = new Date().toISOString().slice(0, 10);
+  const preset = state.salesPreset ?? 'today';
+  if (state.salesFrom === undefined && state.salesPreset !== 'all') {
+    state.salesFrom = today;
+    state.salesTo = today;
+  }
+  const from = state.salesFrom ?? today;
+  const to = state.salesTo ?? today;
+
   return `
     <div class="page-heading-row">
       <div>
@@ -841,6 +848,17 @@ function salesView() {
     </div>
 
     <section class="pro-filter-card">
+      <div class="pro-filter-row" style="margin-bottom:12px;">
+        <div class="pro-filter-pills">
+          <span style="font-size:12px;font-weight:700;color:var(--muted);display:inline-flex;align-items:center;gap:6px;">
+            ${icon('filter', 15)} فترات المبيعات:
+          </span>
+          <button type="button" class="pro-filter-pill ${preset === 'today' ? 'active' : ''}" data-sales-preset="today">اليوم</button>
+          <button type="button" class="pro-filter-pill ${preset === 'week' ? 'active' : ''}" data-sales-preset="week">هذا الأسبوع</button>
+          <button type="button" class="pro-filter-pill ${preset === 'month' ? 'active' : ''}" data-sales-preset="month">هذا الشهر</button>
+          <button type="button" class="pro-filter-pill ${preset === 'all' ? 'active' : ''}" data-sales-preset="all">كل المبيعات</button>
+        </div>
+      </div>
       <form id="sales-history-search" class="pro-filter-row">
         <div class="pro-search-wrap">
           ${icon('search', 16)}
@@ -1607,47 +1625,47 @@ function growthForecastWidget(forecast, currency) {
 
   return `
     <section class="panel compact-panel" style="margin-top:20px;">
-      <div class="panel-heading" style="padding:12px 18px;">
+      <div class="panel-heading" style="padding:14px 20px;">
         <div>
-          <h3 style="font-size:15px;font-weight:800;color:var(--ink);margin:0;">إحصائيات التقدم والتوقعات</h3>
-          <p style="margin:2px 0 0;font-size:11.5px;color:var(--muted);">مقارنة مبيعات هذا الشهر بالشهر السابق وتقدير مبيعات الشهر القادم.</p>
+          <h3 style="font-size:15px;font-weight:800;color:var(--ink);margin:0;">📊 إحصائيات التقدم والتوقعات الشهرية</h3>
+          <p style="margin:2px 0 0;font-size:12px;color:var(--muted);">مقارنة مبيعات هذا الشهر بالشهر السابق وتوقعات المبيعات والوتيرة المطلوبة للشهر القادم.</p>
         </div>
       </div>
 
-      <div class="inventory-summary" style="padding:14px 18px;grid-template-columns: repeat(2, minmax(0, 1fr));gap:14px;">
+      <div class="growth-forecast-grid">
         <!-- مقارنة الشهر الحالي بالسابق -->
-        <div class="inventory-summary-card" style="padding:14px 16px;border-right:3px solid ${isUp ? '#15803d' : '#be123c'};background:var(--panel);">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
-            <span style="font-size:12px;font-weight:700;color:var(--muted);">${escapeHtml(currentMonth.name)} مقارنة بـ ${escapeHtml(previousMonth.name)}</span>
-            <span class="status-pill ${isUp ? 'status-complete' : 'status-low'}" style="font-size:11px;font-weight:700;">
+        <div class="growth-forecast-card ${isUp ? 'card-growth' : 'card-decline'}">
+          <div class="growth-card-header">
+            <span class="growth-card-title">${escapeHtml(currentMonth.name)} مقارنة بـ ${escapeHtml(previousMonth.name)}</span>
+            <span class="status-pill ${isUp ? 'status-complete' : 'status-low'}" style="font-size:12px;font-weight:800;">
               ${isUp ? '▲ نمو' : '▼ تراجع'} (${growthSign}${comparison.growthPercent}%)
             </span>
           </div>
-          <div style="font-size:14px;font-weight:800;color:var(--ink);margin-bottom:8px;">
+          <div class="growth-headline">
             ${isUp
-              ? `أنت بعت الشهر ده أكثر من الشهر اللي فات بنسبة <span style="color:#15803d;">${growthSign}${comparison.growthPercent}%</span>`
-              : `أنت بعت الشهر ده أقل من الشهر اللي فات بنسبة <span style="color:#be123c;">${comparison.growthPercent}%</span>`
+              ? `أنت بعت هذا الشهر أكثر من الشهر السابق بنسبة <span style="color:#15803d;font-weight:900;">${growthSign}${comparison.growthPercent}%</span>`
+              : `أنت بعت هذا الشهر أقل من الشهر السابق بنسبة <span style="color:#be123c;font-weight:900;">${comparison.growthPercent}%</span>`
             }
           </div>
-          <div style="display:flex;gap:14px;font-size:11.5px;color:var(--muted);flex-wrap:wrap;">
-            <span>مبيعات هذا الشهر: <strong style="color:var(--ink);">${format(currentMonth.revenue)}</strong></span>
-            <span>الشهر السابق: <strong style="color:var(--ink);">${format(previousMonth.revenue)}</strong></span>
-            <span>المتوسط اليومي: <strong style="color:var(--ink);">${format(currentMonth.dailyAverage)}</strong></span>
+          <div class="growth-stats-row">
+            <span>مبيعات هذا الشهر: <strong>${format(currentMonth.revenue)}</strong></span>
+            <span>الشهر السابق: <strong>${format(previousMonth.revenue)}</strong></span>
+            <span>المتوسط اليومي: <strong>${format(currentMonth.dailyAverage)}</strong></span>
           </div>
         </div>
 
         <!-- توقعات الشهر القادم -->
-        <div class="inventory-summary-card" style="padding:14px 16px;border-right:3px solid var(--purple);background:var(--panel);">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
-            <span style="font-size:12px;font-weight:700;color:var(--muted);">توقعات شهر ${escapeHtml(fc.nextMonthName)}</span>
-            <span class="status-pill status-complete" style="font-size:11px;font-weight:700;">${escapeHtml(fc.statusText)}</span>
+        <div class="growth-forecast-card card-projected">
+          <div class="growth-card-header">
+            <span class="growth-card-title">توقعات شهر ${escapeHtml(fc.nextMonthName)}</span>
+            <span class="status-pill status-complete" style="font-size:12px;font-weight:800;">${escapeHtml(fc.statusText)}</span>
           </div>
-          <div style="font-size:14px;font-weight:800;color:var(--ink);margin-bottom:8px;">
-            متوقع الشهر الجاي تبيع بنسبة <span style="color:var(--purple);">${forecastSign}${fc.forecastGrowthPercent}%</span> (مبيعات تقديرية: <span style="color:var(--purple);">${format(fc.projectedRevenue)}</span>)
+          <div class="growth-headline">
+            متوقع الشهر القادم تبيع بنسبة <span style="color:var(--purple);font-weight:900;">${forecastSign}${fc.forecastGrowthPercent}%</span> (مبيعات تقديرية: <span style="color:var(--purple);font-weight:900;">${format(fc.projectedRevenue)}</span>)
           </div>
-          <div style="display:flex;gap:14px;font-size:11.5px;color:var(--muted);flex-wrap:wrap;">
-            <span>توقع نهاية هذا الشهر: <strong style="color:var(--ink);">${format(currentMonth.projectedMonthEnd)}</strong></span>
-            <span>الوتيرة اليومية المطلوبة: <strong style="color:var(--ink);">${format(fc.dailyExpectedPace)} / يوم</strong></span>
+          <div class="growth-stats-row">
+            <span>توقع ختام هذا الشهر: <strong>${format(currentMonth.projectedMonthEnd)}</strong></span>
+            <span>الوتيرة اليومية المطلوبة: <strong>${format(fc.dailyExpectedPace)} / يوم</strong></span>
           </div>
         </div>
       </div>
@@ -2018,14 +2036,23 @@ function expensesView() {
               </div>
             </summary>
             ${item.actual.payments.length ? `
-              <div style="padding:10px 18px;background:var(--surface-soft);border-top:1px solid var(--line);">
-                <div style="font-size:12px;font-weight:700;color:var(--muted);margin-bottom:6px;">سجل الدفعات المسجلة لهذا الشهر (${item.actual.payments.length}):</div>
-                ${item.actual.payments.map((p) => `
-                  <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;font-size:12px;border-bottom:1px dashed var(--line);">
-                    <span>سداد ${p.method === 'CASH_DRAWER' ? 'درج النقدية' : p.method === 'CASH_SAFE' ? 'الخزينة' : 'تحويل بنكي'}${p.referenceNumber ? ` · ${escapeHtml(p.referenceNumber)}` : ''} · ${new Date(p.paidAt).toLocaleDateString('ar-EG')}</span>
-                    <strong style="color:#15803d;">${money(p.amount)}</strong>
-                  </div>
-                `).join('')}
+              <div class="obligation-payments-box">
+                <div class="obligation-payments-head">
+                  <span>سجل الدفعات المسددة لهذا الشهر (${item.actual.payments.length} دفعة):</span>
+                  <span class="status-pill status-complete">${money(item.actual.paidAmount)} تم سداده</span>
+                </div>
+                <div class="obligation-payments-scroll">
+                  ${item.actual.payments.map((p) => `
+                    <div class="obligation-payment-row">
+                      <div class="obligation-payment-info">
+                        <span class="payment-badge-chip">${p.method === 'CASH_DRAWER' ? 'درج النقدية' : p.method === 'CASH_SAFE' ? 'الخزينة' : 'تحويل بنكي'}</span>
+                        <span style="color:var(--muted);">${new Date(p.paidAt).toLocaleDateString('ar-EG')}</span>
+                        ${p.referenceNumber ? `<span style="font-weight:600;color:var(--ink);">${escapeHtml(p.referenceNumber)}</span>` : ''}
+                      </div>
+                      <strong class="obligation-payment-amount">${money(p.amount)}</strong>
+                    </div>
+                  `).join('')}
+                </div>
               </div>
             ` : ''}
           </details>
@@ -2130,28 +2157,27 @@ function posView() {
 
 function supplierModal(html, formId, endpoint, convert = (data) => data, successMessage = 'تم حفظ الحركة في سجل التاجر') {
   const root = getModalRoot();
-  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card ${formId === 'purchase-form' ? 'product-variants-modal' : ''}" role="dialog" aria-modal="true"><div class="modal-heading"><h2>${formId === 'supplier-form' ? 'إضافة تاجر' : formId === 'purchase-form' ? 'تسجيل فاتورة شراء من تاجر (نظام الموديل والألوان والمقاسات)' : formId === 'expense-form' ? 'تسجيل مصروف' : formId === 'return-form' ? 'تسجيل مرتجع مرتبط بالفاتورة' : formId === 'supplier-return-form' ? '\u062a\u0633\u062c\u064a\u0644 \u0645\u0631\u062a\u062c\u0639 \u0644\u0644\u0645\u0648\u0631\u062f' : formId === 'monthly-obligation-form' ? 'إضافة التزام شهري' : formId === 'monthly-actual-form' ? 'تأكيد المصروف الفعلي' : 'تسجيل سداد'}</h2><button class="modal-close" data-close-modal>×</button></div><form id="${formId}" class="form-stack modal-form">${html}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">حفظ</button></div></form></section></div>`;
+  const isPayment = formId === 'monthly-payment-form' || formId === 'purchase-payment-form';
+  const submitText = isPayment ? '💳 تأكيد السداد' : 'حفظ';
+  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card ${formId === 'purchase-form' ? 'product-variants-modal' : ''}" role="dialog" aria-modal="true"><div class="modal-heading"><h2>${formId === 'supplier-form' ? 'إضافة تاجر' : formId === 'purchase-form' ? 'تسجيل فاتورة شراء من تاجر (نظام الموديل والألوان والمقاسات)' : formId === 'expense-form' ? 'تسجيل مصروف' : formId === 'return-form' ? 'تسجيل مرتجع مرتبط بالفاتورة' : formId === 'supplier-return-form' ? 'تسجيل مرتجع للمورد' : formId === 'monthly-obligation-form' ? 'إضافة التزام شهري' : formId === 'monthly-actual-form' ? 'تأكيد المصروف الفعلي' : 'تسجيل سداد'}</h2><button class="modal-close" data-close-modal aria-label="إغلاق">×</button></div><form id="${formId}" class="form-stack modal-form">${html}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">${submitText}</button></div></form></section></div>`;
   root.querySelectorAll('[data-close-modal]').forEach((button) => button.addEventListener('click', () => { root.innerHTML = ''; }));
-  root.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('click', (e) => { if (e.target === backdrop) root.innerHTML = ''; }));
+  // Modal backdrop click dismissal disabled: tapping outside does NOT discard the popup.
   root.querySelector(`#${formId}`).addEventListener('submit', async (event) => {
     event.preventDefault();
     const button = event.currentTarget.querySelector('[type=submit]'); button.disabled = true;
     try {
       const data = convert(Object.fromEntries(new FormData(event.currentTarget)));
       await api(endpoint, { method: 'POST', body: JSON.stringify(data) });
+      root.innerHTML = '';
       state.report = null;
       state.reportKey = null;
       state.productStats = null;
       state.supplierStats = null;
       state.analyticsKey = null;
       state.salesHistory = null;
-      state.report = null;
-      state.reportKey = null;
-      state.productStats = null;
-      state.supplierStats = null;
-      state.analyticsKey = null;
-      state.salesHistory = null;
-      await loadData(state.data.selectedStoreId); render(); toast(successMessage);
+      await loadData(state.data.selectedStoreId);
+      render();
+      toast(successMessage);
     } catch (error) { toast(error.message, 'error'); button.disabled = false; }
   });
 }
@@ -2619,6 +2645,34 @@ function bindSuppliers() {
 }
 
 async function bindSalesHistory() {
+  document.querySelectorAll('[data-sales-preset]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const preset = btn.dataset.salesPreset;
+      state.salesPreset = preset;
+      const today = new Date().toISOString().slice(0, 10);
+      if (preset === 'today') {
+        state.salesFrom = today;
+        state.salesTo = today;
+      } else if (preset === 'week') {
+        const d = new Date();
+        d.setDate(d.getDate() - 7);
+        state.salesFrom = d.toISOString().slice(0, 10);
+        state.salesTo = today;
+      } else if (preset === 'month') {
+        const d = new Date();
+        d.setDate(1);
+        state.salesFrom = d.toISOString().slice(0, 10);
+        state.salesTo = today;
+      } else {
+        state.salesFrom = '';
+        state.salesTo = '';
+      }
+      state.salesHistory = [];
+      state.salesHistoryTotal = 0;
+      await fetchSalesHistory(0, false);
+    });
+  });
+
   const searchForm = document.querySelector('#sales-history-search');
   searchForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -2634,6 +2688,7 @@ async function bindSalesHistory() {
       toast('تاريخ البداية لازم يكون قبل تاريخ النهاية', 'error');
       return;
     }
+    state.salesPreset = 'custom';
     state.salesHistorySearch = search;
     state.salesFrom = from;
     state.salesTo = to;
@@ -2643,6 +2698,7 @@ async function bindSalesHistory() {
   });
 
   document.querySelector('#reset-sales-filter')?.addEventListener('click', async () => {
+    state.salesPreset = 'all';
     state.salesHistorySearch = '';
     state.salesFrom = '';
     state.salesTo = '';
@@ -3021,23 +3077,38 @@ function bindMonthlyExpenses() {
     const name = button.dataset.name || 'الإيجار';
 
     supplierModal(`
-      <div style="font-size:15px;font-weight:800;color:var(--ink);margin-bottom:12px;">سداد: <strong>${escapeHtml(name)}</strong></div>
+      <div style="background:var(--surface-soft);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <span style="font-size:12px;color:var(--muted);font-weight:700;">سداد التزام شهري:</span>
+          <h3 style="margin:2px 0 0;font-size:16px;font-weight:800;color:var(--ink);">${escapeHtml(name)}</h3>
+        </div>
+        <div style="text-align:left;">
+          <span style="font-size:11px;color:var(--muted);font-weight:700;">المتبقي غير المسدد</span>
+          <div style="font-size:14px;font-weight:800;color:#be123c;">${maxAmount} ${state.data.company.currency}</div>
+        </div>
+      </div>
 
-      <label style="font-weight:700;font-size:13.5px;color:var(--ink);">المبلغ المراد سداده (${state.data.company.currency}):
-        <input name="amount" inputmode="decimal" value="${dailySuggested}" max="${maxAmount}" required autofocus style="font-weight:800;font-size:18px;height:44px;color:var(--purple);padding:0 12px;margin-top:6px;">
+      <label style="font-weight:700;font-size:13.5px;color:var(--ink);">المبلغ المراد سداده الآن (${state.data.company.currency}):
+        <input name="amount" inputmode="decimal" value="${dailySuggested}" max="${maxAmount}" required autofocus style="font-weight:800;font-size:19px;height:46px;color:var(--purple);padding:0 12px;margin-top:6px;border-radius:8px;">
+        <small style="display:block;margin-top:4px;font-size:11.5px;color:var(--muted);">المقسومة اليومية المقترحة لهذا الشهر: <strong>${dailySuggested} ${state.data.company.currency}</strong> (يمكنك تعديل المبلغ لما يناسبك).</small>
       </label>
 
       <div class="form-grid" style="margin-top:12px;">
         <label style="font-weight:700;font-size:13px;color:var(--ink);">طريقة الدفع (الخصم من):
-          <select name="paymentMethod" style="height:40px;">
+          <select name="paymentMethod" style="height:42px;border-radius:8px;">
             <option value="CASH_DRAWER">درج النقدية</option>
             <option value="CASH_SAFE">الخزينة</option>
             <option value="BANK_TRANSFER">تحويل بنكي</option>
           </select>
         </label>
-        <label style="font-weight:700;font-size:13px;color:var(--ink);">ملاحظات (اختياري):
-          <input name="referenceNumber" maxlength="80" value="سداد دفعة" style="height:40px;">
+        <label style="font-weight:700;font-size:13px;color:var(--ink);">بيان وملاحظات:
+          <input name="referenceNumber" maxlength="80" value="سداد دفعة" style="height:42px;border-radius:8px;">
         </label>
+      </div>
+
+      <div style="margin-top:12px;padding:10px 12px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;font-size:12px;color:#15803d;display:flex;align-items:center;gap:8px;">
+        <span>💡</span>
+        <span>المبلغ الذي تدفعه وتؤكده هنا فقط هو ما سيتم خصمه فورياً من أرباح المتجر وخزينة النقدية.</span>
       </div>
 
       <input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">
@@ -3045,7 +3116,7 @@ function bindMonthlyExpenses() {
     'monthly-payment-form',
     `/api/monthly-expenses/${button.dataset.actual}/payments`,
     (data) => ({ ...data, amount: toMinor(data.amount, decimals) }),
-    'تم تسجيل السداد وخصمه من الحسابات والمكسب');
+    'تم تسجيل السداد بنجاح وخصمه من أرباح المتجر');
   }));
 }
 

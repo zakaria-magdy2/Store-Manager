@@ -441,12 +441,8 @@ async function profitLossReport(ctx, url) {
   const netSales = grossSales - discounts - refunds;
   const grossProfit = netSales - cogs;
   const directExpenseTotal = directExpenses.reduce((sum, item) => sum + BigInt(item.amount), 0n);
-  let monthlyExpenseTotal = 0n;
-  for (const item of actuals) {
-    const monthStart = new Date(Date.UTC(item.year, item.month - 1, 1));
-    const monthEnd = new Date(Date.UTC(item.year, item.month, 0));
-    monthlyExpenseTotal += dailyMonthlyShare(BigInt(item.amount), item.days_in_month, monthStart, from, to < monthEnd ? to : monthEnd);
-  }
+  // Only deduct actually confirmed and paid monthly obligations:
+  const monthlyExpenseTotal = monthlyPayments.reduce((sum, item) => sum + BigInt(item.amount), 0n);
   const missingMonthlyActuals = [];
   for (let cursor = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), 1)); cursor <= to; cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1))) {
     const year = cursor.getUTCFullYear(), month = cursor.getUTCMonth() + 1;
