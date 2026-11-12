@@ -175,10 +175,13 @@ function money(value) {
   }
   const rawAmount = typeof value === 'object' ? value.amount : value;
   const minor = BigInt(String(rawAmount ?? '0').replace(/\..*$/, ''));
+  const isNegative = minor < 0n;
+  const absMinor = isNegative ? -minor : minor;
   const decimals = Number(value?.decimals ?? 2);
-  const digits = minor < 0n ? (-minor).toString().padStart(decimals + 1, '0') : minor.toString().padStart(decimals + 1, '0');
+  const digits = absMinor.toString().padStart(decimals + 1, '0');
   const amount = decimals === 0 ? digits : `${digits.slice(0, -decimals)}.${digits.slice(-decimals)}`;
-  return `${amount} ${value?.currency ?? 'EGP'}`.trim();
+  const sign = isNegative ? '-' : '';
+  return `${sign}${amount} ${value?.currency ?? 'EGP'}`.trim();
 }
 
 function decimalPrice(value) {
@@ -2005,6 +2008,7 @@ function profitLossView() {
   });
   const today = new Date().toISOString().slice(0, 10);
   const from = state.reportFrom ?? today, to = state.reportTo ?? today;
+  const activePlRange = state.plRange ?? (from === today && to === today ? 'today' : 'custom');
   const report = state.report;
   const currency = state.data.company.currency;
   const decimals = currencyDecimals(currency);
@@ -2099,11 +2103,11 @@ function profitLossView() {
     <section class="panel compact-filter-panel">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
         <div class="quick-date-pills">
-          <button type="button" class="date-preset-chip ${from === today && to === today ? 'active' : ''}" data-pl-range="today">اليوم</button>
-          <button type="button" class="date-preset-chip" data-pl-range="7d">آخر 7 أيام</button>
-          <button type="button" class="date-preset-chip" data-pl-range="30d">آخر 30 يوم</button>
-          <button type="button" class="date-preset-chip" data-pl-range="month">هذا الشهر</button>
-          <button type="button" class="date-preset-chip" data-pl-range="year">هذا العام</button>
+          <button type="button" class="date-preset-chip ${activePlRange === 'today' ? 'active' : ''}" data-pl-range="today">اليوم</button>
+          <button type="button" class="date-preset-chip ${activePlRange === '7d' ? 'active' : ''}" data-pl-range="7d">آخر 7 أيام</button>
+          <button type="button" class="date-preset-chip ${activePlRange === '30d' ? 'active' : ''}" data-pl-range="30d">آخر 30 يوم</button>
+          <button type="button" class="date-preset-chip ${activePlRange === 'month' ? 'active' : ''}" data-pl-range="month">هذا الشهر</button>
+          <button type="button" class="date-preset-chip ${activePlRange === 'year' ? 'active' : ''}" data-pl-range="year">هذا العام</button>
         </div>
         <form id="profit-loss-filter" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0;">
           <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin:0;font-weight:700;color:var(--ink);">من:
@@ -2373,43 +2377,47 @@ function growthForecastWidget(forecast, currency) {
         </div>
       </div>
 
-      <!-- الرسم البياني التفاعلي للأعمدة المزدوجة (المبيعات مقابل الأرباح) -->
-      <div class="growth-chart-container" style="margin:20px 0 16px;padding:16px;background:var(--surface-soft);border:1px solid var(--line);border-radius:12px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
-          <div style="display:flex;align-items:center;gap:18px;font-size:12px;font-weight:750;">
-            <span style="display:inline-flex;align-items:center;gap:6px;color:var(--purple);">
-              <span style="width:12px;height:12px;border-radius:3px;background:var(--purple);display:inline-block;"></span>
+      <!-- الرسم البياني التفاعلي للأعمدة المزدوجة -->
+      <div class="growth-chart-wrapper">
+        <div class="growth-chart-legend">
+          <div class="growth-legend-items">
+            <span class="legend-item legend-sales">
+              <span class="legend-bullet" style="background:#5948d8;"></span>
               إجمالي المبيعات
             </span>
-            <span style="display:inline-flex;align-items:center;gap:6px;color:#15803d;">
-              <span style="width:12px;height:12px;border-radius:3px;background:#15803d;display:inline-block;"></span>
-              مجمل الربح المحقق
+            <span class="legend-item legend-profit">
+              <span class="legend-bullet" style="background:#15803d;"></span>
+              مجمل الربح التجاري
             </span>
           </div>
-          <small style="color:var(--muted);font-size:11.5px;">اضغط على أي عمود لاستعراض وتحليل تفاصيل ذلك الشهر</small>
+          <small class="legend-hint">اضغط على أي عمود لاستعراض وتحليل تفاصيل ذلك الشهر</small>
         </div>
 
-        <div style="display:flex;align-items:flex-end;gap:14px;height:180px;padding:10px 4px 0;border-bottom:2px solid var(--line);overflow-x:auto;">
+        <div class="growth-chart-stage">
           ${chartMonths.map((m) => {
             const revNum = Number(m.revenue || '0');
             const profitNum = Number(m.profit || '0');
-            const revHeight = Math.max(6, Math.round((revNum / maxValNum) * 135));
-            const profitHeight = Math.max(4, Math.round((profitNum / maxValNum) * 135));
+            const revHeight = revNum > 0 ? Math.max(16, Math.round((revNum / maxValNum) * 160)) : 6;
+            const profitHeight = profitNum > 0 ? Math.max(10, Math.round((profitNum / maxValNum) * 160)) : 6;
             const isSelectedMonth = m.isSelected || (m.year === currentMonth.year && m.month === currentMonth.month);
 
             return `
-              <div class="growth-chart-col ${isSelectedMonth ? 'selected-col' : ''}" data-chart-ym="${m.yearMonth}" style="flex:1;min-width:65px;display:flex;flex-direction:column;align-items:center;cursor:pointer;padding:4px;border-radius:8px;${isSelectedMonth ? 'background:rgba(89,72,216,0.08);outline:2px solid var(--purple);' : ''}" title="${escapeHtml(m.name)} - مبيعات: ${format(m.revenue)} | أرباح: ${format(m.profit)}">
-                <div style="display:flex;align-items:flex-end;gap:5px;height:140px;width:100%;justify-content:center;">
+              <div class="growth-col-item ${isSelectedMonth ? 'growth-col-active' : ''}" data-chart-ym="${m.yearMonth}" title="${escapeHtml(m.name)}: مبيعات ${format(m.revenue)} | أرباح ${format(m.profit)}">
+                <div class="growth-col-bars">
                   <!-- عمود المبيعات -->
-                  <div style="width:16px;height:${revHeight}px;background:var(--purple);border-radius:4px 4px 0 0;transition:height 0.3s;position:relative;" title="المبيعات: ${format(m.revenue)}"></div>
+                  <div class="growth-bar-wrap">
+                    <span class="growth-bar-val growth-val-sales">${revNum > 0 ? format(m.revenue) : ''}</span>
+                    <div class="growth-bar-elem growth-bar-sales" style="height:${revHeight}px;"></div>
+                  </div>
                   <!-- عمود الربح -->
-                  <div style="width:16px;height:${profitHeight}px;background:#15803d;border-radius:4px 4px 0 0;transition:height 0.3s;position:relative;" title="مجمل الربح: ${format(m.profit)}"></div>
+                  <div class="growth-bar-wrap">
+                    <span class="growth-bar-val growth-val-profit">${profitNum > 0 ? format(m.profit) : ''}</span>
+                    <div class="growth-bar-elem growth-bar-profit" style="height:${profitHeight}px;"></div>
+                  </div>
                 </div>
-                <div style="margin-top:6px;font-size:11px;font-weight:800;color:var(--ink);text-align:center;white-space:nowrap;">
-                  ${m.name.split(' ')[0]}
-                </div>
-                <div style="font-size:9.5px;color:var(--muted);text-align:center;">
-                  ${m.year}
+                <div class="growth-col-label">
+                  <strong>${m.name.split(' ')[0]}</strong>
+                  <small>${m.year}</small>
                 </div>
               </div>
             `;
@@ -2464,63 +2472,6 @@ function growthForecastWidget(forecast, currency) {
           </div>
         </div>
       </div>
-
-      <!-- جدول الأرشيف الشامل لكل الشهور -->
-      ${monthlyHistory.length ? `
-        <div class="growth-archive-box">
-          <div class="growth-archive-head">
-            <div>
-              <h4>أرشيف وسجل نمو الشهور (مبيعات، أرباح، ونسب النمو عبر التاريخ)</h4>
-              <p style="margin:2px 0 0;font-size:11.5px;color:var(--muted);">جميع الشهور المسجلة محفوظة في هذا الأرشيف ويمكنك استعراض أي شهر في أي وقت بالضغط على تحليله</p>
-            </div>
-            <span class="status-pill status-complete" style="font-size:11px;font-weight:800;">${monthlyHistory.length} شهور محفوظة</span>
-          </div>
-          <div class="table-scroll analytics-scroll-box" style="max-height:420px;overflow-y:auto;">
-            <table class="compact-table zebra-table">
-              <thead>
-                <tr>
-                  <th>الشهر والسنة</th>
-                  <th style="text-align:center;">عدد الفواتير</th>
-                  <th>إجمالي المبيعات</th>
-                  <th>مجمل الربح</th>
-                  <th>المتوسط اليومي</th>
-                  <th style="text-align:center;">معدل النمو الشهري</th>
-                  <th style="text-align:center;">تحليل الشهر</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${monthlyHistory.map((m) => {
-                  const mUp = m.isGrowth;
-                  const mSign = m.growthPercent >= 0 ? '+' : '';
-                  return `
-                    <tr style="${m.isSelected ? 'background:rgba(89,72,216,0.08);font-weight:700;' : ''}">
-                      <td>
-                        <strong>${escapeHtml(m.name)}</strong>
-                        ${m.isCurrent ? ' <span class="badge badge-brand" style="font-size:10px;padding:2px 6px;margin-right:4px;">الحالي</span>' : ''}
-                        ${m.isSelected ? ' <span class="badge" style="background:var(--purple);color:#fff;font-size:10px;padding:2px 6px;margin-right:4px;">المعروض</span>' : ''}
-                      </td>
-                      <td style="text-align:center;"><strong>${m.salesCount}</strong></td>
-                      <td><strong>${format(m.revenue)}</strong></td>
-                      <td style="color:#15803d;font-weight:700;">${format(m.profit)}</td>
-                      <td>${format(m.dailyAverage)}</td>
-                      <td style="text-align:center;">
-                        <span class="status-pill ${mUp ? 'status-complete' : 'status-low'}" style="font-size:11px;font-weight:800;">
-                          ${mSign}${m.growthPercent}%
-                        </span>
-                      </td>
-                      <td style="text-align:center;">
-                        <button type="button" class="button button-secondary button-sm view-growth-month-btn" data-growth-ym="${m.yearMonth}" style="height:28px;padding:0 10px;font-size:11.5px;font-weight:750;">
-                          ${m.isSelected ? 'معروض حالياً' : 'عرض وتحليل'}
-                        </button>
-                      </td>
-                    </tr>
-                  `;
-                }).join('')}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      ` : ''}
     </section>
   `;
 }
@@ -2629,41 +2580,54 @@ function financialMapView() {
       </div>
     </section>
 
-    <div class="fm-card-grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 14px;">
+    <div class="fm-card-grid" style="grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 16px;">
       <div class="fm-kpi-card">
         <small>المبيعات المحصلة (+)</small>
-        <strong style="color:#15803d;">+${format(summary.totalSales)}</strong>
+        <strong style="color:#15803d;font-size:18px;">+${format(summary.totalSales)}</strong>
         <small style="color:var(--muted);">مجمل ربح البضاعة: ${format(summary.totalGrossProfit)}</small>
       </div>
       <div class="fm-kpi-card">
         <small>سداد دفعات الموردين (-)</small>
-        <strong style="color:#be123c;">-${format(summary.totalSupplierPaid)}</strong>
-        <small style="color:var(--muted);">يخصم من السيولة النقدية</small>
+        <strong style="color:#be123c;font-size:18px;">-${format(summary.totalSupplierPaid)}</strong>
+        <small style="color:var(--muted);">حركة نقدية لتسوية المديونية</small>
       </div>
       <div class="fm-kpi-card">
         <small>المصروفات المسددة (-)</small>
-        <strong style="color:#be123c;">-${format(summary.totalExpensesPaid)}</strong>
-        <small style="color:var(--muted);">إيجار ومصروفات تشغيلية</small>
+        <strong style="color:#be123c;font-size:18px;">-${format(summary.totalExpensesPaid)}</strong>
+        <small style="color:var(--muted);">إيجار ومصروفات تشغيلية مؤكدة</small>
       </div>
-      <div class="fm-kpi-card fm-kpi-profit">
-        <small style="color:var(--purple);font-weight:750;">صافي الأرباح التشغيلية (=)</small>
-        <strong style="color:${BigInt(summary.operatingProfit ?? '0') >= 0n ? 'var(--purple)' : '#be123c'};">${format(summary.operatingProfit ?? summary.totalGrossProfit)}</strong>
-        <small style="color:var(--muted);">مطابق لتقرير الأرباح والخسائر 100%</small>
-      </div>
-      <div class="fm-kpi-card" style="border-right:3px solid #2563eb;">
-        <small style="color:#2563eb;font-weight:750;">صافي السيولة النقدية (الكاش) (=)</small>
-        <strong style="color:${BigInt(summary.netCashFlow ?? summary.realizedCashProfit ?? '0') >= 0n ? '#15803d' : '#be123c'};">${format(summary.netCashFlow ?? summary.realizedCashProfit)}</strong>
-        <small style="color:var(--muted);">المحصل - المدفوع للتجار والمصاريف</small>
-      </div>
+      ${(() => {
+        const opMinor = BigInt(summary.operatingProfit ?? '0');
+        const isOpProfit = opMinor >= 0n;
+        return `
+          <div class="fm-kpi-card" style="border-right:3px solid ${isOpProfit ? '#15803d' : 'var(--rose,#be123c)'};${!isOpProfit ? 'background:rgba(190,18,60,0.03);' : ''}">
+            <small style="color:${isOpProfit ? '#15803d' : 'var(--rose,#be123c)'};font-weight:750;">${isOpProfit ? 'صافي الأرباح التشغيلية (+)' : 'النتيجة التشغيلية (عجز / خسائر -)'}</small>
+            <strong style="color:${isOpProfit ? '#15803d' : 'var(--rose,#be123c)'};font-size:19px;">${isOpProfit ? '+' : ''}${format(summary.operatingProfit)}</strong>
+            <small style="color:var(--muted);">${isOpProfit ? 'أرباح محققة من النشاط التجاري' : 'عجز نتيجة زيادة المصروفات عن أرباح المبيعات'}</small>
+          </div>
+        `;
+      })()}
+      ${(() => {
+        const cashMinor = BigInt(summary.netCashFlow ?? summary.realizedCashProfit ?? '0');
+        const isCashPositive = cashMinor >= 0n;
+        return `
+          <div class="fm-kpi-card" style="border-right:3px solid ${isCashPositive ? '#2563eb' : 'var(--rose,#be123c)'};">
+            <small style="color:${isCashPositive ? '#2563eb' : 'var(--rose,#be123c)'};font-weight:750;">صافي السيولة النقدية (الكاش)</small>
+            <strong style="color:${isCashPositive ? '#15803d' : '#be123c'};font-size:19px;">${isCashPositive ? '+' : ''}${format(summary.netCashFlow ?? summary.realizedCashProfit)}</strong>
+            <small style="color:var(--muted);">المحصل كاش - المدفوع للتجار والمصاريف</small>
+          </div>
+        `;
+      })()}
     </div>
 
-    <div class="pro-info-banner" style="background:var(--purple-soft);border:1px solid #c4b5fd;border-radius:12px;padding:12px 16px;margin-bottom:18px;">
-      <strong style="color:var(--purple-dark);font-size:13px;display:block;margin-bottom:3px;">
-        توضيح مالي متكامل: التوافق بين الأرباح والخسائر والمسار المالي
+    <div class="pro-info-banner" style="background:var(--surface-soft);border:1px solid var(--line);border-radius:12px;padding:14px 18px;margin-bottom:18px;">
+      <strong style="color:var(--ink);font-size:13.5px;display:block;margin-bottom:5px;">
+        بيان توضيحي لنتيجة النشاط والفرق بين الأرباح والخسائر وحركة السيولة:
       </strong>
-      <p style="font-size:11.5px;color:var(--ink-soft);margin:0;line-height:1.6;">
-        • <strong>صافي الأرباح التشغيلية (${format(summary.operatingProfit ?? summary.totalGrossProfit)}):</strong> يمثل الربح الفعلي المحقق من نشاط البيع والتشغيل (المبيعات - تكلفة البضاعة المباعة - المصروفات التشغيلية المؤكدة). هذا الرقم متطابق تماماً مع تقرير الأرباح والخسائر.<br>
-        • <strong>صافي حركة السيولة (${format(summary.netCashFlow ?? summary.realizedCashProfit)}):</strong> يمثل حركة النقدية الفعلية في الدرج والخزينة. سداد فواتير الموردين يقلل الكاش والمديونية ولا يُعد خسارة في الأرباح التشغيلية، لأن البضاعة المشراة موجودة كأصل ذو قيمة داخل المخزن.
+      <p style="font-size:12px;color:var(--ink-soft);margin:0;line-height:1.7;">
+        • <strong>لماذا يوجد عجز تشغيلي (${format(summary.operatingProfit)})؟</strong><br>
+        مجمل ربح البضاعة التي تم بيعها فعلياً بلغ <strong>${format(summary.totalGrossProfit)}</strong>، بينما المصروفات والالتزامات المسددة بلغت <strong>${format(summary.totalExpensesPaid)}</strong> (تشمل إيجار 4,000 ج.م ومصروفات تشغيل وكهرباء). بما أن المصروفات في هذه الفترة أعلى من أرباح البضاعة المباعة، فالنتيجة هي <strong>عجز / خسارة بقيمة ${format(summary.operatingProfit)}</strong> وتتحول تلقائياً إلى ربح مع بيع المزيد من البضاعة لتغطية المصروفات.<br>
+        • <strong>صافي حركة السيولة (${format(summary.netCashFlow ?? summary.realizedCashProfit)}):</strong> يمثل حركة النقدية الفعلية داخل الدرج والخزينة (المقبوض من العملاء مخصوماً منه المسدد للتجار والمصروفات).
       </p>
     </div>
 
@@ -4377,19 +4341,39 @@ function bindTopProducts() {
   });
   if (!state.growthForecast) void loadGrowthForecast();
 
+  document.querySelector('#growth-view-3m')?.addEventListener('click', () => {
+    state.growthViewMode = '3m';
+    render();
+  });
+  document.querySelector('#growth-view-6m')?.addEventListener('click', () => {
+    state.growthViewMode = '6m';
+    render();
+  });
+  document.querySelector('#growth-view-year')?.addEventListener('click', () => {
+    state.growthViewMode = 'year';
+    render();
+  });
+  document.querySelector('#growth-year-select')?.addEventListener('change', async (e) => {
+    state.growthSelectedYear = Number(e.target.value);
+    state.growthViewMode = 'year';
+    await loadGrowthForecast(state.growthSelectedYear, 1);
+  });
+
   const growthMonthPicker = document.querySelector('#growth-month-picker');
   growthMonthPicker?.addEventListener('change', (e) => {
     const val = e.target.value;
     if (!val) return;
     const [y, m] = val.split('-');
+    state.growthSelectedYear = Number(y);
     void loadGrowthForecast(y, m);
   });
 
-  document.querySelectorAll('.view-growth-month-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const ym = btn.dataset.growthYm;
+  document.querySelectorAll('[data-chart-ym], .view-growth-month-btn').forEach((elem) => {
+    elem.addEventListener('click', () => {
+      const ym = elem.dataset.chartYm || elem.dataset.growthYm;
       if (!ym) return;
       const [y, m] = ym.split('-');
+      state.growthSelectedYear = Number(y);
       void loadGrowthForecast(y, m);
     });
   });
@@ -4443,12 +4427,14 @@ function bindProfitLoss() {
     }
   };
   document.querySelectorAll('[data-pl-range]').forEach((btn) => btn.addEventListener('click', () => {
+    state.plRange = btn.dataset.plRange;
     const range = computePresetRange(btn.dataset.plRange);
     state.reportKey = null;
     void load(range.from, range.to);
   }));
   document.querySelector('#profit-loss-filter')?.addEventListener('submit', (event) => {
     event.preventDefault();
+    state.plRange = 'custom';
     const from = document.querySelector('#report-from').value;
     const to = document.querySelector('#report-to').value;
     state.reportKey = null;

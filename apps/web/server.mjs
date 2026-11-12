@@ -898,7 +898,8 @@ async function financialMapReport(ctx, url) {
 
   // 5. Customer Returns
   let retSql = `
-    SELECT cr.id, cr.return_number, cr.created_at, cr.refund_amount, cr.payment_method, cr.created_by_user_id
+    SELECT cr.id, cr.return_number, cr.created_at, cr.refund_amount, cr.payment_method, cr.created_by_user_id,
+      COALESCE((SELECT SUM(cri.cost_amount) FROM customer_return_items cri WHERE cri.return_id = cr.id AND cri.tenant_id = cr.tenant_id), 0) as returned_cost
     FROM customer_returns cr
     WHERE cr.tenant_id = ? AND cr.store_id = ?
   `;
@@ -986,7 +987,9 @@ async function financialMapReport(ctx, url) {
   }
 
   for (const r of retRows) {
-    const amt = BigInt(r.refund_amount ?? 0);
+    const refundAmt = BigInt(r.refund_amount ?? 0);
+    const costAmt = BigInt(r.returned_cost ?? 0);
+    const lostMargin = refundAmt - costAmt; // Only the lost profit margin from the returned merchandise
     timeline.push({
       id: r.id,
       timestamp: toIsoTimestamp(r.created_at),
@@ -997,9 +1000,9 @@ async function financialMapReport(ctx, url) {
       party: 'عميل مرتجع',
       actor: userMap.get(r.created_by_user_id) || 'الكاشير',
       amountIn: '0',
-      amountOut: amt.toString(),
-      profitImpact: (-amt).toString(),
-      details: `استرداد نقدي لعميل مقابل بضاعة مرتجعة`,
+      amountOut: refundAmt.toString(),
+      profitImpact: (-lostMargin).toString(),
+      details: `استرداد نقدي بقيمة ${Money.fromMinor(refundAmt, currency).toDecimalString()} ${currency} (تمت استعادة البضاعة للمخزن بتكلفة ${Money.fromMinor(costAmt, currency).toDecimalString()} ${currency})`,
     });
   }
 
@@ -1012,6 +1015,7 @@ async function financialMapReport(ctx, url) {
   let totalSupplierPaidMinor = 0n;
   let totalExpensesMinor = 0n;
   let totalRefundsMinor = 0n;
+  let totalReturnedCostMinor = 0n;
 
   for (const item of timeline) {
     const inAmt = BigInt(item.amountIn);
@@ -1030,6 +1034,7 @@ async function financialMapReport(ctx, url) {
       totalExpensesMinor += outAmt;
     } else if (item.type === 'CUSTOMER_RETURN') {
       totalRefundsMinor += outAmt;
+      totalReturnedCostMinor += (outAmt + pImpact);
     }
 
     item.runningCash = runningCashMinor.toString();
@@ -1037,7 +1042,8 @@ async function financialMapReport(ctx, url) {
   }
 
   const netCashFlowMinor = totalSalesMinor - totalSupplierPaidMinor - totalExpensesMinor - totalRefundsMinor;
-  const operatingProfitMinor = totalGrossProfitMinor - totalExpensesMinor - totalRefundsMinor;
+  const netReturnLossMinor = totalRefundsMinor - totalReturnedCostMinor;
+  const operatingProfitMinor = totalGrossProfitMinor - totalExpensesMinor - netReturnLossMinor;
 
   return {
     currency,

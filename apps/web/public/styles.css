@@ -2025,37 +2025,213 @@ table tbody tr:hover td,
   border-color: rgba(126, 34, 206, 0.4);
 }
 
-/* Growth Month Toolbar & History Archive Table */
+/* ========================================================
+   Active Filter State Prominence & Contrast
+   ======================================================== */
+.pro-filter-pill.active,
+.date-preset-chip.active {
+  background: var(--purple, #5948d8) !important;
+  border-color: var(--purple, #5948d8) !important;
+  color: #ffffff !important;
+  font-weight: 850 !important;
+  box-shadow: 0 4px 12px rgba(89, 72, 216, 0.38) !important;
+  transform: translateY(-1px);
+}
+:root[data-theme="dark"] .pro-filter-pill.active,
+:root[data-theme="dark"] .date-preset-chip.active {
+  background: #7968ef !important;
+  border-color: #7968ef !important;
+  color: #ffffff !important;
+  box-shadow: 0 4px 14px rgba(121, 104, 239, 0.45) !important;
+}
+
+/* ========================================================
+   Modern Growth Dual-Bar Chart Styling
+   ======================================================== */
+.growth-forecast-section {
+  padding: 22px !important;
+}
 .growth-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 14px;
   flex-wrap: wrap;
-  padding: 12px 20px;
-  background: var(--surface-soft);
+  padding: 0 0 16px 0;
+  background: transparent;
   border-bottom: 1px solid var(--line);
 }
-.growth-archive-box {
-  margin: 16px 20px 20px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  overflow: hidden;
-  background: var(--panel);
-}
-.growth-archive-head {
+.growth-toolbar-title {
+  font-size: 16px;
+  font-weight: 850;
+  color: var(--ink);
+  margin: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 12px 18px;
-  background: var(--surface-soft);
-  border-bottom: 1px solid var(--line);
+  gap: 8px;
 }
-.growth-archive-head h4 {
-  margin: 0;
-  font-size: 13.5px;
+.growth-toolbar-desc {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.growth-toolbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.growth-chart-wrapper {
+  margin: 18px 0 14px;
+  padding: 20px 18px 14px;
+  background: var(--surface-soft, #f8fafc);
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 14px;
+}
+:root[data-theme="dark"] .growth-chart-wrapper {
+  background: rgba(30, 41, 59, 0.45);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+.growth-chart-legend {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 18px;
+  padding-bottom: 10px;
+  border-bottom: 1px dashed var(--line);
+}
+.growth-legend-items {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  font-size: 12.5px;
+  font-weight: 750;
+}
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.legend-sales {
+  color: var(--purple, #5948d8);
+}
+:root[data-theme="dark"] .legend-sales {
+  color: #a78bfa;
+}
+.legend-profit {
+  color: #15803d;
+}
+:root[data-theme="dark"] .legend-profit {
+  color: #4ade80;
+}
+.legend-bullet {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  display: inline-block;
+}
+.legend-hint {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.growth-chart-stage {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  min-height: 250px;
+  padding: 14px 10px 4px;
+  border-bottom: 2px solid var(--line);
+  overflow-x: auto;
+}
+.growth-col-item {
+  flex: 1;
+  min-width: 80px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  cursor: pointer;
+  padding: 8px 6px;
+  border-radius: 10px;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  background: transparent;
+}
+.growth-col-item:hover {
+  background: rgba(89, 72, 216, 0.06);
+  transform: translateY(-2px);
+}
+.growth-col-item.growth-col-active {
+  background: rgba(89, 72, 216, 0.1) !important;
+  outline: 2px solid var(--purple, #5948d8);
+  box-shadow: 0 6px 18px rgba(89, 72, 216, 0.18);
+}
+:root[data-theme="dark"] .growth-col-item.growth-col-active {
+  background: rgba(121, 104, 239, 0.18) !important;
+  outline-color: #7968ef;
+}
+.growth-col-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  height: 200px;
+  width: 100%;
+  justify-content: center;
+}
+.growth-bar-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  height: 100%;
+}
+.growth-bar-val {
+  font-size: 10px;
+  font-weight: 800;
+  margin-bottom: 6px;
+  white-space: nowrap;
+  font-family: monospace;
+}
+.growth-val-sales {
+  color: var(--purple, #5948d8);
+}
+:root[data-theme="dark"] .growth-val-sales {
+  color: #c4b5fd;
+}
+.growth-val-profit {
+  color: #15803d;
+}
+:root[data-theme="dark"] .growth-val-profit {
+  color: #86efac;
+}
+.growth-bar-elem {
+  width: 22px;
+  border-radius: 6px 6px 0 0;
+  transition: height 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.growth-bar-sales {
+  background: linear-gradient(180deg, #7968ef 0%, #5142ce 100%);
+  box-shadow: 0 3px 8px rgba(89, 72, 216, 0.3);
+}
+.growth-bar-profit {
+  background: linear-gradient(180deg, #22c55e 0%, #15803d 100%);
+  box-shadow: 0 3px 8px rgba(21, 128, 61, 0.3);
+}
+.growth-col-label {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.growth-col-label strong {
+  font-size: 12px;
   font-weight: 800;
   color: var(--ink);
+  white-space: nowrap;
+}
+.growth-col-label small {
+  font-size: 10px;
+  color: var(--muted);
 }
 
 
