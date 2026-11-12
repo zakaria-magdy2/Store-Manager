@@ -1266,18 +1266,21 @@ async function showShiftSalesModal(shiftId, shiftNumber) {
   const root = getModalRoot();
   root.innerHTML = `
     <div class="modal-backdrop">
-      <section class="modal-card invoice-detail-card" role="dialog" aria-modal="true" style="width:min(860px, calc(100vw - 32px));margin:20px auto;">
-        <div class="modal-heading">
+      <section class="modal-card invoice-detail-card" role="dialog" aria-modal="true" style="width:min(860px, calc(100vw - 32px)); border-radius:16px;">
+        <div class="modal-heading" style="padding:18px 26px; border-bottom:1px solid var(--line);">
           <div>
             <span class="eyebrow eyebrow-dark">فواتير مبيعات الوردية</span>
-            <h2>فواتير الوردية ${escapeHtml(shiftNumber)}</h2>
+            <div style="display:flex;align-items:center;gap:8px;margin-top:2px;">
+              <h2 style="margin:0;font-size:18px;font-weight:800;">فواتير الوردية</h2>
+              <span class="invoice-number-chip">#${escapeHtml(shiftNumber)}</span>
+            </div>
           </div>
-          <button class="modal-close" data-close-modal>×</button>
+          <button class="modal-close" data-close-modal aria-label="إغلاق">×</button>
         </div>
-        <div id="shift-sales-content" style="padding:16px 20px;">
+        <div id="shift-sales-content" class="modal-body" style="padding:22px 26px; overflow-y:auto;">
           <p style="text-align:center;color:var(--muted);">جاري تحميل الفواتير...</p>
         </div>
-        <div class="modal-actions" style="padding:12px 20px;">
+        <div class="modal-actions" style="margin:0; padding:16px 26px; border-top:1px solid var(--line); display:flex; justify-content:flex-end;">
           <button type="button" class="button button-secondary" data-close-modal>إغلاق</button>
         </div>
       </section>
@@ -1300,39 +1303,41 @@ async function showShiftSalesModal(shiftId, shiftNumber) {
     }
 
     content.innerHTML = `
-      <div class="table-scroll analytics-scroll-box" style="max-height:450px; overflow-y:auto;">
-        <table class="compact-table zebra-table">
-          <thead>
-            <tr>
-              <th>رقم الفاتورة</th>
-              <th>التوقيت</th>
-              <th>العميل</th>
-              <th>طريقة السداد</th>
-              <th style="text-align:center;">عدد الأصناف</th>
-              <th>إجمالي الفاتورة</th>
-              ${sales[0]?.grossProfit !== null && sales[0]?.grossProfit !== undefined ? '<th>الربح المحقق</th>' : ''}
-              <th style="text-align:center;">الإيصال</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${sales.map((s) => `
+      <div class="invoice-table-container">
+        <div class="table-scroll analytics-scroll-box" style="max-height:450px; overflow-y:auto; margin:0;">
+          <table class="compact-table zebra-table invoice-table" style="margin:0; width:100%;">
+            <thead>
               <tr>
-                <td><strong style="color:var(--purple);font-family:monospace;">${escapeHtml(s.saleNumber)}</strong></td>
-                <td>${new Date(s.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</td>
-                <td><strong>${escapeHtml(s.customerName)}</strong></td>
-                <td><span class="payment-badge">${methodLabel(s.paymentMethod)}</span></td>
-                <td style="text-align:center;">${s.itemsCount}</td>
-                <td><strong style="color:#15803d;">${format(s.total)}</strong></td>
-                ${s.grossProfit !== null && s.grossProfit !== undefined ? `<td><strong style="color:var(--purple);">${format(s.grossProfit)}</strong></td>` : ''}
-                <td style="text-align:center;">
-                  <button type="button" class="button button-sm button-secondary print-shift-sale-btn" data-sale-id="${s.id}" style="font-size:11px;padding:2px 8px;">
-                    معاينة الإيصال
-                  </button>
-                </td>
+                <th>رقم الفاتورة</th>
+                <th>التوقيت</th>
+                <th>العميل</th>
+                <th>طريقة السداد</th>
+                <th style="text-align:center;">عدد الأصناف</th>
+                <th>إجمالي الفاتورة</th>
+                ${sales[0]?.grossProfit !== null && sales[0]?.grossProfit !== undefined ? '<th>الربح المحقق</th>' : ''}
+                <th style="text-align:center;">الإيصال</th>
               </tr>
-            `).join('')}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              ${sales.map((s) => `
+                <tr>
+                  <td><span class="invoice-number-chip" style="font-size:11.5px;padding:2px 7px;">#${escapeHtml(s.saleNumber)}</span></td>
+                  <td>${new Date(s.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</td>
+                  <td><strong>${escapeHtml(s.customerName)}</strong></td>
+                  <td><span class="payment-badge">${methodLabel(s.paymentMethod)}</span></td>
+                  <td style="text-align:center;">${s.itemsCount}</td>
+                  <td><strong style="color:#15803d;">${format(s.total)}</strong></td>
+                  ${s.grossProfit !== null && s.grossProfit !== undefined ? `<td><strong style="color:var(--purple);">${format(s.grossProfit)}</strong></td>` : ''}
+                  <td style="text-align:center;">
+                    <button type="button" class="button button-sm button-secondary print-shift-sale-btn" data-sale-id="${s.id}" style="font-size:11px;padding:2px 8px;">
+                      معاينة الإيصال
+                    </button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
       </div>
     `;
 
@@ -3586,7 +3591,123 @@ function showSaleDetails(sale) {
   const hasChange = sale.changeGiven && BigInt(sale.changeGiven.amount) > 0n;
   const canReturn = (state.data.capabilities.canRefund || state.data.capabilities.canReturnSale || state.data.capabilities.cashierMode) && (sale.items ?? []).some((item) => BigInt(item.returnableQuantity ?? item.quantity ?? '0') > 0n);
 
-  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card invoice-detail-card" role="dialog" aria-modal="true"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">فاتورة مبيعات المتجر</span><h2>فاتورة #${escapeHtml(sale.saleNumber)}</h2></div><button class="modal-close" data-close-modal>×</button></div><div class="invoice-meta-badges"><div class="invoice-meta-badge"><small>تاريخ وتوقيت الفاتورة</small><strong>${new Intl.DateTimeFormat('ar-EG', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(sale.createdAt))}</strong></div><div class="invoice-meta-badge"><small>الكاشير المسؤول</small><strong>${escapeHtml(sale.cashierName)}</strong></div><div class="invoice-meta-badge"><small>العميل</small><strong>${escapeHtml(sale.customerName || 'عميل نقدي')}</strong></div></div><div class="table-scroll" style="margin:14px 0;"><table class="invoice-table"><thead><tr><th>الصنف / الموديل</th><th>كود القطعة</th><th style="text-align:center;">الكمية</th><th>سعر الوحدة</th>${hasDiscount ? '<th>الخصم</th>' : ''}<th>الإجمالي</th></tr></thead><tbody>${sale.items.map((item) => `<tr><td><strong>${escapeHtml(item.name)}</strong></td><td><span class="sku-code">${escapeHtml(item.sku)}</span></td><td style="text-align:center;"><strong>${item.quantity}</strong></td><td>${money(item.unitPrice)}</td>${hasDiscount ? `<td>${money({ ...item.netRevenue, amount: (BigInt(item.lineDiscount?.amount ?? '0') + BigInt(item.cartDiscountShare?.amount ?? '0')).toString() })}</td>` : ''}<td class="table-total">${money(item.netRevenue)}</td></tr>`).join('')}</tbody></table></div><div class="invoice-clean-summary">${hasDiscount ? `<div class="summary-line"><span>الإجمالي قبل الخصم:</span><span>${money(sale.subtotal)}</span></div><div class="summary-line" style="color:var(--rose,#be123c);"><span>قيمة الخصم:</span><strong>- ${money(sale.discountTotal)}</strong></div>` : ''}<div class="summary-line main-total"><span>إجمالي الفاتورة المطلوب:</span><strong class="grand-amount">${money(sale.total)}</strong></div><div class="summary-line payment-line"><span>طريقة السداد:</span><span class="payment-badge">${sale.payments.map((p) => `${methodLabel(p.method)}: ${money(p.amount)}`).join(' · ')}</span></div>${hasChange ? `<div class="summary-line change-line"><span>المتبقي للعميل (الباقي):</span><strong>${money(sale.changeGiven)}</strong></div>` : ''}</div>${sale.returns.length ? `<div style="margin-top:14px;padding:12px;background:var(--surface-soft);border:1px solid var(--line);border-radius:10px;"><strong style="color:var(--rose,#be123c);font-size:13px;display:block;margin-bottom:6px;">المرتجعات المسجلة:</strong>${sale.returns.map((item) => `<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0;"><span>${escapeHtml(item.returnNumber)} · ${methodLabel(item.paymentMethod)}</span><strong>${money(item.refundAmount)}</strong></div>`).join('')}<div style="border-top:1px dashed var(--line);margin-top:6px;padding-top:6px;display:flex;justify-content:space-between;font-weight:700;"><span>إجمالي المرتجع:</span><strong>${money({ ...sale.total, amount: totalReturned })}</strong></div></div>` : ''}<div class="modal-actions" style="margin-top:16px;"><button class="button button-secondary" data-close-modal>إغلاق</button>${canReturn ? '<button class="button button-secondary" type="button" id="invoice-start-return-btn" style="color:var(--rose,#be123c);border-color:var(--rose,#be123c);font-weight:700;">عمل مرتجع من هذه الفاتورة</button>' : ''}<button class="button button-primary" type="button" data-print-invoice>طباعة الفاتورة</button></div></section></div>`;
+  root.innerHTML = `
+    <div class="modal-backdrop">
+      <section class="modal-card invoice-detail-card" role="dialog" aria-modal="true" aria-labelledby="sale-details-title">
+        <div class="modal-heading">
+          <div style="display:flex;align-items:center;gap:12px;">
+            <div>
+              <span class="eyebrow eyebrow-dark">فاتورة مبيعات المتجر</span>
+              <div style="display:flex;align-items:center;gap:8px;margin-top:2px;">
+                <h2 id="sale-details-title" style="margin:0;font-size:18px;font-weight:800;">فاتورة مبيعات</h2>
+                <span class="invoice-number-chip">#${escapeHtml(sale.saleNumber)}</span>
+              </div>
+            </div>
+          </div>
+          <button class="modal-close" data-close-modal aria-label="إغلاق">×</button>
+        </div>
+
+        <div class="modal-body invoice-modal-body">
+          <div class="invoice-meta-badges">
+            <div class="invoice-meta-badge">
+              <small>تاريخ وتوقيت الفاتورة</small>
+              <strong>${new Intl.DateTimeFormat('ar-EG', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(sale.createdAt))}</strong>
+            </div>
+            <div class="invoice-meta-badge">
+              <small>الكاشير المسؤول</small>
+              <strong>${escapeHtml(sale.cashierName)}</strong>
+            </div>
+            <div class="invoice-meta-badge">
+              <small>العميل</small>
+              <strong>${escapeHtml(sale.customerName || 'عميل نقدي')}</strong>
+            </div>
+          </div>
+
+          <div class="invoice-table-container">
+            <div class="table-scroll" style="margin:0;">
+              <table class="invoice-table zebra-table">
+                <thead>
+                  <tr>
+                    <th>الصنف / الموديل</th>
+                    <th>كود القطعة</th>
+                    <th style="text-align:center;">الكمية</th>
+                    <th>سعر الوحدة</th>
+                    ${hasDiscount ? '<th>الخصم</th>' : ''}
+                    <th>الإجمالي</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${sale.items.map((item) => `
+                    <tr>
+                      <td><strong>${escapeHtml(item.name)}</strong></td>
+                      <td><span class="sku-code">${escapeHtml(item.sku)}</span></td>
+                      <td style="text-align:center;"><strong>${item.quantity}</strong></td>
+                      <td>${money(item.unitPrice)}</td>
+                      ${hasDiscount ? `<td>${money({ ...item.netRevenue, amount: (BigInt(item.lineDiscount?.amount ?? '0') + BigInt(item.cartDiscountShare?.amount ?? '0')).toString() })}</td>` : ''}
+                      <td class="table-total">${money(item.netRevenue)}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="invoice-clean-summary">
+            ${hasDiscount ? `
+              <div class="summary-line">
+                <span>الإجمالي قبل الخصم:</span>
+                <span>${money(sale.subtotal)}</span>
+              </div>
+              <div class="summary-line" style="color:var(--rose,#be123c);">
+                <span>قيمة الخصم:</span>
+                <strong>- ${money(sale.discountTotal)}</strong>
+              </div>
+            ` : ''}
+            <div class="summary-line main-total">
+              <span>إجمالي الفاتورة المطلوب:</span>
+              <strong class="grand-amount">${money(sale.total)}</strong>
+            </div>
+            <div class="summary-line payment-line">
+              <span>طريقة السداد:</span>
+              <span class="payment-badge">${sale.payments.map((p) => `${methodLabel(p.method)}: ${money(p.amount)}`).join(' · ')}</span>
+            </div>
+            ${hasChange ? `
+              <div class="summary-line change-line">
+                <span>المتبقي للعميل (الباقي):</span>
+                <strong>${money(sale.changeGiven)}</strong>
+              </div>
+            ` : ''}
+          </div>
+
+          ${sale.returns.length ? `
+            <div class="invoice-returns-box" style="padding:14px 18px;background:rgba(190, 18, 60, 0.05);border:1px solid rgba(190, 18, 60, 0.22);border-radius:12px;">
+              <strong style="color:var(--rose,#be123c);font-size:13.5px;display:block;margin-bottom:8px;">المرتجعات المسجلة:</strong>
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                ${sale.returns.map((item) => `
+                  <div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px;padding:4px 0;">
+                    <span>${escapeHtml(item.returnNumber)} · ${methodLabel(item.paymentMethod)}</span>
+                    <strong>${money(item.refundAmount)}</strong>
+                  </div>
+                `).join('')}
+              </div>
+              <div style="border-top:1px dashed rgba(190, 18, 60, 0.25);margin-top:8px;padding-top:8px;display:flex;justify-content:space-between;font-weight:700;font-size:13px;">
+                <span>إجمالي المرتجع:</span>
+                <strong style="color:var(--rose,#be123c);">${money({ ...sale.total, amount: totalReturned })}</strong>
+              </div>
+            </div>
+          ` : ''}
+        </div>
+
+        <div class="modal-actions" style="display:flex;justify-content:space-between;align-items:center;">
+          <button class="button button-secondary" data-close-modal>إغلاق</button>
+          <div style="display:flex;align-items:center;gap:10px;">
+            ${canReturn ? '<button class="button button-secondary" type="button" id="invoice-start-return-btn" style="color:var(--rose,#be123c);border-color:var(--rose,#be123c);font-weight:700;">عمل مرتجع من هذه الفاتورة</button>' : ''}
+            <button class="button button-primary" type="button" data-print-invoice>طباعة الفاتورة</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  `;
   root.querySelectorAll('[data-close-modal]').forEach((button) => button.addEventListener('click', () => { root.innerHTML = ''; }));
   root.querySelector('[data-print-invoice]')?.addEventListener('click', () => void showThermalReceiptModal(sale.id));
   root.querySelector('#invoice-start-return-btn')?.addEventListener('click', () => {
@@ -3620,53 +3741,58 @@ async function openSaleReturnModal(saleOrId) {
   root.innerHTML = `
     <div class="modal-backdrop">
       <section class="modal-card invoice-detail-card" role="dialog" aria-modal="true" aria-labelledby="return-modal-title">
-        <div class="modal-heading">
+        <div class="modal-heading" style="padding:18px 26px; border-bottom:1px solid var(--line);">
           <div>
             <span class="eyebrow eyebrow-dark">إرجاع مبيعات · إرجاع قطعة معينة أو الفاتورة</span>
-            <h2 id="return-modal-title">تسجيل مرتجع من فاتورة #${escapeHtml(sale.saleNumber)}</h2>
-            <p>حدد عدد القطع المراد إرجاعها لكل صنف (يمكن إرجاع قطعة واحدة فقط) مع طريقة رد المبلغ.</p>
+            <div style="display:flex;align-items:center;gap:8px;margin-top:2px;">
+              <h2 id="return-modal-title" style="margin:0;font-size:18px;font-weight:800;">تسجيل مرتجع من فاتورة</h2>
+              <span class="invoice-number-chip">#${escapeHtml(sale.saleNumber)}</span>
+            </div>
+            <p style="margin-top:4px;">حدد عدد القطع المراد إرجاعها لكل صنف (يمكن إرجاع قطعة واحدة فقط) مع طريقة رد المبلغ.</p>
           </div>
-          <button type="button" class="modal-close" data-close-return>×</button>
+          <button type="button" class="modal-close" data-close-return aria-label="إغلاق">×</button>
         </div>
 
-        <form id="sale-return-form" class="modal-form">
-          <div class="table-scroll" style="margin-bottom:14px;">
-            <table class="invoice-table return-items-table">
-              <thead>
-                <tr>
-                  <th>الصنف / الموديل</th>
-                  <th>الكمية المشتراة</th>
-                  <th>المتاح للإرجاع</th>
-                  <th>سعر القطعة</th>
-                  <th style="min-width:140px;text-align:center;">الكمية المراد إرجاعها</th>
-                  <th>المبلغ المسترد</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${returnableItems.map((item) => `
+        <form id="sale-return-form" class="modal-form" style="padding:22px 26px; display:flex; flex-direction:column; gap:16px;">
+          <div class="invoice-table-container">
+            <div class="table-scroll" style="margin:0;">
+              <table class="invoice-table zebra-table return-items-table" style="margin:0; width:100%;">
+                <thead>
                   <tr>
-                    <td>
-                      <strong>${escapeHtml(item.name)}</strong>
-                      <div style="font-size:10.5px;color:var(--muted);">${escapeHtml(item.sku)}</div>
-                    </td>
-                    <td>${item.quantity} قطعة</td>
-                    <td><strong style="color:var(--brand);">${item.returnableQuantity} قطعة</strong></td>
-                    <td>${money(item.unitPrice)}</td>
-                    <td style="text-align:center;">
-                      <div class="quantity-control" style="display:inline-flex;margin:auto;">
-                        <button type="button" data-return-step="-1" data-item-id="${item.id}">−</button>
-                        <input type="number" name="qty:${item.id}" data-item-id="${item.id}" min="0" max="${item.returnableQuantity}" step="1" value="0" style="width:50px;height:26px;text-align:center;font-weight:800;border:0;background:transparent;">
-                        <button type="button" data-return-step="1" data-item-id="${item.id}">+</button>
-                      </div>
-                    </td>
-                    <td class="table-total" data-item-refund="${item.id}">0 ${currency}</td>
+                    <th>الصنف / الموديل</th>
+                    <th>الكمية المشتراة</th>
+                    <th>المتاح للإرجاع</th>
+                    <th>سعر القطعة</th>
+                    <th style="min-width:140px;text-align:center;">الكمية المراد إرجاعها</th>
+                    <th>المبلغ المسترد</th>
                   </tr>
-                `).join('')}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  ${returnableItems.map((item) => `
+                    <tr>
+                      <td>
+                        <strong>${escapeHtml(item.name)}</strong>
+                        <div style="font-size:10.5px;color:var(--muted);">${escapeHtml(item.sku)}</div>
+                      </td>
+                      <td>${item.quantity} قطعة</td>
+                      <td><strong style="color:var(--brand);">${item.returnableQuantity} قطعة</strong></td>
+                      <td>${money(item.unitPrice)}</td>
+                      <td style="text-align:center;">
+                        <div class="quantity-control" style="display:inline-flex;margin:auto;">
+                          <button type="button" data-return-step="-1" data-item-id="${item.id}">−</button>
+                          <input type="number" name="qty:${item.id}" data-item-id="${item.id}" min="0" max="${item.returnableQuantity}" step="1" value="0" style="width:50px;height:26px;text-align:center;font-weight:800;border:0;background:transparent;">
+                          <button type="button" data-return-step="1" data-item-id="${item.id}">+</button>
+                        </div>
+                      </td>
+                      <td class="table-total" data-item-refund="${item.id}">0 ${currency}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
           </div>
 
-          <div class="invoice-clean-summary">
+          <div class="invoice-clean-summary" style="margin:0; padding:18px 22px; border-radius:12px;">
             <div class="summary-line">
               <span>إجمالي القطع المحددة للإرجاع:</span>
               <strong id="return-total-pieces" style="font-size:15px;color:var(--rose,#be123c);">0 قطعة</strong>
@@ -3692,7 +3818,7 @@ async function openSaleReturnModal(saleOrId) {
             </div>
           </div>
 
-          <div class="modal-actions" style="margin-top:16px;">
+          <div class="modal-actions" style="margin:0; padding:16px 26px; border-top:1px solid var(--line); display:flex; justify-content:space-between; align-items:center;">
             <button type="button" class="button button-secondary" data-close-return>إلغاء</button>
             <button type="submit" class="button button-primary" id="confirm-sale-return-btn" disabled style="background:var(--rose,#be123c);border-color:var(--rose,#be123c);">
               تأكيد إرجاع القطع ورد المبلغ
@@ -4160,65 +4286,75 @@ async function showThermalReceiptModal(saleId) {
     const root = getModalRoot();
     root.innerHTML = `
       <div class="modal-backdrop">
-        <section class="modal-card" role="dialog" aria-modal="true" style="width:min(580px, calc(100vw - 24px)); border-radius:16px;">
-          <div class="modal-heading" style="padding:16px 22px;">
+        <section class="modal-card thermal-receipt-card" role="dialog" aria-modal="true" style="width:min(580px, calc(100vw - 32px)); border-radius:16px;">
+          <div class="modal-heading" style="padding:18px 24px; border-bottom:1px solid var(--line);">
             <div>
-              <span class="eyebrow eyebrow-dark">إيصال مبيعات حراري (${escapeHtml(receipt.width)})</span>
+              <span class="eyebrow eyebrow-dark">معاينة الإيصال الحراري (${escapeHtml(receipt.width)})</span>
               <h2 style="font-size:17px;font-weight:800;margin-top:2px;">${escapeHtml(receipt.companyName)} — ${escapeHtml(receipt.storeName)}</h2>
             </div>
-            <button class="modal-close" data-close-modal>×</button>
+            <button class="modal-close" data-close-modal aria-label="إغلاق">×</button>
           </div>
-          <div class="invoice-meta-badges" style="margin:14px 22px; gap:10px;">
-            <div class="invoice-meta-badge" style="padding:8px 12px;">
-              <small>رقم الإيصال</small>
-              <strong style="color:var(--purple);font-size:14px;">#${escapeHtml(receipt.saleNumber)}</strong>
+
+          <div class="modal-body thermal-receipt-body" style="padding:22px 24px; display:flex; flex-direction:column; gap:16px; overflow-y:auto;">
+            <div class="invoice-meta-badges" style="margin:0; display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:10px;">
+              <div class="invoice-meta-badge" style="padding:10px 14px;">
+                <small>رقم الإيصال</small>
+                <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
+                  <span class="invoice-number-chip" style="font-size:12px;padding:2px 8px;">#${escapeHtml(receipt.saleNumber)}</span>
+                </div>
+              </div>
+              <div class="invoice-meta-badge" style="padding:10px 14px;">
+                <small>الكاشير</small>
+                <strong>${escapeHtml(receipt.cashierName)}</strong>
+              </div>
+              <div class="invoice-meta-badge" style="padding:10px 14px;">
+                <small>التاريخ والوقت</small>
+                <strong>${new Date(receipt.createdAt).toLocaleString('ar-EG', { dateStyle:'short', timeStyle:'short' })}</strong>
+              </div>
             </div>
-            <div class="invoice-meta-badge" style="padding:8px 12px;">
-              <small>الكاشير</small>
-              <strong>${escapeHtml(receipt.cashierName)}</strong>
+
+            <div class="invoice-table-container" style="border:1px solid var(--line); border-radius:10px; overflow:hidden;">
+              <div class="table-scroll" style="margin:0;">
+                <table class="invoice-table zebra-table" style="margin:0; width:100%;">
+                  <thead>
+                    <tr>
+                      <th>الصنف</th>
+                      <th style="text-align:center;">الكمية</th>
+                      <th>السعر</th>
+                      <th>الإجمالي</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${receipt.items.map((item) => `
+                      <tr>
+                        <td><strong>${escapeHtml(item.productName)}</strong></td>
+                        <td style="text-align:center;"><strong>${escapeHtml(item.quantity)}</strong></td>
+                        <td>${money(item.unitPrice)}</td>
+                        <td class="table-total">${money(item.lineTotal)}</td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              </div>
             </div>
-            <div class="invoice-meta-badge" style="padding:8px 12px;">
-              <small>التاريخ والوقت</small>
-              <strong>${new Date(receipt.createdAt).toLocaleString('ar-EG', { dateStyle:'short', timeStyle:'short' })}</strong>
+
+            <div class="invoice-clean-summary" style="margin:0; padding:16px 20px; border-radius:10px;">
+              <div class="summary-line main-total">
+                <span>الإجمالي المطلوب:</span>
+                <strong class="grand-amount">${money(receipt.total)}</strong>
+              </div>
+              <div class="summary-line">
+                <span>المدفوع:</span>
+                <strong>${money(receipt.paidTotal)}</strong>
+              </div>
+              <div class="summary-line change-line">
+                <span>الباقي:</span>
+                <strong>${money(receipt.changeGiven)}</strong>
+              </div>
             </div>
           </div>
-          <div class="table-scroll" style="margin:0 22px 14px;">
-            <table class="invoice-table" style="margin:0;">
-              <thead>
-                <tr>
-                  <th>الصنف</th>
-                  <th style="text-align:center;">الكمية</th>
-                  <th>السعر</th>
-                  <th>الإجمالي</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${receipt.items.map((item) => `
-                  <tr>
-                    <td><strong>${escapeHtml(item.productName)}</strong></td>
-                    <td style="text-align:center;">${escapeHtml(item.quantity)}</td>
-                    <td>${money(item.unitPrice)}</td>
-                    <td class="table-total">${money(item.lineTotal)}</td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-          </div>
-          <div class="invoice-clean-summary" style="margin:0 22px 16px;">
-            <div class="summary-line main-total">
-              <span>الإجمالي المطلوب:</span>
-              <strong class="grand-amount">${money(receipt.total)}</strong>
-            </div>
-            <div class="summary-line">
-              <span>المدفوع:</span>
-              <strong>${money(receipt.paidTotal)}</strong>
-            </div>
-            <div class="summary-line change-line">
-              <span>الباقي:</span>
-              <strong>${money(receipt.changeGiven)}</strong>
-            </div>
-          </div>
-          <div class="modal-actions" style="padding:14px 22px;">
+
+          <div class="modal-actions" style="margin:0; padding:16px 24px; border-top:1px solid var(--line); display:flex; justify-content:space-between; align-items:center;">
             <button type="button" class="button button-secondary" data-close-modal>إغلاق</button>
             <button type="button" class="button button-primary" id="confirm-thermal-print">طباعة الآن</button>
           </div>

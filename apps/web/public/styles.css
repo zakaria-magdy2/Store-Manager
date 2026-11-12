@@ -1049,19 +1049,168 @@ html[data-theme="dark"] .stock-matrix-cell.cell-low{color:#fcd34d}
 .invoice-summary-row.balance-due{font-size:15px;font-weight:800;color:#be123c}
 
 /* Clean Invoice Modal, Card Spacing & Attendance Styles */
-.invoice-meta-badges{display:flex;flex-wrap:wrap;gap:12px;margin:12px 0 16px}
-.invoice-meta-badge{flex:1 1 180px;display:grid;gap:4px;padding:10px 14px;background:var(--surface-soft);border:1px solid var(--line);border-radius:10px}
-.invoice-meta-badge small{color:var(--muted);font-size:11.5px;font-weight:600}
-.invoice-meta-badge strong{color:var(--ink);font-size:13.5px}
-.invoice-table{width:100%;border-collapse:collapse;margin:12px 0}
-.invoice-table th{padding:10px 14px;text-align:right;font-size:12px;font-weight:700;color:var(--muted);background:var(--surface-soft);border-bottom:1.5px solid var(--line)}
-.invoice-table td{padding:12px 14px;text-align:right;font-size:13px;border-bottom:1px solid var(--line)}
-.invoice-clean-summary{display:grid;gap:10px;padding:16px 18px;background:var(--surface-soft);border:1px solid var(--line);border-radius:12px;margin-top:14px}
-.invoice-clean-summary .summary-line{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13.5px}
-.invoice-clean-summary .summary-line.main-total{font-size:17px;font-weight:800;color:var(--brand);padding:8px 0;border-top:1px dashed var(--line);border-bottom:1px dashed var(--line)}
-.invoice-clean-summary .grand-amount{font-size:20px;color:var(--brand)}
-.invoice-clean-summary .payment-badge{font-weight:700;color:var(--ink)}
-.invoice-clean-summary .change-line{color:#059669;font-weight:700}
+.modal-card.invoice-detail-card {
+  width: min(840px, calc(100vw - 36px)) !important;
+  max-width: calc(100vw - 36px) !important;
+  border-radius: 16px !important;
+  box-shadow: 0 28px 70px rgba(15, 23, 42, 0.35) !important;
+}
+
+.modal-card.thermal-receipt-card {
+  width: min(580px, calc(100vw - 36px)) !important;
+  max-width: calc(100vw - 36px) !important;
+  border-radius: 16px !important;
+  box-shadow: 0 28px 70px rgba(15, 23, 42, 0.35) !important;
+}
+
+.invoice-number-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: 'IBM Plex Sans Arabic', monospace;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--purple, #5948d8);
+  background: var(--purple-soft, #f1efff);
+  border: 1px solid rgba(89, 72, 216, 0.25);
+  padding: 3px 10px;
+  border-radius: 8px;
+  letter-spacing: 0.5px;
+}
+
+.invoice-modal-body,
+.thermal-receipt-body {
+  padding: 22px 26px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 18px !important;
+  overflow-y: auto !important;
+  -webkit-overflow-scrolling: touch !important;
+  box-sizing: border-box !important;
+}
+
+.invoice-meta-badges {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.invoice-meta-badge {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px 16px;
+  background: var(--surface-soft, #f8fafc);
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 12px;
+  box-sizing: border-box;
+}
+
+.invoice-meta-badge small {
+  color: var(--muted, #64748b);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.invoice-meta-badge strong {
+  color: var(--ink, #1e293b);
+  font-size: 13.5px;
+  font-weight: 700;
+}
+
+.invoice-table-container {
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--panel, #ffffff);
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.invoice-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0;
+}
+
+.invoice-table th {
+  padding: 12px 16px;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted, #64748b);
+  background: var(--surface-soft, #f8fafc);
+  border-bottom: 1px solid var(--line, #e2e8f0);
+}
+
+.invoice-table td {
+  padding: 13px 16px;
+  text-align: right;
+  font-size: 13px;
+  border-bottom: 1px solid var(--line, #e2e8f0);
+  color: var(--ink, #1e293b);
+}
+
+.invoice-table.zebra-table tbody tr:nth-child(even) {
+  background: rgba(248, 250, 252, 0.75);
+}
+
+.invoice-table.zebra-table tbody tr:hover {
+  background: var(--purple-soft, #f1efff);
+}
+
+.invoice-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.invoice-clean-summary {
+  display: grid;
+  gap: 11px;
+  padding: 18px 22px;
+  background: var(--surface-soft, #f8fafc);
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 12px;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.invoice-clean-summary .summary-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13.5px;
+  color: var(--ink-soft, #334155);
+}
+
+.invoice-clean-summary .summary-line.main-total {
+  font-size: 16.5px;
+  font-weight: 800;
+  color: var(--purple, #5948d8);
+  padding: 10px 0;
+  border-top: 1px dashed var(--line-strong, #cbd5e1);
+  border-bottom: 1px dashed var(--line-strong, #cbd5e1);
+}
+
+.invoice-clean-summary .grand-amount {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--purple, #5948d8);
+}
+
+.invoice-clean-summary .payment-badge {
+  font-weight: 700;
+  color: var(--ink, #1e293b);
+}
+
+.invoice-clean-summary .change-line {
+  color: #059669;
+  font-weight: 700;
+}
+
 .attendance-badge-btn{display:inline-flex;align-items:center;gap:7px;padding:7px 14px;border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer;transition:all .15s ease}
 .attendance-badge-active{background:rgba(5,150,105,.12);border:1.5px solid rgba(5,150,105,.4);color:#059669}
 
@@ -1120,7 +1269,6 @@ html[data-theme="dark"] .stock-matrix-cell.cell-low{color:#fcd34d}
 }
 
 .modal-card.product-variants-modal,
-.modal-card.invoice-detail-card,
 .modal-card.barcode-print-modal {
   width: min(920px, calc(100vw - 24px)) !important;
   max-width: calc(100vw - 24px) !important;
@@ -1177,7 +1325,6 @@ html[data-theme="dark"] .stock-matrix-cell.cell-low{color:#fcd34d}
 .modal-body,
 .pos-matrix-picker,
 .matrix-section-box,
-.invoice-clean-summary,
 .barcode-print-modal > .table-scroll {
   min-height: 0 !important;
   flex: 1 1 auto !important;
@@ -1305,7 +1452,6 @@ html[data-theme="dark"] .stock-matrix-cell.cell-low{color:#fcd34d}
   .modal-body,
   .pos-matrix-picker,
   .matrix-section-box,
-  .invoice-clean-summary,
   .barcode-print-modal > .table-scroll {
     padding: 12px 14px !important;
   }
@@ -1365,6 +1511,84 @@ html[data-theme="dark"] .stock-matrix-cell.cell-low{color:#fcd34d}
 :root[data-theme="dark"] .pos-size-tile:hover:not(:disabled) {
   background: #2e2654 !important;
   border-color: #7968ef !important;
+}
+
+/* Dark Theme Overrides for Invoices & Thermal Receipts */
+:root[data-theme="dark"] .modal-card.invoice-detail-card,
+:root[data-theme="dark"] .modal-card.thermal-receipt-card {
+  background: #171e2b !important;
+  border-color: #2b3545 !important;
+}
+
+:root[data-theme="dark"] .invoice-number-chip {
+  background: rgba(129, 140, 248, 0.15) !important;
+  color: #a5b4fc !important;
+  border-color: rgba(129, 140, 248, 0.3) !important;
+}
+
+:root[data-theme="dark"] .invoice-modal-body,
+:root[data-theme="dark"] .thermal-receipt-body {
+  background: #141a24 !important;
+}
+
+:root[data-theme="dark"] .invoice-meta-badge {
+  background: #1a2230 !important;
+  border-color: #2b3545 !important;
+}
+
+:root[data-theme="dark"] .invoice-meta-badge small {
+  color: #94a3b8 !important;
+}
+
+:root[data-theme="dark"] .invoice-meta-badge strong {
+  color: #f1f5f9 !important;
+}
+
+:root[data-theme="dark"] .invoice-table-container {
+  background: #1a2230 !important;
+  border-color: #2b3545 !important;
+}
+
+:root[data-theme="dark"] .invoice-table th {
+  background: #161c27 !important;
+  border-bottom-color: #2b3545 !important;
+  color: #94a3b8 !important;
+}
+
+:root[data-theme="dark"] .invoice-table td {
+  border-bottom-color: #242d3d !important;
+  color: #e2e8f0 !important;
+}
+
+:root[data-theme="dark"] .invoice-table.zebra-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.025) !important;
+}
+
+:root[data-theme="dark"] .invoice-table.zebra-table tbody tr:hover {
+  background: rgba(89, 72, 216, 0.15) !important;
+}
+
+:root[data-theme="dark"] .invoice-clean-summary {
+  background: #1a2230 !important;
+  border-color: #2b3545 !important;
+}
+
+:root[data-theme="dark"] .invoice-clean-summary .summary-line {
+  color: #cbd5e1 !important;
+}
+
+:root[data-theme="dark"] .invoice-clean-summary .summary-line.main-total {
+  color: #a5b4fc !important;
+  border-top-color: #334155 !important;
+  border-bottom-color: #334155 !important;
+}
+
+:root[data-theme="dark"] .invoice-clean-summary .grand-amount {
+  color: #a5b4fc !important;
+}
+
+:root[data-theme="dark"] .invoice-clean-summary .payment-badge {
+  color: #f8fafc !important;
 }
 
 /* Employee Profile Dialog Responsive Styles */
