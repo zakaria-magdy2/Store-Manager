@@ -339,7 +339,45 @@
   .product-stat-metrics { grid-template-columns: minmax(0, 1fr); }
 }
 
-.invoice-open{border:0;background:transparent;color:var(--purple);font:inherit;font-weight:700;text-decoration:underline;text-underline-offset:3px;padding:0}.sales-history-more{display:flex;justify-content:center;padding:18px}.invoice-detail-card{width:min(920px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto}.invoice-detail-meta{display:flex;flex-wrap:wrap;gap:10px 24px;color:var(--muted);font-size:13px;margin:0 0 18px}.invoice-detail-card h3{font-size:14px;margin:20px 0 10px}.invoice-detail-totals,.invoice-detail-payments{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:10px;margin-top:16px}.invoice-detail-totals>div,.invoice-detail-payments>div{display:flex;justify-content:space-between;gap:12px;padding:12px;background:var(--panel);border:1px solid var(--line);border-radius:9px}.invoice-detail-totals span,.invoice-detail-payments span{color:var(--muted);font-size:12px}.invoice-detail-totals strong,.invoice-detail-payments strong{font-size:13px}@media print{body *{visibility:hidden!important}.invoice-detail-card,.invoice-detail-card *{visibility:visible!important}.invoice-detail-card{position:absolute;inset:0;width:100%;max-height:none;box-shadow:none}.invoice-detail-card .modal-actions{display:none!important}}
+.invoice-open{border:0;background:transparent;color:var(--purple);font:inherit;font-weight:700;text-decoration:underline;text-underline-offset:3px;padding:0}.sales-history-more{display:flex;justify-content:center;padding:18px}.invoice-detail-card{width:min(920px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto}.invoice-detail-meta{display:flex;flex-wrap:wrap;gap:10px 24px;color:var(--muted);font-size:13px;margin:0 0 18px}.invoice-detail-card h3{font-size:14px;margin:20px 0 10px}.invoice-detail-totals,.invoice-detail-payments{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:10px;margin-top:16px}.invoice-detail-totals>div,.invoice-detail-payments>div{display:flex;justify-content:space-between;gap:12px;padding:12px;background:var(--panel);border:1px solid var(--line);border-radius:9px}.invoice-detail-totals span,.invoice-detail-payments span{color:var(--muted);font-size:12px}.invoice-detail-totals strong,.invoice-detail-payments strong{font-size:13px}@media print {
+  body * {
+    visibility: hidden !important;
+  }
+  .invoice-detail-card,
+  .invoice-detail-card *,
+  .thermal-receipt-paper,
+  .thermal-receipt-paper * {
+    visibility: visible !important;
+  }
+  .invoice-detail-card {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    max-height: none;
+    box-shadow: none;
+  }
+  .thermal-receipt-paper {
+    position: absolute !important;
+    inset-inline: 0 !important;
+    top: 0 !important;
+    margin: 0 auto !important;
+    width: 80mm !important;
+    max-width: 80mm !important;
+    border: none !important;
+    box-shadow: none !important;
+    background: #fff !important;
+    color: #000 !important;
+    padding: 0 !important;
+  }
+  .thermal-receipt-paper * {
+    color: #000 !important;
+  }
+  .modal-actions,
+  .modal-close,
+  .modal-heading {
+    display: none !important;
+  }
+}
 
 .product-variants-modal{width:min(920px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto}.variant-options-section{display:grid;gap:10px;padding:14px;border:1px solid var(--line);border-radius:12px;background:color-mix(in srgb,var(--panel) 94%,var(--purple-soft))}.variant-options-section>div:first-child{display:grid;gap:4px}.variant-options-section>div:first-child strong{font-size:13px;color:var(--ink)}.variant-options-section small,.variant-options-note{margin:0;color:var(--muted);font-size:10px;line-height:1.6}.variant-option-row{display:grid;grid-template-columns:minmax(130px,.55fr) minmax(0,1.45fr);gap:9px}.variant-option-row input,.variant-option-row select{width:100%;height:40px;min-width:0;padding:0 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink)}#variant-matrix-notice{color:#b45d13;font-size:11px}.variant-matrix-scroll{max-width:100%;overflow:auto}.variant-matrix-table{width:100%;min-width:610px;border-collapse:collapse}.variant-matrix-table th,.variant-matrix-table td{padding:7px;text-align:right;border-bottom:1px solid var(--line);font-size:11px}.variant-matrix-table td:first-child{font-weight:700;white-space:nowrap}.variant-matrix-table input{width:100%;min-width:95px;height:36px;padding:0 8px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--ink)}.variant-options-section[hidden],.single-variant-sku[hidden],.variant-matrix[hidden]{display:none!important}@media(max-width:600px){.product-variants-modal{padding:18px 14px}.variant-option-row{grid-template-columns:minmax(0,1fr)}.variant-options-section{padding:10px}}
 .sales-history-search{display:flex;align-items:center;gap:6px;min-width:min(280px,100%)}.sales-history-search input{width:100%;height:38px;min-width:0;border:1px solid var(--line);border-radius:8px;padding:0 10px;background:var(--panel);color:var(--ink)}.sales-history-search .button{width:40px;min-width:40px;padding:0}@media(max-width:640px){.panel-heading:has(.sales-history-search){align-items:stretch;flex-direction:column}.sales-history-search{width:100%}}
@@ -1056,11 +1094,12 @@ html[data-theme="dark"] .stock-matrix-cell.cell-low{color:#fcd34d}
   box-shadow: 0 28px 70px rgba(15, 23, 42, 0.35) !important;
 }
 
+.modal-card.thermal-receipt-dialog,
 .modal-card.thermal-receipt-card {
-  width: min(580px, calc(100vw - 36px)) !important;
-  max-width: calc(100vw - 36px) !important;
+  width: min(440px, calc(100vw - 28px)) !important;
+  max-width: calc(100vw - 28px) !important;
   border-radius: 16px !important;
-  box-shadow: 0 28px 70px rgba(15, 23, 42, 0.35) !important;
+  box-shadow: 0 28px 75px rgba(0, 0, 0, 0.4) !important;
 }
 
 .invoice-number-chip {
@@ -1078,8 +1117,19 @@ html[data-theme="dark"] .stock-matrix-cell.cell-low{color:#fcd34d}
   letter-spacing: 0.5px;
 }
 
-.invoice-modal-body,
-.thermal-receipt-body {
+.thermal-receipt-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--purple, #5948d8);
+  background: var(--purple-soft, #f1efff);
+  border: 1px solid rgba(89, 72, 216, 0.25);
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+
+.invoice-modal-body {
   padding: 22px 26px !important;
   display: flex !important;
   flex-direction: column !important;
@@ -1089,13 +1139,199 @@ html[data-theme="dark"] .stock-matrix-cell.cell-low{color:#fcd34d}
   box-sizing: border-box !important;
 }
 
+.thermal-receipt-body {
+  padding: 16px 20px !important;
+  background: var(--surface-soft, #f8fafc) !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  overflow-y: auto !important;
+  -webkit-overflow-scrolling: touch !important;
+  max-height: calc(100dvh - 160px) !important;
+  box-sizing: border-box !important;
+}
+
+/* Realistic Thermal Receipt Paper Slip (80mm) */
+.thermal-receipt-paper {
+  width: 100%;
+  max-width: 380px;
+  background: var(--panel, #ffffff);
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 12px;
+  padding: 18px 16px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.07);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-sizing: border-box;
+}
+
+.thermal-header {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.thermal-store-name {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--ink, #1e293b);
+}
+
+.thermal-branch-name {
+  font-size: 12px;
+  color: var(--muted, #64748b);
+  font-weight: 600;
+}
+
+.thermal-receipt-num {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--purple, #5948d8);
+  margin-top: 4px;
+  letter-spacing: 0.5px;
+}
+
+.thermal-divider-dashed {
+  border-top: 1.5px dashed var(--line-strong, #cbd5e1);
+  margin: 3px 0;
+  width: 100%;
+}
+
+.thermal-meta-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.thermal-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--ink-soft, #334155);
+}
+
+.thermal-meta-row span {
+  color: var(--muted, #64748b);
+  font-size: 11.5px;
+}
+
+.thermal-meta-row strong {
+  color: var(--ink, #1e293b);
+  font-weight: 700;
+}
+
+.thermal-items-table {
+  width: 100% !important;
+  min-width: 0 !important;
+  border-collapse: collapse;
+  margin: 2px 0;
+  font-size: 12px;
+}
+
+.thermal-items-table th {
+  padding: 8px 4px;
+  font-size: 11.5px;
+  font-weight: 800;
+  color: var(--muted, #64748b);
+  border-bottom: 1.5px solid var(--line, #e2e8f0);
+  background: transparent;
+}
+
+.thermal-items-table td {
+  padding: 9px 4px;
+  font-size: 12px;
+  border-bottom: 1px dashed var(--line, #e2e8f0);
+  vertical-align: middle;
+  color: var(--ink, #1e293b);
+}
+
+.thermal-items-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.thermal-item-desc {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.thermal-item-desc strong {
+  font-size: 12.5px;
+  color: var(--ink, #1e293b);
+  line-height: 1.35;
+}
+
+.thermal-sku {
+  font-size: 10.5px;
+  color: var(--muted, #64748b);
+  font-family: monospace;
+}
+
+.thermal-totals {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 12.5px;
+}
+
+.thermal-total-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--ink-soft, #334155);
+}
+
+.thermal-total-row.main {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--purple, #5948d8);
+  padding: 6px 0;
+}
+
+.thermal-grand-total {
+  font-size: 17px;
+  font-weight: 800;
+  color: var(--purple, #5948d8);
+}
+
+.thermal-footer {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 4px;
+}
+
+.thermal-footer p {
+  margin: 0;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--ink-soft, #334155);
+}
+
+.thermal-footer small {
+  font-size: 10px;
+  color: var(--muted, #64748b);
+}
+
 .invoice-meta-badges {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
   gap: 12px;
   margin: 0;
   width: 100%;
   box-sizing: border-box;
+}
+
+@media (max-width: 640px) {
+  .invoice-meta-badges {
+    grid-template-columns: 1fr !important;
+  }
 }
 
 .invoice-meta-badge {
@@ -1124,16 +1360,23 @@ html[data-theme="dark"] .stock-matrix-cell.cell-low{color:#fcd34d}
 .invoice-table-container {
   border: 1px solid var(--line, #e2e8f0);
   border-radius: 12px;
-  overflow: hidden;
+  overflow-x: auto;
   background: var(--panel, #ffffff);
   width: 100%;
+  flex-shrink: 0;
   box-sizing: border-box;
 }
 
 .invoice-table {
-  width: 100%;
+  width: 100% !important;
+  min-width: 0 !important;
   border-collapse: collapse;
   margin: 0;
+}
+
+.invoice-table-container .table-scroll table {
+  min-width: 0 !important;
+  width: 100% !important;
 }
 
 .invoice-table th {
@@ -1175,6 +1418,7 @@ html[data-theme="dark"] .stock-matrix-cell.cell-low{color:#fcd34d}
   border-radius: 12px;
   box-sizing: border-box;
   width: 100%;
+  flex-shrink: 0;
 }
 
 .invoice-clean-summary .summary-line {
@@ -1515,9 +1759,88 @@ html[data-theme="dark"] .stock-matrix-cell.cell-low{color:#fcd34d}
 
 /* Dark Theme Overrides for Invoices & Thermal Receipts */
 :root[data-theme="dark"] .modal-card.invoice-detail-card,
-:root[data-theme="dark"] .modal-card.thermal-receipt-card {
+:root[data-theme="dark"] .modal-card.thermal-receipt-card,
+:root[data-theme="dark"] .modal-card.thermal-receipt-dialog {
   background: #171e2b !important;
   border-color: #2b3545 !important;
+}
+
+:root[data-theme="dark"] .thermal-receipt-chip {
+  background: rgba(129, 140, 248, 0.15) !important;
+  color: #a5b4fc !important;
+  border-color: rgba(129, 140, 248, 0.3) !important;
+}
+
+:root[data-theme="dark"] .thermal-receipt-paper {
+  background: #171f2c !important;
+  border-color: #2b3545 !important;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4) !important;
+}
+
+:root[data-theme="dark"] .thermal-store-name {
+  color: #f1f5f9 !important;
+}
+
+:root[data-theme="dark"] .thermal-branch-name {
+  color: #94a3b8 !important;
+}
+
+:root[data-theme="dark"] .thermal-receipt-num {
+  color: #a5b4fc !important;
+}
+
+:root[data-theme="dark"] .thermal-divider-dashed {
+  border-top-color: #334155 !important;
+}
+
+:root[data-theme="dark"] .thermal-meta-row {
+  color: #cbd5e1 !important;
+}
+
+:root[data-theme="dark"] .thermal-meta-row span {
+  color: #94a3b8 !important;
+}
+
+:root[data-theme="dark"] .thermal-meta-row strong {
+  color: #f1f5f9 !important;
+}
+
+:root[data-theme="dark"] .thermal-items-table th {
+  color: #94a3b8 !important;
+  border-bottom-color: #2b3545 !important;
+}
+
+:root[data-theme="dark"] .thermal-items-table td {
+  border-bottom-color: #242d3d !important;
+  color: #e2e8f0 !important;
+}
+
+:root[data-theme="dark"] .thermal-item-desc strong {
+  color: #f1f5f9 !important;
+}
+
+:root[data-theme="dark"] .thermal-sku {
+  color: #94a3b8 !important;
+}
+
+:root[data-theme="dark"] .thermal-total-row {
+  color: #cbd5e1 !important;
+}
+
+:root[data-theme="dark"] .thermal-total-row.main {
+  color: #a5b4fc !important;
+}
+
+:root[data-theme="dark"] .thermal-grand-total {
+  color: #a5b4fc !important;
+}
+
+:root[data-theme="dark"] .thermal-footer p {
+  color: #cbd5e1 !important;
+}
+
+:root[data-theme="dark"] .thermal-footer small {
+  color: #64748b !important;
 }
 
 :root[data-theme="dark"] .invoice-number-chip {

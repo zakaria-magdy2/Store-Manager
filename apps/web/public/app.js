@@ -4092,7 +4092,7 @@ function showNotificationsModal() {
       <section class="modal-card" style="width:min(620px, 94vw);max-height:85vh;overflow:auto;" role="dialog" aria-modal="true" aria-labelledby="notifications-modal-title">
         <div class="modal-heading">
           <div style="display:flex;align-items:center;gap:12px;">
-            <span style="display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:12px;background:var(--purple-soft);color:var(--purple);font-size:20px;">🔔</span>
+            <span class="status-pill status-complete" style="font-weight:800;font-size:12px;padding:6px 12px;border-radius:8px;">إشعارات</span>
             <div>
               <h2 id="notifications-modal-title" style="margin:0;font-size:17px;font-weight:800;color:var(--ink);">مركز الإشعارات والتنبيهات</h2>
               <p style="margin:2px 0 0;font-size:12px;color:var(--muted);">${totalAlerts > 0 ? `لديك ${totalAlerts} تنبيه يتطلب المتابعة` : 'جميع الحسابات والمخزون في حالة ممتازة'}</p>
@@ -4284,79 +4284,106 @@ async function showThermalReceiptModal(saleId) {
   try {
     const { receipt } = await api(`/api/sales/${encodeURIComponent(saleId)}/receipt?width=80mm`);
     const root = getModalRoot();
+    const formattedDate = new Date(receipt.createdAt).toLocaleString('ar-EG', {
+      dateStyle: 'medium',
+      timeStyle: 'short'
+    });
+
     root.innerHTML = `
       <div class="modal-backdrop">
-        <section class="modal-card thermal-receipt-card" role="dialog" aria-modal="true" style="width:min(580px, calc(100vw - 32px)); border-radius:16px;">
-          <div class="modal-heading" style="padding:18px 24px; border-bottom:1px solid var(--line);">
-            <div>
-              <span class="eyebrow eyebrow-dark">معاينة الإيصال الحراري (${escapeHtml(receipt.width)})</span>
-              <h2 style="font-size:17px;font-weight:800;margin-top:2px;">${escapeHtml(receipt.companyName)} — ${escapeHtml(receipt.storeName)}</h2>
+        <section class="modal-card thermal-receipt-dialog" role="dialog" aria-modal="true" aria-labelledby="thermal-preview-title">
+          <div class="modal-heading">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <span class="thermal-receipt-chip">إيصال حراري ${escapeHtml(receipt.width || '80mm')}</span>
+              <h2 id="thermal-preview-title" style="margin:0;font-size:16px;font-weight:800;">معاينة الإيصال قبل الطباعة</h2>
             </div>
             <button class="modal-close" data-close-modal aria-label="إغلاق">×</button>
           </div>
 
-          <div class="modal-body thermal-receipt-body" style="padding:22px 24px; display:flex; flex-direction:column; gap:16px; overflow-y:auto;">
-            <div class="invoice-meta-badges" style="margin:0; display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:10px;">
-              <div class="invoice-meta-badge" style="padding:10px 14px;">
-                <small>رقم الإيصال</small>
-                <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
-                  <span class="invoice-number-chip" style="font-size:12px;padding:2px 8px;">#${escapeHtml(receipt.saleNumber)}</span>
+          <div class="modal-body thermal-receipt-body">
+            <div class="thermal-receipt-paper" id="printable-thermal-receipt">
+              <div class="thermal-header">
+                <div class="thermal-store-name">${escapeHtml(receipt.companyName)}</div>
+                ${receipt.storeName ? `<div class="thermal-branch-name">${escapeHtml(receipt.storeName)}</div>` : ''}
+                <div class="thermal-receipt-num">إيصال رقم: #${escapeHtml(receipt.saleNumber)}</div>
+              </div>
+
+              <div class="thermal-divider-dashed"></div>
+
+              <div class="thermal-meta-list">
+                <div class="thermal-meta-row">
+                  <span>التاريخ والوقت:</span>
+                  <strong>${formattedDate}</strong>
+                </div>
+                <div class="thermal-meta-row">
+                  <span>الكاشير المسؤول:</span>
+                  <strong>${escapeHtml(receipt.cashierName)}</strong>
+                </div>
+                ${receipt.customerName ? `
+                  <div class="thermal-meta-row">
+                    <span>العميل:</span>
+                    <strong>${escapeHtml(receipt.customerName)}</strong>
+                  </div>
+                ` : ''}
+              </div>
+
+              <div class="thermal-divider-dashed"></div>
+
+              <table class="thermal-items-table">
+                <thead>
+                  <tr>
+                    <th style="text-align:right;">الصنف</th>
+                    <th style="text-align:center;">الكمية</th>
+                    <th style="text-align:center;">السعر</th>
+                    <th style="text-align:left;">الإجمالي</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${receipt.items.map((item) => `
+                    <tr>
+                      <td class="thermal-item-desc">
+                        <strong>${escapeHtml(item.productName)}</strong>
+                        ${item.sku ? `<small class="thermal-sku">${escapeHtml(item.sku)}</small>` : ''}
+                      </td>
+                      <td style="text-align:center;font-weight:700;">${escapeHtml(item.quantity)}</td>
+                      <td style="text-align:center;">${money(item.unitPrice)}</td>
+                      <td style="text-align:left;font-weight:800;">${money(item.lineTotal)}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+
+              <div class="thermal-divider-dashed"></div>
+
+              <div class="thermal-totals">
+                <div class="thermal-total-row main">
+                  <span>الإجمالي المطلوب:</span>
+                  <strong class="thermal-grand-total">${money(receipt.total)}</strong>
+                </div>
+                <div class="thermal-total-row">
+                  <span>المدفوع:</span>
+                  <span>${money(receipt.paidTotal)}</span>
+                </div>
+                <div class="thermal-total-row">
+                  <span>المتبقي (الباقي):</span>
+                  <span>${money(receipt.changeGiven)}</span>
                 </div>
               </div>
-              <div class="invoice-meta-badge" style="padding:10px 14px;">
-                <small>الكاشير</small>
-                <strong>${escapeHtml(receipt.cashierName)}</strong>
-              </div>
-              <div class="invoice-meta-badge" style="padding:10px 14px;">
-                <small>التاريخ والوقت</small>
-                <strong>${new Date(receipt.createdAt).toLocaleString('ar-EG', { dateStyle:'short', timeStyle:'short' })}</strong>
-              </div>
-            </div>
 
-            <div class="invoice-table-container" style="border:1px solid var(--line); border-radius:10px; overflow:hidden;">
-              <div class="table-scroll" style="margin:0;">
-                <table class="invoice-table zebra-table" style="margin:0; width:100%;">
-                  <thead>
-                    <tr>
-                      <th>الصنف</th>
-                      <th style="text-align:center;">الكمية</th>
-                      <th>السعر</th>
-                      <th>الإجمالي</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${receipt.items.map((item) => `
-                      <tr>
-                        <td><strong>${escapeHtml(item.productName)}</strong></td>
-                        <td style="text-align:center;"><strong>${escapeHtml(item.quantity)}</strong></td>
-                        <td>${money(item.unitPrice)}</td>
-                        <td class="table-total">${money(item.lineTotal)}</td>
-                      </tr>
-                    `).join('')}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+              <div class="thermal-divider-dashed"></div>
 
-            <div class="invoice-clean-summary" style="margin:0; padding:16px 20px; border-radius:10px;">
-              <div class="summary-line main-total">
-                <span>الإجمالي المطلوب:</span>
-                <strong class="grand-amount">${money(receipt.total)}</strong>
-              </div>
-              <div class="summary-line">
-                <span>المدفوع:</span>
-                <strong>${money(receipt.paidTotal)}</strong>
-              </div>
-              <div class="summary-line change-line">
-                <span>الباقي:</span>
-                <strong>${money(receipt.changeGiven)}</strong>
+              <div class="thermal-footer">
+                <p>شكرًا لزيارتكم! نتشرف بخدمتكم دائمًا.</p>
+                <small>نسخة إلكترونية مطابقة لطابعة الكاشير</small>
               </div>
             </div>
           </div>
 
           <div class="modal-actions" style="margin:0; padding:16px 24px; border-top:1px solid var(--line); display:flex; justify-content:space-between; align-items:center;">
             <button type="button" class="button button-secondary" data-close-modal>إغلاق</button>
-            <button type="button" class="button button-primary" id="confirm-thermal-print">طباعة الآن</button>
+            <button type="button" class="button button-primary" id="confirm-thermal-print" style="font-weight:800;">
+              طباعة الإيصال الآن
+            </button>
           </div>
         </section>
       </div>`;
