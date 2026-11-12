@@ -1891,6 +1891,174 @@ table tbody tr:hover td,
   padding-inline: max(16px, env(safe-area-inset-right));
 }
 
+/* Sales Table Enhanced Styles with Margins & Border Spacing */
+.sales-table-scroll-container {
+  max-height: 520px;
+  overflow-y: auto;
+  overflow-x: auto;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.03);
+  margin: 12px 0 16px;
+}
+.sales-table-scroll-container table {
+  margin: 0;
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.sales-table-scroll-container thead th {
+  padding: 14px 18px;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--muted);
+  border-bottom: 2px solid var(--line);
+  white-space: nowrap;
+}
+.sales-table-scroll-container tbody td {
+  padding: 13px 18px;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--line);
+}
+.invoice-id-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 800;
+  color: var(--purple);
+  background: var(--purple-soft);
+  border: 1px solid rgba(89, 72, 216, 0.2);
+  border-radius: 8px;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+.invoice-id-btn:hover {
+  background: var(--purple);
+  color: #fff;
+  border-color: var(--purple);
+  box-shadow: 0 3px 8px rgba(89, 72, 216, 0.25);
+}
+.sales-date-box {
+  display: grid;
+  gap: 2px;
+}
+.sales-date-box strong {
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.sales-date-box small {
+  font-size: 11px;
+  color: var(--muted);
+}
+.sales-cashier-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  padding: 3px 10px;
+  border-radius: 6px;
+}
+.sales-qty-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-soft);
+  background: #f1f5f9;
+  border-radius: 6px;
+  padding: 3px 9px;
+}
+:root[data-theme="dark"] .sales-qty-pill {
+  background: #242c3b;
+  color: #d9dfeb;
+}
+.payment-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 6px;
+}
+.payment-pill-cash {
+  background: #dcfce7;
+  color: #15803d;
+  border: 1px solid #bbf7d0;
+}
+.payment-pill-card {
+  background: #e0f2fe;
+  color: #0369a1;
+  border: 1px solid #bae6fd;
+}
+.payment-pill-mobile {
+  background: #f3e8ff;
+  color: #7e22ce;
+  border: 1px solid #e9d5ff;
+}
+.payment-pill-other {
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #e2e8f0;
+}
+:root[data-theme="dark"] .payment-pill-cash {
+  background: rgba(21, 128, 61, 0.2);
+  color: #86efac;
+  border-color: rgba(21, 128, 61, 0.4);
+}
+:root[data-theme="dark"] .payment-pill-card {
+  background: rgba(3, 105, 161, 0.2);
+  color: #7dd3fc;
+  border-color: rgba(3, 105, 161, 0.4);
+}
+:root[data-theme="dark"] .payment-pill-mobile {
+  background: rgba(126, 34, 206, 0.2);
+  color: #d8b4fe;
+  border-color: rgba(126, 34, 206, 0.4);
+}
+
+/* Growth Month Toolbar & History Archive Table */
+.growth-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 20px;
+  background: var(--surface-soft);
+  border-bottom: 1px solid var(--line);
+}
+.growth-archive-box {
+  margin: 16px 20px 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--panel);
+}
+.growth-archive-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 18px;
+  background: var(--surface-soft);
+  border-bottom: 1px solid var(--line);
+}
+.growth-archive-head h4 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 800;
+  color: var(--ink);
+}
+
+
 
 
 

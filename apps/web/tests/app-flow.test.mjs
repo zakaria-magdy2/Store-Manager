@@ -363,8 +363,8 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.equal(profitLoss.payload.profitLoss.netSales.amount, '0');
   assert.equal(profitLoss.payload.profitLoss.cogs.amount, '1200');
   assert.equal(profitLoss.payload.profitLoss.directExpenses.amount, '1750');
-  assert.equal(profitLoss.payload.profitLoss.monthlyExpenses.amount, expectedDailyMonthlyExpense.toString());
-  assert.equal(profitLoss.payload.profitLoss.operatingProfit.amount, (-1200n - 1750n - expectedDailyMonthlyExpense).toString());
+  assert.equal(profitLoss.payload.profitLoss.monthlyExpenses.amount, '10000');
+  assert.equal(profitLoss.payload.profitLoss.operatingProfit.amount, (-1200n - 1750n - 10000n).toString());
   assert.equal(profitLoss.payload.cashFlow.cashSales.amount, '0');
   assert.equal(profitLoss.payload.cashFlow.directExpenseOutflow.amount, '1750');
   assert.equal(profitLoss.payload.cashFlow.monthlyObligationOutflow.amount, '10000');

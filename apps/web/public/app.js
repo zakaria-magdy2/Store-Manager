@@ -622,7 +622,85 @@ function dashboardView() {
 }
 
 function salesTable(sales) {
-  return `<div class="sales-table-scroll-container"><table class="sales-table zebra-table"><thead><tr><th>رقم الفاتورة</th><th>التاريخ والوقت</th><th>الكاشير / البائع</th><th>الأصناف</th><th>طريقة الدفع</th><th>الإجمالي</th><th>الحالة</th><th></th></tr></thead><tbody>${(sales ?? []).map((sale) => `<tr><td><button class="invoice-id invoice-open" data-sale-open="${sale.id}">${escapeHtml(sale.saleNumber)}</button></td><td>${new Intl.DateTimeFormat('ar-EG', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' }).format(new Date(sale.createdAt))}</td><td><span class="sku-code" style="font-weight:600;">${escapeHtml(sale.cashierName || 'كاشير')}</span></td><td>${(sale.items ?? []).reduce((sum, item) => sum + Number(item.quantity || 0), 0)} قطعة</td><td><span class="payment-chip">${(sale.payments ?? []).map((payment) => methodLabel(payment.method)).join(' + ')}</span></td><td class="table-total">${money(sale.total)}</td><td><span class="status-pill status-complete">مكتملة</span></td><td>${(state.data.capabilities.canRefund || state.data.capabilities.canReturnSale || state.data.capabilities.cashierMode) && (sale.items ?? []).some((item) => BigInt(item.returnableQuantity ?? '0') > 0n) ? `<button class="text-action start-return" data-sale="${sale.id}">مرتجع</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
+  return `
+    <div class="sales-table-scroll-container">
+      <table class="sales-table zebra-table">
+        <thead>
+          <tr>
+            <th>رقم الفاتورة</th>
+            <th>التاريخ والوقت</th>
+            <th>الكاشير / البائع</th>
+            <th>الأصناف</th>
+            <th>طريقة الدفع</th>
+            <th>الإجمالي</th>
+            <th>الحالة</th>
+            <th style="text-align:center;">الإجراءات</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${(sales ?? []).map((sale) => {
+            const d = new Date(sale.createdAt);
+            const dateStr = new Intl.DateTimeFormat('ar-EG', { day: 'numeric', month: 'short', year: 'numeric' }).format(d);
+            const timeStr = new Intl.DateTimeFormat('ar-EG', { hour: '2-digit', minute: '2-digit' }).format(d);
+            const totalItems = (sale.items ?? []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+            const canReturn = (state.data.capabilities.canRefund || state.data.capabilities.canReturnSale || state.data.capabilities.cashierMode) && (sale.items ?? []).some((item) => BigInt(item.returnableQuantity ?? '0') > 0n);
+            
+            const paymentPills = (sale.payments ?? []).map((payment) => {
+              const method = payment.method;
+              const cls = method === 'CASH' ? 'payment-pill-cash' : method === 'CARD' ? 'payment-pill-card' : method === 'MOBILE' ? 'payment-pill-mobile' : 'payment-pill-other';
+              const icon = method === 'CASH' ? '💵' : method === 'CARD' ? '💳' : method === 'MOBILE' ? '📱' : '🏷️';
+              return `<span class="payment-pill ${cls}">${icon} ${methodLabel(method)}</span>`;
+            }).join(' ');
+
+            return `
+              <tr>
+                <td>
+                  <button type="button" class="invoice-id-btn invoice-open" data-sale-open="${sale.id}">
+                    <span>🧾</span> #${escapeHtml(sale.saleNumber)}
+                  </button>
+                </td>
+                <td>
+                  <div class="sales-date-box">
+                    <strong>${dateStr}</strong>
+                    <small>${timeStr}</small>
+                  </div>
+                </td>
+                <td>
+                  <span class="sales-cashier-pill">👤 ${escapeHtml(sale.cashierName || 'كاشير')}</span>
+                </td>
+                <td>
+                  <span class="sales-qty-pill">🛍️ ${totalItems} قطعة</span>
+                </td>
+                <td>
+                  <div style="display:inline-flex;gap:4px;flex-wrap:wrap;">
+                    ${paymentPills}
+                  </div>
+                </td>
+                <td>
+                  <strong class="table-total" style="font-size:13.5px;color:var(--ink);">${money(sale.total)}</strong>
+                </td>
+                <td>
+                  <span class="status-pill status-complete" style="font-size:11px;font-weight:800;">✓ مكتملة</span>
+                </td>
+                <td style="text-align:center;">
+                  <div style="display:inline-flex;align-items:center;gap:6px;justify-content:center;">
+                    <button type="button" class="button button-secondary button-sm invoice-open" data-sale-open="${sale.id}" style="height:30px;padding:0 10px;font-size:12px;font-weight:700;">
+                      تفاصيل
+                    </button>
+                    ${canReturn ? `
+                      <button type="button" class="button button-secondary button-sm start-return" data-sale="${sale.id}" style="height:30px;padding:0 10px;font-size:12px;color:var(--rose,#be123c);border-color:var(--rose,#be123c);font-weight:750;">
+                        ↩️ مرتجع
+                      </button>
+                    ` : ''}
+                  </div>
+                </td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
 }
 
 function methodLabel(method) {
@@ -1077,11 +1155,6 @@ function showPurchaseModelVariantsModal(modelGroup, purchase, supplier) {
 function suppliersView() {
   const suppliers = state.data.suppliers;
   const currency = state.data.company.currency;
-  document.querySelector('#btn-pl-to-financial-map')?.addEventListener('click', () => {
-    state.page = 'financial-map';
-    render();
-  });
-  if (!state.growthForecast) void loadGrowthForecast();
   const today = new Date().toISOString().slice(0, 10);
   const preset = state.supplierDatePreset ?? 'all';
   const from = state.supplierFrom ?? '';
@@ -1470,11 +1543,6 @@ function profitLossView() {
 function topProductsView() {
   const stats = state.productStats;
   const vendors = state.supplierStats;
-  document.querySelector('#btn-pl-to-financial-map')?.addEventListener('click', () => {
-    state.page = 'financial-map';
-    render();
-  });
-  if (!state.growthForecast) void loadGrowthForecast();
   const today = new Date().toISOString().slice(0, 10);
   const from = state.analyticsFrom ?? (() => { const date = new Date(); date.setUTCDate(date.getUTCDate() - 29); return date.toISOString().slice(0, 10); })();
   const to = state.analyticsTo ?? today;
@@ -1618,22 +1686,38 @@ function growthForecastWidget(forecast, currency) {
   const decimals = currencyDecimals(currency);
   const format = (v) => money({ amount: v, currency, decimals });
 
-  const { currentMonth, previousMonth, comparison, forecast: fc } = forecast;
+  const { currentMonth, previousMonth, comparison, forecast: fc, monthlyHistory = [], selectedPeriod } = forecast;
   const isUp = comparison.isGrowth;
   const growthSign = comparison.growthPercent >= 0 ? '+' : '';
   const forecastSign = fc.forecastGrowthPercent >= 0 ? '+' : '';
+  const isCurrentMonthView = selectedPeriod?.isCurrent !== false;
 
   return `
     <section class="panel compact-panel" style="margin-top:20px;">
-      <div class="panel-heading" style="padding:14px 20px;">
+      <div class="growth-toolbar">
         <div>
-          <h3 style="font-size:15px;font-weight:800;color:var(--ink);margin:0;">📊 إحصائيات التقدم والتوقعات الشهرية</h3>
-          <p style="margin:2px 0 0;font-size:12px;color:var(--muted);">مقارنة مبيعات هذا الشهر بالشهر السابق وتوقعات المبيعات والوتيرة المطلوبة للشهر القادم.</p>
+          <h3 style="font-size:15.5px;font-weight:850;color:var(--ink);margin:0;display:flex;align-items:center;gap:8px;">
+            <span>📈</span> إحصائيات التقدم ومسار النمو الشهري
+          </h3>
+          <p style="margin:3px 0 0;font-size:12px;color:var(--muted);">
+            سجل مبيعات وأرباح المتجر لكل الشهور، مع مقارنة تفصيلية وتوقعات الأداء للشهر القادم.
+          </p>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <label style="font-size:12px;font-weight:750;color:var(--ink);margin:0;">اختر الشهر للتحليل:</label>
+          <select id="growth-month-picker" class="pro-select" style="font-size:13px;padding:6px 14px;border-radius:8px;border:1px solid var(--line);background:var(--panel);font-weight:750;color:var(--ink);cursor:pointer;">
+            ${monthlyHistory.map((m) => `
+              <option value="${m.yearMonth}" ${m.isSelected ? 'selected' : ''}>
+                ${m.name} ${m.isCurrent ? '(الشهر الحالي)' : ''}
+              </option>
+            `).join('')}
+          </select>
         </div>
       </div>
 
-      <div class="growth-forecast-grid">
-        <!-- مقارنة الشهر الحالي بالسابق -->
+      <div class="growth-forecast-grid" style="margin-top:16px;">
+        <!-- مقارنة الشهر المختار بالشهر السابق له -->
         <div class="growth-forecast-card ${isUp ? 'card-growth' : 'card-decline'}">
           <div class="growth-card-header">
             <span class="growth-card-title">${escapeHtml(currentMonth.name)} مقارنة بـ ${escapeHtml(previousMonth.name)}</span>
@@ -1643,43 +1727,116 @@ function growthForecastWidget(forecast, currency) {
           </div>
           <div class="growth-headline">
             ${isUp
-              ? `أنت بعت هذا الشهر أكثر من الشهر السابق بنسبة <span style="color:#15803d;font-weight:900;">${growthSign}${comparison.growthPercent}%</span>`
-              : `أنت بعت هذا الشهر أقل من الشهر السابق بنسبة <span style="color:#be123c;font-weight:900;">${comparison.growthPercent}%</span>`
+              ? `مبيعات ${escapeHtml(currentMonth.name)} أعلى من ${escapeHtml(previousMonth.name)} بنسبة <span style="color:#15803d;font-weight:900;">${growthSign}${comparison.growthPercent}%</span>`
+              : `مبيعات ${escapeHtml(currentMonth.name)} أقل من ${escapeHtml(previousMonth.name)} بنسبة <span style="color:#be123c;font-weight:900;">${comparison.growthPercent}%</span>`
             }
           </div>
           <div class="growth-stats-row">
-            <span>مبيعات هذا الشهر: <strong>${format(currentMonth.revenue)}</strong></span>
+            <span>مبيعات الشهر: <strong>${format(currentMonth.revenue)}</strong></span>
+            <span>مجمل الربح: <strong>${format(currentMonth.profit)}</strong></span>
             <span>الشهر السابق: <strong>${format(previousMonth.revenue)}</strong></span>
             <span>المتوسط اليومي: <strong>${format(currentMonth.dailyAverage)}</strong></span>
+            <span>الفواتير: <strong>${currentMonth.salesCount}</strong></span>
           </div>
         </div>
 
-        <!-- توقعات الشهر القادم -->
+        <!-- توقعات الشهر القادم أو خلاصة الشهر -->
         <div class="growth-forecast-card card-projected">
           <div class="growth-card-header">
-            <span class="growth-card-title">توقعات شهر ${escapeHtml(fc.nextMonthName)}</span>
-            <span class="status-pill status-complete" style="font-size:12px;font-weight:800;">${escapeHtml(fc.statusText)}</span>
+            <span class="growth-card-title">${isCurrentMonthView ? `توقعات شهر ${escapeHtml(fc.nextMonthName)}` : `خلاصة أداء شهر ${escapeHtml(currentMonth.name)}`}</span>
+            <span class="status-pill status-complete" style="font-size:12px;font-weight:800;">${isCurrentMonthView ? escapeHtml(fc.statusText) : 'شهر مكتمل ومؤرشف ✓'}</span>
           </div>
           <div class="growth-headline">
-            متوقع الشهر القادم تبيع بنسبة <span style="color:var(--purple);font-weight:900;">${forecastSign}${fc.forecastGrowthPercent}%</span> (مبيعات تقديرية: <span style="color:var(--purple);font-weight:900;">${format(fc.projectedRevenue)}</span>)
+            ${isCurrentMonthView ? `
+              متوقع الشهر القادم مبيعات بنسبة <span style="color:var(--purple);font-weight:900;">${forecastSign}${fc.forecastGrowthPercent}%</span> (مبيعات تقديرية: <span style="color:var(--purple);font-weight:900;">${format(fc.projectedRevenue)}</span>)
+            ` : `
+              إجمالي مبيعات الشهر حققت <span style="color:var(--purple);font-weight:900;">${format(currentMonth.revenue)}</span> بعدد <span style="font-weight:900;">${currentMonth.salesCount}</span> فاتورة مكتملة.
+            `}
           </div>
           <div class="growth-stats-row">
-            <span>توقع ختام هذا الشهر: <strong>${format(currentMonth.projectedMonthEnd)}</strong></span>
-            <span>الوتيرة اليومية المطلوبة: <strong>${format(fc.dailyExpectedPace)} / يوم</strong></span>
+            ${isCurrentMonthView ? `
+              <span>توقع ختام هذا الشهر: <strong>${format(currentMonth.projectedMonthEnd)}</strong></span>
+              <span>الوتيرة اليومية المطلوبة: <strong>${format(fc.dailyExpectedPace)} / يوم</strong></span>
+            ` : `
+              <span>مجمل الأرباح المحققة: <strong>${format(currentMonth.profit)}</strong></span>
+              <span>متوسط المبيعات اليومية: <strong>${format(currentMonth.dailyAverage)}</strong></span>
+            `}
           </div>
         </div>
       </div>
+
+      <!-- جدول الأرشيف الشامل لكل الشهور -->
+      ${monthlyHistory.length ? `
+        <div class="growth-archive-box">
+          <div class="growth-archive-head">
+            <div>
+              <h4>📚 أرشيف وسجل نمو الشهور (مبيعات، أرباح، ونسب النمو عبر التاريخ)</h4>
+              <p style="margin:2px 0 0;font-size:11.5px;color:var(--muted);">جميع الشهور المسجلة محفوظة في هذا الأرشيف ويمكنك استعراض أي شهر في أي وقت بالضغط على تحليله</p>
+            </div>
+            <span class="status-pill status-complete" style="font-size:11px;font-weight:800;">${monthlyHistory.length} شهور محفوظة</span>
+          </div>
+          <div class="table-scroll">
+            <table class="compact-table zebra-table">
+              <thead>
+                <tr>
+                  <th>الشهر والسنة</th>
+                  <th style="text-align:center;">عدد الفواتير</th>
+                  <th>إجمالي المبيعات</th>
+                  <th>مجمل الربح</th>
+                  <th>المتوسط اليومي</th>
+                  <th style="text-align:center;">معدل النمو الشهري</th>
+                  <th style="text-align:center;">تحليل الشهر</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${monthlyHistory.map((m) => {
+                  const mUp = m.isGrowth;
+                  const mSign = m.growthPercent >= 0 ? '+' : '';
+                  return `
+                    <tr style="${m.isSelected ? 'background:rgba(89,72,216,0.08);font-weight:700;' : ''}">
+                      <td>
+                        <strong>${escapeHtml(m.name)}</strong>
+                        ${m.isCurrent ? ' <span class="badge badge-brand" style="font-size:10px;padding:2px 6px;margin-right:4px;">الحالي</span>' : ''}
+                        ${m.isSelected ? ' <span class="badge" style="background:var(--purple);color:#fff;font-size:10px;padding:2px 6px;margin-right:4px;">المعروض</span>' : ''}
+                      </td>
+                      <td style="text-align:center;"><strong>${m.salesCount}</strong></td>
+                      <td><strong>${format(m.revenue)}</strong></td>
+                      <td style="color:#15803d;font-weight:700;">${format(m.profit)}</td>
+                      <td>${format(m.dailyAverage)}</td>
+                      <td style="text-align:center;">
+                        <span class="status-pill ${mUp ? 'status-complete' : 'status-low'}" style="font-size:11px;font-weight:800;">
+                          ${mUp ? '▲' : '▼'} ${mSign}${m.growthPercent}%
+                        </span>
+                      </td>
+                      <td style="text-align:center;">
+                        <button type="button" class="button button-secondary button-sm view-growth-month-btn" data-growth-ym="${m.yearMonth}" style="height:28px;padding:0 10px;font-size:11.5px;font-weight:750;">
+                          ${m.isSelected ? '✓ معروض حالياً' : 'عرض وتحليل 🔍'}
+                        </button>
+                      </td>
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ` : ''}
     </section>
   `;
 }
 
-async function loadGrowthForecast() {
+async function loadGrowthForecast(year = null, month = null) {
   const storeId = state.data?.selectedStoreId;
-  const key = `${storeId}:growth`;
+  const query = new URLSearchParams({ storeId });
+  if (year && month) {
+    query.set('year', year);
+    query.set('month', month);
+  }
+  const key = `${storeId}:${year || 'cur'}:${month || 'cur'}`;
   if (state.growthForecastKey === key && state.growthForecast) return state.growthForecast;
   try {
     state.growthForecastKey = key;
-    const result = await api(`/api/reports/growth-forecast?storeId=${encodeURIComponent(storeId)}`);
+    const result = await api(`/api/reports/growth-forecast?${query.toString()}`);
     state.growthForecast = result;
     render();
     return result;
@@ -1691,11 +1848,6 @@ async function loadGrowthForecast() {
 
 async function loadFinancialMap(preset = state.financialMapRange || 'all') {
   const storeId = state.data?.selectedStoreId;
-  document.querySelector('#btn-pl-to-financial-map')?.addEventListener('click', () => {
-    state.page = 'financial-map';
-    render();
-  });
-  if (!state.growthForecast) void loadGrowthForecast();
   const today = new Date().toISOString().slice(0, 10);
   let from = '', to = '';
 
@@ -2757,7 +2909,6 @@ function showSaleDetails(sale) {
 
   root.innerHTML = `<div class="modal-backdrop"><section class="modal-card invoice-detail-card" role="dialog" aria-modal="true"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">فاتورة مبيعات المتجر</span><h2>فاتورة #${escapeHtml(sale.saleNumber)}</h2></div><button class="modal-close" data-close-modal>×</button></div><div class="invoice-meta-badges"><div class="invoice-meta-badge"><small>تاريخ وتوقيت الفاتورة</small><strong>${new Intl.DateTimeFormat('ar-EG', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(sale.createdAt))}</strong></div><div class="invoice-meta-badge"><small>الكاشير المسؤول</small><strong>${escapeHtml(sale.cashierName)}</strong></div><div class="invoice-meta-badge"><small>العميل</small><strong>${escapeHtml(sale.customerName || 'عميل نقدي')}</strong></div></div><div class="table-scroll" style="margin:14px 0;"><table class="invoice-table"><thead><tr><th>الصنف / الموديل</th><th>كود القطعة</th><th style="text-align:center;">الكمية</th><th>سعر الوحدة</th>${hasDiscount ? '<th>الخصم</th>' : ''}<th>الإجمالي</th></tr></thead><tbody>${sale.items.map((item) => `<tr><td><strong>${escapeHtml(item.name)}</strong></td><td><span class="sku-code">${escapeHtml(item.sku)}</span></td><td style="text-align:center;"><strong>${item.quantity}</strong></td><td>${money(item.unitPrice)}</td>${hasDiscount ? `<td>${money({ ...item.netRevenue, amount: (BigInt(item.lineDiscount?.amount ?? '0') + BigInt(item.cartDiscountShare?.amount ?? '0')).toString() })}</td>` : ''}<td class="table-total">${money(item.netRevenue)}</td></tr>`).join('')}</tbody></table></div><div class="invoice-clean-summary">${hasDiscount ? `<div class="summary-line"><span>الإجمالي قبل الخصم:</span><span>${money(sale.subtotal)}</span></div><div class="summary-line" style="color:var(--rose,#be123c);"><span>قيمة الخصم:</span><strong>- ${money(sale.discountTotal)}</strong></div>` : ''}<div class="summary-line main-total"><span>إجمالي الفاتورة المطلوب:</span><strong class="grand-amount">${money(sale.total)}</strong></div><div class="summary-line payment-line"><span>طريقة السداد:</span><span class="payment-badge">${sale.payments.map((p) => `${methodLabel(p.method)}: ${money(p.amount)}`).join(' · ')}</span></div>${hasChange ? `<div class="summary-line change-line"><span>المتبقي للعميل (الباقي):</span><strong>${money(sale.changeGiven)}</strong></div>` : ''}</div>${sale.returns.length ? `<div style="margin-top:14px;padding:12px;background:var(--surface-soft);border:1px solid var(--line);border-radius:10px;"><strong style="color:var(--rose,#be123c);font-size:13px;display:block;margin-bottom:6px;">المرتجعات المسجلة:</strong>${sale.returns.map((item) => `<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0;"><span>${escapeHtml(item.returnNumber)} · ${methodLabel(item.paymentMethod)}</span><strong>${money(item.refundAmount)}</strong></div>`).join('')}<div style="border-top:1px dashed var(--line);margin-top:6px;padding-top:6px;display:flex;justify-content:space-between;font-weight:700;"><span>إجمالي المرتجع:</span><strong>${money({ ...sale.total, amount: totalReturned })}</strong></div></div>` : ''}<div class="modal-actions" style="margin-top:16px;"><button class="button button-secondary" data-close-modal>إغلاق</button>${canReturn ? '<button class="button button-secondary" type="button" id="invoice-start-return-btn" style="color:var(--rose,#be123c);border-color:var(--rose,#be123c);font-weight:700;">↩️ عمل مرتجع من هذه الفاتورة</button>' : ''}<button class="button button-primary" type="button" data-print-invoice>🖨️ طباعة الفاتورة</button></div></section></div>`;
   root.querySelectorAll('[data-close-modal]').forEach((button) => button.addEventListener('click', () => { root.innerHTML = ''; }));
-  root.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('click', (e) => { if (e.target === backdrop) root.innerHTML = ''; }));
   root.querySelector('[data-print-invoice]')?.addEventListener('click', () => void showThermalReceiptModal(sale.id));
   root.querySelector('#invoice-start-return-btn')?.addEventListener('click', () => {
     openSaleReturnModal(sale);
@@ -3436,6 +3587,23 @@ function bindTopProducts() {
     render();
   });
   if (!state.growthForecast) void loadGrowthForecast();
+
+  const growthMonthPicker = document.querySelector('#growth-month-picker');
+  growthMonthPicker?.addEventListener('change', (e) => {
+    const val = e.target.value;
+    if (!val) return;
+    const [y, m] = val.split('-');
+    void loadGrowthForecast(y, m);
+  });
+
+  document.querySelectorAll('.view-growth-month-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const ym = btn.dataset.growthYm;
+      if (!ym) return;
+      const [y, m] = ym.split('-');
+      void loadGrowthForecast(y, m);
+    });
+  });
   const today = new Date().toISOString().slice(0, 10);
   state.analyticsTo ??= today;
   if (!state.analyticsFrom) { const start = new Date(); start.setUTCDate(start.getUTCDate() - 29); state.analyticsFrom = start.toISOString().slice(0, 10); }
@@ -3467,7 +3635,6 @@ function bindProfitLoss() {
     state.page = 'financial-map';
     render();
   });
-  if (!state.growthForecast) void loadGrowthForecast();
   const today = new Date().toISOString().slice(0, 10);
   state.reportFrom ??= today;
   state.reportTo ??= today;

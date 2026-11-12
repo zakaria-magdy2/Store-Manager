@@ -1005,9 +1005,16 @@ async function growthForecastReport(ctx, url) {
 
   const rawDb = database.getRawDatabase();
   const now = new Date();
-  const currentYear = now.getUTCFullYear();
-  const currentMonth = now.getUTCMonth() + 1;
-  const currentDay = now.getUTCDate();
+  const realCurrentYear = now.getUTCFullYear();
+  const realCurrentMonth = now.getUTCMonth() + 1;
+
+  const paramYear = Number.parseInt(url.searchParams.get('year') ?? '', 10);
+  const paramMonth = Number.parseInt(url.searchParams.get('month') ?? '', 10);
+  const currentYear = (!Number.isNaN(paramYear) && paramYear >= 2020 && paramYear <= 2099) ? paramYear : realCurrentYear;
+  const currentMonth = (!Number.isNaN(paramMonth) && paramMonth >= 1 && paramMonth <= 12) ? paramMonth : realCurrentMonth;
+
+  const isRealCurrentMonth = (currentYear === realCurrentYear && currentMonth === realCurrentMonth);
+  const currentDay = isRealCurrentMonth ? now.getUTCDate() : new Date(currentYear, currentMonth, 0).getDate();
   const daysInCurrentMonth = new Date(currentYear, currentMonth, 0).getDate();
 
   const prevMonthDate = new Date(Date.UTC(currentYear, currentMonth - 2, 1));
@@ -1042,9 +1049,11 @@ async function growthForecastReport(ctx, url) {
   const prevProfit = BigInt(prevSalesRow?.profit ?? 0);
   const prevCount = Number(prevSalesRow?.salesCount ?? 0);
 
-  const daysElapsed = Math.max(1, currentDay);
-  const dailyRunRateMinor = curRevenue / BigInt(daysElapsed);
-  const projectedMonthEndRevenueMinor = dailyRunRateMinor * BigInt(daysInCurrentMonth);
+  const daysElapsed = isRealCurrentMonth ? Math.max(1, currentDay) : daysInCurrentMonth;
+  const dailyRunRateMinor = daysElapsed > 0 ? (curRevenue / BigInt(daysElapsed)) : 0n;
+  const projectedMonthEndRevenueMinor = isRealCurrentMonth
+    ? dailyRunRateMinor * BigInt(daysInCurrentMonth)
+    : curRevenue;
 
   let growthPercent = 0;
   if (prevRevenue > 0n) {
@@ -1064,8 +1073,105 @@ async function growthForecastReport(ctx, url) {
   const nextMonthYear = currentMonth === 12 ? currentYear + 1 : currentYear;
   const nextMonthName = `${arMonths[nextMonthIdx]} ${nextMonthYear}`;
 
+  // Monthly archive query: all months with sales recorded in the tenant
+  const salesMonthsRows = rawDb.prepare(`
+    SELECT substr(s.created_at, 1, 7) as yearMonth,
+      COUNT(s.id) as salesCount,
+      COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as revenue,
+      COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as profit
+    FROM sales s
+    WHERE s.tenant_id = ? AND s.store_id = ? AND s.status = 'COMPLETED'
+    GROUP BY substr(s.created_at, 1, 7)
+    ORDER BY yearMonth DESC
+  `).all(ctx.tenantId, storeId);
+
+  const monthMap = new Map();
+  // Ensure recent 6 months are always represented
+  for (let i = 0; i < 6; i++) {
+    const d = new Date(Date.UTC(realCurrentYear, realCurrentMonth - 1 - i, 1));
+    const ym = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+    monthMap.set(ym, {
+      yearMonth: ym,
+      year: d.getUTCFullYear(),
+      month: d.getUTCMonth() + 1,
+      salesCount: 0,
+      revenue: '0',
+      profit: '0',
+    });
+  }
+
+  for (const row of salesMonthsRows) {
+    if (!row.yearMonth) continue;
+    const [yStr, mStr] = row.yearMonth.split('-');
+    monthMap.set(row.yearMonth, {
+      yearMonth: row.yearMonth,
+      year: Number(yStr),
+      month: Number(mStr),
+      salesCount: Number(row.salesCount || 0),
+      revenue: String(row.revenue || 0),
+      profit: String(row.profit || 0),
+    });
+  }
+
+  if (!monthMap.has(curPrefix)) {
+    monthMap.set(curPrefix, {
+      yearMonth: curPrefix,
+      year: currentYear,
+      month: currentMonth,
+      salesCount: curCount,
+      revenue: curRevenue.toString(),
+      profit: curProfit.toString(),
+    });
+  }
+
+  const sortedMonthsKeys = Array.from(monthMap.keys()).sort(); // chronological ascending
+  const monthlyHistory = [];
+
+  for (let idx = 0; idx < sortedMonthsKeys.length; idx++) {
+    const ym = sortedMonthsKeys[idx];
+    const data = monthMap.get(ym);
+    const mRev = BigInt(data.revenue);
+    const mDays = new Date(data.year, data.month, 0).getDate();
+    let mGrowth = 0;
+    if (idx > 0) {
+      const prevYm = sortedMonthsKeys[idx - 1];
+      const prevData = monthMap.get(prevYm);
+      const prevRev = BigInt(prevData.revenue);
+      if (prevRev > 0n) {
+        mGrowth = Number((mRev - prevRev) * 10000n / prevRev) / 100;
+      } else if (mRev > 0n) {
+        mGrowth = 100;
+      }
+    }
+    const isCur = (data.year === realCurrentYear && data.month === realCurrentMonth);
+    const elapsed = isCur ? Math.max(1, now.getUTCDate()) : mDays;
+    const dailyAvg = elapsed > 0 ? (mRev / BigInt(elapsed)).toString() : '0';
+
+    monthlyHistory.push({
+      yearMonth: data.yearMonth,
+      year: data.year,
+      month: data.month,
+      name: `${arMonths[data.month - 1]} ${data.year}`,
+      salesCount: data.salesCount,
+      revenue: data.revenue,
+      profit: data.profit,
+      dailyAverage: dailyAvg,
+      growthPercent: mGrowth,
+      isGrowth: mGrowth >= 0,
+      isCurrent: isCur,
+      isSelected: (data.year === currentYear && data.month === currentMonth),
+    });
+  }
+
+  monthlyHistory.reverse();
+
   return {
     currency,
+    selectedPeriod: {
+      year: currentYear,
+      month: currentMonth,
+      isCurrent: isRealCurrentMonth,
+    },
     currentMonth: {
       year: currentYear,
       month: currentMonth,
@@ -1077,6 +1183,7 @@ async function growthForecastReport(ctx, url) {
       salesCount: curCount,
       dailyAverage: dailyRunRateMinor.toString(),
       projectedMonthEnd: projectedMonthEndRevenueMinor.toString(),
+      isCompleted: !isRealCurrentMonth,
     },
     previousMonth: {
       year: prevYear,
@@ -1099,6 +1206,7 @@ async function growthForecastReport(ctx, url) {
       dailyExpectedPace: (projectedNextMonthMinor / 30n).toString(),
       statusText: growthPercent >= 15 ? 'أداء نمو تصاعدي قوي 🚀' : growthPercent >= 0 ? 'أداء مستقر وإيجابي 📈' : 'يحتاج إلى تنشيط للمبيعات 💡',
     },
+    monthlyHistory,
   };
 }
 
