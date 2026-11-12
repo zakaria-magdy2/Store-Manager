@@ -74,6 +74,26 @@ database.connect();
 const db = database.getDb();
 const migration = await new DatabaseMigrator(db).migrateToLatest();
 if (!migration.success) throw migration.error ?? new Error('Database migration failed');
+
+function generateNextSaleNumber(tenantId) {
+  const rawDb = database.getRawDatabase();
+  const countRow = rawDb.prepare('SELECT COUNT(*) as cnt FROM sales WHERE tenant_id = ?').get(tenantId);
+  let seq = Number(countRow?.cnt ?? 0) + 1001;
+  while (rawDb.prepare('SELECT 1 FROM sales WHERE tenant_id = ? AND sale_number = ?').get(tenantId, `INV-${seq}`)) {
+    seq += 1;
+  }
+  return `INV-${seq}`;
+}
+
+function generateNextPurchaseNumber(tenantId) {
+  const rawDb = database.getRawDatabase();
+  const countRow = rawDb.prepare('SELECT COUNT(*) as cnt FROM supplier_purchases WHERE tenant_id = ?').get(tenantId);
+  let seq = Number(countRow?.cnt ?? 0) + 1001;
+  while (rawDb.prepare('SELECT 1 FROM supplier_purchases WHERE tenant_id = ? AND invoice_number = ?').get(tenantId, `PUR-${seq}`)) {
+    seq += 1;
+  }
+  return `PUR-${seq}`;
+}
 if (restoredAfterCrash) {
   await db.updateTable('sessions').set({ is_revoked: 1 }).execute();
   console.warn('A database restore was recovered; all prior login sessions were revoked.');
@@ -1204,7 +1224,7 @@ async function growthForecastReport(ctx, url) {
       projectedRevenue: projectedNextMonthMinor.toString(),
       forecastGrowthPercent: nextMonthGrowthPercent,
       dailyExpectedPace: (projectedNextMonthMinor / 30n).toString(),
-      statusText: growthPercent >= 15 ? 'أداء نمو تصاعدي قوي 🚀' : growthPercent >= 0 ? 'أداء مستقر وإيجابي 📈' : 'يحتاج إلى تنشيط للمبيعات 💡',
+      statusText: growthPercent >= 15 ? 'أداء نمو تصاعدي قوي' : growthPercent >= 0 ? 'أداء مستقر وإيجابي' : 'يحتاج إلى تنشيط للمبيعات',
     },
     monthlyHistory,
   };
@@ -2184,7 +2204,7 @@ async function handleApi(req, res, url) {
     const tenant = await tenantRepo.findById(ctx.tenantId);
     if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
     const id = randomUUID();
-    const invoiceNumber = body.invoiceNumber?.trim() || `PUR-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${id.slice(0, 8).toUpperCase()}`;
+    const invoiceNumber = body.invoiceNumber?.trim() || generateNextPurchaseNumber(ctx.tenantId);
     await purchasing.recordPurchase(ctx, {
       id, idempotencyKey: body.idempotencyKey, storeId: body.storeId, supplierId: body.supplierId,
       invoiceNumber,
@@ -2491,8 +2511,9 @@ async function handleApi(req, res, url) {
       cart = cart.addItem({ lineId: `line-${index}-${randomUUID()}`, variantId: variant.id, productId: product.id, productName: optionLabel ? `${product.name} - ${optionLabel}` : product.name, sku: variant.sku, unitPrice: variant.retailPrice, quantity: BigInt(item.quantity) });
     }
     const now = new Date();
+    const saleNumber = generateNextSaleNumber(ctx.tenantId);
     const sale = await checkout.checkout(ctx, {
-      saleId: randomUUID(), saleNumber: `R-${now.toISOString().replace(/\D/g, '').slice(0, 14)}-${randomUUID().slice(0, 6).toUpperCase()}`,
+      saleId: randomUUID(), saleNumber,
       storeId: body.storeId, cart,
       payments: [{ method: body.payment.method, amount: Money.fromMinor(BigInt(body.payment.amount), tenant.currency) }],
       idempotencyKey: body.idempotencyKey, customerName: body.customerName, occurredAt: now,
