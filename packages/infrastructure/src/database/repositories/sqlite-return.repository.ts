@@ -9,6 +9,7 @@ export interface CustomerReturnLineInput { originalSaleItemId: string; quantity:
 export interface RecordCustomerReturnInput {
   id: string; idempotencyKey: string; storeId: string; originalSaleId: string;
   paymentMethod: PaymentMethod; occurredAt: Date; lines: readonly CustomerReturnLineInput[];
+  returnNumber?: string;
 }
 
 function badRequest(message: string): Error { return Object.assign(new Error(message), { status: 400 }); }
@@ -83,7 +84,7 @@ export class SqliteReturnRepository {
       const journalEntry = await trx.selectFrom('journal_entries').select('id').where('tenant_id', '=', ctx.tenantId)
         .where('idempotency_key', '=', journalKey).executeTakeFirstOrThrow();
       await trx.insertInto('customer_returns').values({ id: returnId, tenant_id: ctx.tenantId, store_id: sale.store_id,
-        original_sale_id: sale.id, return_number: `R-${input.occurredAt.toISOString().replace(/\D/g, '').slice(0, 14)}-${returnId.slice(0, 6).toUpperCase()}`,
+        original_sale_id: sale.id, return_number: input.returnNumber || `RET-${input.occurredAt.toISOString().replace(/\D/g, '').slice(0, 14)}-${returnId.slice(0, 6).toUpperCase()}`,
         idempotency_key: input.idempotencyKey, refund_amount: refundAmount, currency: sale.currency,
         payment_method: input.paymentMethod, journal_entry_id: journalEntry.id, created_by_user_id: ctx.userId,
         created_at: input.occurredAt.toISOString() }).execute();

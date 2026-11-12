@@ -94,6 +94,50 @@ function generateNextPurchaseNumber(tenantId) {
   }
   return `PUR-${seq}`;
 }
+
+const rawDbInit = database.getRawDatabase();
+rawDbInit.exec(`
+  CREATE TABLE IF NOT EXISTS cashier_shifts (
+    id TEXT PRIMARY KEY,
+    shift_number TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    store_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    opening_cash INTEGER NOT NULL DEFAULT 0,
+    expected_cash INTEGER NOT NULL DEFAULT 0,
+    actual_cash INTEGER NOT NULL DEFAULT 0,
+    variance INTEGER NOT NULL DEFAULT 0,
+    handover_cash INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'OPEN',
+    notes TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_cashier_shifts_tenant_store ON cashier_shifts(tenant_id, store_id, started_at);
+  CREATE INDEX IF NOT EXISTS idx_cashier_shifts_user_status ON cashier_shifts(tenant_id, user_id, status);
+`);
+
+function generateNextShiftNumber(tenantId) {
+  const rawDb = database.getRawDatabase();
+  const countRow = rawDb.prepare('SELECT COUNT(*) as cnt FROM cashier_shifts WHERE tenant_id = ?').get(tenantId);
+  let seq = Number(countRow?.cnt ?? 0) + 1001;
+  while (rawDb.prepare('SELECT 1 FROM cashier_shifts WHERE tenant_id = ? AND shift_number = ?').get(tenantId, `SH-${seq}`)) {
+    seq += 1;
+  }
+  return `SH-${seq}`;
+}
+
+function generateNextReturnNumber(tenantId) {
+  const rawDb = database.getRawDatabase();
+  const countRow = rawDb.prepare('SELECT COUNT(*) as cnt FROM customer_returns WHERE tenant_id = ?').get(tenantId);
+  let seq = Number(countRow?.cnt ?? 0) + 1001;
+  while (rawDb.prepare('SELECT 1 FROM customer_returns WHERE tenant_id = ? AND return_number = ?').get(tenantId, `RET-${seq}`)) {
+    seq += 1;
+  }
+  return `RET-${seq}`;
+}
 if (restoredAfterCrash) {
   await db.updateTable('sessions').set({ is_revoked: 1 }).execute();
   console.warn('A database restore was recovered; all prior login sessions were revoked.');
@@ -898,8 +942,8 @@ async function financialMapReport(ctx, url) {
       actor: userMap.get(p.created_by_user_id) || 'المسؤول',
       amountIn: '0',
       amountOut: amt.toString(),
-      profitImpact: (-amt).toString(),
-      details: `دفعة سداد نقدية للتاجر ${p.supplier_name} - يخصم من المكسب المتاح`,
+      profitImpact: '0',
+      details: `دفعة سداد نقدية للتاجر ${p.supplier_name} - حركة سيولة نقدية (البضاعة بالمخزن أصل وليست خسارة)`,
     });
   }
 
@@ -916,8 +960,8 @@ async function financialMapReport(ctx, url) {
       actor: userMap.get(p.created_by_user_id) || 'المسؤول',
       amountIn: '0',
       amountOut: amt.toString(),
-      profitImpact: (-amt).toString(),
-      details: `سداد دفعة من حساب التاجر ${p.supplier_name} - يخصم من المكسب المتاح`,
+      profitImpact: '0',
+      details: `سداد دفعة من حساب التاجر ${p.supplier_name} - حركة سيولة نقدية (تسوية مستحقات)`,
     });
   }
 
@@ -992,7 +1036,8 @@ async function financialMapReport(ctx, url) {
     item.runningProfit = runningProfitMinor.toString();
   }
 
-  const realizedCashProfitMinor = totalSalesMinor - totalSupplierPaidMinor - totalExpensesMinor - totalRefundsMinor;
+  const netCashFlowMinor = totalSalesMinor - totalSupplierPaidMinor - totalExpensesMinor - totalRefundsMinor;
+  const operatingProfitMinor = totalGrossProfitMinor - totalExpensesMinor - totalRefundsMinor;
 
   return {
     currency,
@@ -1003,7 +1048,9 @@ async function financialMapReport(ctx, url) {
       totalSupplierPaid: totalSupplierPaidMinor.toString(),
       totalExpensesPaid: totalExpensesMinor.toString(),
       totalRefunds: totalRefundsMinor.toString(),
-      realizedCashProfit: realizedCashProfitMinor.toString(),
+      operatingProfit: operatingProfitMinor.toString(),
+      netCashFlow: netCashFlowMinor.toString(),
+      realizedCashProfit: netCashFlowMinor.toString(),
       runningFinalCash: runningCashMinor.toString(),
       eventsCount: timeline.length,
     },
@@ -1452,16 +1499,26 @@ async function currentData(ctx, url) {
 
   const todayDateStr = new Date().toISOString().slice(0, 10);
   const rawDatabase = database.getRawDatabase();
+  const activeShiftRow = rawDatabase.prepare(
+    "SELECT id, shift_number as shiftNumber, started_at as startedAt, opening_cash as openingCash, notes FROM cashier_shifts WHERE tenant_id = ? AND store_id = ? AND user_id = ? AND status = 'OPEN' ORDER BY started_at DESC LIMIT 1"
+  ).get(ctx.tenantId, storeId, ctx.userId);
   const todayAttendanceRows = rawDatabase.prepare(
     "SELECT actor_user_id AS userId, actor_username AS username, created_at AS createdAt, summary FROM audit_logs WHERE tenant_id = ? AND action = 'ATTENDANCE_CHECK_IN' AND substr(created_at, 1, 10) = ? ORDER BY sequence_no DESC"
   ).all(ctx.tenantId, todayDateStr);
   const userCheckedInRecord = todayAttendanceRows.find((r) => r.userId === ctx.userId);
-  const userCheckedInToday = Boolean(userCheckedInRecord);
-  const userCheckInTime = userCheckedInRecord?.createdAt ?? null;
+  const userCheckedInToday = Boolean(userCheckedInRecord || activeShiftRow);
+  const userCheckInTime = userCheckedInRecord?.createdAt ?? activeShiftRow?.startedAt ?? null;
 
   return {
     company: { name: tenant.name, currency: tenant.currency },
     user: { id: ctx.userId, fullName: signedInUser?.fullName ?? '', role: ctx.roleId, storeId: ctx.storeId ?? null },
+    activeShift: activeShiftRow ? {
+      id: activeShiftRow.id,
+      shiftNumber: activeShiftRow.shiftNumber,
+      startedAt: activeShiftRow.startedAt,
+      openingCash: String(activeShiftRow.openingCash ?? 0),
+      notes: activeShiftRow.notes ?? '',
+    } : null,
     todayAttendance: todayAttendanceRows.map((r) => ({
       userId: r.userId,
       username: r.username,
@@ -1951,6 +2008,346 @@ async function handleApi(req, res, url) {
 
   if (method === 'GET' && path === '/api/data') return json(res, 200, await currentData(ctx, url));
 
+  if (method === 'GET' && path === '/api/shifts/current') {
+    const stores = await storeRepo.listByTenant(ctx);
+    const requestedStore = url.searchParams.get('storeId');
+    const storeId = ctx.storeId ?? requestedStore ?? stores[0]?.id;
+    const rawDb = database.getRawDatabase();
+    const openShift = rawDb.prepare(
+      "SELECT * FROM cashier_shifts WHERE tenant_id = ? AND store_id = ? AND user_id = ? AND status = 'OPEN' ORDER BY started_at DESC LIMIT 1"
+    ).get(ctx.tenantId, storeId, ctx.userId);
+
+    if (!openShift) return json(res, 200, { currentShift: null });
+
+    const tenant = await tenantRepo.findById(ctx.tenantId);
+    const currency = tenant?.currency ?? 'EGP';
+
+    const salesDuringShift = rawDb.prepare(`
+      SELECT s.id, s.sale_number, s.created_at,
+        COALESCE((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS total_amount,
+        COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id AND sp.method = 'CASH'), 0) AS cash_paid,
+        s.change_given,
+        COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id AND sp.method != 'CASH'), 0) AS electronic_paid
+      FROM sales s
+      WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED' AND s.created_at >= ?
+    `).all(ctx.tenantId, storeId, ctx.userId, openShift.started_at);
+
+    const returnsDuringShift = rawDb.prepare(`
+      SELECT cr.id, cr.refund_amount, cr.payment_method
+      FROM customer_returns cr
+      WHERE cr.tenant_id = ? AND cr.store_id = ? AND cr.created_by_user_id = ? AND cr.created_at >= ?
+    `).all(ctx.tenantId, storeId, ctx.userId, openShift.started_at);
+
+    let totalSalesMinor = 0n;
+    let cashSalesMinor = 0n;
+    let electronicSalesMinor = 0n;
+    for (const s of salesDuringShift) {
+      totalSalesMinor += BigInt(s.total_amount ?? 0);
+      cashSalesMinor += BigInt(s.cash_paid ?? 0) - BigInt(s.change_given ?? 0);
+      electronicSalesMinor += BigInt(s.electronic_paid ?? 0);
+    }
+
+    let cashReturnsMinor = 0n;
+    for (const r of returnsDuringShift) {
+      if (r.payment_method === 'CASH') cashReturnsMinor += BigInt(r.refund_amount ?? 0);
+    }
+
+    const openingCashMinor = BigInt(openShift.opening_cash ?? 0);
+    const expectedCashMinor = openingCashMinor + cashSalesMinor - cashReturnsMinor;
+
+    return json(res, 200, {
+      currentShift: {
+        id: openShift.id,
+        shiftNumber: openShift.shift_number,
+        storeId: openShift.store_id,
+        startedAt: openShift.started_at,
+        openingCash: openingCashMinor.toString(),
+        cashSales: cashSalesMinor.toString(),
+        electronicSales: electronicSalesMinor.toString(),
+        cashReturns: cashReturnsMinor.toString(),
+        salesCount: salesDuringShift.length,
+        totalSales: totalSalesMinor.toString(),
+        expectedCash: expectedCashMinor.toString(),
+        notes: openShift.notes ?? '',
+        currency,
+      }
+    });
+  }
+
+  if (method === 'POST' && path === '/api/shifts/start') {
+    const body = await readJson(req);
+    const stores = await storeRepo.listByTenant(ctx);
+    const storeId = ctx.storeId ?? body.storeId ?? stores[0]?.id;
+    if (!storeId || !stores.some((s) => s.id === storeId)) {
+      throw Object.assign(new Error('الفرع غير متاح'), { status: 403 });
+    }
+    const rawDb = database.getRawDatabase();
+    const existing = rawDb.prepare(
+      "SELECT id FROM cashier_shifts WHERE tenant_id = ? AND store_id = ? AND user_id = ? AND status = 'OPEN' LIMIT 1"
+    ).get(ctx.tenantId, storeId, ctx.userId);
+    if (existing) {
+      throw Object.assign(new Error('يوجد شفت مفتوح بالفعل لك في هذا الفرع. يجب إنهاؤه أولاً.'), { status: 409 });
+    }
+
+    const shiftId = randomUUID();
+    const shiftNumber = generateNextShiftNumber(ctx.tenantId);
+    const nowIso = new Date().toISOString();
+    const openingCash = BigInt(body.openingCash ?? '0');
+    const notes = body.notes?.trim() || null;
+
+    rawDb.prepare(`
+      INSERT INTO cashier_shifts (id, shift_number, tenant_id, store_id, user_id, started_at, opening_cash, status, notes, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?)
+    `).run(shiftId, shiftNumber, ctx.tenantId, storeId, ctx.userId, nowIso, openingCash.toString(), notes, nowIso, nowIso);
+
+    await recordAudit(ctx, {
+      storeId,
+      action: 'ATTENDANCE_CHECK_IN',
+      entityType: 'SHIFT',
+      entityId: shiftId,
+      summary: `بدء الوردية (${shiftNumber}) برصيد افتتاحي ${openingCash.toString()}`,
+      metadata: { shiftNumber, openingCash: openingCash.toString() }
+    });
+
+    return json(res, 201, {
+      shift: { id: shiftId, shiftNumber, startedAt: nowIso, openingCash: openingCash.toString(), status: 'OPEN' }
+    });
+  }
+
+  if (method === 'POST' && path === '/api/shifts/end') {
+    const body = await readJson(req);
+    const shiftId = body.shiftId;
+    if (!shiftId) throw Object.assign(new Error('معرف الشفت مطلوب'), { status: 400 });
+    const rawDb = database.getRawDatabase();
+    const shift = rawDb.prepare("SELECT * FROM cashier_shifts WHERE id = ? AND tenant_id = ?").get(shiftId, ctx.tenantId);
+    if (!shift) throw Object.assign(new Error('الشفت غير موجود'), { status: 404 });
+    if (shift.status !== 'OPEN') throw Object.assign(new Error('هذا الشفت مغلق بالفعل'), { status: 409 });
+    if (shift.user_id !== ctx.userId && ctx.roleId !== 'OWNER' && ctx.roleId !== 'STORE_MANAGER') {
+      throw Object.assign(new Error('غير مصرح بإغلاق شفت موظف آخر'), { status: 403 });
+    }
+
+    const nowIso = new Date().toISOString();
+    const actualCash = BigInt(body.actualCash ?? '0');
+    const handoverCash = BigInt(body.handoverCash ?? '0');
+    const notes = body.notes?.trim() || shift.notes || null;
+
+    const salesDuringShift = rawDb.prepare(`
+      SELECT s.id,
+        COALESCE((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS total_amount,
+        COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id AND sp.method = 'CASH'), 0) AS cash_paid,
+        s.change_given
+      FROM sales s
+      WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
+        AND s.created_at >= ? AND s.created_at <= ?
+    `).all(ctx.tenantId, shift.store_id, shift.user_id, shift.started_at, nowIso);
+
+    const returnsDuringShift = rawDb.prepare(`
+      SELECT cr.id, cr.refund_amount, cr.payment_method
+      FROM customer_returns cr
+      WHERE cr.tenant_id = ? AND cr.store_id = ? AND cr.created_by_user_id = ?
+        AND cr.created_at >= ? AND cr.created_at <= ?
+    `).all(ctx.tenantId, shift.store_id, shift.user_id, shift.started_at, nowIso);
+
+    let cashSalesMinor = 0n;
+    for (const s of salesDuringShift) {
+      cashSalesMinor += BigInt(s.cash_paid ?? 0) - BigInt(s.change_given ?? 0);
+    }
+    let cashReturnsMinor = 0n;
+    for (const r of returnsDuringShift) {
+      if (r.payment_method === 'CASH') cashReturnsMinor += BigInt(r.refund_amount ?? 0);
+    }
+
+    const openingCashMinor = BigInt(shift.opening_cash ?? 0);
+    const expectedCashMinor = openingCashMinor + cashSalesMinor - cashReturnsMinor;
+    const varianceMinor = actualCash - expectedCashMinor;
+
+    rawDb.prepare(`
+      UPDATE cashier_shifts SET
+        ended_at = ?,
+        expected_cash = ?,
+        actual_cash = ?,
+        variance = ?,
+        handover_cash = ?,
+        status = 'CLOSED',
+        notes = ?,
+        updated_at = ?
+      WHERE id = ? AND tenant_id = ?
+    `).run(nowIso, expectedCashMinor.toString(), actualCash.toString(), varianceMinor.toString(), handoverCash.toString(), notes, nowIso, shift.id, ctx.tenantId);
+
+    await recordAudit(ctx, {
+      storeId: shift.store_id,
+      action: 'SHIFT_CLOSED',
+      entityType: 'SHIFT',
+      entityId: shift.id,
+      summary: `إنهاء الوردية (${shift.shift_number}): متوقع ${expectedCashMinor.toString()}، فعلي ${actualCash.toString()}، الفارق ${varianceMinor.toString()}`,
+      metadata: { shiftNumber: shift.shift_number, expectedCash: expectedCashMinor.toString(), actualCash: actualCash.toString(), variance: varianceMinor.toString(), handoverCash: handoverCash.toString() }
+    });
+
+    return json(res, 200, {
+      shift: {
+        id: shift.id,
+        shiftNumber: shift.shift_number,
+        startedAt: shift.started_at,
+        endedAt: nowIso,
+        openingCash: openingCashMinor.toString(),
+        expectedCash: expectedCashMinor.toString(),
+        actualCash: actualCash.toString(),
+        variance: varianceMinor.toString(),
+        handoverCash: handoverCash.toString(),
+        salesCount: salesDuringShift.length,
+        status: 'CLOSED',
+      }
+    });
+  }
+
+  if (method === 'GET' && path === '/api/shifts') {
+    const stores = await storeRepo.listByTenant(ctx);
+    const requestedStore = url.searchParams.get('storeId');
+    const storeId = ctx.storeId ?? requestedStore ?? stores[0]?.id;
+    if (!storeId || !stores.some((s) => s.id === storeId)) {
+      throw Object.assign(new Error('الفرع غير متاح'), { status: 403 });
+    }
+    const tenant = await tenantRepo.findById(ctx.tenantId);
+    const currency = tenant?.currency ?? 'EGP';
+    const rawDb = database.getRawDatabase();
+
+    const from = url.searchParams.get('from') || '';
+    const to = url.searchParams.get('to') || '';
+    let filterUser = url.searchParams.get('userId') || '';
+    const isCashier = ctx.roleId === 'CASHIER';
+    if (isCashier) {
+      filterUser = ctx.userId;
+    }
+
+    let sql = `SELECT cs.*, u.full_name, u.username, u.role FROM cashier_shifts cs
+      LEFT JOIN users u ON u.id = cs.user_id AND u.tenant_id = cs.tenant_id
+      WHERE cs.tenant_id = ? AND cs.store_id = ?`;
+    const params = [ctx.tenantId, storeId];
+
+    if (filterUser) {
+      sql += ` AND cs.user_id = ?`;
+      params.push(filterUser);
+    }
+    if (from) {
+      sql += ` AND substr(cs.started_at, 1, 10) >= ?`;
+      params.push(from);
+    }
+    if (to) {
+      sql += ` AND substr(cs.started_at, 1, 10) <= ?`;
+      params.push(to);
+    }
+
+    sql += ` ORDER BY cs.started_at DESC LIMIT 200`;
+    const shiftRows = rawDb.prepare(sql).all(...params);
+
+    const shifts = [];
+    let grandSalesMinor = 0n;
+    let grandProfitMinor = 0n;
+    let grandVarianceMinor = 0n;
+
+    for (const row of shiftRows) {
+      const endTime = row.ended_at || new Date().toISOString();
+      const salesQuery = rawDb.prepare(`
+        SELECT COUNT(s.id) as salesCount,
+          COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) AS totalRevenue,
+          COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) AS grossProfit
+        FROM sales s
+        WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
+          AND s.created_at >= ? AND s.created_at <= ?
+      `).get(ctx.tenantId, row.store_id, row.user_id, row.started_at, endTime);
+
+      const salesRev = BigInt(salesQuery?.totalRevenue ?? 0);
+      const salesProfit = BigInt(salesQuery?.grossProfit ?? 0);
+      const salesCount = Number(salesQuery?.salesCount ?? 0);
+
+      grandSalesMinor += salesRev;
+      if (!isCashier) grandProfitMinor += salesProfit;
+      grandVarianceMinor += BigInt(row.variance ?? 0);
+
+      const startMs = new Date(row.started_at).getTime();
+      const endMs = row.ended_at ? new Date(row.ended_at).getTime() : Date.now();
+      const diffMins = Math.max(1, Math.round((endMs - startMs) / 60000));
+      const hours = Math.floor(diffMins / 60);
+      const mins = diffMins % 60;
+      const durationStr = hours > 0 ? `${hours} س و ${mins} د` : `${mins} دقيقة`;
+
+      shifts.push({
+        id: row.id,
+        shiftNumber: row.shift_number,
+        storeId: row.store_id,
+        userId: row.user_id,
+        userName: row.full_name || row.username || 'موظف',
+        userRole: row.role || 'CASHIER',
+        startedAt: row.started_at,
+        endedAt: row.ended_at,
+        duration: durationStr,
+        status: row.status,
+        openingCash: String(row.opening_cash ?? 0),
+        expectedCash: String(row.expected_cash ?? 0),
+        actualCash: String(row.actual_cash ?? 0),
+        variance: String(row.variance ?? 0),
+        handoverCash: String(row.handover_cash ?? 0),
+        salesCount,
+        salesRevenue: salesRev.toString(),
+        grossProfit: isCashier ? null : salesProfit.toString(),
+        notes: row.notes ?? '',
+      });
+    }
+
+    return json(res, 200, {
+      currency,
+      shifts,
+      summary: {
+        totalShifts: shifts.length,
+        totalSales: grandSalesMinor.toString(),
+        totalProfit: isCashier ? null : grandProfitMinor.toString(),
+        totalVariance: grandVarianceMinor.toString(),
+      }
+    });
+  }
+
+  const shiftSalesMatch = method === 'GET' ? path.match(/^\/api\/shifts\/([0-9a-f-]+)\/sales$/i) : null;
+  if (shiftSalesMatch) {
+    const shiftId = shiftSalesMatch[1];
+    const rawDb = database.getRawDatabase();
+    const shift = rawDb.prepare("SELECT * FROM cashier_shifts WHERE id = ? AND tenant_id = ?").get(shiftId, ctx.tenantId);
+    if (!shift) throw Object.assign(new Error('الوردية غير موجودة'), { status: 404 });
+    const isCashier = ctx.roleId === 'CASHIER';
+    if (isCashier && shift.user_id !== ctx.userId) {
+      throw Object.assign(new Error('غير مصرح بعرض فواتير وردية موظف آخر'), { status: 403 });
+    }
+    const tenant = await tenantRepo.findById(ctx.tenantId);
+    const currency = tenant?.currency ?? 'EGP';
+    const endTime = shift.ended_at || new Date().toISOString();
+
+    const salesRows = rawDb.prepare(`
+      SELECT s.id, s.sale_number, s.created_at, s.customer_name, s.status, s.change_given,
+        COALESCE((SELECT sp.method FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id LIMIT 1), 'CASH') as payment_method,
+        COALESCE((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS total_amount,
+        COALESCE((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS gross_profit,
+        (SELECT COUNT(si.id) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id) as items_count
+      FROM sales s
+      WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
+        AND s.created_at >= ? AND s.created_at <= ?
+      ORDER BY s.created_at DESC
+    `).all(ctx.tenantId, shift.store_id, shift.user_id, shift.started_at, endTime);
+
+    return json(res, 200, {
+      currency,
+      shift: { id: shift.id, shiftNumber: shift.shift_number, startedAt: shift.started_at, endedAt: shift.ended_at },
+      sales: salesRows.map((s) => ({
+        id: s.id,
+        saleNumber: s.sale_number,
+        createdAt: s.created_at,
+        customerName: s.customer_name || 'عميل نقدي',
+        paymentMethod: s.payment_method,
+        itemsCount: s.items_count,
+        total: s.total_amount.toString(),
+        grossProfit: isCashier ? null : s.gross_profit.toString(),
+      }))
+    });
+  }
+
   if (method === 'POST' && path === '/api/users') {
     ctx.assertPermission(Permissions.USERS_MANAGE);
     const body = validate(CreateUserSchema, await readJson(req));
@@ -2192,10 +2589,18 @@ async function handleApi(req, res, url) {
       ctx.assertPermission(Permissions.POS_REFUND);
     }
     const body = validate(CustomerReturnSchema, await readJson(req));
-    const result = await returns.record(ctx, { id: randomUUID(), idempotencyKey: body.idempotencyKey,
-      storeId: body.storeId, originalSaleId: returnMatch[1], paymentMethod: body.paymentMethod,
-      occurredAt: new Date(), lines: body.items.map((item) => ({ originalSaleItemId: item.originalSaleItemId, quantity: BigInt(item.quantity) })) });
-    return json(res, 201, { id: result.id, refundAmount: result.refundAmount.toString() });
+    const returnNumber = generateNextReturnNumber(ctx.tenantId);
+    const result = await returns.record(ctx, {
+      id: randomUUID(),
+      returnNumber,
+      idempotencyKey: body.idempotencyKey,
+      storeId: body.storeId,
+      originalSaleId: returnMatch[1],
+      paymentMethod: body.paymentMethod,
+      occurredAt: new Date(),
+      lines: body.items.map((item) => ({ originalSaleItemId: item.originalSaleItemId, quantity: BigInt(item.quantity) }))
+    });
+    return json(res, 201, { id: result.id, returnNumber, refundAmount: result.refundAmount.toString() });
   }
 
   if (method === 'POST' && path === '/api/purchases') {

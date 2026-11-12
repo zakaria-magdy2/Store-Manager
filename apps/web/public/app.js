@@ -62,6 +62,8 @@ const icons = {
   calendar: '<rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
   check: '<polyline points="20 6 9 17 4 12"/>',
   x: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
+  clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  play: '<polygon points="5 3 19 12 5 21 5 3"/>',
 };
 
 function getTheme() {
@@ -103,6 +105,7 @@ const navItems = [
   { id: 'products', label: 'المنتجات والموديلات', icon: 'box' },
   { id: 'inventory', label: 'المخزون', icon: 'store' },
   { id: 'sales', label: 'المبيعات', icon: 'chart' },
+  { id: 'shifts', label: 'الورديات', icon: 'clock' },
   { id: 'suppliers', label: 'التجار والمشتريات', icon: 'users' },
   { id: 'expenses', label: 'المصروفات', icon: 'wallet' },
   { id: 'financial-map', label: 'المسار المالي', icon: 'chart' },
@@ -110,7 +113,7 @@ const navItems = [
   { id: 'top-products', label: 'التقارير والإحصائيات', icon: 'chart' },
   { id: 'users', label: 'المستخدمون', icon: 'users' },
 ];
-const extraPageTitles = { backups: 'النسخ الاحتياطي اليومي والاستعادة', 'audit-logs': 'سجل المراجعة والأمان', 'monthly-expenses': 'الالتزامات الشهرية', 'financial-map': 'المسار المالي وتدفق الأرباح' };
+const extraPageTitles = { backups: 'النسخ الاحتياطي اليومي والاستعادة', 'audit-logs': 'سجل المراجعة والأمان', 'monthly-expenses': 'الالتزامات الشهرية', 'financial-map': 'المسار المالي وتدفق الأرباح', shifts: 'سجل الورديات ومتابعة الشفتات' };
 
 function icon(name, size = 20) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] ?? ''}</svg>`;
@@ -335,26 +338,26 @@ function bindLogin() {
 
 function shellView() {
   const isCashier = state.data.user.role === 'CASHIER' || Boolean(state.data.capabilities.cashierMode);
-  const cashierAllowedPages = ['pos', 'inventory', 'sales'];
+  const cashierAllowedPages = ['pos', 'inventory', 'sales', 'shifts'];
   const visibleNavItems = isCashier ? navItems.filter((item) => cashierAllowedPages.includes(item.id)) : navItems;
   const pageTitle = navItems.find((item) => item.id === state.page)?.label ?? extraPageTitles[state.page] ?? 'الرئيسية';
   const menuExtraItems = `${state.data.capabilities.canManageBackups ? `<button type="button" class="account-menu-item" role="menuitem" data-page="backups">${icon('store', 17)}<span>النسخ الاحتياطي اليومي</span></button>` : ''}${state.data.capabilities.canViewAuditLogs ? `<button type="button" class="account-menu-item" role="menuitem" data-page="audit-logs">${icon('scan', 17)}<span>سجل المراجعة والأمان</span></button>` : ''}`;
-  const isCashierEmployee = state.data.user.role === 'CASHIER';
-  const attendanceControl = isCashierEmployee ? (state.data.userCheckedInToday ? `
-    <span class="attendance-badge-btn attendance-badge-active" title="تم تسجيل حضورك اليوم بنجاح">
-      ${icon('check', 15)}<span>حاضر (${new Date(state.data.userCheckInTime).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })})</span>
-    </span>
-  ` : `
-    <button type="button" id="header-attendance-btn" class="button button-primary button-sm" style="background:#059669;border-color:#059669;box-shadow:0 2px 8px rgba(5,150,105,.25);font-weight:700;">
-      ${icon('check', 15)}<span>تسجيل حضور</span>
+  const activeShift = state.data.activeShift;
+  const shiftControl = activeShift ? `
+    <button type="button" id="header-end-shift-btn" class="button button-sm button-shift-active" style="background:#5948d8;border-color:#5948d8;color:#fff;box-shadow:0 2px 8px rgba(89,72,216,.25);font-weight:750;display:inline-flex;align-items:center;gap:6px;" title="الوردية مفتوحة حالياً، اضغط لإنهائها وتقفيل الدرج">
+      ${icon('clock', 15)}<span>إنهاء الوردية (${escapeHtml(activeShift.shiftNumber)})</span>
     </button>
-  `) : '';
+  ` : `
+    <button type="button" id="header-start-shift-btn" class="button button-sm button-shift-start" style="background:#059669;border-color:#059669;color:#fff;box-shadow:0 2px 8px rgba(5,150,105,.25);font-weight:750;display:inline-flex;align-items:center;gap:6px;" title="بدء وردية جديدة وتسجيل الحضور">
+      ${icon('play', 15)}<span>بدء الوردية (تسجيل الحضور)</span>
+    </button>
+  `;
   const lowStockCount = state.data.summary?.lowStockCount ?? state.data.lowStock?.length ?? 0;
   const suppliersDebtCount = (state.data.suppliers ?? []).filter((s) => s.purchases.some((p) => BigInt(p.remainingAmount.amount) > 0n)).length;
   const monthlyDueCount = (state.data.monthlyExpenses ?? []).filter((m) => m.actual && BigInt(m.actual.remainingAmount.amount) > 0n).length;
   const totalAlertsCount = lowStockCount + suppliersDebtCount + monthlyDueCount;
 
-  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'financial-map' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item" role="menuitem" href="mailto:support@retailos.local">${icon('help', 17)}<span>\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u0627\u0644\u062f\u0639\u0645</span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${attendanceControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>⌘ K</kbd></label><button class="icon-button notification-button" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount ? '<i></i>' : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${pageView()}</section></main>`;
+  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'financial-map' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item" role="menuitem" href="mailto:support@retailos.local">${icon('help', 17)}<span>\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u0627\u0644\u062f\u0639\u0645</span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${shiftControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>⌘ K</kbd></label><button class="icon-button notification-button" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount ? '<i></i>' : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${pageView()}</section></main>`;
 }
 
 function roleLabel(role) {
@@ -369,12 +372,14 @@ function pageView() {
   if (state.data.capabilities.cashierMode) {
     if (state.page === 'inventory') return inventoryView();
     if (state.page === 'sales') return salesView();
+    if (state.page === 'shifts') return shiftsView();
     return posView();
   }
   if (state.page === 'pos') return posView();
   if (state.page === 'products') return productsView();
   if (state.page === 'inventory') return inventoryView();
   if (state.page === 'sales') return salesView();
+  if (state.page === 'shifts') return shiftsView();
   if (state.page === 'suppliers') return suppliersView();
   if (state.page === 'expenses' && state.data.capabilities.canViewExpenses) return expensesView();
   if (state.page === 'monthly-expenses' && state.data.capabilities.canViewMonthlyExpenses) return expensesView();
@@ -413,7 +418,7 @@ function usersView() {
         ? `<span class="status-pill status-complete" style="font-size:11.5px;font-weight:700;">✓ حاضر اليوم (${new Date(att.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })})</span>`
         : `<span class="status-pill status-low" style="font-size:11.5px;">لم يحضر اليوم بعد</span>`)
       : `<span class="status-pill" style="opacity:0.65;font-size:11.5px;">${userRoleLabel(user.role)}</span>`;
-    const historyBtn = `<button type="button" class="button button-secondary button-sm view-attendance-btn" data-user-id="${user.id}" data-user-name="${escapeHtml(user.fullName)}" style="font-size:11.5px;padding:3px 9px;">📅 سجل الحضور</button>`;
+    const historyBtn = `<button type="button" class="button button-secondary button-sm view-attendance-btn" data-user-id="${user.id}" data-user-name="${escapeHtml(user.fullName)}" style="font-size:11.5px;padding:3px 9px;">سجل الحضور</button>`;
 
     const roleField = isOwner
       ? '<span class="status-pill status-complete" style="font-weight:700;">مالك النظام</span><input type="hidden" name="role" value="OWNER">'
@@ -475,11 +480,10 @@ function showEmployeeDetails(user) {
   const att = (state.data.todayAttendance ?? []).find((a) => a.userId === user.id);
   const isEmp = user.role === 'CASHIER';
   const attText = isEmp ? (att ? `✓ حاضر اليوم (${new Date(att.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })})` : 'لم يحضر اليوم بعد') : 'إدارة / مالك';
-  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card employee-profile-card" role="dialog" aria-modal="true" aria-labelledby="employee-profile-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">ملف الموظف</span><h2 id="employee-profile-title">${escapeHtml(user.fullName)}</h2></div><button type="button" class="modal-close" data-close-employee aria-label="إغلاق">×</button></div><div class="employee-profile-body"><div class="employee-profile-meta"><div class="employee-meta-item"><small>اسم المستخدم</small><strong>${escapeHtml(user.username)}</strong></div><div class="employee-meta-item"><small>الدور الوظيفي</small><strong>${userRoleLabel(user.role)}</strong></div><div class="employee-meta-item"><small>الفرع المعين به</small><strong>${escapeHtml(storeName)}</strong></div><div class="employee-meta-item"><small>حالة الحساب</small><strong class="${user.isActive ? 'profile-active' : 'profile-inactive'}">${user.isActive ? 'نشط ومفعل' : 'موقوف'}</strong></div><div class="employee-meta-item"><small>حضور اليوم</small><strong style="color:${att ? '#15803d' : '#b45309'};">${attText}</strong></div><div class="employee-meta-item"><small>تاريخ الانضمام</small><strong>${employeeDateLabel(user.createdAt, true)}</strong></div><div class="employee-meta-item employee-meta-wide"><small>مدة العمل في المتجر</small><strong>${employeeTenure(user.employmentStartDate)}</strong></div></div><form id="employee-profile-form" data-user-id="${user.id}" class="form-stack"><div class="form-grid"><label><span>رقم الهاتف</span><input name="phone" type="tel" maxlength="32" autocomplete="tel" value="${escapeHtml(user.phone ?? '')}" placeholder="لم يُسجل رقم هاتف"></label><label><span>تاريخ بدء العمل الفعلي</span><input name="employmentStartDate" type="date" required value="${escapeHtml(user.employmentStartDate ?? '')}"></label></div><div class="modal-actions" style="margin-top:10px;"><button type="button" class="button button-secondary" data-close-employee>إغلاق</button><button type="button" class="button button-secondary" id="employee-modal-att-btn">📅 سجل الحضور</button><button type="submit" class="button button-primary">حفظ بيانات الموظف</button></div></form></div></section></div>`;
+  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card employee-profile-card" role="dialog" aria-modal="true" aria-labelledby="employee-profile-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">ملف الموظف</span><h2 id="employee-profile-title">${escapeHtml(user.fullName)}</h2></div><button type="button" class="modal-close" data-close-employee aria-label="إغلاق">×</button></div><div class="employee-profile-body"><div class="employee-profile-meta"><div class="employee-meta-item"><small>اسم المستخدم</small><strong>${escapeHtml(user.username)}</strong></div><div class="employee-meta-item"><small>الدور الوظيفي</small><strong>${userRoleLabel(user.role)}</strong></div><div class="employee-meta-item"><small>الفرع المعين به</small><strong>${escapeHtml(storeName)}</strong></div><div class="employee-meta-item"><small>حالة الحساب</small><strong class="${user.isActive ? 'profile-active' : 'profile-inactive'}">${user.isActive ? 'نشط ومفعل' : 'موقوف'}</strong></div><div class="employee-meta-item"><small>حضور اليوم</small><strong style="color:${att ? '#15803d' : '#b45309'};">${attText}</strong></div><div class="employee-meta-item"><small>تاريخ الانضمام</small><strong>${employeeDateLabel(user.createdAt, true)}</strong></div><div class="employee-meta-item employee-meta-wide"><small>مدة العمل في المتجر</small><strong>${employeeTenure(user.employmentStartDate)}</strong></div></div><form id="employee-profile-form" data-user-id="${user.id}" class="form-stack"><div class="form-grid"><label><span>رقم الهاتف</span><input name="phone" type="tel" maxlength="32" autocomplete="tel" value="${escapeHtml(user.phone ?? '')}" placeholder="لم يُسجل رقم هاتف"></label><label><span>تاريخ بدء العمل الفعلي</span><input name="employmentStartDate" type="date" required value="${escapeHtml(user.employmentStartDate ?? '')}"></label></div><div class="modal-actions" style="margin-top:10px;"><button type="button" class="button button-secondary" data-close-employee>إغلاق</button><button type="button" class="button button-secondary" id="employee-modal-att-btn">سجل الحضور</button><button type="submit" class="button button-primary">حفظ بيانات الموظف</button></div></form></div></section></div>`;
   root.querySelectorAll('[data-close-employee]').forEach((element) => element.addEventListener('click', (event) => {
     if (element === event.target || element.tagName === 'BUTTON') root.innerHTML = '';
   }));
-  root.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('click', (e) => { if (e.target === backdrop) root.innerHTML = ''; }));
   root.querySelector('#employee-modal-att-btn')?.addEventListener('click', () => {
     showAttendanceHistoryModal(user.id, user.fullName);
   });
@@ -508,9 +512,8 @@ function showEmployeeDetails(user) {
 
 async function showAttendanceHistoryModal(userId, userName) {
   const root = getModalRoot();
-  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card" role="dialog" aria-modal="true" style="max-width:550px;"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">سجل حضور الموظف</span><h2>${escapeHtml(userName)}</h2></div><button class="modal-close" data-close-modal>×</button></div><div style="padding:16px 0;" id="attendance-history-content"><p style="text-align:center;color:var(--text-soft);">جاري تحميل سجل الحضور...</p></div><div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إغلاق</button></div></section></div>`;
+  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card" role="dialog" aria-modal="true" style="width:min(580px, calc(100vw - 32px));margin:20px auto;"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">سجل حضور الموظف</span><h2>${escapeHtml(userName)}</h2></div><button class="modal-close" data-close-modal>×</button></div><div style="padding:16px 20px;" id="attendance-history-content"><p style="text-align:center;color:var(--text-soft);">جاري تحميل سجل الحضور...</p></div><div class="modal-actions" style="padding:12px 20px;"><button type="button" class="button button-secondary" data-close-modal>إغلاق</button></div></section></div>`;
   root.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
-  root.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('click', (e) => { if (e.target === backdrop) root.innerHTML = ''; }));
   try {
     const data = await api(`/api/attendance/history?userId=${encodeURIComponent(userId)}`);
     const history = data.history ?? [];
@@ -520,7 +523,7 @@ async function showAttendanceHistoryModal(userId, userName) {
       content.innerHTML = `<div class="empty-row" style="text-align:center;padding:24px;">لا يوجد سجل حضور مسجل بعد لهذا الموظف.</div>`;
       return;
     }
-    content.innerHTML = `<div class="table-scroll"><table style="width:100%;border-collapse:collapse;"><thead><tr><th>التاريخ</th><th>وقت تسجيل الحضور</th><th>الحالة</th></tr></thead><tbody>${history.map((item) => {
+    content.innerHTML = `<div class="table-scroll analytics-scroll-box" style="max-height:420px; overflow-y:auto;"><table class="compact-table zebra-table" style="width:100%;border-collapse:collapse;"><thead><tr><th>التاريخ</th><th>وقت تسجيل الحضور</th><th>الحالة</th></tr></thead><tbody>${history.map((item) => {
       const d = new Date(item.createdAt);
       const dateStr = d.toLocaleDateString('ar-EG', { weekday: 'long', year: 'numeric', month: 'short', day: 'numeric' });
       const timeStr = d.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
@@ -596,7 +599,6 @@ function showChangePasswordModal() {
     root.innerHTML = '';
   };
   root.querySelectorAll('[data-close-password]').forEach((button) => button.addEventListener('click', clearAndClose));
-  root.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('click', (e) => { if (e.target === backdrop) clearAndClose(); }));
   root.querySelector('#account-password-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.currentTarget, data = Object.fromEntries(new FormData(form));
@@ -951,7 +953,23 @@ function inventoryView() {
       </div>
     </div>
   </div>
-  <section class="panel"><div class="panel-heading"><div><h3>أرصدة الموديلات والمقاسات</h3><p>اضغط على الموديل لعرض مصفوفة الألوان والمقاسات</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="ابحث عن الموديل أو الكود أو المقاس" value="${escapeHtml(state.query)}"></label></div>${items.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل</th><th>كود الموديل</th><th>الألوان والمقاسات</th><th>إجمالي الرصيد</th>${!data.capabilities.cashierMode ? '<th>متوسط التكلفة</th>' : '<th>سعر البيع</th>'}<th>حالة المقاسات</th></tr></thead><tbody>${items.map((product) => `<tr><td><button type="button" class="product-name-action inventory-product-details" data-product-id="${product.id}"><span class="product-avatar">${escapeHtml(product.name.slice(0, 1))}</span><span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand || 'اضغط لعرض جدول المقاسات')}</small></span></button></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${product.matrix.isMatrix ? `<div class="model-sub-badges">${product.matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(product.matrix.colorSummaryLabel)}</span>` : ''}${product.matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(product.matrix.sizeRangeLabel)}</span>` : ''}</div>` : `<small>${product.variants.length} نسخة</small>`}</td><td><strong>${product.quantity}</strong> قطعة</td><td>${!data.capabilities.cashierMode ? (product.cost ? money(product.cost) : '—') : (product.variants[0]?.retailPrice ? money(product.variants[0].retailPrice) : '—')}</td><td>${product.hasLowVariant ? '<span class="status-pill status-low">مقاسات تحتاج طلب</span>' : '<span class="status-pill status-complete">متوفر</span>'}</td></tr>`).join('')}</tbody></table></div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('box', 28)}</div><strong>مفيش منتجات في المخزون</strong><p>سجّل فاتورة شراء لإضافة البضاعة للمخزون.</p>${!data.capabilities.cashierMode ? '<button class="button button-primary" data-page="suppliers">فاتورة شراء</button>' : ''}</div>`}</section>`;
+  <section class="panel"><div class="panel-heading"><div><h3>أرصدة الموديلات والمقاسات</h3><p>اضغط على الموديل لعرض مصفوفة الألوان والمقاسات</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="ابحث عن الموديل أو الكود أو المقاس" value="${escapeHtml(state.query)}"></label></div>${items.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل</th><th>كود الموديل</th><th>الألوان والمقاسات</th><th style="text-align:center;">إجمالي الرصيد</th>${!data.capabilities.cashierMode ? '<th>سعر التكلفة (الفعلي)</th><th>سعر البيع</th><th>المكسب المتوقع</th>' : '<th>سعر البيع</th>'}<th>حالة المقاسات</th></tr></thead><tbody>${items.map((product) => `<tr><td><button type="button" class="product-name-action inventory-product-details" data-product-id="${product.id}"><span class="product-avatar">${escapeHtml(product.name.slice(0, 1))}</span><span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand || 'اضغط لعرض جدول المقاسات')}</small></span></button></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${product.matrix.isMatrix ? `<div class="model-sub-badges">${product.matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(product.matrix.colorSummaryLabel)}</span>` : ''}${product.matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(product.matrix.sizeRangeLabel)}</span>` : ''}</div>` : `<small>${product.variants.length} نسخة</small>`}</td><td style="text-align:center;"><strong>${product.quantity}</strong> قطعة</td>${!data.capabilities.cashierMode ? (() => {
+  const v0 = product.variants[0];
+  const unitRetail = v0?.retailPrice ?? v0?.price ?? null;
+  const unitCost = product.cost;
+  let unitProfitStr = '—';
+  if (unitRetail && unitCost) {
+    const profitMinor = BigInt(unitRetail.amount) - BigInt(unitCost.amount);
+    unitProfitStr = money({ amount: profitMinor.toString(), currency: unitRetail.currency, decimals: unitRetail.decimals });
+  }
+  return `
+    <td>${unitCost ? money(unitCost) : '—'}</td>
+    <td><strong style="color:var(--purple);">${unitRetail ? money(unitRetail) : '—'}</strong></td>
+    <td><strong style="color:#15803d;">${unitProfitStr}</strong><br><small style="color:var(--muted);font-size:10px;">لكل قطعة</small></td>
+  `;
+})() : `
+  <td><strong style="color:var(--purple);">${product.variants[0]?.retailPrice ? money(product.variants[0].retailPrice) : '—'}</strong></td>
+`}<td>${product.hasLowVariant ? '<span class="status-pill status-low">مقاسات تحتاج طلب</span>' : '<span class="status-pill status-complete">متوفر</span>'}</td></tr>`).join('')}</tbody></table></div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('box', 28)}</div><strong>مفيش منتجات في المخزون</strong><p>سجّل فاتورة شراء لإضافة البضاعة للمخزون.</p>${!data.capabilities.cashierMode ? '<button class="button button-primary" data-page="suppliers">فاتورة شراء</button>' : ''}</div>`}</section>`;
 }
 
 function salesView() {
@@ -1065,6 +1083,522 @@ function salesView() {
       </div>
     </details>
   `;
+}
+
+async function loadShifts() {
+  const storeId = state.data?.selectedStoreId;
+  const params = new URLSearchParams();
+  if (storeId) params.set('storeId', storeId);
+  if (state.shiftFrom) params.set('from', state.shiftFrom);
+  if (state.shiftTo) params.set('to', state.shiftTo);
+  if (state.shiftUser) params.set('userId', state.shiftUser);
+  const q = params.toString() ? `?${params.toString()}` : '';
+  try {
+    state.shiftsData = await api(`/api/shifts${q}`);
+    render();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+function shiftsView() {
+  const currency = state.data.company.currency;
+  const decimals = currencyDecimals(currency);
+  const format = (v) => money({ amount: v, currency, decimals });
+  const isCashier = state.data.user.role === 'CASHIER' || Boolean(state.data.capabilities.cashierMode);
+  const activePreset = state.shiftPreset || 'today';
+  const shiftsData = state.shiftsData;
+
+  if (!shiftsData) {
+    void loadShifts();
+    return `<div class="panel empty-chart" style="padding:60px 20px;"><div class="empty-illustration">${icon('clock', 32)}</div><strong>جاري تحميل سجل الورديات...</strong><p>يتم تجميع كافة ورديات الشفتات ومبيعات كل كاشير.</p></div>`;
+  }
+
+  const { shifts = [], summary = {} } = shiftsData;
+
+  return `
+    <div class="page-heading-row">
+      <div>
+        <p class="page-lead">سجل ورديات الموظفين: متابعة بدء وانتهاء الشفتات، جرد الأدراج، المبيعات المحققة، والتوريدات.</p>
+      </div>
+      <div>
+        ${state.data.activeShift ? `
+          <button type="button" class="button button-primary" id="shifts-end-now-btn" style="background:#5948d8;border-color:#5948d8;">
+            ${icon('clock', 16)} إنهاء الوردية الحالية (${escapeHtml(state.data.activeShift.shiftNumber)})
+          </button>
+        ` : `
+          <button type="button" class="button button-primary" id="shifts-start-now-btn" style="background:#059669;border-color:#059669;">
+            ${icon('play', 16)} بدء وردية جديدة
+          </button>
+        `}
+      </div>
+    </div>
+
+    <section class="pro-filter-card" style="margin-bottom:18px;">
+      <div class="pro-filter-row">
+        <div class="pro-filter-pills">
+          <span style="font-size:12px;font-weight:700;color:var(--muted);display:inline-flex;align-items:center;gap:6px;">
+            ${icon('filter', 15)} تصفية الورديات:
+          </span>
+          <button type="button" class="pro-filter-pill ${activePreset === 'all' ? 'active' : ''}" data-shift-preset="all">كل الورديات</button>
+          <button type="button" class="pro-filter-pill ${activePreset === 'today' ? 'active' : ''}" data-shift-preset="today">اليوم</button>
+          <button type="button" class="pro-filter-pill ${activePreset === 'week' ? 'active' : ''}" data-shift-preset="week">هذا الأسبوع</button>
+          <button type="button" class="pro-filter-pill ${activePreset === 'month' ? 'active' : ''}" data-shift-preset="month">هذا الشهر</button>
+        </div>
+        <form id="shifts-date-filter" class="pro-date-inputs">
+          <div class="pro-input-wrap">
+            <label>${icon('calendar', 14)} من:</label>
+            <input type="date" name="from" value="${state.shiftFrom || ''}">
+          </div>
+          <div class="pro-input-wrap">
+            <label>${icon('calendar', 14)} إلى:</label>
+            <input type="date" name="to" value="${state.shiftTo || ''}">
+          </div>
+          <button type="submit" class="button button-primary button-sm" style="height:38px;padding:0 14px;">تطبيق</button>
+        </form>
+      </div>
+    </section>
+
+    <div class="fm-card-grid" style="grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 18px;">
+      <div class="fm-kpi-card">
+        <small>إجمالي عدد الورديات</small>
+        <strong style="color:var(--ink);">${summary.totalShifts ?? shifts.length} وردية</strong>
+        <small style="color:var(--muted);">${activePreset === 'today' ? 'اليوم' : 'في الفترة المحددة'}</small>
+      </div>
+      <div class="fm-kpi-card">
+        <small>إجمالي مبيعات الورديات</small>
+        <strong style="color:#15803d;">${format(summary.totalSales ?? '0')}</strong>
+        <small style="color:var(--muted);">المحصل من كافة الفواتير</small>
+      </div>
+      ${!isCashier ? `
+        <div class="fm-kpi-card fm-kpi-profit">
+          <small style="color:var(--purple);font-weight:750;">إجمالي أرباح الورديات</small>
+          <strong>${format(summary.totalProfit ?? '0')}</strong>
+          <small style="color:var(--muted);">مجمل ربح البضاعة المباعة</small>
+        </div>
+      ` : ''}
+      <div class="fm-kpi-card">
+        <small>صافي عجز / زيادة الأدراج</small>
+        <strong style="color:${BigInt(summary.totalVariance ?? '0') === 0n ? '#15803d' : BigInt(summary.totalVariance ?? '0') > 0n ? '#2563eb' : 'var(--rose,#be123c)'};">
+          ${BigInt(summary.totalVariance ?? '0') === 0n ? 'متطابق (0.00)' : format(summary.totalVariance ?? '0')}
+        </strong>
+        <small style="color:var(--muted);">فروقات الجرد الفعلي</small>
+      </div>
+    </div>
+
+    <section class="panel compact-panel">
+      <div class="panel-heading">
+        <div>
+          <h3 style="font-size:16px;font-weight:800;color:var(--ink);">قائمة الورديات المسجلة (${shifts.length} وردية)</h3>
+          <p>تفاصيل كل شفت، توقيت الحضور والانصراف، مبيعات الكاشير، ورصيد التوريد والتسليم.</p>
+        </div>
+      </div>
+
+      ${shifts.length ? `
+        <div class="table-scroll analytics-scroll-box" style="max-height:550px; overflow-y:auto;">
+          <table class="compact-table zebra-table">
+            <thead>
+              <tr>
+                <th>رقم الوردية</th>
+                <th>الموظف المسؤول</th>
+                <th>البداية والانتهاء</th>
+                <th>مدة الشفت</th>
+                <th>الافتتاحي</th>
+                <th>إجمالي المبيعات</th>
+                ${!isCashier ? '<th>الأرباح</th>' : ''}
+                <th>المتوقع بالدرج</th>
+                <th>الفعلي المعدود</th>
+                <th style="text-align:center;">الفارق</th>
+                <th>المبلغ المورد</th>
+                <th style="text-align:center;">الفواتير</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${shifts.map((s) => {
+                const varianceNum = BigInt(s.variance || '0');
+                const varianceBadge = varianceNum === 0n
+                  ? '<span class="status-pill status-complete" style="font-size:11px;">متطابق ✓</span>'
+                  : varianceNum > 0n
+                  ? `<span class="status-pill status-complete" style="background:#eff6ff;color:#2563eb;border-color:#bfdbfe;font-size:11px;">+${format(s.variance)} (زيادة)</span>`
+                  : `<span class="status-pill status-low" style="font-size:11px;">${format(s.variance)} (عجز)</span>`;
+                return `
+                  <tr>
+                    <td><strong style="color:var(--purple);font-family:monospace;letter-spacing:0.5px;">${escapeHtml(s.shiftNumber)}</strong></td>
+                    <td><strong>${escapeHtml(s.userName)}</strong><br><small style="color:var(--muted);">${roleLabel(s.userRole)}</small></td>
+                    <td>
+                      <div>${new Date(s.startedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })} ${new Date(s.startedAt).toLocaleDateString('ar-EG', { month: 'numeric', day: 'numeric' })}</div>
+                      <div style="font-size:11px;color:var(--muted);">${s.endedAt ? `${new Date(s.endedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}` : '<span style="color:#15803d;font-weight:700;">مفتوحة حالياً</span>'}</div>
+                    </td>
+                    <td><span class="sku-code">${escapeHtml(s.duration)}</span></td>
+                    <td>${format(s.openingCash)}</td>
+                    <td><strong style="color:#15803d;">${format(s.salesRevenue)}</strong><br><small style="color:var(--muted);">${s.salesCount} فاتورة</small></td>
+                    ${!isCashier ? `<td><strong style="color:var(--purple);">${format(s.grossProfit ?? '0')}</strong></td>` : ''}
+                    <td>${format(s.expectedCash)}</td>
+                    <td><strong>${s.status === 'OPEN' ? '—' : format(s.actualCash)}</strong></td>
+                    <td style="text-align:center;">${s.status === 'OPEN' ? '<span class="status-pill" style="font-size:11px;">قيد العمل</span>' : varianceBadge}</td>
+                    <td><strong>${format(s.handoverCash)}</strong></td>
+                    <td style="text-align:center;">
+                      <button type="button" class="button button-sm button-secondary view-shift-sales-btn" data-shift-id="${s.id}" data-shift-number="${escapeHtml(s.shiftNumber)}" style="font-size:11.5px;padding:3px 10px;">
+                        عرض الفواتير (${s.salesCount})
+                      </button>
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      ` : `
+        <div class="empty-chart" style="padding:40px 16px;">
+          <div class="empty-illustration">${icon('clock', 32)}</div>
+          <strong>لا توجد ورديات مسجلة في هذه الفترة</strong>
+          <p>ابدأ وردية جديدة ليتم احتساب المبيعات وحركات الدرج تلقائياً.</p>
+        </div>
+      `}
+    </section>
+  `;
+}
+
+async function showShiftSalesModal(shiftId, shiftNumber) {
+  const root = getModalRoot();
+  root.innerHTML = `
+    <div class="modal-backdrop">
+      <section class="modal-card invoice-detail-card" role="dialog" aria-modal="true" style="width:min(860px, calc(100vw - 32px));margin:20px auto;">
+        <div class="modal-heading">
+          <div>
+            <span class="eyebrow eyebrow-dark">فواتير مبيعات الوردية</span>
+            <h2>فواتير الوردية ${escapeHtml(shiftNumber)}</h2>
+          </div>
+          <button class="modal-close" data-close-modal>×</button>
+        </div>
+        <div id="shift-sales-content" style="padding:16px 20px;">
+          <p style="text-align:center;color:var(--muted);">جاري تحميل الفواتير...</p>
+        </div>
+        <div class="modal-actions" style="padding:12px 20px;">
+          <button type="button" class="button button-secondary" data-close-modal>إغلاق</button>
+        </div>
+      </section>
+    </div>
+  `;
+  root.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
+
+  try {
+    const data = await api(`/api/shifts/${encodeURIComponent(shiftId)}/sales`);
+    const currency = data.currency;
+    const decimals = currencyDecimals(currency);
+    const format = (v) => money({ amount: v, currency, decimals });
+    const content = root.querySelector('#shift-sales-content');
+    if (!content) return;
+    const sales = data.sales ?? [];
+
+    if (!sales.length) {
+      content.innerHTML = `<div class="empty-row" style="text-align:center;padding:24px;">لم يتم تسجيل أي فواتير بيع خلال هذه الوردية.</div>`;
+      return;
+    }
+
+    content.innerHTML = `
+      <div class="table-scroll analytics-scroll-box" style="max-height:450px; overflow-y:auto;">
+        <table class="compact-table zebra-table">
+          <thead>
+            <tr>
+              <th>رقم الفاتورة</th>
+              <th>التوقيت</th>
+              <th>العميل</th>
+              <th>طريقة السداد</th>
+              <th style="text-align:center;">عدد الأصناف</th>
+              <th>إجمالي الفاتورة</th>
+              ${sales[0]?.grossProfit !== null && sales[0]?.grossProfit !== undefined ? '<th>الربح المحقق</th>' : ''}
+              <th style="text-align:center;">الإيصال</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${sales.map((s) => `
+              <tr>
+                <td><strong style="color:var(--purple);font-family:monospace;">${escapeHtml(s.saleNumber)}</strong></td>
+                <td>${new Date(s.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</td>
+                <td><strong>${escapeHtml(s.customerName)}</strong></td>
+                <td><span class="payment-badge">${methodLabel(s.paymentMethod)}</span></td>
+                <td style="text-align:center;">${s.itemsCount}</td>
+                <td><strong style="color:#15803d;">${format(s.total)}</strong></td>
+                ${s.grossProfit !== null && s.grossProfit !== undefined ? `<td><strong style="color:var(--purple);">${format(s.grossProfit)}</strong></td>` : ''}
+                <td style="text-align:center;">
+                  <button type="button" class="button button-sm button-secondary print-shift-sale-btn" data-sale-id="${s.id}" style="font-size:11px;padding:2px 8px;">
+                    معاينة الإيصال
+                  </button>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    content.querySelectorAll('.print-shift-sale-btn').forEach((btn) => btn.addEventListener('click', () => {
+      void showThermalReceiptModal(btn.dataset.saleId);
+    }));
+  } catch (err) {
+    const content = root.querySelector('#shift-sales-content');
+    if (content) content.innerHTML = `<div class="status-pill status-low">${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function showStartShiftModal() {
+  const root = getModalRoot();
+  const currency = state.data.company.currency;
+  const decimals = currencyDecimals(currency);
+
+  root.innerHTML = `
+    <div class="modal-backdrop">
+      <section class="modal-card" role="dialog" aria-modal="true" style="width:min(480px, calc(100vw - 32px));margin:20px auto;">
+        <div class="modal-heading">
+          <div>
+            <span class="eyebrow eyebrow-dark">نظام الورديات والحضور</span>
+            <h2>بدء وردية جديدة وتسجيل الحضور</h2>
+          </div>
+          <button class="modal-close" data-close-modal>×</button>
+        </div>
+        <form id="start-shift-form" class="form-stack modal-form" style="padding:16px 20px;">
+          <p style="font-size:12.5px;color:var(--muted);margin:0 0 12px;">
+            أدخل رصيد عهدة بداية الشفت الموجود في درج الكاشير للبدء في تسجيل المبيعات وحركات النقدية.
+          </p>
+          <label style="font-weight:750;">عهدة النقدية في الدرج عند البداية (${currency})
+            <input name="openingCash" inputmode="decimal" value="0.00" required placeholder="0.00" style="font-size:16px;font-weight:800;color:var(--ink);">
+          </label>
+          <label style="font-weight:750;">ملاحظات البداية (اختياري)
+            <input name="notes" maxlength="250" placeholder="مثال: تسليم الدرج من الوردية السابقة">
+          </label>
+          <div class="modal-actions" style="margin-top:16px;padding:0;">
+            <button type="button" class="button button-secondary" data-close-modal>إلغاء</button>
+            <button type="submit" class="button button-primary" style="background:#059669;border-color:#059669;">تأكيد بدء الوردية</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  `;
+  root.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
+
+  root.querySelector('#start-shift-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const submitBtn = form.querySelector('[type=submit]');
+    submitBtn.disabled = true;
+    try {
+      const data = new FormData(form);
+      const openingCashMinor = toMinor(data.get('openingCash') || '0', decimals);
+      const res = await api('/api/shifts/start', {
+        method: 'POST',
+        body: JSON.stringify({
+          storeId: state.data.selectedStoreId,
+          openingCash: openingCashMinor,
+          notes: data.get('notes') || '',
+        })
+      });
+      root.innerHTML = '';
+      toast(`تم بدء الوردية #${res.shift.shiftNumber} بنجاح وتسجيل الحضور`);
+      await loadData(state.data.selectedStoreId);
+      render();
+    } catch (err) {
+      toast(err.message, 'error');
+      submitBtn.disabled = false;
+    }
+  });
+}
+
+async function showEndShiftModal() {
+  const root = getModalRoot();
+  const currency = state.data.company.currency;
+  const decimals = currencyDecimals(currency);
+  const format = (v) => money({ amount: v, currency, decimals });
+
+  root.innerHTML = `
+    <div class="modal-backdrop">
+      <section class="modal-card" role="dialog" aria-modal="true" style="width:min(580px, calc(100vw - 32px));margin:20px auto;">
+        <div class="modal-heading">
+          <div>
+            <span class="eyebrow eyebrow-dark">نظام الورديات والحسابات</span>
+            <h2>تقفيل الوردية وإنهاء الشفت</h2>
+          </div>
+          <button class="modal-close" data-close-modal>×</button>
+        </div>
+        <div id="end-shift-modal-body" style="padding:16px 20px;">
+          <p style="text-align:center;color:var(--muted);">جاري تجميع حركات الوردية الحالية...</p>
+        </div>
+      </section>
+    </div>
+  `;
+  root.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
+
+  try {
+    const { currentShift } = await api(`/api/shifts/current?storeId=${encodeURIComponent(state.data.selectedStoreId)}`);
+    if (!currentShift) {
+      root.innerHTML = '';
+      toast('لا توجد وردية مفتوحة حالياً', 'error');
+      return;
+    }
+
+    const modalBody = root.querySelector('#end-shift-modal-body');
+    if (!modalBody) return;
+
+    const expectedCashBig = BigInt(currentShift.expectedCash || '0');
+
+    modalBody.innerHTML = `
+      <div style="background:var(--surface-soft);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:8px;font-size:12.5px;">
+          <span>الوردية الحالية: <strong style="color:var(--purple);font-family:monospace;">${escapeHtml(currentShift.shiftNumber)}</strong></span>
+          <span>بدأت الساعة: <strong>${new Date(currentShift.startedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</strong></span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;margin-top:6px;border-top:1px dashed var(--line);padding-top:8px;">
+          <div>كاش البداية (الافتتاحي): <strong>${format(currentShift.openingCash)}</strong></div>
+          <div>مبيعات الكاش المحصلة: <strong style="color:#15803d;">+${format(currentShift.cashSales)}</strong></div>
+          <div>مبيعات الفيزا/المحفظة: <strong>${format(currentShift.electronicSales)}</strong></div>
+          <div>مرتجعات كاش مسددة: <strong style="color:var(--rose,#be123c);">-${format(currentShift.cashReturns)}</strong></div>
+        </div>
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;">
+          <strong style="font-size:13px;color:var(--ink);">النقدية المتوقع وجودها بالدرج:</strong>
+          <strong style="font-size:16px;color:var(--purple);">${format(currentShift.expectedCash)}</strong>
+        </div>
+      </div>
+
+      <form id="end-shift-form" class="form-stack">
+        <label style="font-weight:750;">النقدية الفعلية المعدودة في الدرج الآن (${currency}) *
+          <input name="actualCash" id="shift-actual-cash" inputmode="decimal" required placeholder="المبلغ الفعلي بالدرج" style="font-size:16px;font-weight:800;color:var(--ink);">
+          <small style="color:var(--muted);font-size:11px;">عِدّ النقدية الموجودة في الدرج بدقة واكتب المبلغ هنا</small>
+        </label>
+
+        <div id="shift-variance-preview" style="display:none;padding:10px 14px;border-radius:10px;font-size:12px;font-weight:750;margin:4px 0 10px;"></div>
+
+        <label style="font-weight:750;">المبلغ المورد للشفت القادم / الخزينة (${currency})
+          <input name="handoverCash" inputmode="decimal" placeholder="المبلغ المسلم للوردية التالية أو الخزينة" value="0.00">
+        </label>
+
+        <label style="font-weight:750;">ملاحظات التقفيل والتسليم (اختياري)
+          <input name="notes" maxlength="250" placeholder="مثال: تم تسليم الكاش للزميل أحمد بدون أي عجز">
+        </label>
+
+        <div class="modal-actions" style="margin-top:14px;padding:0;">
+          <button type="button" class="button button-secondary" data-close-modal>إلغاء</button>
+          <button type="submit" class="button button-primary" style="background:#5948d8;border-color:#5948d8;">تأكيد إنهاء الوردية وتقفيل الدرج</button>
+        </div>
+      </form>
+    `;
+
+    const actualInput = modalBody.querySelector('#shift-actual-cash');
+    const variancePreview = modalBody.querySelector('#shift-variance-preview');
+
+    actualInput?.addEventListener('input', () => {
+      const valStr = actualInput.value.trim();
+      if (!valStr || !variancePreview) {
+        if (variancePreview) variancePreview.style.display = 'none';
+        return;
+      }
+      try {
+        const actualMinor = BigInt(toMinor(valStr, decimals));
+        const diff = actualMinor - expectedCashBig;
+        variancePreview.style.display = 'block';
+        if (diff === 0n) {
+          variancePreview.style.background = '#ecfdf5';
+          variancePreview.style.border = '1px solid #a7f3d0';
+          variancePreview.style.color = '#047857';
+          variancePreview.textContent = '✓ رصيد الدرج متطابق تماماً مع المبيعات والنقدية المسجلة.';
+        } else if (diff < 0n) {
+          variancePreview.style.background = '#fef2f2';
+          variancePreview.style.border = '1px solid #fecaca';
+          variancePreview.style.color = '#be123c';
+          variancePreview.textContent = `يوجد عجز في الدرج بمقدار: ${format(diff.toString())}`;
+        } else {
+          variancePreview.style.background = '#eff6ff';
+          variancePreview.style.border = '1px solid #bfdbfe';
+          variancePreview.style.color = '#1d4ed8';
+          variancePreview.textContent = `توجد زيادة في الدرج بمقدار: +${format(diff.toString())}`;
+        }
+      } catch {
+        variancePreview.style.display = 'none';
+      }
+    });
+
+    modalBody.querySelector('#end-shift-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const form = e.currentTarget;
+      const submitBtn = form.querySelector('[type=submit]');
+      submitBtn.disabled = true;
+      try {
+        const formData = new FormData(form);
+        const actualMinor = toMinor(formData.get('actualCash') || '0', decimals);
+        const handoverMinor = toMinor(formData.get('handoverCash') || '0', decimals);
+        const res = await api('/api/shifts/end', {
+          method: 'POST',
+          body: JSON.stringify({
+            shiftId: currentShift.id,
+            actualCash: actualMinor,
+            handoverCash: handoverMinor,
+            notes: formData.get('notes') || '',
+          })
+        });
+        root.innerHTML = '';
+        toast(`تم إنهاء الوردية #${res.shift.shiftNumber} وتقفيل الدرج بنجاح`);
+        await loadData(state.data.selectedStoreId);
+        render();
+      } catch (err) {
+        toast(err.message, 'error');
+        submitBtn.disabled = false;
+      }
+    });
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+
+function bindShifts() {
+  document.querySelector('#shifts-start-now-btn')?.addEventListener('click', () => {
+    showStartShiftModal();
+  });
+  document.querySelector('#shifts-end-now-btn')?.addEventListener('click', () => {
+    showEndShiftModal();
+  });
+  document.querySelectorAll('[data-shift-preset]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const preset = btn.dataset.shiftPreset;
+      state.shiftPreset = preset;
+      const today = new Date().toISOString().slice(0, 10);
+      if (preset === 'today') {
+        state.shiftFrom = today;
+        state.shiftTo = today;
+      } else if (preset === 'week') {
+        const d = new Date();
+        const day = d.getDay();
+        const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+        const start = new Date(d.setDate(diff)).toISOString().slice(0, 10);
+        state.shiftFrom = start;
+        state.shiftTo = today;
+      } else if (preset === 'month') {
+        const d = new Date();
+        const start = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
+        state.shiftFrom = start;
+        state.shiftTo = today;
+      } else {
+        state.shiftFrom = '';
+        state.shiftTo = '';
+      }
+      await loadShifts();
+    });
+  });
+
+  const filterForm = document.querySelector('#shifts-date-filter');
+  filterForm?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const data = new FormData(filterForm);
+    state.shiftFrom = data.get('from') || '';
+    state.shiftTo = data.get('to') || '';
+    state.shiftPreset = 'custom';
+    await loadShifts();
+  });
+
+  document.querySelectorAll('.view-shift-sales-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      showShiftSalesModal(btn.dataset.shiftId, btn.dataset.shiftNumber);
+    });
+  });
 }
 
 function supplierReturnItemModal(purchase, itemId, itemName, returnableQty) {
@@ -1192,7 +1726,6 @@ function showPurchaseModelVariantsModal(modelGroup, purchase, supplier) {
 
   const close = () => { root.innerHTML = ''; };
   root.querySelectorAll('[data-close-breakdown]').forEach((b) => b.addEventListener('click', close));
-  root.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); }));
 
   root.querySelectorAll('.return-supplier-item-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -1742,37 +2275,155 @@ function growthForecastWidget(forecast, currency) {
   const forecastSign = fc.forecastGrowthPercent >= 0 ? '+' : '';
   const isCurrentMonthView = selectedPeriod?.isCurrent !== false;
 
+  // Year & Period filters
+  const currentSysYear = new Date().getFullYear();
+  state.growthSelectedYear = state.growthSelectedYear || (selectedPeriod?.year ?? currentSysYear);
+  state.growthViewMode = state.growthViewMode || '6m'; // '3m' | '6m' | 'year'
+
+  // Extract available years
+  const historyYears = Array.from(new Set([
+    currentSysYear - 1,
+    currentSysYear,
+    currentSysYear + 1,
+    ...monthlyHistory.map((m) => m.year)
+  ])).sort((a, b) => b - a);
+
+  // Chronological copy for charting
+  const chronologicalHistory = [...monthlyHistory].sort((a, b) => a.yearMonth.localeCompare(b.yearMonth));
+
+  let chartMonths = [];
+  if (state.growthViewMode === '3m') {
+    chartMonths = chronologicalHistory.slice(-3);
+  } else if (state.growthViewMode === '6m') {
+    chartMonths = chronologicalHistory.slice(-6);
+  } else {
+    // Filter by selected year
+    chartMonths = chronologicalHistory.filter((m) => m.year === Number(state.growthSelectedYear));
+    if (!chartMonths.length) {
+      const arMonthsNames = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
+      chartMonths = arMonthsNames.map((name, i) => ({
+        yearMonth: `${state.growthSelectedYear}-${String(i + 1).padStart(2, '0')}`,
+        year: Number(state.growthSelectedYear),
+        month: i + 1,
+        name: `${name} ${state.growthSelectedYear}`,
+        salesCount: 0,
+        revenue: '0',
+        profit: '0',
+        dailyAverage: '0',
+        growthPercent: 0,
+        isGrowth: true,
+        isCurrent: false,
+        isSelected: false,
+      }));
+    }
+  }
+
+  // Find max value for bar heights (max height: 140px)
+  let maxValMinor = 1n;
+  for (const m of chartMonths) {
+    const r = BigInt(m.revenue || '0');
+    const p = BigInt(m.profit || '0');
+    if (r > maxValMinor) maxValMinor = r;
+    if (p > maxValMinor) maxValMinor = p;
+  }
+  const maxValNum = Number(maxValMinor) || 1;
+
   return `
     <section class="panel compact-panel" style="margin-top:20px;">
-      <div class="growth-toolbar">
+      <!-- شريط أدوات الرسم البياني والفلاتر -->
+      <div class="growth-toolbar" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;border-bottom:1px solid var(--line);padding-bottom:14px;">
         <div>
-          <h3 style="font-size:15.5px;font-weight:850;color:var(--ink);margin:0;display:flex;align-items:center;gap:8px;">
-            إحصائيات التقدم ومسار النمو الشهري
+          <h3 style="font-size:16px;font-weight:850;color:var(--ink);margin:0;display:flex;align-items:center;gap:8px;">
+            ${icon('chart', 18)} الرسم البياني وإحصائيات التقدم والنمو الشهري
           </h3>
           <p style="margin:3px 0 0;font-size:12px;color:var(--muted);">
-            سجل مبيعات وأرباح المتجر لكل الشهور، مع مقارنة تفصيلية وتوقعات الأداء للشهر القادم.
+            تتبع بصري لحركة المبيعات والأرباح عبر الشهور والسنوات، مع إمكانية استعراض وتدقيق أي فترة.
           </p>
         </div>
 
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-          <label style="font-size:12px;font-weight:750;color:var(--ink);margin:0;">اختر الشهر للتحليل:</label>
-          <select id="growth-month-picker" class="pro-select" style="font-size:13px;padding:6px 14px;border-radius:8px;border:1px solid var(--line);background:var(--panel);font-weight:750;color:var(--ink);cursor:pointer;">
-            ${monthlyHistory.map((m) => `
-              <option value="${m.yearMonth}" ${m.isSelected ? 'selected' : ''}>
-                ${m.name} ${m.isCurrent ? '(الشهر الحالي)' : ''}
-              </option>
-            `).join('')}
-          </select>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <!-- فلاتر المدة -->
+          <div class="pro-filter-pills" style="margin:0;">
+            <button type="button" class="pro-filter-pill ${state.growthViewMode === '3m' ? 'active' : ''}" id="growth-view-3m">آخر 3 شهور</button>
+            <button type="button" class="pro-filter-pill ${state.growthViewMode === '6m' ? 'active' : ''}" id="growth-view-6m">آخر 6 شهور</button>
+            <button type="button" class="pro-filter-pill ${state.growthViewMode === 'year' ? 'active' : ''}" id="growth-view-year">سنة كاملة</button>
+          </div>
+
+          <!-- اختيار السنة -->
+          <div style="display:inline-flex;align-items:center;gap:6px;">
+            <label style="font-size:12px;font-weight:750;color:var(--muted);">السنة:</label>
+            <select id="growth-year-select" class="pro-select" style="font-size:12.5px;padding:4px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel);font-weight:800;color:var(--ink);cursor:pointer;">
+              ${historyYears.map((yr) => `
+                <option value="${yr}" ${Number(state.growthSelectedYear) === yr ? 'selected' : ''}>سنة ${yr}</option>
+              `).join('')}
+            </select>
+          </div>
+
+          <!-- اختيار الشهر للتدقيق -->
+          <div style="display:inline-flex;align-items:center;gap:6px;">
+            <label style="font-size:12px;font-weight:750;color:var(--muted);">تحليل شهر:</label>
+            <select id="growth-month-picker" class="pro-select" style="font-size:12.5px;padding:4px 12px;border-radius:8px;border:1px solid var(--line);background:var(--panel);font-weight:800;color:var(--ink);cursor:pointer;">
+              ${monthlyHistory.map((m) => `
+                <option value="${m.yearMonth}" ${m.isSelected ? 'selected' : ''}>
+                  ${m.name} ${m.isCurrent ? '(الحالي)' : ''}
+                </option>
+              `).join('')}
+            </select>
+          </div>
         </div>
       </div>
 
+      <!-- الرسم البياني التفاعلي للأعمدة المزدوجة (المبيعات مقابل الأرباح) -->
+      <div class="growth-chart-container" style="margin:20px 0 16px;padding:16px;background:var(--surface-soft);border:1px solid var(--line);border-radius:12px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+          <div style="display:flex;align-items:center;gap:18px;font-size:12px;font-weight:750;">
+            <span style="display:inline-flex;align-items:center;gap:6px;color:var(--purple);">
+              <span style="width:12px;height:12px;border-radius:3px;background:var(--purple);display:inline-block;"></span>
+              إجمالي المبيعات
+            </span>
+            <span style="display:inline-flex;align-items:center;gap:6px;color:#15803d;">
+              <span style="width:12px;height:12px;border-radius:3px;background:#15803d;display:inline-block;"></span>
+              مجمل الربح المحقق
+            </span>
+          </div>
+          <small style="color:var(--muted);font-size:11.5px;">اضغط على أي عمود لاستعراض وتحليل تفاصيل ذلك الشهر</small>
+        </div>
+
+        <div style="display:flex;align-items:flex-end;gap:14px;height:180px;padding:10px 4px 0;border-bottom:2px solid var(--line);overflow-x:auto;">
+          ${chartMonths.map((m) => {
+            const revNum = Number(m.revenue || '0');
+            const profitNum = Number(m.profit || '0');
+            const revHeight = Math.max(6, Math.round((revNum / maxValNum) * 135));
+            const profitHeight = Math.max(4, Math.round((profitNum / maxValNum) * 135));
+            const isSelectedMonth = m.isSelected || (m.year === currentMonth.year && m.month === currentMonth.month);
+
+            return `
+              <div class="growth-chart-col ${isSelectedMonth ? 'selected-col' : ''}" data-chart-ym="${m.yearMonth}" style="flex:1;min-width:65px;display:flex;flex-direction:column;align-items:center;cursor:pointer;padding:4px;border-radius:8px;${isSelectedMonth ? 'background:rgba(89,72,216,0.08);outline:2px solid var(--purple);' : ''}" title="${escapeHtml(m.name)} - مبيعات: ${format(m.revenue)} | أرباح: ${format(m.profit)}">
+                <div style="display:flex;align-items:flex-end;gap:5px;height:140px;width:100%;justify-content:center;">
+                  <!-- عمود المبيعات -->
+                  <div style="width:16px;height:${revHeight}px;background:var(--purple);border-radius:4px 4px 0 0;transition:height 0.3s;position:relative;" title="المبيعات: ${format(m.revenue)}"></div>
+                  <!-- عمود الربح -->
+                  <div style="width:16px;height:${profitHeight}px;background:#15803d;border-radius:4px 4px 0 0;transition:height 0.3s;position:relative;" title="مجمل الربح: ${format(m.profit)}"></div>
+                </div>
+                <div style="margin-top:6px;font-size:11px;font-weight:800;color:var(--ink);text-align:center;white-space:nowrap;">
+                  ${m.name.split(' ')[0]}
+                </div>
+                <div style="font-size:9.5px;color:var(--muted);text-align:center;">
+                  ${m.year}
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </div>
+
+      <!-- بطاقات المقارنة والتحليل -->
       <div class="growth-forecast-grid" style="margin-top:16px;">
-        <!-- مقارنة الشهر المختار بالشهر السابق له -->
         <div class="growth-forecast-card ${isUp ? 'card-growth' : 'card-decline'}">
           <div class="growth-card-header">
             <span class="growth-card-title">${escapeHtml(currentMonth.name)} مقارنة بـ ${escapeHtml(previousMonth.name)}</span>
             <span class="status-pill ${isUp ? 'status-complete' : 'status-low'}" style="font-size:12px;font-weight:800;">
-              ${isUp ? '▲ نمو' : '▼ تراجع'} (${growthSign}${comparison.growthPercent}%)
+              ${isUp ? 'نمو' : 'تراجع'} (${growthSign}${comparison.growthPercent}%)
             </span>
           </div>
           <div class="growth-headline">
@@ -1790,11 +2441,10 @@ function growthForecastWidget(forecast, currency) {
           </div>
         </div>
 
-        <!-- توقعات الشهر القادم أو خلاصة الشهر -->
         <div class="growth-forecast-card card-projected">
           <div class="growth-card-header">
             <span class="growth-card-title">${isCurrentMonthView ? `توقعات شهر ${escapeHtml(fc.nextMonthName)}` : `خلاصة أداء شهر ${escapeHtml(currentMonth.name)}`}</span>
-            <span class="status-pill status-complete" style="font-size:12px;font-weight:800;">${isCurrentMonthView ? escapeHtml(fc.statusText) : 'شهر مكتمل ومؤرشف ✓'}</span>
+            <span class="status-pill status-complete" style="font-size:12px;font-weight:800;">${isCurrentMonthView ? escapeHtml(fc.statusText) : 'شهر مكتمل ومؤرشف'}</span>
           </div>
           <div class="growth-headline">
             ${isCurrentMonthView ? `
@@ -1825,7 +2475,7 @@ function growthForecastWidget(forecast, currency) {
             </div>
             <span class="status-pill status-complete" style="font-size:11px;font-weight:800;">${monthlyHistory.length} شهور محفوظة</span>
           </div>
-          <div class="table-scroll">
+          <div class="table-scroll analytics-scroll-box" style="max-height:420px;overflow-y:auto;">
             <table class="compact-table zebra-table">
               <thead>
                 <tr>
@@ -1855,12 +2505,12 @@ function growthForecastWidget(forecast, currency) {
                       <td>${format(m.dailyAverage)}</td>
                       <td style="text-align:center;">
                         <span class="status-pill ${mUp ? 'status-complete' : 'status-low'}" style="font-size:11px;font-weight:800;">
-                          ${mUp ? '▲' : '▼'} ${mSign}${m.growthPercent}%
+                          ${mSign}${m.growthPercent}%
                         </span>
                       </td>
                       <td style="text-align:center;">
                         <button type="button" class="button button-secondary button-sm view-growth-month-btn" data-growth-ym="${m.yearMonth}" style="height:28px;padding:0 10px;font-size:11.5px;font-weight:750;">
-                          ${m.isSelected ? '✓ معروض حالياً' : 'عرض وتحليل'}
+                          ${m.isSelected ? 'معروض حالياً' : 'عرض وتحليل'}
                         </button>
                       </td>
                     </tr>
@@ -1979,16 +2629,16 @@ function financialMapView() {
       </div>
     </section>
 
-    <div class="fm-card-grid">
+    <div class="fm-card-grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 14px;">
       <div class="fm-kpi-card">
-        <small>إجمالي المبيعات المحصلة (+)</small>
+        <small>المبيعات المحصلة (+)</small>
         <strong style="color:#15803d;">+${format(summary.totalSales)}</strong>
         <small style="color:var(--muted);">مجمل ربح البضاعة: ${format(summary.totalGrossProfit)}</small>
       </div>
       <div class="fm-kpi-card">
-        <small>سداد دفعات للتجار (-)</small>
+        <small>سداد دفعات الموردين (-)</small>
         <strong style="color:#be123c;">-${format(summary.totalSupplierPaid)}</strong>
-        <small style="color:var(--muted);">يخصم من المكسب المتوفر</small>
+        <small style="color:var(--muted);">يخصم من السيولة النقدية</small>
       </div>
       <div class="fm-kpi-card">
         <small>المصروفات المسددة (-)</small>
@@ -1996,10 +2646,25 @@ function financialMapView() {
         <small style="color:var(--muted);">إيجار ومصروفات تشغيلية</small>
       </div>
       <div class="fm-kpi-card fm-kpi-profit">
-        <small style="color:var(--purple);font-weight:750;">صافي المكسب المتوفر الفعلي (=)</small>
-        <strong>${format(summary.realizedCashProfit)}</strong>
-        <small style="color:var(--muted);">المعادلة: المبيعات - المسدد للتجار - المصروفات - المرتجعات</small>
+        <small style="color:var(--purple);font-weight:750;">صافي الأرباح التشغيلية (=)</small>
+        <strong style="color:${BigInt(summary.operatingProfit ?? '0') >= 0n ? 'var(--purple)' : '#be123c'};">${format(summary.operatingProfit ?? summary.totalGrossProfit)}</strong>
+        <small style="color:var(--muted);">مطابق لتقرير الأرباح والخسائر 100%</small>
       </div>
+      <div class="fm-kpi-card" style="border-right:3px solid #2563eb;">
+        <small style="color:#2563eb;font-weight:750;">صافي السيولة النقدية (الكاش) (=)</small>
+        <strong style="color:${BigInt(summary.netCashFlow ?? summary.realizedCashProfit ?? '0') >= 0n ? '#15803d' : '#be123c'};">${format(summary.netCashFlow ?? summary.realizedCashProfit)}</strong>
+        <small style="color:var(--muted);">المحصل - المدفوع للتجار والمصاريف</small>
+      </div>
+    </div>
+
+    <div class="pro-info-banner" style="background:var(--purple-soft);border:1px solid #c4b5fd;border-radius:12px;padding:12px 16px;margin-bottom:18px;">
+      <strong style="color:var(--purple-dark);font-size:13px;display:block;margin-bottom:3px;">
+        توضيح مالي متكامل: التوافق بين الأرباح والخسائر والمسار المالي
+      </strong>
+      <p style="font-size:11.5px;color:var(--ink-soft);margin:0;line-height:1.6;">
+        • <strong>صافي الأرباح التشغيلية (${format(summary.operatingProfit ?? summary.totalGrossProfit)}):</strong> يمثل الربح الفعلي المحقق من نشاط البيع والتشغيل (المبيعات - تكلفة البضاعة المباعة - المصروفات التشغيلية المؤكدة). هذا الرقم متطابق تماماً مع تقرير الأرباح والخسائر.<br>
+        • <strong>صافي حركة السيولة (${format(summary.netCashFlow ?? summary.realizedCashProfit)}):</strong> يمثل حركة النقدية الفعلية في الدرج والخزينة. سداد فواتير الموردين يقلل الكاش والمديونية ولا يُعد خسارة في الأرباح التشغيلية، لأن البضاعة المشراة موجودة كأصل ذو قيمة داخل المخزن.
+      </p>
     </div>
 
     <section class="panel compact-panel">
@@ -3076,7 +3741,6 @@ async function openSaleReturnModal(saleOrId) {
 
   const close = () => { root.innerHTML = ''; };
   root.querySelectorAll('[data-close-return]').forEach((b) => b.addEventListener('click', close));
-  root.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); }));
 
   const form = root.querySelector('#sale-return-form');
   const confirmBtn = root.querySelector('#confirm-sale-return-btn');
@@ -3412,7 +4076,7 @@ function showNotificationsModal() {
   `;
 
   root.querySelectorAll('[data-close-notifications]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
-  root.querySelectorAll('.modal-backdrop').forEach((b) => b.addEventListener('click', (e) => { if (e.target === b) root.innerHTML = ''; }));
+  // Backdrop click dismissal disabled
   root.querySelectorAll('[data-nav-to]').forEach((b) => b.addEventListener('click', () => {
     state.page = b.dataset.navTo;
     root.innerHTML = '';
@@ -3521,7 +4185,7 @@ function bindShell() {
   if (state.page === 'reports') bindProfitLoss();
   if (state.page === 'top-products') bindTopProducts();
   if (state.page === 'backups') bindBackups();
-  if (state.page === 'users') bindUsers(); if (state.page === 'audit-logs') bindAuditLogs(); if (state.page === 'accounting') bindAccounting();
+  if (state.page === 'shifts') bindShifts(); if (state.page === 'users') bindUsers(); if (state.page === 'audit-logs') bindAuditLogs(); if (state.page === 'accounting') bindAccounting();
   document.addEventListener('keydown', handleShortcuts, { once: true });
 }
 
@@ -3886,9 +4550,8 @@ function showBarcodeLabelsModal({ product = null, purchase = null } = {}) {
   const title = purchase
     ? `طباعة استيكرات باركود فاتورة الشراء (${purchase.invoiceNumber || purchase.id.slice(0, 8)})`
     : `طباعة استيكرات باركود العلب — ${product?.name ?? ''}`;
-  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal barcode-print-modal" role="dialog" aria-modal="true"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">نظام الباركود واستيكرات العلب الحرارية</span><h2>${escapeHtml(title)}</h2></div><button type="button" class="modal-close" data-close-barcode-modal>×</button></div><div class="matrix-quick-toolbar"><span>حدد عدد الاستيكرات المطلوب طباعتها لكل لون ومقاس:</span><div class="matrix-quick-actions"><button type="button" class="date-preset-chip" data-label-preset="one">استيكر واحد لكل مقاس (1)</button><button type="button" class="date-preset-chip" data-label-preset="stock">بعدد الرصيد/الفاتورة الفعلي</button><button type="button" class="date-preset-chip" data-label-preset="zero">تصفير الكل</button></div></div><div class="table-scroll" style="max-height:220px"><table class="variant-matrix-table compact-table"><thead><tr><th>الموديل</th><th>اللون والمقاس</th><th>كود الفرع (SKU)</th><th>الباركود</th><th>السعر</th><th>عدد الاستيكرات</th></tr></thead><tbody>${rowsData.map((r, idx) => `<tr data-label-row="${idx}"><td><strong>${escapeHtml(r.modelName)}</strong></td><td>${escapeHtml(r.subLabel)}</td><td><span class="sku-code">${escapeHtml(r.sku)}</span></td><td><span class="sku-code">${escapeHtml(r.barcode)}</span></td><td>${escapeHtml(r.priceText)}</td><td><input type="number" min="0" max="200" step="1" data-label-copies="${idx}" value="${r.defaultCopies}" style="width:82px;text-align:center;font-weight:800"></td></tr>`).join('')}</tbody></table></div><div class="barcode-preview-header"><strong>معاينة ملصقات الباركود الجاهزة للطباعة</strong><small id="barcode-total-count"></small></div><div id="barcode-sheet-preview" class="barcode-labels-sheet"></div><div class="modal-actions"><button type="button" class="button button-secondary" data-close-barcode-modal>إغلاق</button><button type="button" class="button button-primary" id="print-barcode-sheet-btn">🖨️ طباعة الاستيكرات الآن</button></div></section></div>`;
+  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal barcode-print-modal" role="dialog" aria-modal="true"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">نظام الباركود واستيكرات العلب الحرارية</span><h2>${escapeHtml(title)}</h2></div><button type="button" class="modal-close" data-close-barcode-modal>×</button></div><div class="matrix-quick-toolbar"><span>حدد عدد الاستيكرات المطلوب طباعتها لكل لون ومقاس:</span><div class="matrix-quick-actions"><button type="button" class="date-preset-chip" data-label-preset="one">استيكر واحد لكل مقاس (1)</button><button type="button" class="date-preset-chip" data-label-preset="stock">بعدد الرصيد/الفاتورة الفعلي</button><button type="button" class="date-preset-chip" data-label-preset="zero">تصفير الكل</button></div></div><div class="table-scroll" style="max-height:220px"><table class="variant-matrix-table compact-table"><thead><tr><th>الموديل</th><th>اللون والمقاس</th><th>كود الفرع (SKU)</th><th>الباركود</th><th>السعر</th><th>عدد الاستيكرات</th></tr></thead><tbody>${rowsData.map((r, idx) => `<tr data-label-row="${idx}"><td><strong>${escapeHtml(r.modelName)}</strong></td><td>${escapeHtml(r.subLabel)}</td><td><span class="sku-code">${escapeHtml(r.sku)}</span></td><td><span class="sku-code">${escapeHtml(r.barcode)}</span></td><td>${escapeHtml(r.priceText)}</td><td><input type="number" min="0" max="200" step="1" data-label-copies="${idx}" value="${r.defaultCopies}" style="width:82px;text-align:center;font-weight:800"></td></tr>`).join('')}</tbody></table></div><div class="barcode-preview-header"><strong>معاينة ملصقات الباركود الجاهزة للطباعة</strong><small id="barcode-total-count"></small></div><div id="barcode-sheet-preview" class="barcode-labels-sheet"></div><div class="modal-actions"><button type="button" class="button button-secondary" data-close-barcode-modal>إغلاق</button><button type="button" class="button button-primary" id="print-barcode-sheet-btn">طباعة الاستيكرات الآن</button></div></section></div>`;
   modal.querySelectorAll('[data-close-barcode-modal]').forEach((b) => b.addEventListener('click', () => { modal.innerHTML = ''; }));
-  modal.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('click', (e) => { if (e.target === backdrop) modal.innerHTML = ''; }));
   const sheet = modal.querySelector('#barcode-sheet-preview');
   const countEl = modal.querySelector('#barcode-total-count');
   const renderLabelsPreview = () => {
@@ -3972,12 +4635,19 @@ function showProductEditModal(product) {
   const defaultReorder = activeExisting[0]?.reorderPoint ?? '3';
   const initialOptions = (product.options?.length ? product.options : []).map((opt) => ({ key: opt.key, name: opt.name, values: [...(opt.values ?? [])] }));
 
-  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="product-edit-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">الكتالوج الموحد — توسيع وتعديل الموديل</span><h2 id="product-edit-title">تعديل الموديل: ${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2></div><button class="modal-close" data-close-modal>×</button></div><form id="product-edit-form" class="form-stack modal-form"><div class="form-grid"><label>اسم الموديل / المنتج<input name="name" required minlength="2" maxlength="120" value="${escapeHtml(product.name)}"></label><label>كود الموديل الأساسي<input name="sku" required maxlength="64" value="${escapeHtml(product.sku)}"></label></div><div class="form-grid"><label>الفئة<select name="categoryId"><option value="">بدون فئة</option>${categoryChoices}</select></label><label>الماركة / المصنع<input name="brand" maxlength="100" value="${escapeHtml(product.brand ?? '')}"></label></div><div class="form-grid"><label>رابط الصورة<input name="imagePath" type="url" maxlength="300" value="${escapeHtml(product.imagePath ?? '')}"></label><label>وصف الموديل<input name="description" maxlength="2000" value="${escapeHtml(product.description ?? '')}"></label></div>
+  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="product-edit-title" style="margin:20px auto;max-width:calc(100vw - 32px);"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">الكتالوج الموحد — توسيع وتعديل الموديل</span><h2 id="product-edit-title">تعديل الموديل: ${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2></div><button class="modal-close" data-close-modal>×</button></div><form id="product-edit-form" class="form-stack modal-form"><div class="form-grid"><label>اسم الموديل / المنتج<input name="name" required minlength="2" maxlength="120" value="${escapeHtml(product.name)}"></label><label>كود الموديل الأساسي<input name="sku" required maxlength="64" value="${escapeHtml(product.sku)}"></label></div><div class="form-grid"><label>الفئة<select name="categoryId"><option value="">بدون فئة</option>${categoryChoices}</select></label><label>الماركة / المصنع<input name="brand" maxlength="100" value="${escapeHtml(product.brand ?? '')}"></label></div><div class="form-grid" style="background:var(--surface-soft);padding:14px;border-radius:12px;border:1px solid var(--line);margin:4px 0;"><label style="font-weight:750;">سعر البيع الجديد للموديل (${currency})<input name="baseRetailPrice" id="edit-modal-base-price" inputmode="decimal" value="${escapeHtml(defaultPrice)}" placeholder="مثال: 350.00" style="font-weight:800;font-size:15px;color:var(--purple);"><small style="color:var(--muted);font-size:11px;">تحديث وتعديل سعر البيع وتطبيقه على كافة المقاسات والألوان</small></label><div style="display:flex;align-items:flex-end;"><button type="button" class="button button-secondary" id="apply-price-to-all-variants" style="height:42px;width:100%;font-weight:750;">تطبيق هذا السعر على كل المقاسات</button></div></div><div class="form-grid"><label>رابط الصورة<input name="imagePath" type="url" maxlength="300" value="${escapeHtml(product.imagePath ?? '')}"></label><label>وصف الموديل<input name="description" maxlength="2000" value="${escapeHtml(product.description ?? '')}"></label></div>
   ${initialOptions.length ? `<div class="variant-options-section"><div><strong>إضافة ألوان أو مقاسات جديدة لهذا الموديل:</strong></div><div class="model-presets-bar"><span class="preset-label">+ لون جديد:</span>${quickColors.map((c) => `<button type="button" class="color-quick-chip" data-edit-add-color="${c}">+ ${c}</button>`).join('')}</div><div class="model-presets-bar"><span class="preset-label">+ مقاسات سريعة:</span>${quickSizes.map((s) => `<button type="button" class="date-preset-chip" data-edit-add-sizes="${s}">+ (${s})</button>`).join('')}</div><div id="edit-option-rows" class="form-stack">${initialOptions.map((opt) => `<div class="variant-option-row" data-edit-option-key="${escapeHtml(opt.key)}"><input data-edit-option-name value="${escapeHtml(opt.name)}" readonly><input data-edit-option-values value="${escapeHtml(opt.values.join(', '))}" placeholder="القيم مفصولة بفواصل"></div>`).join('')}</div></div>` : ''}
-  <div class="matrix-quick-toolbar"><span>الفروع الحالية والجديدة التابعة للموديل (<strong>${activeExisting.length}</strong> فرع مسجل)</span><div class="matrix-quick-actions"><button type="button" class="date-preset-chip" id="edit-generate-barcodes">🏷️ توليد باركود تلقائي للفروع بدون باركود</button><button type="button" class="date-preset-chip" id="edit-open-print-labels">🖨️ طباعة استيكرات الباركود</button></div></div>
-  <div class="table-scroll"><table class="variant-matrix-table"><thead><tr><th>متاحة</th><th>اللون والمقاس الفرعي</th><th>كود الفرع (SKU)</th><th>الباركود</th><th>السعر (${currency})</th><th>حد الطلب</th></tr></thead><tbody id="edit-existing-tbody">${activeExisting.map((variant) => `<tr data-variant-id="${variant.id}" data-variant-attrs="${escapeHtml(JSON.stringify(variant.attributes ?? {}))}"><td><input data-edit-active type="checkbox" checked aria-label="إبقاء التركيبة متاحة"></td><td><strong>${escapeHtml(formatVariantAttributes(product, variant.attributes, product.name))}</strong></td><td><input data-edit-sku maxlength="64" required value="${escapeHtml(variant.sku)}"></td><td><input data-edit-barcode maxlength="64" value="${escapeHtml(variant.barcode ?? '')}" placeholder="باركود العلبة"></td><td><input data-edit-price inputmode="decimal" required value="${escapeHtml(decimalPrice(variant.price))}"></td><td><input data-edit-reorder type="number" min="0" step="1" required value="${escapeHtml(variant.reorderPoint)}"></td></tr>`).join('')}</tbody><tbody id="edit-generated-tbody"></tbody></table></div><div id="new-variant-rows" class="form-stack"></div>${product.options?.length ? '<button type="button" class="button button-secondary button-sm" id="add-edit-variant">+ إضافة فرع مفرد يدويًا</button>' : ''}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">حفظ التعديلات والفروع الجديدة</button></div></form></section></div>`;
+  <div class="matrix-quick-toolbar"><span>الفروع الحالية والجديدة التابعة للموديل (<strong>${activeExisting.length}</strong> فرع مسجل)</span><div class="matrix-quick-actions"><button type="button" class="date-preset-chip" id="edit-generate-barcodes">توليد باركود تلقائي للفروع بدون باركود</button><button type="button" class="date-preset-chip" id="edit-open-print-labels">طباعة استيكرات الباركود</button></div></div>
+  <div class="table-scroll"><table class="variant-matrix-table zebra-table"><thead><tr><th>متاحة</th><th>اللون والمقاس الفرعي</th><th>كود الفرع (SKU)</th><th>الباركود</th><th>السعر (${currency})</th><th>حد الطلب</th></tr></thead><tbody id="edit-existing-tbody">${activeExisting.map((variant) => `<tr data-variant-id="${variant.id}" data-variant-attrs="${escapeHtml(JSON.stringify(variant.attributes ?? {}))}"><td><input data-edit-active type="checkbox" checked aria-label="إبقاء التركيبة متاحة"></td><td><strong>${escapeHtml(formatVariantAttributes(product, variant.attributes, product.name))}</strong></td><td><input data-edit-sku maxlength="64" required value="${escapeHtml(variant.sku)}"></td><td><input data-edit-barcode maxlength="64" value="${escapeHtml(variant.barcode ?? '')}" placeholder="باركود العلبة"></td><td><input data-edit-price inputmode="decimal" required value="${escapeHtml(decimalPrice(variant.price))}"></td><td><input data-edit-reorder type="number" min="0" step="1" required value="${escapeHtml(variant.reorderPoint)}"></td></tr>`).join('')}</tbody><tbody id="edit-generated-tbody"></tbody></table></div><div id="new-variant-rows" class="form-stack"></div>${product.options?.length ? '<button type="button" class="button button-secondary button-sm" id="add-edit-variant">+ إضافة فرع مفرد يدويًا</button>' : ''}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">حفظ التعديلات والفروع الجديدة</button></div></form></section></div>`;
   modal.querySelectorAll('[data-close-modal]').forEach((button) => button.addEventListener('click', () => { modal.innerHTML = ''; }));
-  modal.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('click', (e) => { if (e.target === backdrop) modal.innerHTML = ''; }));
+  modal.querySelector('#apply-price-to-all-variants')?.addEventListener('click', () => {
+    const val = modal.querySelector('#edit-modal-base-price')?.value.trim();
+    if (!val) { toast('أدخل السعر الجديد أولاً', 'error'); return; }
+    modal.querySelectorAll('[data-edit-price], [data-new-combo-price], [data-new-price]').forEach((input) => {
+      input.value = val;
+    });
+    toast(`تم تطبيق السعر (${val} ${currency}) على كافة المقاسات`);
+  });
   const generatedTbody = modal.querySelector('#edit-generated-tbody');
   const editOptionRows = modal.querySelector('#edit-option-rows');
 
@@ -4260,7 +4930,6 @@ function showProductModal() {
 
   const productForm = modal.querySelector('#product-form');
   modal.querySelectorAll('[data-close-modal]').forEach((btn) => btn.addEventListener('click', () => { modal.innerHTML = ''; }));
-  modal.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('click', (e) => { if (e.target === backdrop) modal.innerHTML = ''; }));
   modal.querySelector('#add-category-inline')?.addEventListener('click', () => showCategoryModal());
 
   let currentKind = 'MODEL';
@@ -4587,7 +5256,6 @@ function showInventoryProductDetails(product) {
     </div>` : '';
   modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="inventory-product-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">تفاصيل الموديل والمقاسات</span><h2 id="inventory-product-title">${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2><p>إجمالي الرصيد: <strong>${total}</strong> قطعة · ${variants.length} فرع (لون/مقاس)</p></div><button type="button" class="modal-close" data-close-inventory-details aria-label="إغلاق">×</button></div>${matrixGridHtml}${variants.length ? `<details class="compact-disclosure" ${matrix.isMatrix ? '' : 'open'} style="margin: 10px 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden;"><summary style="padding: 12px 16px;"><span>القائمة التفصيلية للفروع والأكواد (SKUs)</span><div style="display:flex;align-items:center;gap:10px;"><span class="status-pill status-complete">${variants.length} فرع</span><span class="disclosure-chevron" style="width:28px;height:28px;" aria-hidden="true">${icon('chevron', 14)}</span></div></summary><div class="disclosure-content"><div class="table-scroll"><table><thead><tr><th>التركيبة</th><th>SKU</th><th>الكمية</th><th>حد التنبيه</th><th>${state.data.capabilities.cashierMode ? 'سعر البيع' : 'متوسط التكلفة'}</th><th>الحالة</th>${state.data.capabilities.canManageCatalog ? '<th>الإجراء</th>' : ''}</tr></thead><tbody>${variants.map((variant) => { const label = formatVariantAttributes(product, variant.attributes, 'النسخة الأساسية'); const low = BigInt(variant.quantity) <= BigInt(variant.reorderPoint); const removeAction = state.data.capabilities.canManageCatalog ? `<td>${BigInt(variant.quantity) === 0n ? `<button type="button" class="text-action product-delete" data-remove-variant="${variant.id}">حذف</button>` : '<small>صفّر الرصيد أولًا للحذف</small>'}</td>` : ''; return `<tr><td><strong>${escapeHtml(label)}</strong></td><td><span class="sku-code">${escapeHtml(variant.sku)}</span></td><td><strong>${variant.quantity}</strong></td><td>${variant.reorderPoint}</td><td>${state.data.capabilities.cashierMode ? (variant.retailPrice ? money(variant.retailPrice) : '—') : (variant.wac ? money(variant.wac) : '—')}</td><td>${low ? '<span class="status-pill status-low">مخزون منخفض</span>' : '<span class="status-pill status-complete">متوفر</span>'}</td>${removeAction}</tr>`; }).join('')}</tbody></table></div></div></details>` : '<div class="empty-row">لا توجد تركيبات نشطة لهذا المنتج.</div>'}<div class="modal-actions">${state.data.capabilities.canManageCatalog ? `<button type="button" class="button button-secondary" id="inventory-edit-model-btn">توسيع/تعديل الألوان والمقاسات</button>` : ''}<button type="button" class="button button-primary" id="inventory-print-labels-btn">طباعة باركود العلب</button><button type="button" class="button button-secondary" data-close-inventory-details>إغلاق</button></div></section></div>`;
   modal.querySelectorAll('[data-close-inventory-details]').forEach((button) => button.addEventListener('click', () => { modal.innerHTML = ''; }));
-  modal.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('click', (e) => { if (e.target === backdrop) modal.innerHTML = ''; }));
   modal.querySelector('#inventory-print-labels-btn')?.addEventListener('click', () => showBarcodeLabelsModal({ product }));
   modal.querySelector('#inventory-edit-model-btn')?.addEventListener('click', () => showProductEditModal(product));
   modal.querySelectorAll('[data-remove-variant]').forEach((button) => button.addEventListener('click', async () => {
@@ -4636,7 +5304,6 @@ function bindPos() {
     }).join('')}</div></div>`).join('')}</div>` : `<div class="form-stack">${variants.map((variant) => { const label = formatVariantAttributes(product, variant.attributes, variant.sku); const unavailable = product.itemKind === 'PRODUCT' && BigInt(variant.quantity) <= 0n; return `<button class="button button-secondary" data-pos-variant="${variant.id}" ${unavailable ? 'disabled' : ''}>${escapeHtml(label)} · ${escapeHtml(variant.sku)} · ${money(variant.price)} · متاح ${variant.quantity}</button>`; }).join('')}</div>`;
     modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">اختيار اللون والمقاس — كود الموديل ${escapeHtml(product.sku)}</span><h2>${escapeHtml(product.name)}</h2></div><button class="modal-close" data-close-modal>×</button></div>${groupedHtml}</section></div>`;
     modal.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { modal.innerHTML = ''; }));
-    modal.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.addEventListener('click', (e) => { if (e.target === backdrop) modal.innerHTML = ''; }));
     modal.querySelectorAll('[data-pos-variant]').forEach((choice) => choice.addEventListener('click', () => { const id = choice.dataset.posVariant; modal.innerHTML = ''; addToCart(id); }));
   }));
   document.querySelectorAll('[data-qty]').forEach((button) => button.addEventListener('click', () => changeQuantity(button.dataset.qty, Number(button.dataset.delta))));
