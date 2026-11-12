@@ -1506,8 +1506,8 @@ async function currentData(ctx, url) {
   const todayDateStr = new Date().toISOString().slice(0, 10);
   const rawDatabase = database.getRawDatabase();
   const activeShiftRow = rawDatabase.prepare(
-    "SELECT id, shift_number as shiftNumber, started_at as startedAt, opening_cash as openingCash, notes FROM cashier_shifts WHERE tenant_id = ? AND store_id = ? AND user_id = ? AND status = 'OPEN' ORDER BY started_at DESC LIMIT 1"
-  ).get(ctx.tenantId, storeId, ctx.userId);
+    "SELECT id, shift_number as shiftNumber, started_at as startedAt, opening_cash as openingCash, notes FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' ORDER BY started_at DESC LIMIT 1"
+  ).get(ctx.tenantId, ctx.userId);
   const todayAttendanceRows = rawDatabase.prepare(
     "SELECT actor_user_id AS userId, actor_username AS username, created_at AS createdAt, summary FROM audit_logs WHERE tenant_id = ? AND action = 'ATTENDANCE_CHECK_IN' AND substr(created_at, 1, 10) = ? ORDER BY sequence_no DESC"
   ).all(ctx.tenantId, todayDateStr);
@@ -2015,18 +2015,16 @@ async function handleApi(req, res, url) {
   if (method === 'GET' && path === '/api/data') return json(res, 200, await currentData(ctx, url));
 
   if (method === 'GET' && path === '/api/shifts/current') {
-    const stores = await storeRepo.listByTenant(ctx);
-    const requestedStore = url.searchParams.get('storeId');
-    const storeId = ctx.storeId ?? requestedStore ?? stores[0]?.id;
     const rawDb = database.getRawDatabase();
     const openShift = rawDb.prepare(
-      "SELECT * FROM cashier_shifts WHERE tenant_id = ? AND store_id = ? AND user_id = ? AND status = 'OPEN' ORDER BY started_at DESC LIMIT 1"
-    ).get(ctx.tenantId, storeId, ctx.userId);
+      "SELECT * FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' ORDER BY started_at DESC LIMIT 1"
+    ).get(ctx.tenantId, ctx.userId);
 
     if (!openShift) return json(res, 200, { currentShift: null });
 
     const tenant = await tenantRepo.findById(ctx.tenantId);
     const currency = tenant?.currency ?? 'EGP';
+    const storeId = openShift.store_id;
 
     const salesDuringShift = rawDb.prepare(`
       SELECT s.id, s.sale_number, s.created_at,
@@ -2089,10 +2087,10 @@ async function handleApi(req, res, url) {
     }
     const rawDb = database.getRawDatabase();
     const existing = rawDb.prepare(
-      "SELECT id FROM cashier_shifts WHERE tenant_id = ? AND store_id = ? AND user_id = ? AND status = 'OPEN' LIMIT 1"
-    ).get(ctx.tenantId, storeId, ctx.userId);
+      "SELECT id FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' LIMIT 1"
+    ).get(ctx.tenantId, ctx.userId);
     if (existing) {
-      throw Object.assign(new Error('يوجد شفت مفتوح بالفعل لك في هذا الفرع. يجب إنهاؤه أولاً.'), { status: 409 });
+      throw Object.assign(new Error('يوجد وردية مفتوحة بالفعل لك. يجب إنهاؤها أولاً.'), { status: 409 });
     }
 
     const shiftId = randomUUID();
@@ -2207,6 +2205,9 @@ async function handleApi(req, res, url) {
   }
 
   if (method === 'GET' && path === '/api/shifts') {
+    if (ctx.roleId === 'CASHIER') {
+      throw Object.assign(new Error('غير مصرح للكاشير بعرض سجل الورديات العام'), { status: 403 });
+    }
     const stores = await storeRepo.listByTenant(ctx);
     const requestedStore = url.searchParams.get('storeId');
     const storeId = ctx.storeId ?? requestedStore ?? stores[0]?.id;
@@ -2220,10 +2221,6 @@ async function handleApi(req, res, url) {
     const from = url.searchParams.get('from') || '';
     const to = url.searchParams.get('to') || '';
     let filterUser = url.searchParams.get('userId') || '';
-    const isCashier = ctx.roleId === 'CASHIER';
-    if (isCashier) {
-      filterUser = ctx.userId;
-    }
 
     let sql = `SELECT cs.*, u.full_name, u.username, u.role FROM cashier_shifts cs
       LEFT JOIN users u ON u.id = cs.user_id AND u.tenant_id = cs.tenant_id
@@ -2314,14 +2311,13 @@ async function handleApi(req, res, url) {
 
   const shiftSalesMatch = method === 'GET' ? path.match(/^\/api\/shifts\/([0-9a-f-]+)\/sales$/i) : null;
   if (shiftSalesMatch) {
+    if (ctx.roleId === 'CASHIER') {
+      throw Object.assign(new Error('غير مصرح للكاشير بعرض فواتير الوردية'), { status: 403 });
+    }
     const shiftId = shiftSalesMatch[1];
     const rawDb = database.getRawDatabase();
     const shift = rawDb.prepare("SELECT * FROM cashier_shifts WHERE id = ? AND tenant_id = ?").get(shiftId, ctx.tenantId);
     if (!shift) throw Object.assign(new Error('الوردية غير موجودة'), { status: 404 });
-    const isCashier = ctx.roleId === 'CASHIER';
-    if (isCashier && shift.user_id !== ctx.userId) {
-      throw Object.assign(new Error('غير مصرح بعرض فواتير وردية موظف آخر'), { status: 403 });
-    }
     const tenant = await tenantRepo.findById(ctx.tenantId);
     const currency = tenant?.currency ?? 'EGP';
     const endTime = shift.ended_at || new Date().toISOString();

@@ -341,7 +341,7 @@ function bindLogin() {
 
 function shellView() {
   const isCashier = state.data.user.role === 'CASHIER' || Boolean(state.data.capabilities.cashierMode);
-  const cashierAllowedPages = ['pos', 'inventory', 'sales', 'shifts'];
+  const cashierAllowedPages = ['pos', 'inventory', 'sales'];
   const visibleNavItems = isCashier ? navItems.filter((item) => cashierAllowedPages.includes(item.id)) : navItems;
   const pageTitle = navItems.find((item) => item.id === state.page)?.label ?? extraPageTitles[state.page] ?? 'الرئيسية';
   const menuExtraItems = `${state.data.capabilities.canManageBackups ? `<button type="button" class="account-menu-item" role="menuitem" data-page="backups">${icon('store', 17)}<span>النسخ الاحتياطي اليومي</span></button>` : ''}${state.data.capabilities.canViewAuditLogs ? `<button type="button" class="account-menu-item" role="menuitem" data-page="audit-logs">${icon('scan', 17)}<span>سجل المراجعة والأمان</span></button>` : ''}`;
@@ -375,7 +375,6 @@ function pageView() {
   if (state.data.capabilities.cashierMode) {
     if (state.page === 'inventory') return inventoryView();
     if (state.page === 'sales') return salesView();
-    if (state.page === 'shifts') return shiftsView();
     return posView();
   }
   if (state.page === 'pos') return posView();
@@ -1357,33 +1356,34 @@ function showStartShiftModal() {
 
   root.innerHTML = `
     <div class="modal-backdrop">
-      <section class="modal-card" role="dialog" aria-modal="true" style="width:min(480px, calc(100vw - 32px));margin:20px auto;">
+      <section class="modal-card" role="dialog" aria-modal="true" style="width:min(460px, calc(100vw - 32px));margin:20px auto;">
         <div class="modal-heading">
           <div>
             <span class="eyebrow eyebrow-dark">نظام الورديات والحضور</span>
-            <h2>بدء وردية جديدة وتسجيل الحضور</h2>
+            <h2>بدء الوردية وتسجيل الحضور</h2>
           </div>
           <button class="modal-close" data-close-modal>×</button>
         </div>
         <form id="start-shift-form" class="form-stack modal-form" style="padding:16px 20px;">
-          <p style="font-size:12.5px;color:var(--muted);margin:0 0 12px;">
-            أدخل رصيد عهدة بداية الشفت الموجود في درج الكاشير للبدء في تسجيل المبيعات وحركات النقدية.
+          <p style="font-size:13px;color:var(--muted);margin:0 0 14px;line-height:1.5;">
+            أدخل المبلغ المستلم في الدرج (عهدة البداية) للبدء في البيع وتسجيل الحضور فوراً.
           </p>
-          <label style="font-weight:750;">عهدة النقدية في الدرج عند البداية (${currency})
-            <input name="openingCash" inputmode="decimal" value="0.00" required placeholder="0.00" style="font-size:16px;font-weight:800;color:var(--ink);">
+          <label style="font-weight:750;display:flex;flex-direction:column;gap:6px;">المبلغ المستلم في الدرج (${currency}) *
+            <input name="openingCash" id="start-shift-opening-cash" inputmode="decimal" value="0.00" required placeholder="0.00" style="font-size:18px;font-weight:800;color:var(--ink);padding:10px 12px;" autofocus>
           </label>
-          <label style="font-weight:750;">ملاحظات البداية (اختياري)
-            <input name="notes" maxlength="250" placeholder="مثال: تسليم الدرج من الوردية السابقة">
-          </label>
-          <div class="modal-actions" style="margin-top:16px;padding:0;">
+          <div class="modal-actions" style="margin-top:20px;padding:0;">
             <button type="button" class="button button-secondary" data-close-modal>إلغاء</button>
-            <button type="submit" class="button button-primary" style="background:#059669;border-color:#059669;">تأكيد بدء الوردية</button>
+            <button type="submit" class="button button-primary" style="background:#059669;border-color:#059669;font-weight:750;padding:8px 20px;">بدء الوردية الآن</button>
           </div>
         </form>
       </section>
     </div>
   `;
   root.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
+
+  const inputEl = root.querySelector('#start-shift-opening-cash');
+  inputEl?.focus();
+  inputEl?.select();
 
   root.querySelector('#start-shift-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -1398,7 +1398,7 @@ function showStartShiftModal() {
         body: JSON.stringify({
           storeId: state.data.selectedStoreId,
           openingCash: openingCashMinor,
-          notes: data.get('notes') || '',
+          notes: '',
         })
       });
       root.innerHTML = '';
@@ -1417,6 +1417,7 @@ async function showEndShiftModal() {
   const currency = state.data.company.currency;
   const decimals = currencyDecimals(currency);
   const format = (v) => money({ amount: v, currency, decimals });
+  const isCashier = state.data.user.role === 'CASHIER' || Boolean(state.data.capabilities.cashierMode);
 
   root.innerHTML = `
     <div class="modal-backdrop">
@@ -1424,7 +1425,7 @@ async function showEndShiftModal() {
         <div class="modal-heading">
           <div>
             <span class="eyebrow eyebrow-dark">نظام الورديات والحسابات</span>
-            <h2>تقفيل الوردية وإنهاء الشفت</h2>
+            <h2>تقفيل وتسليم الوردية</h2>
           </div>
           <button class="modal-close" data-close-modal>×</button>
         </div>
@@ -1446,6 +1447,64 @@ async function showEndShiftModal() {
 
     const modalBody = root.querySelector('#end-shift-modal-body');
     if (!modalBody) return;
+
+    if (isCashier) {
+      modalBody.innerHTML = `
+        <div style="background:var(--surface-soft);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:16px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;">
+            <span>الوردية الحالية: <strong style="color:var(--purple);font-family:monospace;">${escapeHtml(currentShift.shiftNumber)}</strong></span>
+            <span>بدأت الساعة: <strong>${new Date(currentShift.startedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</strong></span>
+          </div>
+          <div style="margin-top:8px;font-size:12px;color:var(--muted);border-top:1px dashed var(--line);padding-top:8px;">
+            المبلغ المستلم عند البداية: <strong style="color:var(--ink);">${format(currentShift.openingCash)}</strong>
+          </div>
+        </div>
+
+        <form id="end-shift-form" class="form-stack">
+          <label style="font-weight:750;display:flex;flex-direction:column;gap:6px;">المبلغ المسلم بنهاية الوردية (${currency}) *
+            <input name="handoverCash" id="shift-handover-cash" inputmode="decimal" required placeholder="0.00" style="font-size:18px;font-weight:800;color:var(--ink);padding:10px 12px;" autofocus>
+            <small style="color:var(--muted);font-size:11.5px;">عِدّ النقدية الموجودة بالدرج وسلّم المبلغ واكتب قيمته هنا للإغلاق.</small>
+          </label>
+
+          <div class="modal-actions" style="margin-top:20px;padding:0;">
+            <button type="button" class="button button-secondary" data-close-modal>إلغاء</button>
+            <button type="submit" class="button button-primary" style="background:#5948d8;border-color:#5948d8;font-weight:750;padding:8px 20px;">تأكيد تسليم النقدية وإنهاء الوردية</button>
+          </div>
+        </form>
+      `;
+
+      const cashInput = modalBody.querySelector('#shift-handover-cash');
+      cashInput?.focus();
+      cashInput?.select();
+
+      modalBody.querySelector('#end-shift-form')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const form = e.currentTarget;
+        const submitBtn = form.querySelector('[type=submit]');
+        submitBtn.disabled = true;
+        try {
+          const formData = new FormData(form);
+          const enteredMinor = toMinor(formData.get('handoverCash') || '0', decimals);
+          const res = await api('/api/shifts/end', {
+            method: 'POST',
+            body: JSON.stringify({
+              shiftId: currentShift.id,
+              actualCash: enteredMinor,
+              handoverCash: enteredMinor,
+              notes: 'تسليم وردية كاشير',
+            })
+          });
+          root.innerHTML = '';
+          toast(`تم إنهاء الوردية #${res.shift.shiftNumber} بنجاح وتسليم الدرج`);
+          await loadData(state.data.selectedStoreId);
+          render();
+        } catch (err) {
+          toast(err.message, 'error');
+          submitBtn.disabled = false;
+        }
+      });
+      return;
+    }
 
     const expectedCashBig = BigInt(currentShift.expectedCash || '0');
 
@@ -2988,7 +3047,35 @@ function posView() {
   const currency = state.data.company.currency;
   const decimals = state.cart[0]?.price.decimals ?? currencyDecimals(currency);
   const total = { amount: totalMinor.toString(), currency, decimals };
-  return `<div class="pos-layout"><section class="pos-catalog"><div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="ابحث باسم الموديل أو كود الموديل أو الباركود" value="${escapeHtml(state.query)}" autofocus><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="">كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}">${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const allSamePrice = new Set(product.variants.map((variant) => variant.price.amount)).size === 1; const price = allSamePrice ? money(product.variants[0].price) : 'أسعار متعددة'; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${product.itemKind === 'PRODUCT' && stock <= 0n ? 'disabled' : ''}><span class="pos-product-art art-${index % 6}">${icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${price}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${state.cart.length ? state.cart.map((item) => `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art">${icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button data-qty="${item.variantId}" data-delta="-1">−</button><span>${item.quantity}</span><button data-qty="${item.variantId}" data-delta="1">+</button></div><strong>${money({ ...item.price, amount: (BigInt(item.price.amount) * BigInt(item.quantity)).toString() })}</strong></div></div>`).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة أو امسح الباركود عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong>${state.cart.reduce((sum, item) => sum + item.quantity, 0)}</strong></div><div><span>الخصم</span><strong>${money({ ...total, amount: '0' })}</strong></div><div class="cart-grand-total"><span>الإجمالي المستحق</span><strong>${money(total)}</strong></div></div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}"><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button" ${state.cart.length && !state.isSaving ? '' : 'disabled'}><span>إتمام البيع</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
+  const activeShift = state.data.activeShift;
+  const shiftBanner = activeShift ? `
+    <div class="pos-shift-banner pos-shift-banner-active" style="background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;box-shadow:0 1px 3px rgba(0,0,0,.04);">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#10b981;"></span>
+        <div>
+          <span style="font-size:13px;color:var(--ink);font-weight:750;">الوردية نشطة: <strong style="color:var(--purple);font-family:monospace;">${escapeHtml(activeShift.shiftNumber)}</strong></span>
+          <span style="font-size:11.5px;color:var(--muted);margin-right:8px;">(بدأت: ${new Date(activeShift.startedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })})</span>
+        </div>
+      </div>
+      <button type="button" id="pos-end-shift-now-btn" class="button button-sm button-secondary" style="font-weight:750;padding:6px 14px;color:var(--purple);border-color:var(--purple);">
+        إنهاء الوردية وتسليم النقدية
+      </button>
+    </div>
+  ` : `
+    <div class="pos-shift-banner pos-shift-banner-inactive" style="background:var(--surface);border:1.5px dashed #059669;border-radius:12px;padding:12px 18px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;box-shadow:0 1px 3px rgba(0,0,0,.04);">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ef4444;"></span>
+        <div>
+          <strong style="font-size:13px;color:var(--ink);display:block;">لم يتم بدء الوردية بعد</strong>
+          <span style="font-size:11.5px;color:var(--muted);">اضغط هنا لإدخال عهدة البداية لتسجيل الحضور وتفعيل الكاشير</span>
+        </div>
+      </div>
+      <button type="button" id="pos-start-shift-now-btn" class="button button-sm" style="background:#059669;border-color:#059669;color:#fff;font-weight:750;padding:6px 16px;box-shadow:0 2px 6px rgba(5,150,105,.2);">
+        بدء الوردية الآن
+      </button>
+    </div>
+  `;
+  return `<div class="pos-layout"><section class="pos-catalog">${shiftBanner}<div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="ابحث باسم الموديل أو كود الموديل أو الباركود" value="${escapeHtml(state.query)}" autofocus><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="">كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}">${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const allSamePrice = new Set(product.variants.map((variant) => variant.price.amount)).size === 1; const price = allSamePrice ? money(product.variants[0].price) : 'أسعار متعددة'; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${product.itemKind === 'PRODUCT' && stock <= 0n ? 'disabled' : ''}><span class="pos-product-art art-${index % 6}">${icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${price}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${state.cart.length ? state.cart.map((item) => `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art">${icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button data-qty="${item.variantId}" data-delta="-1">−</button><span>${item.quantity}</span><button data-qty="${item.variantId}" data-delta="1">+</button></div><strong>${money({ ...item.price, amount: (BigInt(item.price.amount) * BigInt(item.quantity)).toString() })}</strong></div></div>`).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة أو امسح الباركود عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong>${state.cart.reduce((sum, item) => sum + item.quantity, 0)}</strong></div><div><span>الخصم</span><strong>${money({ ...total, amount: '0' })}</strong></div><div class="cart-grand-total"><span>الإجمالي المستحق</span><strong>${money(total)}</strong></div></div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}"><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button" ${state.cart.length && !state.isSaving ? '' : 'disabled'}><span>إتمام البيع</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
 }
 
 function supplierModal(html, formId, endpoint, convert = (data) => data, successMessage = 'تم حفظ الحركة في سجل التاجر') {
@@ -4276,6 +4363,12 @@ function bindShell() {
   if (state.page === 'top-products') bindTopProducts();
   if (state.page === 'backups') bindBackups();
   if (state.page === 'shifts') bindShifts(); if (state.page === 'users') bindUsers(); if (state.page === 'audit-logs') bindAuditLogs(); if (state.page === 'accounting') bindAccounting();
+  document.querySelector('#header-start-shift-btn')?.addEventListener('click', () => {
+    showStartShiftModal();
+  });
+  document.querySelector('#header-end-shift-btn')?.addEventListener('click', () => {
+    showEndShiftModal();
+  });
   document.addEventListener('keydown', handleShortcuts, { once: true });
 }
 
@@ -5460,6 +5553,12 @@ function bindPos() {
   document.querySelector('#clear-cart')?.addEventListener('click', () => { state.cart = []; render(); });
   document.querySelectorAll('[data-method]').forEach((button) => button.addEventListener('click', () => { state.paymentMethod = button.dataset.method; render(); }));
   document.querySelector('#checkout-button')?.addEventListener('click', doCheckout);
+  document.querySelector('#pos-start-shift-now-btn')?.addEventListener('click', () => {
+    showStartShiftModal();
+  });
+  document.querySelector('#pos-end-shift-now-btn')?.addEventListener('click', () => {
+    showEndShiftModal();
+  });
 }
 
 function addToCart(variantId) {

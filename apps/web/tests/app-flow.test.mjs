@@ -203,6 +203,25 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.notEqual((await request('/api/products', { method: 'POST', body: { name: 'Forbidden', sku: 'FORBIDDEN', variants: [{ sku: 'FORBIDDEN-1', retailPrice: '100', reorderPoint: '0' }] } })).response.status, 201);
   assert.equal((await request('/api/expenses', { method: 'POST', body: { idempotencyKey: 'e1c5bfee-0771-480d-8ae3-873a7b306671', storeId, categoryCode: 'UTILITIES', amount: '100', paymentMethod: 'CASH_DRAWER', expenseDate: '2026-11-04' } })).response.status, 403);
   assert.equal((await request('/api/inventory/receive', { method: 'POST', body: { storeId, variantId: '00000000-0000-4000-8000-000000000000', quantity: '1', unitCost: '1', currency: 'EGP' } })).response.status, 403);
+
+  // Cashier shift permissions and workflow
+  assert.equal((await request('/api/shifts')).response.status, 403, 'Cashier must be blocked from general shifts page');
+  const cashierShiftStart = await request('/api/shifts/start', { method: 'POST', body: { storeId, openingCash: '25000' } });
+  assert.equal(cashierShiftStart.response.status, 201, JSON.stringify(cashierShiftStart.payload));
+  const startedShiftId = cashierShiftStart.payload.shift.id;
+
+  const currentShiftRes = await request('/api/shifts/current');
+  assert.equal(currentShiftRes.response.status, 200);
+  assert.equal(currentShiftRes.payload.currentShift?.id, startedShiftId);
+  assert.equal(currentShiftRes.payload.currentShift?.openingCash, '25000');
+
+  assert.equal((await request(`/api/shifts/${startedShiftId}/sales`)).response.status, 403, 'Cashier must be blocked from shift sales breakdown');
+
+  const cashierShiftEnd = await request('/api/shifts/end', { method: 'POST', body: { shiftId: startedShiftId, actualCash: '25000', handoverCash: '25000' } });
+  assert.equal(cashierShiftEnd.response.status, 200, JSON.stringify(cashierShiftEnd.payload));
+  assert.equal(cashierShiftEnd.payload.shift.status, 'CLOSED');
+  assert.equal((await request('/api/shifts/current')).payload.currentShift, null);
+
   cookie = (managerLogin.response.headers.get('set-cookie') ?? '').split(';')[0];
   const managerRoleEscalation = await request('/api/users', { method: 'POST', body: { username: 'auditor_test', password: 'Auditor-Test-Password-2026', fullName: 'Test Auditor', role: 'AUDITOR' } });
   assert.equal(managerRoleEscalation.response.status, 403);
