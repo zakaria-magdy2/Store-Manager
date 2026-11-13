@@ -3405,6 +3405,138 @@ table tbody tr:hover td,
   to { opacity: 1; transform: scale(1) translateY(0); }
 }
 
+/* Global Page Heading, Panel Heading & Filter Spacing Polish Across All Pages */
+.page-content {
+  padding-top: 28px;
+  padding-bottom: 44px;
+  padding-inline: max(28px, env(safe-area-inset-right));
+}
+.welcome-row,
+.page-heading-row {
+  gap: 14px 20px;
+  margin-bottom: 22px;
+}
+.welcome-row h2,
+.page-heading-row h2 {
+  margin: 0 0 6px;
+}
+.page-lead {
+  font-size: 12.5px;
+  line-height: 1.65;
+  margin-top: 2px;
+}
+.panel-heading,
+.compact-panel .panel-heading {
+  gap: 14px 20px;
+  margin-bottom: 20px;
+}
+.panel-heading h3,
+.user-create-heading h3 {
+  margin: 0 0 6px;
+}
+.panel-heading p,
+.user-create-heading p {
+  margin: 0;
+  line-height: 1.55;
+}
+.panel + .panel {
+  margin-top: 18px;
+}
+.inventory-summary {
+  margin-bottom: 20px;
+}
+.pos-page-title {
+  gap: 12px 18px;
+  margin: 2px 0 20px;
+}
+.pos-search {
+  margin-bottom: 14px;
+}
+.pos-category-row {
+  margin: 14px 0 18px;
+  gap: 10px;
+}
+.table-search {
+  height: 38px;
+  padding: 0 12px;
+  gap: 9px;
+  min-width: min(260px, 100%);
+}
+.table-search input {
+  font-size: 12px;
+}
+
+/* Unified Filter Cards & Search Separation */
+.pro-filter-card,
+.compact-filter-panel {
+  padding: 18px 22px;
+  margin: 6px 0 22px;
+  display: grid;
+  gap: 14px;
+}
+.pro-filter-row {
+  gap: 14px 20px;
+}
+.pro-filter-row-presets {
+  margin-bottom: 0;
+}
+.pro-filter-row-split {
+  padding-top: 14px;
+  border-top: 1px dashed var(--line);
+}
+.pro-filter-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-inline-end: 4px;
+}
+.pro-filter-pills {
+  gap: 10px;
+}
+.pro-search-wrap {
+  min-width: min(260px, 100%);
+  height: 40px;
+  padding: 0 14px;
+  gap: 10px;
+}
+.pro-date-inputs {
+  gap: 12px;
+}
+.pro-input-wrap {
+  height: 40px;
+  padding: 0 12px;
+  gap: 8px;
+}
+.returns-section-divider {
+  margin: 34px 0 16px;
+  border-top: 2px dashed var(--line);
+  padding-top: 22px;
+}
+.returns-section-divider .panel-heading {
+  margin-bottom: 14px;
+}
+
+@media (max-width: 640px) {
+  .page-content {
+    padding: 18px 14px 28px;
+  }
+  .welcome-row,
+  .page-heading-row {
+    margin-bottom: 18px;
+  }
+  .pro-filter-card,
+  .compact-filter-panel {
+    padding: 14px 14px;
+    gap: 12px;
+  }
+  .pro-filter-row-split {
+    padding-top: 12px;
+  }
+}
+
 
 
 

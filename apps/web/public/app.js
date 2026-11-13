@@ -1089,17 +1089,33 @@ function inventoryView() {
 }
 
 function salesView() {
-  const returns = state.data.customerReturns ?? [];
+  const allReturns = state.data.customerReturns ?? [];
   const sales = state.salesHistory ?? state.data.sales ?? [];
   const totalCount = state.salesHistoryTotal ?? state.data.sales?.length ?? sales.length;
-  const today = new Date().toISOString().slice(0, 10);
-  const preset = state.salesPreset ?? 'today';
-  if (state.salesFrom === undefined && state.salesPreset !== 'all') {
-    state.salesFrom = today;
-    state.salesTo = today;
-  }
-  const from = state.salesFrom ?? today;
-  const to = state.salesTo ?? today;
+  const preset = state.salesPreset ?? 'all';
+  const from = state.salesFrom ?? '';
+  const to = state.salesTo ?? '';
+  const searchQuery = (state.salesHistorySearch ?? '').trim().toLowerCase();
+  const hasReturnFilter = Boolean((from && to) || searchQuery);
+  const matchingSaleNumbers = new Set(sales.map((sale) => String(sale.saleNumber ?? '').toLowerCase()).filter(Boolean));
+  const returns = hasReturnFilter
+    ? allReturns.filter((item) => {
+        if (from && to) {
+          const itemDay = String(item.createdAt ?? '').slice(0, 10);
+          if (!itemDay || itemDay < from || itemDay > to) return false;
+        }
+        if (searchQuery) {
+          const retNum = String(item.returnNumber ?? '').toLowerCase();
+          const saleNum = String(item.saleNumber ?? '').toLowerCase();
+          const payLabel = String(methodLabel(item.paymentMethod) ?? '').toLowerCase();
+          const payRaw = String(item.paymentMethod ?? '').toLowerCase();
+          const matchesSelf = retNum.includes(searchQuery) || saleNum.includes(searchQuery) || payLabel.includes(searchQuery) || payRaw.includes(searchQuery);
+          const matchesFilteredSale = matchingSaleNumbers.has(saleNum);
+          if (!matchesSelf && !matchesFilteredSale) return false;
+        }
+        return true;
+      })
+    : allReturns;
 
   return `
     <div class="page-heading-row">
@@ -1110,9 +1126,9 @@ function salesView() {
     </div>
 
     <section class="pro-filter-card">
-      <div class="pro-filter-row" style="margin-bottom:12px;">
+      <div class="pro-filter-row pro-filter-row-presets">
         <div class="pro-filter-pills">
-          <span style="font-size:12px;font-weight:700;color:var(--muted);display:inline-flex;align-items:center;gap:6px;">
+          <span class="pro-filter-label">
             ${icon('filter', 15)} فترات المبيعات:
           </span>
           <button type="button" class="pro-filter-pill ${preset === 'today' ? 'active' : ''}" data-sales-preset="today">اليوم</button>
@@ -1121,7 +1137,7 @@ function salesView() {
           <button type="button" class="pro-filter-pill ${preset === 'all' ? 'active' : ''}" data-sales-preset="all">كل المبيعات</button>
         </div>
       </div>
-      <form id="sales-history-search" class="pro-filter-row">
+      <form id="sales-history-search" class="pro-filter-row pro-filter-row-split">
         <div class="pro-search-wrap">
           ${icon('search', 16)}
           <input name="search" value="${escapeHtml(state.salesHistorySearch ?? '')}" placeholder="ابحث برقم الفاتورة أو اسم الموديل أو الكود...">
@@ -1136,7 +1152,7 @@ function salesView() {
             <input type="date" name="to" value="${to}">
           </div>
           <button class="button button-primary button-sm" type="submit" style="height:38px;padding:0 16px;">تطبيق الفلتر</button>
-          ${from || to || (state.salesHistorySearch ?? '').trim() ? '<button type="button" id="reset-sales-filter" class="text-action" style="font-size:12px;color:var(--rose,var(--rose, #be123c));font-weight:700;">مسح الفلتر</button>' : ''}
+          ${from || to || (state.salesHistorySearch ?? '').trim() ? '<button type="button" id="reset-sales-filter" class="text-action" style="font-size:12px;color:var(--rose, #be123c);font-weight:700;">مسح الفلتر</button>' : ''}
         </div>
       </form>
     </section>
@@ -1151,13 +1167,13 @@ function salesView() {
       ${sales.length ? `${salesTable(sales)}${sales.length < totalCount ? '<div class="sales-history-more"><button class="button button-secondary" id="sales-history-more">عرض فواتير أقدم</button></div>' : ''}` : `<div class="empty-chart"><div class="empty-illustration">${icon('chart', 28)}</div><strong>${state.salesHistorySearch ? 'لا توجد فواتير مطابقة للبحث' : 'لا توجد مبيعات مسجلة في هذه الفترة'}</strong><button class="button button-primary" data-page="pos">ابدأ البيع</button></div>`}
     </section>
 
-    <div style="margin: 32px 0 16px; border-top: 2px dashed var(--line); padding-top: 20px;">
-      <div class="panel-heading" style="margin-bottom: 10px;">
+    <div class="returns-section-divider">
+      <div class="panel-heading">
         <div>
           <h3 style="font-size: 15px; font-weight: 800; color: var(--ink);">سجل فواتير المرتجعات السابقة</h3>
           <p style="font-size: 11px; color: var(--muted);">كل عمليات الاسترجاع المسجلة على فواتير المبيعات مع المبالغ المستردة والمخزون المرتجع</p>
         </div>
-        <span class="status-pill status-complete">${returns.length} حركة مرتجع</span>
+        <span class="status-pill status-complete">${hasReturnFilter ? `${returns.length} من ${allReturns.length} مرتجع` : `${returns.length} حركة مرتجع`}</span>
       </div>
     </div>
 
@@ -1189,13 +1205,13 @@ function salesView() {
                     <td><span class="sku-code">${escapeHtml(item.saleNumber)}</span></td>
                     <td>${new Date(item.createdAt).toLocaleString('ar-EG')}</td>
                     <td><span class="payment-chip">${methodLabel(item.paymentMethod)}</span></td>
-                    <td class="table-total" style="color:var(--rose,var(--rose, #be123c));">${money(typeof item.refundAmount === 'object' ? item.refundAmount : { amount: item.refundAmount, currency: item.currency, decimals: currencyDecimals(item.currency) })}</td>
+                    <td class="table-total" style="color:var(--rose, #be123c);">${money(typeof item.refundAmount === 'object' ? item.refundAmount : { amount: item.refundAmount, currency: item.currency, decimals: currencyDecimals(item.currency) })}</td>
                   </tr>
                 `).join('')}
               </tbody>
             </table>
           </div>
-        ` : '<div class="empty-row">لا توجد مرتجعات مسجلة في هذا المتجر حتى الآن.</div>'}
+        ` : `<div class="empty-row">${hasReturnFilter ? 'لا توجد مرتجعات مطابقة للفلتر في هذه الفترة.' : 'لا توجد مرتجعات مسجلة في هذا المتجر حتى الآن.'}</div>`}
       </div>
     </details>
   `;
@@ -2156,7 +2172,7 @@ function suppliersView() {
             <input type="date" name="to" value="${to}">
           </div>
           <button type="submit" class="button button-primary button-sm" style="height:38px;padding:0 14px;">تطبيق</button>
-          ${from || to ? '<button type="button" class="text-action reset-sup-filter" style="font-size:12px;color:var(--rose,var(--rose, #be123c));font-weight:700;">مسح</button>' : ''}
+          ${from || to ? '<button type="button" class="text-action reset-sup-filter" style="font-size:12px;color:var(--rose, #be123c);font-weight:700;">مسح</button>' : ''}
         </form>
       </div>
     </section>
@@ -2438,9 +2454,9 @@ function topProductsView() {
 
   return `<div class="page-heading-row"><div><p class="page-lead">إحصائيات المبيعات، الأرباح، وحركة الموديلات والمقاسات الأكثر طلباً في المتجر.</p></div><button class="button button-secondary button-sm" data-page="reports">فتح الأرباح والخسائر ←</button></div>
     <section class="pro-filter-card">
-      <div class="pro-filter-row" style="margin-bottom:12px;">
+      <div class="pro-filter-row pro-filter-row-presets">
         <div class="pro-filter-pills">
-          <span style="font-size:12px;font-weight:700;color:var(--muted);display:inline-flex;align-items:center;gap:6px;">
+          <span class="pro-filter-label">
             ${icon('calendar', 15)} الفترة الزمنية:
           </span>
           <button type="button" class="pro-filter-pill ${(state.analyticsRange ?? '30d') === '7d' ? 'active' : ''}" data-analytics-range="7d">7 أيام</button>
@@ -2461,8 +2477,8 @@ function topProductsView() {
         </form>
       </div>
 
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-top:12px;border-top:1px solid var(--line);">
-        <span style="font-size:12px;font-weight:700;color:var(--muted);display:inline-flex;align-items:center;gap:6px;">
+      <div class="pro-filter-row pro-filter-row-split">
+        <span class="pro-filter-label">
           ${icon('filter', 15)} القسم المعروض:
         </span>
         <div class="pro-filter-pills">
@@ -3036,8 +3052,8 @@ function expensesView() {
     </div>
 
     <!-- قائمة الالتزامات بنمط بطاقات التجار المصغرة -->
-    <div style="margin-bottom:14px;">
-      <h3 style="margin:0 0 10px;font-size:15px;font-weight:800;color:var(--ink);">الالتزامات الشهرية</h3>
+    <div style="margin:22px 0 14px;">
+      <h3 style="margin:0;font-size:15px;font-weight:800;color:var(--ink);">الالتزامات الشهرية</h3>
     </div>
 
     ${items.length ? items.map((item) => {
@@ -3143,7 +3159,7 @@ function expensesView() {
 
     <!-- سجل المصروفات المباشرة (مثل الكهرباء والصيانة) -->
     <section class="panel compact-panel" style="margin-top:24px;">
-      <div class="panel-heading" style="padding:12px 18px;">
+      <div class="panel-heading">
         <div>
           <h3 style="font-size:15px;font-weight:800;color:var(--ink);margin:0;">سجل المصروفات المباشرة لشهر ${monthName} (${currentMonthExpenses.length} مصروف)</h3>
           <p style="margin:2px 0 0;font-size:11.5px;color:var(--muted);">المصروفات التي تم تسجيلها (كهرباء، فواتير، مستلزمات، صيانة...).</p>
