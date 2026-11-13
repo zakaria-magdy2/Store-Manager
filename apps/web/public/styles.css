@@ -3249,6 +3249,56 @@ table tbody tr:hover td,
 :root[data-theme="dark"] .notif-alert-amber .notif-divider {
   border-bottom-color: rgba(251, 191, 36, 0.25);
 }
+:root[data-theme="dark"] .sidebar-brand,
+:root[data-theme="dark"] .brand-lockup {
+  color: #f8fafc;
+}
+:root[data-theme="dark"] .brand-light {
+  color: #a5b4fc;
+}
+:root[data-theme="dark"] .workspace-pill {
+  color: #e2e8f0;
+}
+:root[data-theme="dark"] .nav-item kbd,
+:root[data-theme="dark"] .global-search kbd,
+:root[data-theme="dark"] .pos-search kbd {
+  background: #192231;
+  border-color: #2a374c;
+  color: #a5b4fc;
+}
+:root[data-theme="dark"] .help-card strong {
+  color: #f8fafc;
+}
+:root[data-theme="dark"] .help-card p {
+  color: #94a3b8;
+}
+:root[data-theme="dark"] .help-card a {
+  color: #a5b4fc;
+}
+:root[data-theme="dark"] .avatar {
+  background: #24223f;
+  color: #c4b5fd;
+}
+:root[data-theme="dark"] .product-name-action strong {
+  color: #f8fafc;
+}
+:root[data-theme="dark"] .product-name-action small {
+  color: #94a3b8;
+}
+:root[data-theme="dark"] .auth-layout,
+:root[data-theme="dark"] .auth-form-panel {
+  background: #0b0f17;
+  color: #f8fafc;
+}
+:root[data-theme="dark"] .auth-form-wrap h2 {
+  color: #f8fafc;
+}
+:root[data-theme="dark"] .auth-subtitle {
+  color: #94a3b8;
+}
+:root[data-theme="dark"] .auth-form-wrap .form-divider {
+  background: #222c3d;
+}
 
 
 
