@@ -64,6 +64,7 @@ const icons = {
   x: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
   clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
   play: '<polygon points="5 3 19 12 5 21 5 3"/>',
+  message: '<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5Z"/>',
 };
 
 function getTheme() {
@@ -377,7 +378,7 @@ function bindSetup() {
 }
 
 function loginView() {
-  return `<main class="auth-layout"><section class="auth-story"><div class="brand-lockup"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="auth-story-copy"><span class="eyebrow">أهلًا بعودتك</span><h1>متجرك شغال.<br>ابدأ يومك.</h1><p>سجّل دخولك لإدارة ${escapeHtml(state.bootstrap.companyName)}.</p><div class="story-stat"><span class="story-stat-dot"></span>بياناتك محفوظة محليًا · ${escapeHtml(state.bootstrap.currency)}</div></div><div class="auth-story-footer">رَفّ · نظام إدارة المتاجر</div></section><section class="auth-form-panel"><div class="auth-form-wrap login-form-wrap"><span class="eyebrow eyebrow-dark">تسجيل الدخول</span><h2>مرحبًا بك</h2><p class="auth-subtitle">أدخل بيانات حسابك للمتابعة</p><form id="login-form" class="form-stack"><label>اسم المستخدم<input name="username" required maxlength="30" autocomplete="username" placeholder="اسم المستخدم"></label><label>كلمة المرور<input name="password" type="password" required maxlength="128" autocomplete="current-password" placeholder="كلمة المرور"></label><button class="button button-primary button-wide" type="submit">تسجيل الدخول <span>${icon('arrow', 18)}</span></button></form><p class="form-footnote">${escapeHtml(state.bootstrap.companyName)} · مساحة عمل مستقلة</p></div></section></main>`;
+  return `<main class="auth-layout"><section class="auth-story"><div class="brand-lockup"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="auth-story-copy"><span class="eyebrow">أهلًا بعودتك</span><h1>متجرك شغال.<br>ابدأ يومك.</h1><p>سجّل دخولك لإدارة ${escapeHtml(state.bootstrap.companyName)}.</p><div class="story-stat"><span class="story-stat-dot"></span>بياناتك محفوظة محليًا · ${escapeHtml(state.bootstrap.currency)}</div></div><div class="auth-story-footer">رَفّ · نظام إدارة المتاجر · <a href="https://wa.me/201200562966" target="_blank" rel="noopener noreferrer" style="color:#b8b1fa;text-decoration:none;font-weight:700;">الدعم (واتساب): 01200562966</a></div></section><section class="auth-form-panel"><div class="auth-form-wrap login-form-wrap"><span class="eyebrow eyebrow-dark">تسجيل الدخول</span><h2>مرحبًا بك</h2><p class="auth-subtitle">أدخل بيانات حسابك للمتابعة</p><form id="login-form" class="form-stack"><label>اسم المستخدم<input name="username" required maxlength="30" autocomplete="username" placeholder="اسم المستخدم"></label><label>كلمة المرور<input name="password" type="password" required maxlength="128" autocomplete="current-password" placeholder="كلمة المرور"></label><button class="button button-primary button-wide" type="submit">تسجيل الدخول <span>${icon('arrow', 18)}</span></button></form><p class="form-footnote">${escapeHtml(state.bootstrap.companyName)} · مساحة عمل مستقلة</p></div></section></main>`;
 }
 
 function bindLogin() {
@@ -418,7 +419,7 @@ function shellView() {
   `;
   const { totalCount: totalAlertsCount } = computeSystemAlerts(state.data);
 
-  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'financial-map' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item" role="menuitem" href="mailto:support@retailos.local">${icon('help', 17)}<span>\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u0627\u0644\u062f\u0639\u0645</span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${shiftControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>⌘ K</kbd></label><button type="button" class="icon-button notification-button ${totalAlertsCount > 0 ? 'has-alerts' : ''}" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount > 0 ? `<span class="notif-count-badge">${totalAlertsCount > 99 ? '99+' : totalAlertsCount}</span>` : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${pageView()}</section></main>`;
+  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'financial-map' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item account-menu-whatsapp" role="menuitem" href="https://wa.me/201200562966" target="_blank" rel="noopener noreferrer">${icon('message', 17)}<span>تواصل مع الدعم (واتساب)<small class="support-phone-sub">01200562966</small></span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${shiftControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>⌘ K</kbd></label><button type="button" class="icon-button notification-button ${totalAlertsCount > 0 ? 'has-alerts' : ''}" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount > 0 ? `<span class="notif-count-badge">${totalAlertsCount > 99 ? '99+' : totalAlertsCount}</span>` : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${pageView()}</section></main>`;
 }
 
 function roleLabel(role) {
@@ -2513,6 +2514,36 @@ function topProductsView() {
       ${growthForecastWidget(state.growthForecast, currency)}
     `}`;
 }
+function formatCompactMajor(minorValue, decimals = 2) {
+  const num = Number(minorValue || '0') / (10 ** decimals);
+  if (!Number.isFinite(num) || num <= 0) return '0';
+  if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(num >= 10_000_000 ? 0 : 1)}M`;
+  if (num >= 1_000) return `${(num / 1_000).toFixed(num >= 10_000 ? 0 : 1)}K`;
+  return num < 100 && !Number.isInteger(num) ? num.toFixed(1).replace(/\.0$/, '') : String(Math.round(num));
+}
+
+function buildSmoothAreaPaths(points, baseY) {
+  if (!points.length) return { line: '', area: '' };
+  if (points.length === 1) {
+    const p = points[0];
+    return {
+      line: `M ${p.x},${p.y} L ${p.x},${p.y}`,
+      area: `M ${p.x},${baseY} L ${p.x},${p.y} Z`,
+    };
+  }
+  let line = `M ${points[0].x.toFixed(2)},${points[0].y.toFixed(2)}`;
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[i];
+    const p1 = points[i + 1];
+    const midX = ((p0.x + p1.x) / 2).toFixed(2);
+    line += ` C ${midX},${p0.y.toFixed(2)} ${midX},${p1.y.toFixed(2)} ${p1.x.toFixed(2)},${p1.y.toFixed(2)}`;
+  }
+  const first = points[0];
+  const last = points[points.length - 1];
+  const area = `${line} L ${last.x.toFixed(2)},${baseY.toFixed(2)} L ${first.x.toFixed(2)},${baseY.toFixed(2)} Z`;
+  return { line, area };
+}
+
 function growthForecastWidget(forecast, currency) {
   if (!forecast) return '';
   const decimals = currencyDecimals(currency);
@@ -2524,20 +2555,17 @@ function growthForecastWidget(forecast, currency) {
   const forecastSign = fc.forecastGrowthPercent >= 0 ? '+' : '';
   const isCurrentMonthView = selectedPeriod?.isCurrent !== false;
 
-  // Year & Period filters
   const currentSysYear = new Date().getFullYear();
   state.growthSelectedYear = state.growthSelectedYear || (selectedPeriod?.year ?? currentSysYear);
-  state.growthViewMode = state.growthViewMode || '6m'; // '3m' | '6m' | 'year'
+  state.growthViewMode = state.growthViewMode || '6m';
 
-  // Extract available years
   const historyYears = Array.from(new Set([
     currentSysYear - 1,
     currentSysYear,
     currentSysYear + 1,
-    ...monthlyHistory.map((m) => m.year)
+    ...monthlyHistory.map((m) => m.year),
   ])).sort((a, b) => b - a);
 
-  // Chronological copy for charting
   const chronologicalHistory = [...monthlyHistory].sort((a, b) => a.yearMonth.localeCompare(b.yearMonth));
 
   let chartMonths = [];
@@ -2546,7 +2574,6 @@ function growthForecastWidget(forecast, currency) {
   } else if (state.growthViewMode === '6m') {
     chartMonths = chronologicalHistory.slice(-6);
   } else {
-    // Filter by selected year
     chartMonths = chronologicalHistory.filter((m) => m.year === Number(state.growthSelectedYear));
     if (!chartMonths.length) {
       const arMonthsNames = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
@@ -2567,155 +2594,294 @@ function growthForecastWidget(forecast, currency) {
     }
   }
 
-  // Find max value for bar heights (max height: 140px)
-  let maxValMinor = 1n;
+  let maxValMinor = 0n;
   for (const m of chartMonths) {
     const r = BigInt(m.revenue || '0');
     const p = BigInt(m.profit || '0');
     if (r > maxValMinor) maxValMinor = r;
     if (p > maxValMinor) maxValMinor = p;
   }
-  const maxValNum = Number(maxValMinor) || 1;
+  const hasAnySales = maxValMinor > 0n;
+  const scaleMax = hasAnySales ? Number(maxValMinor) : 100;
+
+  // SVG plot coordinates inside 1000x210 canvas; points centered over each equal-width month column
+  const svgW = 1000;
+  const svgH = 210;
+  const topPad = 18;
+  const baseY = 192;
+  const plotH = baseY - topPad;
+  const count = Math.max(1, chartMonths.length);
+
+  const salesPoints = [];
+  const profitPoints = [];
+  const colPositions = chartMonths.map((m, idx) => {
+    const xPct = ((idx + 0.5) / count) * 100;
+    const x = (xPct / 100) * svgW;
+    const revNum = Math.max(0, Number(m.revenue || '0'));
+    const profNum = Math.max(0, Number(m.profit || '0'));
+    const salesY = hasAnySales ? baseY - ((revNum / scaleMax) * plotH) : baseY;
+    const profitY = hasAnySales ? baseY - ((profNum / scaleMax) * plotH) : baseY;
+    salesPoints.push({ x, y: salesY, xPct, yPct: (salesY / svgH) * 100 });
+    profitPoints.push({ x, y: profitY, xPct, yPct: (profitY / svgH) * 100 });
+    return { month: m, xPct, salesY, profitY, revNum, profNum };
+  });
+
+  const salesPath = buildSmoothAreaPaths(salesPoints, baseY);
+  const profitPath = buildSmoothAreaPaths(profitPoints, baseY);
+
+  const selectedChartMonth = chartMonths.find((m) => m.isSelected || (m.year === currentMonth.year && m.month === currentMonth.month))
+    ?? chartMonths[chartMonths.length - 1]
+    ?? currentMonth;
+  const selRev = Number(selectedChartMonth?.revenue || '0');
+  const selProfit = Number(selectedChartMonth?.profit || '0');
+  const selMarginPct = selRev > 0 ? Math.max(0, Math.min(100, (selProfit / selRev) * 100)) : 0;
+
+  const yTicks = [1, 0.66, 0.33, 0].map((ratio) => ({
+    ratio,
+    y: topPad + (1 - ratio) * plotH,
+    label: hasAnySales ? formatCompactMajor(Math.round(scaleMax * ratio), decimals) : '0',
+  }));
+
+  // Monthly goal / comparison progress math (simple & transparent)
+  const curRevMinor = BigInt(currentMonth.revenue || '0');
+  const prevRevMinor = BigInt(previousMonth.revenue || '0');
+  const curProfitMinor = BigInt(currentMonth.profit || '0');
+
+  let progressPct = 0;
+  let progressLabel = '';
+  let targetRefLabel = '';
+  if (prevRevMinor > 0n) {
+    progressPct = Number((curRevMinor * 100n) / prevRevMinor);
+    progressLabel = `${progressPct}% من الشهر السابق`;
+    targetRefLabel = `المرجع (${escapeHtml(previousMonth.name)})`;
+  } else {
+    const daysElapsed = Math.max(0, Number(currentMonth.daysElapsed || 0));
+    const daysTotal = Math.max(1, Number(currentMonth.daysInMonth || 30));
+    progressPct = isCurrentMonthView ? Math.round((daysElapsed * 100) / daysTotal) : (curRevMinor > 0n ? 100 : 0);
+    progressLabel = isCurrentMonthView ? `يوم ${daysElapsed} من ${daysTotal}` : 'الشهر مكتمل';
+    targetRefLabel = 'بداية جديدة (لا توجد مبيعات للشهر السابق)';
+  }
+  const progressBarWidth = Math.max(curRevMinor > 0n ? 4 : 0, Math.min(100, progressPct));
+
+  const curMarginPct = curRevMinor > 0n
+    ? Math.max(0, Math.min(100, Number((curProfitMinor * 1000n) / curRevMinor) / 10))
+    : 0;
+
+  const gradSuffix = String(state.data?.selectedStoreId ?? 's').replace(/[^a-zA-Z0-9]/g, '').slice(0, 8);
 
   return `
-    <section class="panel compact-panel" style="margin-top:20px;">
-      <!-- شريط أدوات الرسم البياني والفلاتر -->
-      <div class="growth-toolbar" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;border-bottom:1px solid var(--line);padding-bottom:14px;">
+    <section class="panel compact-panel growth-pro-panel">
+      <div class="growth-pro-header">
         <div>
-          <h3 style="font-size:16px;font-weight:850;color:var(--ink);margin:0;display:flex;align-items:center;gap:8px;">
-            ${icon('chart', 18)} الرسم البياني وإحصائيات التقدم والنمو الشهري
-          </h3>
-          <p style="margin:3px 0 0;font-size:12px;color:var(--muted);">
-            تتبع بصري لحركة المبيعات والأرباح عبر الشهور والسنوات، مع إمكانية استعراض وتدقيق أي فترة.
-          </p>
+          <h3 class="growth-pro-title">${icon('chart', 18)} تحليل النمو والتقدم الشهري</h3>
+          <p class="growth-pro-sub">نظرة بسيطة وواضحة على مسار المبيعات والأرباح وتقدم الشهر الحالي.</p>
         </div>
 
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-          <!-- فلاتر المدة -->
+        <div class="growth-pro-controls">
           <div class="pro-filter-pills" style="margin:0;">
-            <button type="button" class="pro-filter-pill ${state.growthViewMode === '3m' ? 'active' : ''}" id="growth-view-3m">آخر 3 شهور</button>
-            <button type="button" class="pro-filter-pill ${state.growthViewMode === '6m' ? 'active' : ''}" id="growth-view-6m">آخر 6 شهور</button>
-            <button type="button" class="pro-filter-pill ${state.growthViewMode === 'year' ? 'active' : ''}" id="growth-view-year">سنة كاملة</button>
+            <button type="button" class="pro-filter-pill ${state.growthViewMode === '3m' ? 'active' : ''}" id="growth-view-3m">3 شهور</button>
+            <button type="button" class="pro-filter-pill ${state.growthViewMode === '6m' ? 'active' : ''}" id="growth-view-6m">6 شهور</button>
+            <button type="button" class="pro-filter-pill ${state.growthViewMode === 'year' ? 'active' : ''}" id="growth-view-year">السنة</button>
           </div>
 
-          <!-- اختيار السنة -->
-          <div style="display:inline-flex;align-items:center;gap:6px;">
-            <label style="font-size:12px;font-weight:750;color:var(--muted);">السنة:</label>
-            <select id="growth-year-select" class="pro-select" style="font-size:12.5px;padding:4px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel);font-weight:800;color:var(--ink);cursor:pointer;">
-              ${historyYears.map((yr) => `
-                <option value="${yr}" ${Number(state.growthSelectedYear) === yr ? 'selected' : ''}>سنة ${yr}</option>
-              `).join('')}
-            </select>
-          </div>
+          <select id="growth-year-select" class="pro-select growth-pro-select" aria-label="اختر السنة">
+            ${historyYears.map((yr) => `
+              <option value="${yr}" ${Number(state.growthSelectedYear) === yr ? 'selected' : ''}>${yr}</option>
+            `).join('')}
+          </select>
 
-          <!-- اختيار الشهر للتدقيق -->
-          <div style="display:inline-flex;align-items:center;gap:6px;">
-            <label style="font-size:12px;font-weight:750;color:var(--muted);">تحليل شهر:</label>
-            <select id="growth-month-picker" class="pro-select" style="font-size:12.5px;padding:4px 12px;border-radius:8px;border:1px solid var(--line);background:var(--panel);font-weight:800;color:var(--ink);cursor:pointer;">
-              ${monthlyHistory.map((m) => `
-                <option value="${m.yearMonth}" ${m.isSelected ? 'selected' : ''}>
-                  ${m.name} ${m.isCurrent ? '(الحالي)' : ''}
-                </option>
-              `).join('')}
-            </select>
-          </div>
+          <select id="growth-month-picker" class="pro-select growth-pro-select" aria-label="اختر الشهر">
+            ${monthlyHistory.map((m) => `
+              <option value="${m.yearMonth}" ${m.isSelected ? 'selected' : ''}>
+                ${escapeHtml(m.name)}${m.isCurrent ? ' (الحالي)' : ''}
+              </option>
+            `).join('')}
+          </select>
         </div>
       </div>
 
-      <!-- الرسم البياني التفاعلي للأعمدة المزدوجة -->
-      <div class="growth-chart-wrapper">
-        <div class="growth-chart-legend">
+      <!-- شريط تركيز الشهر المحدد -->
+      <div class="growth-spotlight-bar">
+        <div class="growth-spotlight-item">
+          <small>الشهر المعروض</small>
+          <strong>${escapeHtml(selectedChartMonth?.name ?? currentMonth.name)}</strong>
+        </div>
+        <div class="growth-spotlight-item">
+          <small>إجمالي المبيعات</small>
+          <strong class="spot-indigo">${format(selectedChartMonth?.revenue ?? '0')}</strong>
+        </div>
+        <div class="growth-spotlight-item">
+          <small>مجمل الربح (هامش ${selMarginPct.toFixed(0)}%)</small>
+          <strong class="spot-green">${format(selectedChartMonth?.profit ?? '0')}</strong>
+        </div>
+        <div class="growth-spotlight-item">
+          <small>الحركة اليومية</small>
+          <strong>${selectedChartMonth?.salesCount ?? 0} فاتورة · ${format(selectedChartMonth?.dailyAverage ?? '0')}/يوم</strong>
+        </div>
+      </div>
+
+      <!-- الرسم البياني الانسيابي الحديث -->
+      <div class="growth-trend-card">
+        <div class="growth-trend-legend">
           <div class="growth-legend-items">
-            <span class="legend-item legend-sales">
-              <span class="legend-bullet" style="background:#5948d8;"></span>
-              إجمالي المبيعات
-            </span>
-            <span class="legend-item legend-profit">
-              <span class="legend-bullet" style="background:var(--green, #15803d);"></span>
-              مجمل الربح التجاري
-            </span>
+            <span class="legend-item legend-sales"><span class="legend-dot legend-dot-sales"></span> المبيعات</span>
+            <span class="legend-item legend-profit"><span class="legend-dot legend-dot-profit"></span> مجمل الربح</span>
           </div>
-          <small class="legend-hint">اضغط على أي عمود لاستعراض وتحليل تفاصيل ذلك الشهر</small>
+          <small class="legend-hint">اضغط على أي شهر بالأسفل لعرض أرقامه</small>
         </div>
 
-        <div class="growth-chart-stage">
-          ${chartMonths.map((m) => {
-            const revNum = Number(m.revenue || '0');
-            const profitNum = Number(m.profit || '0');
-            const revHeight = revNum > 0 ? Math.max(16, Math.round((revNum / maxValNum) * 160)) : 6;
-            const profitHeight = profitNum > 0 ? Math.max(10, Math.round((profitNum / maxValNum) * 160)) : 6;
-            const isSelectedMonth = m.isSelected || (m.year === currentMonth.year && m.month === currentMonth.month);
+        <div class="growth-svg-frame" dir="ltr">
+          <div class="growth-y-axis">
+            ${yTicks.map((t) => `<span>${t.label}</span>`).join('')}
+          </div>
 
+          <div class="growth-canvas-area">
+            <svg class="growth-trend-svg" viewBox="0 0 ${svgW} ${svgH}" preserveAspectRatio="none" aria-hidden="true">
+              <defs>
+                <linearGradient id="salesFill_${gradSuffix}" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#6366f1" stop-opacity="0.28" />
+                  <stop offset="100%" stop-color="#6366f1" stop-opacity="0.01" />
+                </linearGradient>
+                <linearGradient id="profitFill_${gradSuffix}" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#10b981" stop-opacity="0.24" />
+                  <stop offset="100%" stop-color="#10b981" stop-opacity="0.01" />
+                </linearGradient>
+              </defs>
+
+              ${yTicks.map((t) => `<line x1="0" y1="${t.y.toFixed(1)}" x2="${svgW}" y2="${t.y.toFixed(1)}" class="growth-grid-line" />`).join('')}
+
+              ${colPositions.map((col) => {
+                const active = col.month.yearMonth === selectedChartMonth?.yearMonth;
+                return active ? `<line x1="${((col.xPct / 100) * svgW).toFixed(1)}" y1="${topPad}" x2="${((col.xPct / 100) * svgW).toFixed(1)}" y2="${baseY}" class="growth-active-guide" />` : '';
+              }).join('')}
+
+              ${hasAnySales ? `
+                <path d="${salesPath.area}" fill="url(#salesFill_${gradSuffix})" />
+                <path d="${profitPath.area}" fill="url(#profitFill_${gradSuffix})" />
+                <path d="${salesPath.line}" fill="none" stroke="#6366f1" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
+                <path d="${profitPath.line}" fill="none" stroke="#10b981" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
+              ` : `
+                <line x1="0" y1="${baseY}" x2="${svgW}" y2="${baseY}" stroke="#94a3b8" stroke-width="2" stroke-dasharray="6 6" vector-effect="non-scaling-stroke" />
+              `}
+            </svg>
+
+            ${colPositions.map((col, idx) => {
+              const active = col.month.yearMonth === selectedChartMonth?.yearMonth;
+              const sDot = salesPoints[idx];
+              const pDot = profitPoints[idx];
+              return `
+                <button type="button" class="growth-node-hit ${active ? 'is-active' : ''}" data-chart-ym="${col.month.yearMonth}" style="left:${col.xPct}%;" title="${escapeHtml(col.month.name)} — مبيعات: ${format(col.month.revenue)} | ربح: ${format(col.month.profit)}" aria-label="${escapeHtml(col.month.name)}">
+                  <span class="growth-dot dot-sales ${active ? 'is-active' : ''}" style="top:${sDot.yPct}%;"></span>
+                  <span class="growth-dot dot-profit ${active ? 'is-active' : ''}" style="top:${pDot.yPct}%;"></span>
+                </button>
+              `;
+            }).join('')}
+
+            ${!hasAnySales ? `<div class="growth-empty-badge">لا توجد مبيعات مسجلة في الشهور المعروضة</div>` : ''}
+          </div>
+        </div>
+
+        <div class="growth-months-strip" dir="ltr" style="grid-template-columns:repeat(${count}, minmax(0, 1fr));">
+          ${colPositions.map(({ month }) => {
+            const active = month.yearMonth === selectedChartMonth?.yearMonth;
             return `
-              <div class="growth-col-item ${isSelectedMonth ? 'growth-col-active' : ''}" data-chart-ym="${m.yearMonth}" title="${escapeHtml(m.name)}: مبيعات ${format(m.revenue)} | أرباح ${format(m.profit)}">
-                <div class="growth-col-bars">
-                  <!-- عمود المبيعات -->
-                  <div class="growth-bar-wrap">
-                    <span class="growth-bar-val growth-val-sales">${revNum > 0 ? format(m.revenue) : ''}</span>
-                    <div class="growth-bar-elem growth-bar-sales" style="height:${revHeight}px;"></div>
-                  </div>
-                  <!-- عمود الربح -->
-                  <div class="growth-bar-wrap">
-                    <span class="growth-bar-val growth-val-profit">${profitNum > 0 ? format(m.profit) : ''}</span>
-                    <div class="growth-bar-elem growth-bar-profit" style="height:${profitHeight}px;"></div>
-                  </div>
-                </div>
-                <div class="growth-col-label">
-                  <strong>${m.name.split(' ')[0]}</strong>
-                  <small>${m.year}</small>
-                </div>
-              </div>
+              <button type="button" class="growth-month-chip ${active ? 'is-active' : ''}" data-chart-ym="${month.yearMonth}">
+                <strong>${escapeHtml(month.name.split(' ')[0])}</strong>
+                <small>${formatCompactMajor(month.revenue, decimals)}</small>
+              </button>
             `;
           }).join('')}
         </div>
       </div>
 
-      <!-- بطاقات المقارنة والتحليل -->
-      <div class="growth-forecast-grid" style="margin-top:16px;">
-        <div class="growth-forecast-card ${isUp ? 'card-growth' : 'card-decline'}">
-          <div class="growth-card-header">
-            <span class="growth-card-title">${escapeHtml(currentMonth.name)} مقارنة بـ ${escapeHtml(previousMonth.name)}</span>
-            <span class="status-pill ${isUp ? 'status-complete' : 'status-low'}" style="font-size:12px;font-weight:800;">
-              ${isUp ? 'نمو' : 'تراجع'} (${growthSign}${comparison.growthPercent}%)
+      <!-- بطاقات التقدم البسيطة والواضحة -->
+      <div class="growth-progress-grid">
+        <article class="growth-progress-card">
+          <div class="growth-progress-top">
+            <div>
+              <small class="growth-progress-eyebrow">التقدم الشهري</small>
+              <h4>${escapeHtml(currentMonth.name)}</h4>
+            </div>
+            <span class="status-pill ${isUp ? 'status-complete' : 'status-low'}">
+              ${isUp ? 'نمو' : 'تراجع'} ${growthSign}${comparison.growthPercent}%
             </span>
           </div>
-          <div class="growth-headline">
-            ${isUp
-              ? `مبيعات ${escapeHtml(currentMonth.name)} أعلى من ${escapeHtml(previousMonth.name)} بنسبة <span style="color:var(--green, #15803d);font-weight:900;">${growthSign}${comparison.growthPercent}%</span>`
-              : `مبيعات ${escapeHtml(currentMonth.name)} أقل من ${escapeHtml(previousMonth.name)} بنسبة <span style="color:var(--rose, #be123c);font-weight:900;">${comparison.growthPercent}%</span>`
-            }
-          </div>
-          <div class="growth-stats-row">
-            <span>مبيعات الشهر: <strong>${format(currentMonth.revenue)}</strong></span>
-            <span>مجمل الربح: <strong>${format(currentMonth.profit)}</strong></span>
-            <span>الشهر السابق: <strong>${format(previousMonth.revenue)}</strong></span>
-            <span>المتوسط اليومي: <strong>${format(currentMonth.dailyAverage)}</strong></span>
-            <span>الفواتير: <strong>${currentMonth.salesCount}</strong></span>
-          </div>
-        </div>
 
-        <div class="growth-forecast-card card-projected">
-          <div class="growth-card-header">
-            <span class="growth-card-title">${isCurrentMonthView ? `توقعات شهر ${escapeHtml(fc.nextMonthName)}` : `خلاصة أداء شهر ${escapeHtml(currentMonth.name)}`}</span>
-            <span class="status-pill status-complete" style="font-size:12px;font-weight:800;">${isCurrentMonthView ? escapeHtml(fc.statusText) : 'شهر مكتمل ومؤرشف'}</span>
+          <div class="growth-progress-meter">
+            <div class="growth-progress-meter-head">
+              <strong>${progressLabel}</strong>
+              <small>${targetRefLabel}</small>
+            </div>
+            <div class="growth-progress-track">
+              <div class="growth-progress-fill ${isUp ? 'fill-up' : 'fill-warn'}" style="width:${progressBarWidth}%;"></div>
+            </div>
           </div>
-          <div class="growth-headline">
+
+          <div class="growth-mini-metrics">
+            <div>
+              <small>المحقق حالياً</small>
+              <strong>${format(currentMonth.revenue)}</strong>
+            </div>
+            <div>
+              <small>الشهر السابق</small>
+              <strong>${format(previousMonth.revenue)}</strong>
+            </div>
+            <div>
+              <small>${isCurrentMonthView ? 'توقع نهاية الشهر' : 'عدد الفواتير'}</small>
+              <strong>${isCurrentMonthView ? format(currentMonth.projectedMonthEnd) : `${currentMonth.salesCount} فاتورة`}</strong>
+            </div>
+          </div>
+        </article>
+
+        <article class="growth-progress-card">
+          <div class="growth-progress-top">
+            <div>
+              <small class="growth-progress-eyebrow">الربحية والتوقعات</small>
+              <h4>${isCurrentMonthView ? `توقعات ${escapeHtml(fc.nextMonthName)}` : `خلاصة ${escapeHtml(currentMonth.name)}`}</h4>
+            </div>
+            <span class="status-pill status-complete">${isCurrentMonthView ? escapeHtml(fc.statusText) : 'مؤرشف'}</span>
+          </div>
+
+          <div class="growth-progress-meter">
+            <div class="growth-progress-meter-head">
+              <strong>هامش الربح: ${curMarginPct.toFixed(1)}%</strong>
+              <small>صافي مجمل الربح ${format(currentMonth.profit)}</small>
+            </div>
+            <div class="growth-progress-track">
+              <div class="growth-progress-fill fill-profit" style="width:${Math.max(curProfitMinor > 0n ? 4 : 0, Math.min(100, curMarginPct))}%;"></div>
+            </div>
+          </div>
+
+          <div class="growth-mini-metrics">
             ${isCurrentMonthView ? `
-              متوقع الشهر القادم مبيعات بنسبة <span style="color:var(--purple);font-weight:900;">${forecastSign}${fc.forecastGrowthPercent}%</span> (مبيعات تقديرية: <span style="color:var(--purple);font-weight:900;">${format(fc.projectedRevenue)}</span>)
+              <div>
+                <small>توقع ${escapeHtml(fc.nextMonthName)}</small>
+                <strong style="color:var(--purple);">${format(fc.projectedRevenue)}</strong>
+              </div>
+              <div>
+                <small>نسبة التغير المتوقعة</small>
+                <strong>${forecastSign}${fc.forecastGrowthPercent}%</strong>
+              </div>
+              <div>
+                <small>المطلوب يومياً</small>
+                <strong>${format(fc.dailyExpectedPace)}/يوم</strong>
+              </div>
             ` : `
-              إجمالي مبيعات الشهر حققت <span style="color:var(--purple);font-weight:900;">${format(currentMonth.revenue)}</span> بعدد <span style="font-weight:900;">${currentMonth.salesCount}</span> فاتورة مكتملة.
+              <div>
+                <small>إجمالي المبيعات</small>
+                <strong style="color:var(--purple);">${format(currentMonth.revenue)}</strong>
+              </div>
+              <div>
+                <small>مجمل الربح</small>
+                <strong>${format(currentMonth.profit)}</strong>
+              </div>
+              <div>
+                <small>المتوسط اليومي</small>
+                <strong>${format(currentMonth.dailyAverage)}/يوم</strong>
+              </div>
             `}
           </div>
-          <div class="growth-stats-row">
-            ${isCurrentMonthView ? `
-              <span>توقع ختام هذا الشهر: <strong>${format(currentMonth.projectedMonthEnd)}</strong></span>
-              <span>الوتيرة اليومية المطلوبة: <strong>${format(fc.dailyExpectedPace)} / يوم</strong></span>
-            ` : `
-              <span>مجمل الأرباح المحققة: <strong>${format(currentMonth.profit)}</strong></span>
-              <span>متوسط المبيعات اليومية: <strong>${format(currentMonth.dailyAverage)}</strong></span>
-            `}
-          </div>
-        </div>
+        </article>
       </div>
     </section>
   `;
