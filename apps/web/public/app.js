@@ -1563,19 +1563,13 @@ async function showEndShiftModal() {
         const diff = actualMinor - expectedCashBig;
         variancePreview.style.display = 'block';
         if (diff === 0n) {
-          variancePreview.style.background = '#ecfdf5';
-          variancePreview.style.border = '1px solid #a7f3d0';
-          variancePreview.style.color = '#047857';
+          variancePreview.className = 'variance-box variance-match';
           variancePreview.textContent = '✓ رصيد الدرج متطابق تماماً مع المبيعات والنقدية المسجلة.';
         } else if (diff < 0n) {
-          variancePreview.style.background = '#fef2f2';
-          variancePreview.style.border = '1px solid #fecaca';
-          variancePreview.style.color = '#be123c';
+          variancePreview.className = 'variance-box variance-shortage';
           variancePreview.textContent = `يوجد عجز في الدرج بمقدار: ${format(diff.toString())}`;
         } else {
-          variancePreview.style.background = '#eff6ff';
-          variancePreview.style.border = '1px solid #bfdbfe';
-          variancePreview.style.color = '#1d4ed8';
+          variancePreview.className = 'variance-box variance-overage';
           variancePreview.textContent = `توجد زيادة في الدرج بمقدار: +${format(diff.toString())}`;
         }
       } catch {
@@ -4190,46 +4184,46 @@ function showNotificationsModal() {
 
         <div style="display:grid;gap:14px;padding:8px 0 16px;">
           ${lowStock.length ? `
-            <div style="background:#fff7ed;border:1px solid #fdba74;border-radius:12px;padding:14px;">
+            <div class="notif-alert-box notif-alert-amber">
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-                <strong style="color:#c2410c;font-size:13.5px;display:inline-flex;align-items:center;gap:6px;">نواقص المخزون (${lowStock.length} موديل وصل لحد الطلب)</strong>
+                <strong class="notif-title" style="font-size:13.5px;display:inline-flex;align-items:center;gap:6px;">نواقص المخزون (${lowStock.length} موديل وصل لحد الطلب)</strong>
                 <button type="button" class="button button-sm button-secondary" data-nav-to="inventory" style="font-size:11.5px;padding:3px 10px;height:28px;">فتح المخزون</button>
               </div>
-              <div style="display:grid;gap:6px;max-height:160px;overflow-y:auto;font-size:12px;color:#7c2d12;">
+              <div style="display:grid;gap:6px;max-height:160px;overflow-y:auto;font-size:12px;">
                 ${lowStock.slice(0, 10).map((p) => {
                   const qty = p.variants.reduce((sum, v) => sum + BigInt(v.quantity), 0n);
-                  return `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed #fed7aa;"><span>• <strong>${escapeHtml(p.name)}</strong> (${escapeHtml(p.sku)})</span><span style="font-weight:700;">المتبقي: ${qty} قطعة</span></div>`;
+                  return `<div class="notif-divider" style="display:flex;justify-content:space-between;padding:4px 0;"><span>• <strong>${escapeHtml(p.name)}</strong> (${escapeHtml(p.sku)})</span><span style="font-weight:700;">المتبقي: ${qty} قطعة</span></div>`;
                 }).join('')}
               </div>
             </div>
           ` : ''}
 
           ${suppliersDue.length ? `
-            <div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:12px;padding:14px;">
+            <div class="notif-alert-box notif-alert-rose">
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-                <strong style="color:#be123c;font-size:13.5px;display:inline-flex;align-items:center;gap:6px;">مستحقات للتجار غير مسددة (${suppliersDue.length} تاجر)</strong>
+                <strong class="notif-title" style="font-size:13.5px;display:inline-flex;align-items:center;gap:6px;">مستحقات للتجار غير مسددة (${suppliersDue.length} تاجر)</strong>
                 <button type="button" class="button button-sm button-secondary" data-nav-to="suppliers" style="font-size:11.5px;padding:3px 10px;height:28px;">فتح التجار</button>
               </div>
-              <div style="display:grid;gap:6px;max-height:160px;overflow-y:auto;font-size:12px;color:#9f1239;">
+              <div style="display:grid;gap:6px;max-height:160px;overflow-y:auto;font-size:12px;">
                 ${suppliersDue.map((s) => {
                   const due = s.purchases.reduce((sum, p) => sum + BigInt(p.remainingAmount.amount), 0n);
-                  return `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed #fecaca;"><span>• <strong>${escapeHtml(s.name)}</strong></span><span style="font-weight:800;color:#be123c;">متبقي: ${money({ amount: due.toString(), currency, decimals })}</span></div>`;
+                  return `<div class="notif-divider" style="display:flex;justify-content:space-between;padding:4px 0;"><span>• <strong>${escapeHtml(s.name)}</strong></span><span class="notif-amount" style="font-weight:800;">متبقي: ${money({ amount: due.toString(), currency, decimals })}</span></div>`;
                 }).join('')}
               </div>
             </div>
           ` : ''}
 
           ${monthlyDue.length ? `
-            <div style="background:#f5f3ff;border:1px solid #c4b5fd;border-radius:12px;padding:14px;">
+            <div class="notif-alert-box notif-alert-purple">
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-                <strong style="color:#5948d8;font-size:13.5px;display:inline-flex;align-items:center;gap:6px;">التزامات شهرية مستحقة السداد (${monthlyDue.length} بند)</strong>
+                <strong class="notif-title" style="font-size:13.5px;display:inline-flex;align-items:center;gap:6px;">التزامات شهرية مستحقة السداد (${monthlyDue.length} بند)</strong>
                 <button type="button" class="button button-sm button-secondary" data-nav-to="monthly-expenses" style="font-size:11.5px;padding:3px 10px;height:28px;">فتح المصروفات</button>
               </div>
-              <div style="display:grid;gap:6px;max-height:160px;overflow-y:auto;font-size:12px;color:#4338ca;">
+              <div style="display:grid;gap:6px;max-height:160px;overflow-y:auto;font-size:12px;">
                 ${monthlyDue.map((m) => `
-                  <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed #ddd6fe;">
+                  <div class="notif-divider" style="display:flex;justify-content:space-between;padding:4px 0;">
                     <span>• <strong>${escapeHtml(m.name)}</strong> (${escapeHtml(m.category)})</span>
-                    <span style="font-weight:800;color:#5948d8;">متبقي: ${money(m.actual.remainingAmount)}</span>
+                    <span class="notif-amount" style="font-weight:800;">متبقي: ${money(m.actual.remainingAmount)}</span>
                   </div>
                 `).join('')}
               </div>
