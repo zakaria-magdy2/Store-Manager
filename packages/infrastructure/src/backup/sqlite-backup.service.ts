@@ -115,7 +115,28 @@ function isSupportedBackupMigrationHistory(appliedMigrationNames: readonly strin
   return appliedMigrationNames.length - 1 >= minSupportedIndex;
 }
 
-function verifySqliteFile(path: string, expectedTenant?: RestoreTenantIdentity): RestoreTenantIdentity {
+export function checkSqliteFileQuick(path: string): { ok: boolean; messages: string[] } {
+  try {
+    const db = new Database(path, { readonly: true, fileMustExist: true });
+    try {
+      const rows = db.pragma('quick_check') as { quick_check?: string }[];
+      const messages = rows.map((row) => String(row.quick_check ?? '')).filter(Boolean);
+      return {
+        ok: messages.length === 1 && messages[0] === 'ok',
+        messages,
+      };
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      messages: [error instanceof Error ? error.message : String(error)],
+    };
+  }
+}
+
+export function verifySqliteFile(path: string, expectedTenant?: RestoreTenantIdentity): RestoreTenantIdentity {
   const verification = new Database(path, { readonly: true, fileMustExist: true });
   try {
     const integrity = verification.pragma('integrity_check') as { integrity_check: string }[];
@@ -182,6 +203,27 @@ export async function prepareEncryptedSqliteRestore(
     throw error;
   } finally {
     await archive.close();
+  }
+}
+
+export async function preparePlainSqliteRestore(
+  snapshotPath: string,
+  workingDirectory: string,
+  expectedTenant: RestoreTenantIdentity,
+): Promise<PreparedSqliteRestore> {
+  const workspace = await mkdtemp(join(workingDirectory, '.retailos-restore-'));
+  const candidatePath = join(workspace, 'candidate.sqlite');
+  try {
+    const sourceStats = await stat(snapshotPath);
+    if (sourceStats.size === 0 || sourceStats.size > MAX_DATABASE_BYTES) {
+      throw new Error('Daily backup size is invalid');
+    }
+    await copyFile(snapshotPath, candidatePath);
+    const tenant = verifySqliteFile(candidatePath, expectedTenant);
+    return { workspace, candidatePath, candidateSha256: await hashFile(candidatePath), tenant };
+  } catch (error) {
+    await rm(workspace, { recursive: true, force: true });
+    throw error;
   }
 }
 

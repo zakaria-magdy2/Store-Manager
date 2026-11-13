@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createEncryptedSqliteBackup, decryptBackupArchive, installPreparedSqliteRestore, prepareEncryptedSqliteRestore, recoverPendingSqliteRestore, removeBackupArtifact } from '../src/backup/sqlite-backup.service.js';
+import { checkSqliteFileQuick, createEncryptedSqliteBackup, decryptBackupArchive, installPreparedSqliteRestore, prepareEncryptedSqliteRestore, preparePlainSqliteRestore, recoverPendingSqliteRestore, removeBackupArtifact } from '../src/backup/sqlite-backup.service.js';
 import { SqliteDatabaseManager } from '../src/database/sqlite.js';
 import { DatabaseMigrator } from '../src/database/migrator.js';
 
@@ -155,6 +155,29 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
 
       await expect(recoverPendingSqliteRestore(workingDirectory, activePath, restoreTenant.code)).resolves.toBe(false);
       expect(readProbe(activePath)).toBe('rollback-data');
+    } finally {
+      await source.close();
+      await active.close();
+    }
+  });
+
+  it('verifies and prepares a plain daily sqlite snapshot and detects corrupted files via quick check', async () => {
+    workingDirectory = await mkdtemp(join(tmpdir(), 'retailos-plain-restore-'));
+    const sourcePath = join(workingDirectory, 'daily.sqlite');
+    const activePath = join(workingDirectory, 'active.sqlite');
+    const corruptPath = join(workingDirectory, 'corrupt.sqlite');
+    const source = await makeMigratedDatabase(sourcePath, 'daily-good');
+    const active = await makeMigratedDatabase(activePath, 'active-before');
+    try {
+      await source.close();
+      expect(checkSqliteFileQuick(sourcePath).ok).toBe(true);
+      await writeFile(corruptPath, 'not a valid sqlite file');
+      expect(checkSqliteFileQuick(corruptPath).ok).toBe(false);
+
+      const prepared = await preparePlainSqliteRestore(sourcePath, workingDirectory, restoreTenant);
+      await installPreparedSqliteRestore(active.getRawDatabase(), () => active.close(), activePath, workingDirectory, prepared);
+      await expect(recoverPendingSqliteRestore(workingDirectory, activePath, restoreTenant.code)).resolves.toBe(true);
+      expect(readProbe(activePath)).toBe('daily-good');
     } finally {
       await source.close();
       await active.close();

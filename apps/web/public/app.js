@@ -683,7 +683,25 @@ function dashboardView() {
   const sales = data.sales.slice(0, 5);
   const maxRevenue = data.sales.slice(0, 7).reduce((max, sale) => BigInt(sale.total.amount) > max ? BigInt(sale.total.amount) : max, 1n);
   const weekBars = ['س', 'ح', 'ن', 'ث', 'ر', 'خ', 'ج'];
-  return `<div class="welcome-row"><div><div class="welcome-date">${new Intl.DateTimeFormat('ar-EG', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date())}</div><h2>${greeting}، ${escapeHtml((data.user.fullName ?? 'مدير النظام').split(' ')[0])} </h2><p>ده ملخص سريع للي بيحصل في متجرك النهارده.</p></div><button class="button button-primary" data-page="pos">${icon('plus', 18)} عملية بيع جديدة</button></div><div class="metric-grid"><article class="metric-card"><div class="metric-head"><span>مبيعات اليوم</span><span class="metric-icon metric-purple">${icon('wallet', 19)}</span></div><strong>${data.summary.todayRevenue ? money(data.summary.todayRevenue) : '—'}</strong><div class="metric-foot"><span class="metric-muted">${data.summary.todaySalesCount ?? '—'} فاتورة اليوم</span><span class="metric-period">اليوم</span></div></article><article class="metric-card"><div class="metric-head"><span>عدد الفواتير</span><span class="metric-icon metric-green">${icon('bag', 19)}</span></div><strong>${data.summary.todaySalesCount ?? '—'}</strong><div class="metric-foot"><span class="metric-muted">إجمالي العمليات المكتملة</span><span class="metric-positive">اليوم</span></div></article><article class="metric-card"><div class="metric-head"><span>أصناف المنتجات</span><span class="metric-icon metric-blue">${icon('box', 19)}</span></div><strong>${data.summary.productCount}</strong><div class="metric-foot"><span class="metric-muted">منتج مسجل في الكتالوج</span><span class="metric-period">الكتالوج</span></div></article><article class="metric-card"><div class="metric-head"><span>تنبيهات المخزون</span><span class="metric-icon metric-orange">${icon('store', 19)}</span></div><strong>${data.summary.lowStockCount}</strong><div class="metric-foot"><span class="metric-muted">منتجات عند حد إعادة الطلب</span><button class="text-action" data-page="inventory">عرض القائمة ←</button></div></article></div><div class="dashboard-grid"><section class="panel sales-panel"><div class="panel-heading"><div><h3>حركة المبيعات</h3><p>آخر عمليات البيع المسجلة على النظام</p></div><button class="text-action" data-page="sales">كل المبيعات <span>←</span></button></div>${data.sales.length ? `<div class="chart-legend"><span><i></i>قيمة الفاتورة</span><span class="chart-period">آخر الفواتير</span></div><div class="sales-chart">${data.sales.slice(0, 7).reverse().map((sale, index) => `<div class="chart-column"><span class="bar-tooltip">${money(sale.total)}</span><div class="chart-bar ${index === 6 ? 'bar-highlight' : ''}" style="height:${Math.max(12, Number((BigInt(sale.total.amount) * 100n) / maxRevenue))}%"></div><span class="chart-label">${new Intl.DateTimeFormat('ar-EG', { hour: '2-digit', minute: '2-digit' }).format(new Date(sale.createdAt))}</span></div>`).join('')}</div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('chart', 28)}</div><strong>المبيعات هتظهر هنا</strong><p>أول ما تسجل عملية بيع، هتلاقي ملخصها في الصفحة دي.</p><button class="button button-secondary" data-page="pos">ابدأ أول عملية بيع</button></div>`}</section><section class="panel stock-panel"><div class="panel-heading"><div><h3>محتاج إعادة طلب</h3><p>المنتجات اللي عندها تركيبات وصلت لحد الطلب</p></div><button class="icon-button small-icon" data-page="inventory">${icon('arrow', 17)}</button></div>${data.lowStock.length ? `<div class="stock-list">${data.lowStock.slice(0, 5).map((item) => `<div class="stock-row"><div class="stock-thumb">${icon('box', 17)}</div><div class="stock-copy"><strong>${escapeHtml(item.productName)}</strong><small>${item.lowVariantCount} تركيبة تحتاج طلب</small></div><span class="stock-count">${item.quantity} <small>إجمالي</small></span></div>`).join('')}</div>` : `<div class="empty-inline"><span class="empty-check">✓</span><strong>المخزون تمام</strong><p>مفيش أصناف محتاجة إعادة طلب حاليًا.</p></div>`}</section></div><section class="panel recent-panel"><div class="panel-heading"><div><h3>آخر الفواتير</h3><p>متابعة سريعة لأحدث عمليات البيع</p></div><button class="text-action" data-page="sales">عرض الكل <span>←</span></button></div>${sales.length ? salesTable(sales) : `<div class="empty-row">لسه مفيش فواتير. سجّل أول عملية بيع عشان تبدأ تتابع الحركة.</div>`}</section>`;
+  const safety = data.capabilities?.canManageBackups ? data.backupSafety : null;
+  const safetyBanner = safety?.startupRecoveryInfo?.recovered
+    ? `<div class="safety-alert-banner safety-alert-recovered">
+        <div class="safety-alert-copy">
+          <strong>تم استرداد البيانات تلقائيًا عند التشغيل</strong>
+          <span>اكتشف النظام تلفًا مفاجئًا في قاعدة البيانات وتم إصلاحه تلقائيًا من النسخة السليمة (${escapeHtml(safety.startupRecoveryInfo.restoredFrom || 'اليومية')}).</span>
+        </div>
+        <button type="button" class="button button-secondary button-sm" data-page="backups">مراجعة سجل الأمان</button>
+      </div>`
+    : (safety && (!safety.mirrorPath || safety.lastMirrorStatus === 'DISCONNECTED' || safety.lastMirrorStatus === 'ERROR')
+      ? `<div class="safety-alert-banner safety-alert-warn">
+          <div class="safety-alert-copy">
+            <strong>تنبيه حماية البيانات: لم يتم تأمين نسخة خارج الجهاز بعد</strong>
+            <span>${!safety.mirrorPath ? 'النسخ اليومي التلقائي يعمل على هذا الجهاز، ولكن يُنصح بربط فلاشة أو قرص آخر أو مجلد OneDrive/Google Drive لحماية بياناتك لو الجهاز تعطل.' : `المجلد الخارجي (${escapeHtml(safety.mirrorPath)}) غير متصل حاليًا — تأكد من توصيل الفلاشة أو توفر المسار.`}</span>
+          </div>
+          <button type="button" class="button button-primary button-sm" data-page="backups">إعداد النسخ الخارجي</button>
+        </div>`
+      : '');
+  return `<div class="welcome-row"><div><div class="welcome-date">${new Intl.DateTimeFormat('ar-EG', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date())}</div><h2>${greeting}، ${escapeHtml((data.user.fullName ?? 'مدير النظام').split(' ')[0])} </h2><p>ده ملخص سريع للي بيحصل في متجرك النهارده.</p></div><button class="button button-primary" data-page="pos">${icon('plus', 18)} عملية بيع جديدة</button></div>${safetyBanner}<div class="metric-grid"><article class="metric-card"><div class="metric-head"><span>مبيعات اليوم</span><span class="metric-icon metric-purple">${icon('wallet', 19)}</span></div><strong>${data.summary.todayRevenue ? money(data.summary.todayRevenue) : '—'}</strong><div class="metric-foot"><span class="metric-muted">${data.summary.todaySalesCount ?? '—'} فاتورة اليوم</span><span class="metric-period">اليوم</span></div></article><article class="metric-card"><div class="metric-head"><span>عدد الفواتير</span><span class="metric-icon metric-green">${icon('bag', 19)}</span></div><strong>${data.summary.todaySalesCount ?? '—'}</strong><div class="metric-foot"><span class="metric-muted">إجمالي العمليات المكتملة</span><span class="metric-positive">اليوم</span></div></article><article class="metric-card"><div class="metric-head"><span>أصناف المنتجات</span><span class="metric-icon metric-blue">${icon('box', 19)}</span></div><strong>${data.summary.productCount}</strong><div class="metric-foot"><span class="metric-muted">منتج مسجل في الكتالوج</span><span class="metric-period">الكتالوج</span></div></article><article class="metric-card"><div class="metric-head"><span>تنبيهات المخزون</span><span class="metric-icon metric-orange">${icon('store', 19)}</span></div><strong>${data.summary.lowStockCount}</strong><div class="metric-foot"><span class="metric-muted">منتجات عند حد إعادة الطلب</span><button class="text-action" data-page="inventory">عرض القائمة ←</button></div></article></div><div class="dashboard-grid"><section class="panel sales-panel"><div class="panel-heading"><div><h3>حركة المبيعات</h3><p>آخر عمليات البيع المسجلة على النظام</p></div><button class="text-action" data-page="sales">كل المبيعات <span>←</span></button></div>${data.sales.length ? `<div class="chart-legend"><span><i></i>قيمة الفاتورة</span><span class="chart-period">آخر الفواتير</span></div><div class="sales-chart">${data.sales.slice(0, 7).reverse().map((sale, index) => `<div class="chart-column"><span class="bar-tooltip">${money(sale.total)}</span><div class="chart-bar ${index === 6 ? 'bar-highlight' : ''}" style="height:${Math.max(12, Number((BigInt(sale.total.amount) * 100n) / maxRevenue))}%"></div><span class="chart-label">${new Intl.DateTimeFormat('ar-EG', { hour: '2-digit', minute: '2-digit' }).format(new Date(sale.createdAt))}</span></div>`).join('')}</div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('chart', 28)}</div><strong>المبيعات هتظهر هنا</strong><p>أول ما تسجل عملية بيع، هتلاقي ملخصها في الصفحة دي.</p><button class="button button-secondary" data-page="pos">ابدأ أول عملية بيع</button></div>`}</section><section class="panel stock-panel"><div class="panel-heading"><div><h3>محتاج إعادة طلب</h3><p>المنتجات اللي عندها تركيبات وصلت لحد الطلب</p></div><button class="icon-button small-icon" data-page="inventory">${icon('arrow', 17)}</button></div>${data.lowStock.length ? `<div class="stock-list">${data.lowStock.slice(0, 5).map((item) => `<div class="stock-row"><div class="stock-thumb">${icon('box', 17)}</div><div class="stock-copy"><strong>${escapeHtml(item.productName)}</strong><small>${item.lowVariantCount} تركيبة تحتاج طلب</small></div><span class="stock-count">${item.quantity} <small>إجمالي</small></span></div>`).join('')}</div>` : `<div class="empty-inline"><span class="empty-check">✓</span><strong>المخزون تمام</strong><p>مفيش أصناف محتاجة إعادة طلب حاليًا.</p></div>`}</section></div><section class="panel recent-panel"><div class="panel-heading"><div><h3>آخر الفواتير</h3><p>متابعة سريعة لأحدث عمليات البيع</p></div><button class="text-action" data-page="sales">عرض الكل <span>←</span></button></div>${sales.length ? salesTable(sales) : `<div class="empty-row">لسه مفيش فواتير. سجّل أول عملية بيع عشان تبدأ تتابع الحركة.</div>`}</section>`;
 }
 
 function salesTable(sales) {
@@ -4657,20 +4675,140 @@ function bindAccounting() { const decimals = currencyDecimals(state.data.company
 function backupView() {
   const daily = state.dailyBackups;
   const backupsList = daily?.backups ?? [];
+  const integrity = daily?.integrity;
+  const mirror = daily?.mirror;
+  const startupRecovery = daily?.startupRecovery;
   const formatBytes = (bytes) => {
     const n = Number(bytes) || 0;
     if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MB`;
     return `${Math.max(1, Math.round(n / 1024))} KB`;
   };
-  return `<div class="page-heading-row"><div><p class="page-lead">نظام الحماية المزدوج: نسخ احتياطي يومي تلقائي كل ليلة على الجهاز + إمكانية تصدير واستعادة نسخة مشفرة بكلمة مرور.</p></div><button type="button" class="button button-primary button-sm" id="run-daily-backup-now">${icon('plus', 16)} حفظ نسخة يومية فورية الآن</button></div>
+  const mirrorStatus = mirror?.lastMirrorStatus ?? 'UNCONFIGURED';
+  const mirrorBadgeClass = mirrorStatus === 'OK' ? 'kpi-tag-green' : mirrorStatus === 'DISCONNECTED' || mirrorStatus === 'ERROR' ? 'kpi-tag-red' : 'kpi-tag-amber';
+  const mirrorBadgeLabel = mirrorStatus === 'OK' ? 'مؤمّن ومتصل' : mirrorStatus === 'DISCONNECTED' ? 'غير متصل' : mirrorStatus === 'ERROR' ? 'خطأ مزامنة' : 'غير مُعد';
+  const latestBackup = daily?.latestBackup ?? backupsList[0] ?? null;
+  const suggestions = mirror?.suggestedDestinations ?? [];
+
+  return `<div class="page-heading-row"><div><p class="page-lead">نظام الحماية الشامل: حماية فورية ضد انقطاع الكهرباء (WAL + Synchronous FULL)، نسخ يومي محدث تلقائيًا، ومزامنة خارجية لحماية بياناتك لو الجهاز تعطل.</p></div><button type="button" class="button button-primary button-sm" id="run-daily-backup-now">${icon('plus', 16)} حفظ نسخة يومية فورية الآن</button></div>
+
+    ${startupRecovery?.startupRecoveryInfo?.recovered ? `
+      <div class="safety-alert-banner safety-alert-recovered">
+        <div class="safety-alert-copy">
+          <strong>استرداد تلقائي ناجح بعد عطل مفاجئ</strong>
+          <span>قام النظام بعزل الملف التالف واستعادة أحدث نسخة سليمة (${escapeHtml(startupRecovery.startupRecoveryInfo.restoredFrom)}) بتاريخ ${new Date(startupRecovery.startupRecoveryInfo.at).toLocaleString('ar-EG')}.</span>
+        </div>
+      </div>
+    ` : ''}
+
+    <div class="compact-kpi-grid">
+      <article class="compact-kpi-card ${integrity?.quickCheckOk === false ? 'compact-kpi-negative' : 'compact-kpi-positive'}">
+        <div class="compact-kpi-top">
+          <span>حماية انقطاع الكهرباء</span>
+          <span class="kpi-tag ${integrity?.quickCheckOk === false ? 'kpi-tag-red' : 'kpi-tag-green'}">${integrity?.quickCheckOk === false ? 'تحذير' : 'سليمة 100%'}</span>
+        </div>
+        <strong class="compact-kpi-value">WAL + Full Sync</strong>
+        <small>كل عملية بيع تُكتب وتُثبّت مباشرة على القرص مع فحص سلامة تلقائي عند الفتح.</small>
+      </article>
+
+      <article class="compact-kpi-card">
+        <div class="compact-kpi-top">
+          <span>النسخ اليومي التلقائي</span>
+          <span class="kpi-tag kpi-tag-indigo">${backupsList.length} / ${daily?.retentionDays ?? 30} يوم</span>
+        </div>
+        <strong class="compact-kpi-value">${latestBackup ? escapeHtml(latestBackup.date) : 'جاري التجهيز'}</strong>
+        <small>${latestBackup ? `آخر تحديث: ${new Date(latestBackup.updatedAt ?? latestBackup.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })} · يتحدث كل ${daily?.refreshMinutes ?? 30} دقيقة` : 'يتم الحفظ تلقائيًا عند العمل وعند الإغلاق'}</small>
+      </article>
+
+      <article class="compact-kpi-card ${mirrorStatus === 'OK' ? 'compact-kpi-positive' : mirrorStatus === 'DISCONNECTED' || mirrorStatus === 'ERROR' ? 'compact-kpi-negative' : ''}">
+        <div class="compact-kpi-top">
+          <span>النسخة الخارجية (ضد تلف الجهاز)</span>
+          <span class="kpi-tag ${mirrorBadgeClass}">${mirrorBadgeLabel}</span>
+        </div>
+        <strong class="compact-kpi-value" style="font-size:15px;">${mirror?.mirrorPath ? escapeHtml(mirror.mirrorPath) : 'لم يتم اختيار مسار بعد'}</strong>
+        <small>${mirror?.lastMirrorAt ? `آخر مزامنة: ${new Date(mirror.lastMirrorAt).toLocaleString('ar-EG')}` : 'اختر فلاشة USB أو قرص آخر أو مجلد OneDrive / Google Drive بالأسفل.'}</small>
+      </article>
+
+      <article class="compact-kpi-card">
+        <div class="compact-kpi-top">
+          <span>درع الاستعادة السريعة</span>
+          <span class="kpi-tag kpi-tag-teal">نشط</span>
+        </div>
+        <strong class="compact-kpi-value">نسخة أمان فورية</strong>
+        <small>قبل استعادة أي نسخة يومية أو مشفرة، يحفظ النظام نسخة أمان تلقائية من وضعك الحالي أولاً.</small>
+      </article>
+    </div>
+
     <section class="panel compact-panel">
-      <div class="panel-heading"><div><h3>النسخ الاحتياطي اليومي التلقائي (حماية تلقائية كل ليلة)</h3><p>يقوم النظام بحفظ نسخة كاملة من قاعدة البيانات تلقائيًا كل يوم والاحتفاظ بآخر ${daily?.retentionDays ?? 30} يومًا للرجوع إليها في أي وقت.</p></div><span class="status-pill status-complete">مفعّل تلقائيًا</span></div>
-      ${backupsList.length ? `<div class="table-scroll"><table class="compact-table"><thead><tr><th>تاريخ النسخة اليومية</th><th>اسم الملف</th><th>الحجم</th><th>وقت الحفظ</th><th>تحميل</th></tr></thead><tbody>${backupsList.map((item) => `<tr><td><strong>${escapeHtml(item.date)}</strong></td><td><span class="sku-code">${escapeHtml(item.filename)}</span></td><td>${formatBytes(item.sizeBytes)}</td><td>${new Date(item.createdAt).toLocaleString('ar-EG')}</td><td><a class="text-action" href="/api/backups/daily/${encodeURIComponent(item.filename)}" download>تنزيل النسخة ↓</a></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">جاري تجهيز سجل النسخ اليومية التلقائية...</div>'}
+      <div class="panel-heading">
+        <div>
+          <h3>النسخ الاحتياطي الخارجي التلقائي (حماية لو الجهاز باظ أو سقط)</h3>
+          <p>اربط مجلد على فلاشة USB أو بارتشن مختلف (مثل D أو E) أو مجلد سحابي (OneDrive / Google Drive) ليحفظ النظام فيه نسخة محدثة تلقائيًا خارج قرص الويندوز.</p>
+        </div>
+        <span class="status-pill ${mirrorStatus === 'OK' ? 'status-complete' : 'status-low'}">${mirrorBadgeLabel}</span>
+      </div>
+
+      ${suggestions.length ? `
+        <div class="backup-suggestions-wrap">
+          <span class="backup-suggestions-label">مسارات متاحة مكتشفة على جهازك (اضغط للاختيار):</span>
+          <div class="backup-suggestion-chips">
+            ${suggestions.map((dest) => `
+              <button type="button" class="pro-filter-pill ${mirror?.mirrorPath?.toLowerCase() === dest.path.toLowerCase() ? 'active' : ''}" data-pick-mirror="${escapeHtml(dest.path)}">
+                ${escapeHtml(dest.label)} (${escapeHtml(dest.path)})
+              </button>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
+
+      <form id="backup-mirror-form" class="backup-mirror-form">
+        <div class="backup-mirror-inputs">
+          <label class="backup-mirror-path-label">
+            <span>مسار المجلد الخارجي لحفظ النسخ التلقائية</span>
+            <input id="backup-mirror-path" name="mirrorPath" dir="ltr" value="${escapeHtml(mirror?.mirrorPath ?? '')}" placeholder="مثال: E:\\RafBackups أو C:\\Users\\...\\OneDrive\\RafBackups">
+          </label>
+          <label class="backup-mirror-check">
+            <input type="checkbox" name="autoMirror" ${(mirror?.autoMirror ?? true) ? 'checked' : ''}>
+            <span>مزامنة تلقائية مع كل نسخة يومية</span>
+          </label>
+        </div>
+        <div class="backup-mirror-actions">
+          <button type="submit" class="button button-primary button-sm">حفظ المسار ومزامنة الآن</button>
+          ${mirror?.mirrorPath ? `
+            <button type="button" class="button button-secondary button-sm" id="sync-mirror-now-btn">مزامنة خارجية فورية</button>
+            <button type="button" class="button button-secondary button-sm" id="clear-mirror-path-btn" style="color:var(--rose, #be123c);">إلغاء المسار الخارجي</button>
+          ` : ''}
+        </div>
+        ${mirror?.lastMirrorError ? `<div class="empty-row" style="color:var(--rose, #be123c);margin-top:8px;">${escapeHtml(mirror.lastMirrorError)}</div>` : ''}
+      </form>
     </section>
+
+    <section class="panel compact-panel">
+      <div class="panel-heading"><div><h3>النسخ الاحتياطي اليومي التلقائي (حماية تلقائية محدثة)</h3><p>يتم إنشاء وتحديث نسخة اليوم تلقائيًا كل ${daily?.refreshMinutes ?? 30} دقيقة وعند إغلاق الشيفت أو البرنامج، مع الاحتفاظ بآخر ${daily?.retentionDays ?? 30} يومًا والاستعادة بضغطة واحدة.</p></div><span class="status-pill status-complete">مفعّل تلقائيًا</span></div>
+      ${backupsList.length ? `<div class="table-scroll"><table class="compact-table"><thead><tr><th>تاريخ النسخة اليومية</th><th>اسم الملف</th><th>الحجم</th><th>آخر تحديث</th><th>الإجراءات</th></tr></thead><tbody>${backupsList.map((item) => `<tr><td><strong>${escapeHtml(item.date)}</strong></td><td><span class="sku-code">${escapeHtml(item.filename)}</span></td><td>${formatBytes(item.sizeBytes)}</td><td>${new Date(item.updatedAt ?? item.createdAt).toLocaleString('ar-EG')}</td><td><div class="backup-row-actions"><a class="text-action" href="/api/backups/daily/${encodeURIComponent(item.filename)}" download>تنزيل ↓</a><button type="button" class="button button-secondary button-sm restore-daily-btn" data-restore-daily="${escapeHtml(item.filename)}">استعادة</button></div></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">جاري تجهيز سجل النسخ اليومية التلقائية...</div>'}
+    </section>
+
     <div class="analytics-two-col">
       <section class="panel compact-panel"><div class="panel-heading"><div><h3>تصدير نسخة احتياطية مشفرة (.rfbackup)</h3><p>نسخة خارجية مشفرة بكلمة مرور لحفظها على فلاشة أو سحابة خارجية.</p></div></div><div class="empty-row">احفظ كلمة المرور في مكان آمن؛ لا يمكن فك تشفير النسخة بدونها.</div><form id="backup-export-form" class="form-stack"><label>كلمة مرور للتشفير<input name="passphrase" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label><label>أكد كلمة المرور<input name="confirmPassphrase" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label><button class="button button-primary" type="submit">تنزيل نسخة احتياطية</button></form></section>
       <section class="panel compact-panel"><div class="panel-heading"><div><h3>استعادة نسخة مشفرة</h3><p>سيتم استبدال بيانات المحل الحالية وإعادة تشغيل النظام.</p></div></div><form id="backup-restore-form" class="form-stack"><label>ملف النسخة<input name="archive" type="file" accept=".rfbackup,application/octet-stream" required></label><label>كلمة مرور النسخة<input name="passphrase" type="password" minlength="12" maxlength="256" autocomplete="current-password" required></label><label><input name="confirmReplace" type="checkbox" required> أفهم أن الاستعادة ستستبدل البيانات.</label><button class="button button-danger" type="submit">استعادة النسخة</button></form></section>
-    </div>`;
+    </div>
+
+    <section class="panel compact-panel">
+      <div class="panel-heading"><div><h3>خطة الأمان والطوارئ: كيف تحمي بياناتك في كل الحالات؟</h3><p>ملخص وسائل الحماية التلقائية المدمجة في النظام</p></div></div>
+      <div class="safety-guide-grid">
+        <div class="safety-guide-card">
+          <strong>1. إذا انقطعت الكهرباء أو فصل الجهاز فجأة</strong>
+          <p>تعمل قاعدة البيانات بوضع WAL مع تثبيت فوري للكتابة (Synchronous FULL)، وعند إعادة التشغيل يتحقق النظام من سلامة الملف ويعزل أي تلف ويسترجع آخر نسخة سليمة تلقائيًا.</p>
+        </div>
+        <div class="safety-guide-card">
+          <strong>2. إذا تعطل الكمبيوتر أو تلف القرص الصلب</strong>
+          <p>اربط المسار الخارجي أعلاه بفلاشة USB أو مجلد OneDrive / Google Drive لتصلك نسخة محدثة خارج الجهاز. كما يمكنك تنزيل نسخة مشفرة (.rfbackup) ونقلها لأي جهاز جديد.</p>
+        </div>
+        <div class="safety-guide-card">
+          <strong>3. إذا حُذفت بيانات أو احتجت الرجوع ليوم سابق</strong>
+          <p>يحتفظ النظام بآخر 30 نسخة يومية مع زر «استعادة» فوري بجانب كل يوم، ويحفظ تلقائيًا نسخة أمان لحالتك الحالية قبل الاستعادة للرجوع إليها عند الحاجة.</p>
+        </div>
+      </div>
+    </section>`;
 }
 
 function bindBackups() {
@@ -4683,10 +4821,110 @@ function bindBackups() {
     btn.disabled = true;
     try {
       const res = await api('/api/backups/daily/run-now', { method: 'POST', body: '{}' });
-      state.dailyBackups = { ...(state.dailyBackups ?? { retentionDays: 30 }), backups: res.backups ?? [] };
+      state.dailyBackups = res;
       render();
-      toast('تم حفظ النسخة الاحتياطية اليومية بنجاح');
+      toast('تم حفظ وتحديث النسخة الاحتياطية اليومية ومزامنتها بنجاح');
     } catch (error) { toast(error.message, 'error'); btn.disabled = false; }
+  });
+  document.querySelectorAll('[data-pick-mirror]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const input = document.querySelector('#backup-mirror-path');
+      if (input) input.value = btn.dataset.pickMirror ?? '';
+    });
+  });
+  document.querySelector('#backup-mirror-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const submitBtn = form.querySelector('[type="submit"]');
+    const formData = new FormData(form);
+    const mirrorPath = String(formData.get('mirrorPath') ?? '').trim();
+    const autoMirror = formData.get('autoMirror') === 'on';
+    submitBtn.disabled = true;
+    try {
+      const res = await api('/api/backups/settings', { method: 'POST', body: JSON.stringify({ mirrorPath, autoMirror }) });
+      state.dailyBackups = res;
+      if (state.data?.backupSafety) {
+        state.data.backupSafety.mirrorPath = res.mirror?.mirrorPath ?? '';
+        state.data.backupSafety.lastMirrorStatus = res.mirror?.lastMirrorStatus ?? 'UNCONFIGURED';
+        state.data.backupSafety.mirrorConnected = Boolean(res.mirror?.connected);
+      }
+      render();
+      toast(mirrorPath ? 'تم حفظ المسار الخارجي ومزامنة النسخة بنجاح' : 'تم إلغاء المسار الخارجي');
+    } catch (error) {
+      toast(error.message, 'error');
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+  document.querySelector('#sync-mirror-now-btn')?.addEventListener('click', async (event) => {
+    const btn = event.currentTarget;
+    btn.disabled = true;
+    try {
+      const res = await api('/api/backups/mirror/sync-now', { method: 'POST', body: '{}' });
+      state.dailyBackups = res;
+      render();
+      toast('تمت مزامنة النسخة الاحتياطية إلى المسار الخارجي بنجاح');
+    } catch (error) {
+      toast(error.message, 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  document.querySelector('#clear-mirror-path-btn')?.addEventListener('click', async (event) => {
+    const btn = event.currentTarget;
+    const accepted = await showConfirmModal({
+      title: 'إلغاء المسار الخارجي',
+      message: 'هل تريد إيقاف النسخ التلقائي إلى المجلد الخارجي؟ سيستمر النسخ اليومي على هذا الجهاز فقط.',
+      confirmText: 'نعم، إيقاف',
+      cancelText: 'تراجع',
+      danger: true,
+    });
+    if (!accepted) return;
+    btn.disabled = true;
+    try {
+      const res = await api('/api/backups/settings', { method: 'POST', body: JSON.stringify({ mirrorPath: '', autoMirror: false }) });
+      state.dailyBackups = res;
+      if (state.data?.backupSafety) {
+        state.data.backupSafety.mirrorPath = '';
+        state.data.backupSafety.lastMirrorStatus = 'UNCONFIGURED';
+      }
+      render();
+      toast('تم إلغاء المسار الخارجي');
+    } catch (error) {
+      toast(error.message, 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  document.querySelectorAll('[data-restore-daily]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const filename = btn.dataset.restoreDaily;
+      if (!filename) return;
+      const accepted = await showConfirmModal({
+        title: 'استعادة نسخة يومية',
+        message: `هل تريد استعادة قاعدة البيانات من النسخة (${filename})؟ سيقوم النظام تلقائيًا بحفظ نسخة أمان من وضعك الحالي قبل الاستبدال ثم إعادة التشغيل.`,
+        confirmText: 'استعادة الآن',
+        cancelText: 'إلغاء',
+        danger: true,
+      });
+      if (!accepted) return;
+      btn.disabled = true;
+      try {
+        const res = await fetch('/api/backups/daily/restore', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', 'X-RetailOS-Restore-Confirm': 'replace' },
+          body: JSON.stringify({ filename }),
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(payload.error || 'تعذر استعادة النسخة اليومية');
+        toast('تمت استعادة النسخة بنجاح، جاري إعادة تشغيل النظام...');
+        setTimeout(() => window.location.reload(), 2000);
+      } catch (error) {
+        toast(error.message, 'error');
+        btn.disabled = false;
+      }
+    });
   });
   document.querySelector('#backup-export-form')?.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -4716,6 +4954,7 @@ function bindBackups() {
       const response = await fetch('/api/backups/restore', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/octet-stream', 'X-Backup-Passphrase': encodedPassphrase, 'X-RetailOS-Restore-Confirm': 'replace' }, body: data.archive });
       if (!response.ok) { const result = await response.json().catch(() => ({})); throw new Error(result.error || 'Restore failed'); }
       toast('\u0628\u062f\u0623\u062a \u0627\u0633\u062a\u0639\u0627\u062f\u0629 \u0627\u0644\u0646\u0633\u062e\u0629. \u0627\u0646\u062a\u0638\u0631 \u0625\u0639\u0627\u062f\u0629 \u062a\u0634\u063a\u064a\u0644 \u0627\u0644\u0646\u0638\u0627\u0645.'); form.reset();
+      setTimeout(() => window.location.reload(), 2000);
     } catch (error) { toast(error.message, 'error'); } finally { button.disabled = false; }
   });
 }

@@ -1,10 +1,11 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
 import { Transform } from 'node:stream';
 import { createReadStream, createWriteStream, existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
-import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
+import { copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { dirname, extname, isAbsolute, join, normalize, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import {
@@ -42,7 +43,10 @@ import {
   removeBackupArtifact,
   installPreparedSqliteRestore,
   prepareEncryptedSqliteRestore,
+  preparePlainSqliteRestore,
   recoverPendingSqliteRestore,
+  checkSqliteFileQuick,
+  verifySqliteFile,
   EscPosReceiptPrinter,
   postJournalEntry,
   applyStockMovementInTransaction,
@@ -65,12 +69,103 @@ const port = Number.parseInt(process.env.PORT ?? '4173', 10);
 const origin = `http://127.0.0.1:${port}`;
 const databasePath = join(dataDir, 'retailos.sqlite');
 const dailyBackupDir = join(dataDir, 'backups', 'daily');
+const preRestoreBackupDir = join(dataDir, 'backups', 'pre-restore');
+const quarantineBackupDir = join(dataDir, 'backups', 'quarantine');
+const backupSettingsPath = join(dataDir, 'backup-settings.json');
 const MAX_DAILY_BACKUPS = 30;
+const AUTO_DAILY_REFRESH_MS = 30 * 60 * 1000;
 await mkdir(dataDir, { recursive: true });
 await mkdir(dailyBackupDir, { recursive: true });
+await mkdir(preRestoreBackupDir, { recursive: true });
 const restoredAfterCrash = await recoverPendingSqliteRestore(dataDir, databasePath, companyConfig.code);
+
+async function readBackupSettings() {
+  const defaults = { mirrorPath: '', autoMirror: true, lastMirrorAt: null, lastMirrorStatus: 'UNCONFIGURED', lastMirrorError: null };
+  try {
+    if (!existsSync(backupSettingsPath)) return defaults;
+    const parsed = JSON.parse(await readFile(backupSettingsPath, 'utf8'));
+    const mirrorPath = typeof parsed.mirrorPath === 'string' ? parsed.mirrorPath.trim() : '';
+    const autoMirror = parsed.autoMirror !== false;
+    return {
+      mirrorPath,
+      autoMirror,
+      lastMirrorAt: typeof parsed.lastMirrorAt === 'string' ? parsed.lastMirrorAt : null,
+      lastMirrorStatus: mirrorPath ? (parsed.lastMirrorStatus || 'PENDING') : 'UNCONFIGURED',
+      lastMirrorError: typeof parsed.lastMirrorError === 'string' ? parsed.lastMirrorError : null,
+    };
+  } catch {
+    return defaults;
+  }
+}
+
+async function writeBackupSettings(nextSettings) {
+  const tempPath = join(dataDir, `.tmp-backup-settings-${randomUUID().slice(0, 8)}.json`);
+  await writeFile(tempPath, JSON.stringify(nextSettings, null, 2), { encoding: 'utf8', mode: 0o600 });
+  await rename(tempPath, backupSettingsPath);
+}
+
+async function findNewestVerifiedCandidate(extraDirs = []) {
+  const dirs = [dailyBackupDir, ...extraDirs.filter(Boolean)];
+  const candidates = [];
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue;
+    try {
+      const files = await readdir(dir);
+      for (const name of files) {
+        if (/^retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite$/.test(name) || name === 'retailos-latest.sqlite') {
+          const full = join(dir, name);
+          const s = await stat(full).catch(() => null);
+          if (s && s.size > 0) candidates.push({ path: full, name, mtimeMs: s.mtimeMs });
+        }
+      }
+    } catch { /* ignore unreadable external path */ }
+  }
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  for (const item of candidates) {
+    const quick = checkSqliteFileQuick(item.path);
+    if (quick.ok) return item;
+  }
+  return null;
+}
+
 const database = new SqliteDatabaseManager({ filename: databasePath });
-database.connect();
+let startupRecoveryInfo = null;
+let initialIntegrityStatus = { ok: true, messages: ['ok'], checkedAt: new Date().toISOString() };
+try {
+  database.connect();
+  initialIntegrityStatus = { ...database.checkQuickIntegrity(), checkedAt: new Date().toISOString() };
+  if (!initialIntegrityStatus.ok) {
+    throw new Error(`Quick integrity check failed: ${initialIntegrityStatus.messages.join('; ')}`);
+  }
+} catch (startupError) {
+  await database.close().catch(() => undefined);
+  const initialSettings = await readBackupSettings();
+  const candidate = await findNewestVerifiedCandidate([initialSettings.mirrorPath]);
+  if (!candidate) throw startupError;
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const quarantineTargetDir = join(quarantineBackupDir, stamp);
+  await mkdir(quarantineTargetDir, { recursive: true });
+  for (const suffix of ['', '-wal', '-shm']) {
+    const src = `${databasePath}${suffix}`;
+    if (existsSync(src)) {
+      await rename(src, join(quarantineTargetDir, `retailos.sqlite${suffix}`)).catch(async () => {
+        await copyFile(src, join(quarantineTargetDir, `retailos.sqlite${suffix}`)).catch(() => undefined);
+        await rm(src, { force: true }).catch(() => undefined);
+      });
+    }
+  }
+  await copyFile(candidate.path, databasePath);
+  database.connect();
+  initialIntegrityStatus = { ...database.checkQuickIntegrity(), checkedAt: new Date().toISOString() };
+  startupRecoveryInfo = {
+    recovered: true,
+    restoredFrom: candidate.name,
+    quarantinedAt: quarantineTargetDir,
+    reason: startupError instanceof Error ? startupError.message : String(startupError),
+    at: new Date().toISOString(),
+  };
+  console.warn(`[RetailOS Recovery] Restored damaged database automatically from ${candidate.path}`);
+}
 const db = database.getDb();
 const migration = await new DatabaseMigrator(db).migrateToLatest();
 if (!migration.success) throw migration.error ?? new Error('Database migration failed');
@@ -218,6 +313,8 @@ const MonthlyActualSchema = z.object({ year: z.number().int().min(2000).max(9999
 const MonthlyPaymentSchema = z.object({ idempotencyKey: z.string().uuid(), amount: z.string().regex(/^[1-9]\d{0,14}$/), paymentMethod: z.enum(['CASH_DRAWER', 'CASH_SAFE', 'BANK_TRANSFER']), referenceNumber: z.string().max(80).trim().optional() });
 const SupplierReturnSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), items: z.array(z.object({ purchaseItemId: z.string().min(1).max(80), quantity: z.string().regex(/^[1-9]\d{0,8}$/) })).min(1).max(100) });
 const BackupSchema = z.object({ passphrase: z.string().min(12).max(256) });
+const BackupSettingsSchema = z.object({ mirrorPath: z.string().max(500).trim().default(''), autoMirror: z.boolean().default(true) });
+const DailyRestoreSchema = z.object({ filename: z.string().regex(/^retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite$/) });
 const PasswordChangeSchema = z.object({ currentPassword: z.string().min(1).max(128), newPassword: z.string().min(12).max(128) });
 const EmployeeDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
   const date = new Date(`${value}T00:00:00.000Z`);
@@ -532,36 +629,263 @@ async function profitLossReport(ctx, url) {
     cashFlow: { cashSales: money(cashSales), electronicSales: money(electronicSales), directExpenseOutflow: money(directCashOutflow), monthlyObligationOutflow: money(monthlyCashOutflow), pendingUnpaidObligations: money(pendingDue) } };
 }
 
-async function ensureDailyBackup({ force = false } = {}) {
-  await mkdir(dailyBackupDir, { recursive: true });
-  const now = new Date();
-  const localDate = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-  const filename = `retailos-daily-${localDate}.sqlite`;
-  const targetPath = join(dailyBackupDir, filename);
-  if (!force && existsSync(targetPath)) {
-    const fileStat = await stat(targetPath);
-    return { filename, date: localDate, size: fileStat.size, updatedAt: fileStat.mtime.toISOString(), createdNew: false };
+let activeBackupPromise = null;
+
+function validateMirrorPath(rawInput) {
+  const trimmed = String(rawInput ?? '').trim();
+  if (!trimmed) return '';
+  const resolved = resolve(trimmed);
+  if (!isAbsolute(resolved)) {
+    throw Object.assign(new Error('يجب إدخال مسار كامل للمجلد الخارجي، مثل E:\\RafBackups'), { status: 400 });
   }
-  const tempPath = join(dailyBackupDir, `.tmp-${filename}-${randomUUID().slice(0, 8)}`);
-  try {
-    database.checkpointPassive();
-    await database.getRawDatabase().backup(tempPath);
-    if (existsSync(targetPath)) {
-      await rm(targetPath, { force: true }).catch(() => undefined);
+  const parsedRoot = parse(resolved).root;
+  if (resolved.toLowerCase() === parsedRoot.toLowerCase()) {
+    throw Object.assign(new Error('يرجى تحديد اسم مجلد داخل القرص، مثل E:\\RafBackups بدلاً من جذر القرص مباشرة'), { status: 400 });
+  }
+  const normalizedDataDir = resolve(dataDir);
+  const relToData = relative(normalizedDataDir, resolved);
+  if (relToData === '' || (!relToData.startsWith('..') && !isAbsolute(relToData))) {
+    throw Object.assign(new Error('يجب أن يكون المجلد الخارجي خارج مجلد بيانات البرنامج نفسه لضمان الأمان إذا تعطل النظام'), { status: 400 });
+  }
+  const lower = resolved.toLowerCase();
+  const forbiddenPrefixes = [
+    'c:\\windows',
+    'c:\\program files',
+    'c:\\programdata',
+    '/windows',
+    '/etc',
+    '/bin',
+    '/usr',
+    '/system',
+  ];
+  if (forbiddenPrefixes.some((prefix) => lower === prefix || lower.startsWith(`${prefix}${sep}`))) {
+    throw Object.assign(new Error('لا يمكن حفظ النسخ الاحتياطية داخل مجلدات نظام التشغيل'), { status: 400 });
+  }
+  return resolved;
+}
+
+function detectBackupDestinations() {
+  const destinations = [];
+  const seen = new Set();
+  const addDest = (pathValue, label, kind, available = true) => {
+    const clean = resolve(pathValue);
+    const key = clean.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    destinations.push({ path: clean, label, kind, available });
+  };
+
+  const home = homedir();
+  const dataRoot = parse(resolve(dataDir)).root.toLowerCase();
+
+  const cloudCandidates = [
+    [process.env.OneDrive, 'OneDrive (مزامنة سحابية تلقائية)'],
+    [process.env.OneDriveCommercial, 'OneDrive للأعمال (مزامنة سحابية)'],
+    [join(home, 'OneDrive'), 'OneDrive (مزامنة سحابية تلقائية)'],
+    [join(home, 'Google Drive'), 'Google Drive (مزامنة سحابية تلقائية)'],
+    [join(home, 'My Drive'), 'Google Drive (مزامنة سحابية تلقائية)'],
+    [join(home, 'Dropbox'), 'Dropbox (مزامنة سحابية تلقائية)'],
+  ];
+  for (const [base, label] of cloudCandidates) {
+    if (base && existsSync(base)) {
+      addDest(join(base, 'RafBackups'), label, 'CLOUD', true);
     }
-    await rename(tempPath, targetPath);
+  }
+
+  if (process.platform === 'win32') {
+    for (let code = 68; code <= 90; code += 1) {
+      const letter = String.fromCharCode(code);
+      const driveRoot = `${letter}:\\`;
+      if (driveRoot.toLowerCase() === dataRoot) continue;
+      try {
+        if (existsSync(driveRoot)) {
+          addDest(`${driveRoot}RafBackups`, `قرص أو فلاشة (${letter}:) — خارج قرص النظام`, 'EXTERNAL_DRIVE', true);
+        }
+      } catch { /* ignore inaccessible drive */ }
+    }
+  }
+
+  const docsDir = join(home, 'Documents');
+  if (existsSync(docsDir)) {
+    addDest(join(docsDir, 'RafBackups'), 'مجلد المستندات (Documents) على الجهاز', 'LOCAL', true);
+  }
+  return destinations;
+}
+
+async function copyFileAtomic(sourcePath, destinationPath) {
+  const destDir = dirname(destinationPath);
+  const tempPath = join(destDir, `.tmp-${randomUUID().slice(0, 8)}-${parse(destinationPath).base}`);
+  try {
+    await copyFile(sourcePath, tempPath);
+    if (existsSync(destinationPath)) {
+      await rm(destinationPath, { force: true }).catch(() => undefined);
+    }
+    await rename(tempPath, destinationPath);
   } finally {
     if (existsSync(tempPath)) await rm(tempPath, { force: true }).catch(() => undefined);
   }
-  const files = (await readdir(dailyBackupDir))
-    .filter((f) => /^retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite$/.test(f))
+}
+
+async function syncDailyBackupToMirror(sourceDailyPath, dailyFilename, currentSettings = null) {
+  const settings = currentSettings ?? await readBackupSettings();
+  const mirrorDir = settings.mirrorPath?.trim();
+  if (!mirrorDir) {
+    return { status: 'UNCONFIGURED', lastMirrorAt: settings.lastMirrorAt, lastMirrorError: null, connected: false };
+  }
+  const mirrorRoot = parse(mirrorDir).root;
+  if (mirrorRoot && !existsSync(mirrorRoot)) {
+    const next = {
+      ...settings,
+      lastMirrorStatus: 'DISCONNECTED',
+      lastMirrorError: `محرك الأقراص (${mirrorRoot}) غير متصل حاليًا — وصّل الفلاشة أو الهارد الخارجي وستتم المزامنة تلقائيًا.`,
+    };
+    await writeBackupSettings(next).catch(() => undefined);
+    return { status: next.lastMirrorStatus, lastMirrorAt: next.lastMirrorAt, lastMirrorError: next.lastMirrorError, connected: false };
+  }
+  try {
+    await mkdir(mirrorDir, { recursive: true });
+    await copyFileAtomic(sourceDailyPath, join(mirrorDir, dailyFilename));
+    await copyFileAtomic(sourceDailyPath, join(mirrorDir, 'retailos-latest.sqlite'));
+    const mirrorFiles = (await readdir(mirrorDir))
+      .filter((f) => /^retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite$/.test(f))
+      .sort()
+      .reverse();
+    for (const oldFile of mirrorFiles.slice(MAX_DAILY_BACKUPS)) {
+      await rm(join(mirrorDir, oldFile), { force: true }).catch(() => undefined);
+    }
+    const next = {
+      ...settings,
+      lastMirrorAt: new Date().toISOString(),
+      lastMirrorStatus: 'OK',
+      lastMirrorError: null,
+    };
+    await writeBackupSettings(next).catch(() => undefined);
+    return { status: 'OK', lastMirrorAt: next.lastMirrorAt, lastMirrorError: null, connected: true };
+  } catch (error) {
+    const next = {
+      ...settings,
+      lastMirrorStatus: 'ERROR',
+      lastMirrorError: error instanceof Error ? error.message : 'تعذر النسخ إلى المجلد الخارجي',
+    };
+    await writeBackupSettings(next).catch(() => undefined);
+    return { status: 'ERROR', lastMirrorAt: next.lastMirrorAt, lastMirrorError: next.lastMirrorError, connected: false };
+  }
+}
+
+async function ensureDailyBackup({ force = false, minAgeMs = AUTO_DAILY_REFRESH_MS, syncMirror = true } = {}) {
+  if (activeBackupPromise) return activeBackupPromise;
+  activeBackupPromise = (async () => {
+    await mkdir(dailyBackupDir, { recursive: true });
+    const now = new Date();
+    const localDate = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    const filename = `retailos-daily-${localDate}.sqlite`;
+    const targetPath = join(dailyBackupDir, filename);
+    const settings = await readBackupSettings();
+
+    if (!force && existsSync(targetPath)) {
+      const fileStat = await stat(targetPath);
+      const ageMs = Date.now() - fileStat.mtimeMs;
+      if (ageMs < minAgeMs) {
+        if (syncMirror && settings.autoMirror && settings.mirrorPath) {
+          const mirrorDailyPath = join(settings.mirrorPath, filename);
+          if (settings.lastMirrorStatus !== 'OK' || !existsSync(mirrorDailyPath)) {
+            await syncDailyBackupToMirror(targetPath, filename, settings).catch(() => undefined);
+          }
+        }
+        return { filename, date: localDate, size: fileStat.size, updatedAt: fileStat.mtime.toISOString(), createdNew: false };
+      }
+    }
+
+    const tempPath = join(dailyBackupDir, `.tmp-${filename}-${randomUUID().slice(0, 8)}`);
+    try {
+      database.checkpointPassive();
+      await database.getRawDatabase().backup(tempPath);
+      const quick = checkSqliteFileQuick(tempPath);
+      if (!quick.ok) {
+        throw new Error(`Daily backup integrity check failed: ${quick.messages.join('; ')}`);
+      }
+      if (existsSync(targetPath)) {
+        await rm(targetPath, { force: true }).catch(() => undefined);
+      }
+      await rename(tempPath, targetPath);
+    } finally {
+      if (existsSync(tempPath)) await rm(tempPath, { force: true }).catch(() => undefined);
+    }
+
+    const files = (await readdir(dailyBackupDir))
+      .filter((f) => /^retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite$/.test(f))
+      .sort()
+      .reverse();
+    for (const oldFile of files.slice(MAX_DAILY_BACKUPS)) {
+      await rm(join(dailyBackupDir, oldFile), { force: true }).catch(() => undefined);
+    }
+
+    if (syncMirror && settings.autoMirror && settings.mirrorPath) {
+      await syncDailyBackupToMirror(targetPath, filename, settings).catch(() => undefined);
+    }
+
+    const fileStat = await stat(targetPath);
+    return { filename, date: localDate, size: fileStat.size, updatedAt: fileStat.mtime.toISOString(), createdNew: true };
+  })();
+  try {
+    return await activeBackupPromise;
+  } finally {
+    activeBackupPromise = null;
+  }
+}
+
+async function createPreRestoreSafetySnapshot() {
+  await mkdir(preRestoreBackupDir, { recursive: true });
+  const preStamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const preRestorePath = join(preRestoreBackupDir, `retailos-pre-restore-${preStamp}.sqlite`);
+  database.checkpointPassive();
+  await database.getRawDatabase().backup(preRestorePath);
+  const existing = (await readdir(preRestoreBackupDir))
+    .filter((f) => /^retailos-pre-restore-.*\.sqlite$/.test(f))
     .sort()
     .reverse();
-  for (const oldFile of files.slice(MAX_DAILY_BACKUPS)) {
-    await rm(join(dailyBackupDir, oldFile), { force: true }).catch(() => undefined);
+  for (const oldFile of existing.slice(10)) {
+    await rm(join(preRestoreBackupDir, oldFile), { force: true }).catch(() => undefined);
   }
-  const fileStat = await stat(targetPath);
-  return { filename, date: localDate, size: fileStat.size, updatedAt: fileStat.mtime.toISOString(), createdNew: true };
+  return preRestorePath;
+}
+
+async function getBackupSafetyPayload() {
+  const settings = await readBackupSettings();
+  const backups = await listDailyBackups();
+  const integrity = database.checkQuickIntegrity();
+  const mirrorRoot = settings.mirrorPath ? parse(settings.mirrorPath).root : '';
+  const mirrorConnected = Boolean(settings.mirrorPath && (!mirrorRoot || existsSync(mirrorRoot)));
+  return {
+    enabled: true,
+    autoSchedule: 'DAILY_NIGHTLY',
+    retentionDays: MAX_DAILY_BACKUPS,
+    refreshMinutes: Math.round(AUTO_DAILY_REFRESH_MS / 60000),
+    scheduleLabel: 'نسخ احتياطي يومي تلقائي محدث كل 30 دقيقة وعند الإغلاق + حماية فورية ضد انقطاع الكهرباء',
+    integrity: {
+      status: integrity.ok ? 'OK' : 'WARN',
+      quickCheckOk: integrity.ok,
+      messages: integrity.messages,
+      journalMode: 'WAL',
+      synchronousMode: 'FULL',
+      checkedAt: new Date().toISOString(),
+    },
+    startupRecovery: {
+      restoredAfterCrash,
+      startupRecoveryInfo,
+    },
+    mirror: {
+      mirrorPath: settings.mirrorPath,
+      autoMirror: settings.autoMirror,
+      connected: mirrorConnected,
+      lastMirrorAt: settings.lastMirrorAt,
+      lastMirrorStatus: settings.mirrorPath ? (mirrorConnected ? settings.lastMirrorStatus : 'DISCONNECTED') : 'UNCONFIGURED',
+      lastMirrorError: mirrorConnected ? settings.lastMirrorError : (settings.mirrorPath ? `محرك الأقراص (${mirrorRoot}) غير متصل حاليًا` : null),
+      suggestedDestinations: detectBackupDestinations(),
+    },
+    latestBackup: backups[0] ?? null,
+    backups,
+  };
 }
 
 async function listDailyBackups() {
@@ -1582,6 +1906,24 @@ async function currentData(ctx, url) {
       productCount: products.length,
       lowStockCount: lowStock.length,
     },
+    backupSafety: ctx.hasPermission(Permissions.SYSTEM_BACKUP_MANAGE) ? await (async () => {
+      const settings = await readBackupSettings();
+      const mirrorRoot = settings.mirrorPath ? parse(settings.mirrorPath).root : '';
+      const mirrorConnected = Boolean(settings.mirrorPath && (!mirrorRoot || existsSync(mirrorRoot)));
+      const backups = await listDailyBackups();
+      return {
+        integrityOk: initialIntegrityStatus.ok,
+        restoredAfterCrash,
+        startupRecoveryInfo,
+        latestDailyBackup: backups[0] ?? null,
+        dailyCount: backups.length,
+        mirrorPath: settings.mirrorPath,
+        autoMirror: settings.autoMirror,
+        mirrorConnected,
+        lastMirrorAt: settings.lastMirrorAt,
+        lastMirrorStatus: settings.mirrorPath ? (mirrorConnected ? settings.lastMirrorStatus : 'DISCONNECTED') : 'UNCONFIGURED',
+      };
+    })() : null,
   };
 }
 
@@ -1909,21 +2251,102 @@ async function handleApi(req, res, url) {
   if (method === 'GET' && path === '/api/backups/daily') {
     ctx.assertPermission(Permissions.SYSTEM_BACKUP_MANAGE);
     await ensureDailyBackup({ force: false }).catch(() => undefined);
-    const backups = await listDailyBackups();
-    return json(res, 200, {
-      enabled: true,
-      autoSchedule: 'DAILY_NIGHTLY',
-      retentionDays: MAX_DAILY_BACKUPS,
-      scheduleLabel: 'نسخ احتياطي يومي تلقائي كل ليلة وعند بدء التشغيل (يحتفظ بآخر 30 يومًا)',
-      backups,
-    });
+    return json(res, 200, await getBackupSafetyPayload());
   }
 
   if (method === 'POST' && path === '/api/backups/daily/run-now') {
     ctx.assertPermission(Permissions.SYSTEM_BACKUP_MANAGE);
-    const backup = await ensureDailyBackup({ force: true });
+    const backup = await ensureDailyBackup({ force: true, syncMirror: true });
     await recordAudit(ctx, { action: 'DAILY_BACKUP_CREATED', entityType: 'BACKUP', entityId: backup.filename, summary: `إنشاء وتحديث النسخة الاحتياطية اليومية (${backup.date})`, metadata: { filename: backup.filename, size: backup.size } });
-    return json(res, 201, { created: true, backup, backups: await listDailyBackups() });
+    return json(res, 201, { created: true, backup, ...(await getBackupSafetyPayload()) });
+  }
+
+  if (method === 'POST' && path === '/api/backups/settings') {
+    ctx.assertPermission(Permissions.SYSTEM_BACKUP_MANAGE);
+    const body = validate(BackupSettingsSchema, await readJson(req));
+    const validatedMirrorPath = validateMirrorPath(body.mirrorPath);
+    const current = await readBackupSettings();
+    let mirrorStatus = validatedMirrorPath ? 'PENDING' : 'UNCONFIGURED';
+    let mirrorError = null;
+    if (validatedMirrorPath) {
+      const mirrorRoot = parse(validatedMirrorPath).root;
+      if (mirrorRoot && !existsSync(mirrorRoot)) {
+        throw Object.assign(new Error(`محرك الأقراص (${mirrorRoot}) غير موجود أو غير متصل حاليًا`), { status: 400 });
+      }
+      await mkdir(validatedMirrorPath, { recursive: true });
+      const probePath = join(validatedMirrorPath, `.raf-write-test-${randomUUID().slice(0, 8)}`);
+      await writeFile(probePath, 'ok', 'utf8');
+      await rm(probePath, { force: true }).catch(() => undefined);
+    }
+    await writeBackupSettings({
+      mirrorPath: validatedMirrorPath,
+      autoMirror: body.autoMirror,
+      lastMirrorAt: validatedMirrorPath ? current.lastMirrorAt : null,
+      lastMirrorStatus: mirrorStatus,
+      lastMirrorError: mirrorError,
+    });
+    if (validatedMirrorPath && body.autoMirror) {
+      await ensureDailyBackup({ force: false, minAgeMs: 0, syncMirror: true }).catch(() => undefined);
+    }
+    await recordAudit(ctx, {
+      action: 'BACKUP_SETTINGS_UPDATED',
+      entityType: 'BACKUP',
+      entityId: validatedMirrorPath || 'disabled',
+      summary: validatedMirrorPath ? `تفعيل النسخ الاحتياطي الخارجي التلقائي إلى: ${validatedMirrorPath}` : 'إيقاف مسار النسخ الاحتياطي الخارجي التلقائي',
+      metadata: { mirrorPath: validatedMirrorPath, autoMirror: body.autoMirror },
+    });
+    return json(res, 200, { saved: true, ...(await getBackupSafetyPayload()) });
+  }
+
+  if (method === 'POST' && path === '/api/backups/mirror/sync-now') {
+    ctx.assertPermission(Permissions.SYSTEM_BACKUP_MANAGE);
+    const settings = await readBackupSettings();
+    if (!settings.mirrorPath) {
+      throw Object.assign(new Error('قم بتحديد مسار النسخ الخارجي (فلاشة أو بارتشن آخر أو OneDrive) أولاً'), { status: 400 });
+    }
+    const backup = await ensureDailyBackup({ force: true, syncMirror: false });
+    const syncResult = await syncDailyBackupToMirror(join(dailyBackupDir, backup.filename), backup.filename, settings);
+    if (syncResult.status !== 'OK') {
+      throw Object.assign(new Error(syncResult.lastMirrorError || 'فشلت المزامنة مع المجلد الخارجي'), { status: 400 });
+    }
+    await recordAudit(ctx, {
+      action: 'BACKUP_MIRROR_SYNCED',
+      entityType: 'BACKUP',
+      entityId: backup.filename,
+      summary: `مزامنة النسخة اليومية (${backup.date}) إلى المسار الخارجي: ${settings.mirrorPath}`,
+      metadata: { filename: backup.filename, mirrorPath: settings.mirrorPath },
+    });
+    return json(res, 200, { synced: true, backup, ...(await getBackupSafetyPayload()) });
+  }
+
+  if (method === 'POST' && path === '/api/backups/daily/restore') {
+    ctx.assertPermission(Permissions.SYSTEM_BACKUP_MANAGE);
+    if (req.headers['x-retailos-restore-confirm'] !== 'replace') throw Object.assign(new Error('Restore confirmation is required'), { status: 400 });
+    const body = validate(DailyRestoreSchema, await readJson(req));
+    const targetPath = join(dailyBackupDir, body.filename);
+    if (!existsSync(targetPath)) throw Object.assign(new Error('ملف النسخة اليومية غير موجود'), { status: 404 });
+    const currentTenant = await db.selectFrom('tenants').select(['id', 'code', 'currency']).where('id', '=', ctx.tenantId).executeTakeFirst();
+    if (!currentTenant) throw Object.assign(new Error('Company not found'), { status: 404 });
+
+    let preparedRestore;
+    try {
+      preparedRestore = await preparePlainSqliteRestore(targetPath, dataDir, currentTenant);
+    } catch {
+      throw Object.assign(new Error('ملف النسخة اليومية تالف أو لا يخص هذا المتجر'), { status: 400 });
+    }
+    let restartRequired = false;
+    try {
+      await createPreRestoreSafetySnapshot();
+      restartRequired = true;
+      await installPreparedSqliteRestore(database.getRawDatabase(), () => database.close(), databasePath, dataDir, preparedRestore);
+      res.once('finish', () => restartLocalServer());
+      return json(res, 202, { restored: true, restarting: true, restoredFrom: body.filename });
+    } catch (error) {
+      if (restartRequired) res.once('finish', () => restartLocalServer());
+      throw error;
+    } finally {
+      if (preparedRestore && !restartRequired) await rm(preparedRestore.workspace, { recursive: true, force: true });
+    }
   }
 
   const dailyDownloadMatch = method === 'GET' ? path.match(/^\/api\/backups\/daily\/(retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite)$/) : null;
@@ -1999,6 +2422,7 @@ async function handleApi(req, res, url) {
       } catch {
         throw Object.assign(new Error('Backup file or passphrase is invalid, or the backup belongs to another company'), { status: 400 });
       }
+      await createPreRestoreSafetySnapshot();
       restartRequired = true;
       await installPreparedSqliteRestore(database.getRawDatabase(), () => database.close(), databasePath, dataDir, preparedRestore);
       res.once('finish', () => restartLocalServer());
@@ -2186,6 +2610,8 @@ async function handleApi(req, res, url) {
       summary: `إنهاء الشيفت (${shift.shift_number}): متوقع ${expectedCashMinor.toString()}، فعلي ${actualCash.toString()}، الفارق ${varianceMinor.toString()}`,
       metadata: { shiftNumber: shift.shift_number, expectedCash: expectedCashMinor.toString(), actualCash: actualCash.toString(), variance: varianceMinor.toString(), handoverCash: handoverCash.toString() }
     });
+
+    void ensureDailyBackup({ force: false, minAgeMs: 60_000, syncMirror: true }).catch(() => undefined);
 
     return json(res, 200, {
       shift: {
@@ -3023,6 +3449,7 @@ server.listen(port, '127.0.0.1', () => {
 async function shutdown() {
   clearInterval(walCheckpointTimer);
   server.close();
+  await ensureDailyBackup({ force: false, minAgeMs: 60_000, syncMirror: true }).catch(() => undefined);
   database.checkpointPassive();
   await database.close();
 }

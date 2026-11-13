@@ -42,12 +42,12 @@ export class SqliteDatabaseManager {
       fileMustExist: false,
     });
 
-    // Enforce high-performance & safe retail defaults
+    // Enforce power-loss-safe retail durability & bounded WAL defaults
     this.rawDb.pragma('journal_mode = WAL');
-    this.rawDb.pragma('synchronous = NORMAL');
+    this.rawDb.pragma('synchronous = FULL');
     this.rawDb.pragma('foreign_keys = ON');
     this.rawDb.pragma('busy_timeout = 10000');
-    this.rawDb.pragma('wal_autocheckpoint = 1000');
+    this.rawDb.pragma('wal_autocheckpoint = 200');
     this.rawDb.pragma('temp_store = MEMORY');
 
     this.kyselyDb = new Kysely<RetailOSDatabase>({
@@ -70,6 +70,19 @@ export class SqliteDatabaseManager {
     } catch (err) {
       this.logger.warn(`Passive WAL checkpoint returned notice: ${String(err)}`);
     }
+  }
+
+  /**
+   * Runs SQLite quick_check to confirm structural B-tree and index health.
+   */
+  public checkQuickIntegrity(): { ok: boolean; messages: string[] } {
+    const db = this.getRawDatabase();
+    const rows = db.pragma('quick_check') as { quick_check?: string }[];
+    const messages = rows.map((row) => String(row.quick_check ?? '')).filter(Boolean);
+    return {
+      ok: messages.length === 1 && messages[0] === 'ok',
+      messages,
+    };
   }
 
   /**

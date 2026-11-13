@@ -491,6 +491,8 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   const dailyBackupsList = await request('/api/backups/daily');
   assert.equal(dailyBackupsList.response.status, 200, JSON.stringify(dailyBackupsList.payload));
   assert.equal(dailyBackupsList.payload.autoSchedule, 'DAILY_NIGHTLY');
+  assert.equal(dailyBackupsList.payload.integrity.quickCheckOk, true);
+  assert.equal(dailyBackupsList.payload.integrity.synchronousMode, 'FULL');
   assert.ok(dailyBackupsList.payload.backups.length >= 1);
   const runDailyNow = await request('/api/backups/daily/run-now', { method: 'POST', body: {} });
   assert.equal(runDailyNow.response.status, 201, JSON.stringify(runDailyNow.payload));
@@ -501,6 +503,28 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.equal(downloadDaily.status, 200);
   const dailyBytes = Buffer.from(await downloadDaily.arrayBuffer());
   assert.equal(dailyBytes.subarray(0, 15).toString('utf8'), 'SQLite format 3');
+
+  const blockedInsideMirror = await request('/api/backups/settings', {
+    method: 'POST',
+    body: { mirrorPath: join(dataDir, 'inside-mirror'), autoMirror: true },
+  });
+  assert.equal(blockedInsideMirror.response.status, 400);
+
+  const externalMirrorDir = await mkdtemp(join(dirname(dataDir), 'retailos-external-mirror-'));
+  try {
+    const savedMirror = await request('/api/backups/settings', {
+      method: 'POST',
+      body: { mirrorPath: externalMirrorDir, autoMirror: true },
+    });
+    assert.equal(savedMirror.response.status, 200, JSON.stringify(savedMirror.payload));
+    assert.equal(savedMirror.payload.mirror.mirrorPath, externalMirrorDir);
+    const syncedMirror = await request('/api/backups/mirror/sync-now', { method: 'POST', body: {} });
+    assert.equal(syncedMirror.response.status, 200, JSON.stringify(syncedMirror.payload));
+    assert.equal(syncedMirror.payload.mirror.lastMirrorStatus, 'OK');
+  } finally {
+    await request('/api/backups/settings', { method: 'POST', body: { mirrorPath: '', autoMirror: false } });
+    await rm(externalMirrorDir, { recursive: true, force: true });
+  }
 
   const receipt80 = await request(`/api/sales/${additionalSale.payload.id}/receipt?width=80mm`);
   assert.equal(receipt80.response.status, 200, JSON.stringify(receipt80.payload));
