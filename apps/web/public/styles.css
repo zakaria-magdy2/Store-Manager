@@ -4077,6 +4077,304 @@ table tbody tr:hover td,
   }
 }
 
+/* Inventory Name / Variant Type Spacing */
+.product-name-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 3px 0;
+}
+.product-name-action > span:last-child,
+.product-name-action .product-name-stack,
+.product-table-name > span:last-child {
+  display: grid;
+  gap: 5px;
+  line-height: 1.4;
+  align-items: start;
+}
+.product-name-action strong,
+.product-table-name strong {
+  font-size: 13px;
+  font-weight: 700;
+  display: block;
+}
+.product-name-action small,
+.product-table-name small {
+  font-size: 11px;
+  color: var(--muted);
+  display: block;
+}
+.model-sub-badges {
+  gap: 7px;
+  padding: 2px 0;
+}
+.product-avatar.has-image,
+.cart-line-art.has-image {
+  padding: 0;
+  overflow: hidden;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+}
+.product-avatar-img,
+.cart-line-thumb,
+.pos-product-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.pos-product-art.has-image {
+  width: 58px;
+  height: 58px;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--surface-soft) !important;
+  border: 1px solid var(--line);
+  margin-bottom: 6px;
+}
+
+/* Optional Product Image Picker */
+.product-image-picker {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1.5px dashed var(--line-strong, #cbd5e1);
+  border-radius: 12px;
+  background: var(--surface-soft);
+}
+.product-image-preview {
+  width: 68px;
+  height: 68px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  flex: none;
+}
+.product-image-preview.has-image {
+  border-color: color-mix(in srgb, var(--purple) 40%, var(--line));
+}
+.product-image-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.product-image-controls {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+.product-image-title {
+  font-size: 13px;
+  font-weight: 750;
+  color: var(--ink);
+}
+.product-image-hint {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.product-image-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+.product-image-remove-btn {
+  color: #be123c;
+  border-color: rgba(190, 18, 60, 0.25);
+}
+.product-image-remove-btn:hover {
+  background: rgba(190, 18, 60, 0.08);
+  border-color: rgba(190, 18, 60, 0.45);
+}
+
+/* Start Shift Palette Harmonized with RetailOS Purple/Indigo */
+html .pos-shift-banner-inactive {
+  background: linear-gradient(135deg, rgba(89, 72, 216, 0.08) 0%, rgba(99, 102, 241, 0.04) 100%) !important;
+  border: 1.5px solid rgba(89, 72, 216, 0.28) !important;
+}
+html[data-theme="dark"] .pos-shift-banner-inactive {
+  background: linear-gradient(135deg, rgba(89, 72, 216, 0.22) 0%, rgba(15, 23, 42, 0.85) 100%) !important;
+  border-color: rgba(129, 112, 248, 0.48) !important;
+}
+html .pos-shift-dot-inactive {
+  background: #5948d8 !important;
+  box-shadow: 0 0 0 4px rgba(89, 72, 216, 0.16) !important;
+}
+html .shift-start-cta,
+html .button.shift-start-cta,
+html .button-primary.shift-start-cta,
+html .button-shift-start {
+  background: linear-gradient(135deg, #5948d8 0%, #4338ca 100%) !important;
+  border: 1.5px solid #4338ca !important;
+  color: #ffffff !important;
+  font-weight: 750 !important;
+  box-shadow: 0 6px 18px rgba(89, 72, 216, 0.28) !important;
+}
+html .shift-start-cta svg,
+html .button.shift-start-cta svg,
+html .button-shift-start svg {
+  color: #ffffff !important;
+}
+html .shift-start-cta:hover,
+html .button.shift-start-cta:hover,
+html .button-shift-start:hover {
+  background: linear-gradient(135deg, #4c3bc7 0%, #3730a3 100%) !important;
+  border-color: #3730a3 !important;
+  color: #ffffff !important;
+  transform: translateY(-1px);
+  box-shadow: 0 8px 22px rgba(89, 72, 216, 0.36) !important;
+}
+
+/* Supplier Purchase Invoice Modal Polish */
+.modal-card:has(#purchase-form) {
+  width: min(980px, calc(100vw - 32px));
+  padding: 24px 28px;
+}
+.modal-card:has(#purchase-form) .modal-heading {
+  padding-bottom: 14px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+}
+#purchase-form {
+  gap: 18px;
+}
+#purchase-form .invoice-model-card {
+  border: 1px solid var(--line-strong, var(--line));
+  border-inline-start: 4px solid var(--purple);
+  border-radius: 14px;
+  margin-bottom: 16px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
+}
+#purchase-form .invoice-model-head {
+  padding: 14px 18px;
+  background: color-mix(in srgb, var(--surface-soft) 72%, var(--purple-soft));
+}
+#purchase-form .invoice-model-body {
+  padding: 16px 18px;
+  display: grid;
+  gap: 14px;
+}
+#purchase-form .purchase-variant-grid {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 4px;
+}
+#purchase-form .simple-quantity-matrix th {
+  padding: 10px 12px;
+  font-size: 12px;
+}
+#purchase-form .simple-quantity-matrix td {
+  padding: 8px;
+}
+#purchase-form .simple-quantity-matrix input {
+  width: 74px;
+  height: 36px;
+  border-radius: 8px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+#purchase-form .simple-quantity-matrix input:focus {
+  border-color: var(--purple);
+  box-shadow: 0 0 0 3px rgba(89, 72, 216, 0.15);
+}
+#purchase-form .invoice-summary-box {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--purple-soft) 45%, var(--surface)) 0%, var(--surface-soft) 100%);
+  border: 1.5px solid color-mix(in srgb, var(--purple) 24%, var(--line));
+  border-radius: 14px;
+  padding: 18px 20px;
+  gap: 12px;
+}
+#purchase-form .invoice-summary-row {
+  font-size: 14px;
+}
+#purchase-form .invoice-summary-row.grand-total {
+  color: var(--purple);
+  font-size: 17.5px;
+  padding-top: 12px;
+}
+:root[data-theme="dark"] #purchase-form .invoice-model-card {
+  background: #141b27;
+  border-color: #273449;
+  border-inline-start-color: #8170f8;
+}
+:root[data-theme="dark"] #purchase-form .invoice-model-head {
+  background: rgba(89, 72, 216, 0.14);
+  border-bottom-color: #273449;
+}
+:root[data-theme="dark"] #purchase-form .purchase-variant-grid {
+  background: #0f1622;
+  border-color: #222c3d;
+}
+:root[data-theme="dark"] #purchase-form .invoice-summary-box {
+  background: linear-gradient(135deg, rgba(89, 72, 216, 0.16) 0%, #141b27 100%);
+  border-color: rgba(129, 112, 248, 0.35);
+}
+:root[data-theme="dark"] #purchase-form .invoice-summary-row.grand-total {
+  color: #a5b4fc;
+}
+
+/* Notifications Modal Cards & Generous Spacing */
+.modal-card:has(.notif-alert-box) {
+  width: min(680px, calc(100vw - 32px));
+  padding: 22px 24px;
+  border-radius: 18px;
+}
+.modal-card:has(.notif-alert-box) .modal-heading {
+  padding-bottom: 14px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+.modal-card:has(.notif-alert-box) .notif-alert-box {
+  padding: 16px 18px !important;
+  border-radius: 14px !important;
+  display: grid !important;
+  gap: 10px !important;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+}
+.modal-card:has(.notif-alert-box) .notif-alert-box + .notif-alert-box {
+  margin-top: 14px !important;
+}
+.modal-card:has(.notif-alert-box) .notif-alert-box > div:first-child {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 12px !important;
+  padding-bottom: 10px !important;
+  margin-bottom: 2px !important;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+}
+.modal-card:has(.notif-alert-box) .notif-alert-box .notif-divider {
+  padding: 11px 14px !important;
+  border-radius: 10px !important;
+  background: var(--surface) !important;
+  border: 1px solid var(--line) !important;
+  margin: 0 !important;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.03);
+}
+:root[data-theme="dark"] .modal-card:has(.notif-alert-box) .notif-alert-box .notif-divider {
+  background: rgba(15, 23, 42, 0.6) !important;
+  border-color: rgba(148, 163, 184, 0.16) !important;
+}
+@media (max-width: 600px) {
+  .product-image-picker {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .modal-card:has(#purchase-form),
+  .modal-card:has(.notif-alert-box) {
+    padding: 18px 16px;
+  }
+}
+
 
 
 

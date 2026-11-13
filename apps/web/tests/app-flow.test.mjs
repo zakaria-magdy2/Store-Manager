@@ -168,6 +168,49 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   const updatedSizedProduct = data.payload.products.find((item) => item.id === sizedProduct.payload.id);
   assert.equal(updatedSizedProduct.variants.length, 5);
   assert.ok(updatedSizedProduct.variants.some((v) => v.sku === 'SHIRT-TEST-NVY-L' && v.barcode === '2001234567893'));
+
+  // Verify product metadata, image upload data URL, and variant retail price updates persist via PATCH
+  const sampleImageDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+  const rejectedSvgProduct = await request('/api/products', {
+    method: 'POST',
+    body: {
+      name: 'Unsafe SVG Product',
+      sku: 'SVG-BAD',
+      imagePath: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=',
+      variants: [{ sku: 'SVG-BAD-1', retailPrice: '1000', reorderPoint: '1' }],
+    },
+  });
+  assert.equal(rejectedSvgProduct.response.status, 400);
+
+  const editedSizedProduct = await request(`/api/products/${sizedProduct.payload.id}`, {
+    method: 'PATCH',
+    body: {
+      name: 'Shirt Updated',
+      sku: 'SHIRT-TEST-V2',
+      categoryId: null,
+      brand: 'BrandUpdated',
+      description: 'Updated model description',
+      imagePath: sampleImageDataUrl,
+      options: updatedSizedProduct.options,
+      variants: updatedSizedProduct.variants.map((v) => ({
+        id: v.id,
+        sku: v.sku,
+        barcode: v.barcode,
+        attributes: v.attributes,
+        retailPrice: '9200',
+        reorderPoint: '5',
+      })),
+    },
+  });
+  assert.equal(editedSizedProduct.response.status, 200, JSON.stringify(editedSizedProduct.payload));
+  data = await request('/api/data');
+  const reloadedEditedProduct = data.payload.products.find((item) => item.id === sizedProduct.payload.id);
+  assert.equal(reloadedEditedProduct.name, 'Shirt Updated');
+  assert.equal(reloadedEditedProduct.sku, 'SHIRT-TEST-V2');
+  assert.equal(reloadedEditedProduct.brand, 'BrandUpdated');
+  assert.equal(reloadedEditedProduct.description, 'Updated model description');
+  assert.equal(reloadedEditedProduct.imagePath, sampleImageDataUrl);
+  assert.ok(reloadedEditedProduct.variants.every((v) => v.price.amount === '9200' && v.reorderPoint === '5'));
   assert.equal(data.payload.products.find((item) => item.id === createdService.payload.id).itemKind, 'PRODUCT');
   const variant = product.variants[0];
   const storeId = data.payload.selectedStoreId;

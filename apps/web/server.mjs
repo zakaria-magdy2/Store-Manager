@@ -447,7 +447,7 @@ async function readJson(req) {
   let raw = '';
   for await (const chunk of req) {
     raw += chunk.toString();
-    if (raw.length > 64 * 1024) throw Object.assign(new Error('Request is too large'), { status: 413 });
+    if (raw.length > 512 * 1024) throw Object.assign(new Error('Request is too large'), { status: 413 });
   }
   try {
     return raw ? JSON.parse(raw) : {};

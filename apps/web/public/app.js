@@ -78,6 +78,117 @@ function setTheme(theme) {
 }
 
 setTheme(getTheme());
+
+async function compressProductImageFile(file) {
+  if (!file || !String(file.type || '').startsWith('image/')) {
+    throw new Error('يرجى اختيار ملف صورة صالح (PNG أو JPG أو WebP)');
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    throw new Error('حجم الصورة كبير جدًا (الحد الأقصى 10 ميجابايت قبل الضغط)');
+  }
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error('تعذر قراءة ملف الصورة المحدد'));
+      image.src = objectUrl;
+    });
+    const maxDim = 320;
+    const scale = Math.min(1, maxDim / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+    const width = Math.max(1, Math.round((img.naturalWidth || 1) * scale));
+    const height = Math.max(1, Math.round((img.naturalHeight || 1) * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('تعذر معالجة الصورة في المتصفح');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(img, 0, 0, width, height);
+    let dataUrl = canvas.toDataURL('image/webp', 0.82);
+    if (!dataUrl.startsWith('data:image/webp')) {
+      dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+    }
+    if (dataUrl.length > 230_000) {
+      dataUrl = canvas.toDataURL('image/jpeg', 0.65);
+    }
+    if (dataUrl.length > 240_000) {
+      throw new Error('حجم الصورة بعد الضغط لا يزال كبيرًا، جرب صورة أصغر');
+    }
+    return dataUrl;
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+function renderProductThumb(product, fallbackHtml = '', className = 'product-avatar-img') {
+  if (!product?.imagePath) return fallbackHtml;
+  return `<img src="${escapeHtml(product.imagePath)}" alt="${escapeHtml(product.name || '')}" class="${className}" loading="lazy">`;
+}
+
+function renderProductImagePicker(imagePath = '') {
+  const safePath = String(imagePath || '').trim();
+  return `<div class="product-image-picker" data-image-picker>
+    <input type="hidden" name="imagePath" value="${escapeHtml(safePath)}">
+    <div class="product-image-preview ${safePath ? 'has-image' : ''}" data-image-preview>
+      ${safePath ? `<img src="${escapeHtml(safePath)}" alt="صورة المنتج">` : `${icon('box', 24)}`}
+    </div>
+    <div class="product-image-controls">
+      <div class="product-image-title">صورة المنتج (اختياري)</div>
+      <small class="product-image-hint">تظهر في نقطة البيع لمساعدة الكاشير في التعرف على المنتج بسرعة.</small>
+      <div class="product-image-actions">
+        <input type="file" accept="image/*" class="product-image-file-input" data-image-file hidden>
+        <button type="button" class="button button-secondary button-sm" data-pick-image-btn>${safePath ? 'تغيير الصورة' : 'رفع صورة للمنتج'}</button>
+        <button type="button" class="button button-secondary button-sm product-image-remove-btn" data-remove-image-btn ${safePath ? '' : 'hidden'}>حذف الصورة</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function bindProductImagePicker(container) {
+  const picker = container?.querySelector('[data-image-picker]');
+  if (!picker) return;
+  const hiddenInput = picker.querySelector('input[name="imagePath"]');
+  const fileInput = picker.querySelector('[data-image-file]');
+  const pickBtn = picker.querySelector('[data-pick-image-btn]');
+  const removeBtn = picker.querySelector('[data-remove-image-btn]');
+  const preview = picker.querySelector('[data-image-preview]');
+
+  const syncUi = (value) => {
+    const clean = String(value || '').trim();
+    hiddenInput.value = clean;
+    preview.classList.toggle('has-image', Boolean(clean));
+    preview.innerHTML = clean
+      ? `<img src="${escapeHtml(clean)}" alt="معاينة صورة المنتج">`
+      : `${icon('box', 24)}`;
+    pickBtn.textContent = clean ? 'تغيير الصورة' : 'رفع صورة للمنتج';
+    removeBtn.hidden = !clean;
+  };
+
+  pickBtn?.addEventListener('click', () => fileInput?.click());
+  removeBtn?.addEventListener('click', () => {
+    if (fileInput) fileInput.value = '';
+    syncUi('');
+    toast('تمت إزالة صورة المنتج');
+  });
+  fileInput?.addEventListener('change', async () => {
+    const file = fileInput.files?.[0];
+    if (!file) return;
+    pickBtn.disabled = true;
+    pickBtn.textContent = 'جاري تجهيز الصورة...';
+    try {
+      const dataUrl = await compressProductImageFile(file);
+      syncUi(dataUrl);
+      toast('تم تجهيز صورة المنتج بنجاح');
+    } catch (error) {
+      toast(error.message || 'تعذر تحميل الصورة', 'error');
+      syncUi(hiddenInput.value);
+    } finally {
+      pickBtn.disabled = false;
+    }
+  });
+}
 function closeAccountMenu() {
   const menu = document.querySelector('#account-menu');
   const toggle = document.querySelector('#account-menu-toggle');
@@ -564,9 +675,9 @@ function showEmployeeDetails(user) {
       state.analyticsKey = null;
       state.salesHistory = null;
       await loadData(state.data.selectedStoreId);
-      const updatedUser = state.data.users.find((item) => item.id === form.dataset.userId);
-      if (updatedUser) showEmployeeDetails(updatedUser);
-      toast('تم حفظ بيانات الموظف');
+      root.innerHTML = '';
+      render();
+      toast('تم حفظ بيانات الموظف بنجاح');
     } catch (error) { toast(error.message, 'error'); button.disabled = false; }
   });
 }
@@ -960,7 +1071,7 @@ function productsView() {
     const subSummary = matrix.isMatrix
       ? `<div class="model-sub-badges">${matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(matrix.colorSummaryLabel)}</span>` : ''}${matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(matrix.sizeRangeLabel)}</span>` : ''}<small class="model-sub-count">${activeVariants.length} فرع (لون×مقاس)</small></div>`
       : `<span class="model-sub-count">${activeVariants.length === 1 ? 'صنف مباشر (بدون مقاسات)' : `${activeVariants.length} تركيبة`}</span>`;
-    return `<tr><td><div class="product-table-name"><span class="product-avatar">${escapeHtml(product.name.slice(0, 1))}</span><span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand ? `${product.brand} · كود الموديل ${product.sku}` : `كود الموديل: ${product.sku}`)}</small></span></div></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${subSummary}</td><td class="table-total">${priceRange}</td><td><strong>${totalQuantity}</strong> قطعة</td><td class="product-actions"><button type="button" class="text-action product-print-labels" data-product-id="${product.id}">طباعة باركود</button><button type="button" class="text-action product-edit" data-product-id="${product.id}">المقاسات والتعديل</button><button type="button" class="text-action product-delete" data-product-id="${product.id}">حذف</button></td></tr>`;
+    return `<tr><td><div class="product-table-name"><span class="product-avatar ${product.imagePath ? 'has-image' : ''}">${product.imagePath ? renderProductThumb(product) : escapeHtml(product.name.slice(0, 1))}</span><span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand ? `${product.brand} · كود الموديل ${product.sku}` : `كود الموديل: ${product.sku}`)}</small></span></div></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${subSummary}</td><td class="table-total">${priceRange}</td><td><strong>${totalQuantity}</strong> قطعة</td><td class="product-actions"><button type="button" class="text-action product-print-labels" data-product-id="${product.id}">طباعة باركود</button><button type="button" class="text-action product-edit" data-product-id="${product.id}">المقاسات والتعديل</button><button type="button" class="text-action product-delete" data-product-id="${product.id}">حذف</button></td></tr>`;
   }).join('');
   return `<div class="page-heading-row"><div><p class="page-lead">إدارة وتعديل أصناف وكتالوج المتجر بسهولة وسرعة.</p></div><div class="products-heading-actions"><button class="button button-secondary" id="add-category">${icon('plus', 18)} إضافة فئة</button><button class="button button-primary" id="new-product">${icon('plus', 18)} إضافة موديل / منتج</button></div></div><section class="panel products-panel"><div class="panel-heading"><div><h3>كتالوج الموديلات والمنتجات</h3><p>${state.data.products.length} موديل أساسي في الكتالوج</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="بحث باسم الموديل أو الكود أو اللون أو المقاس" value="${escapeHtml(state.query)}"></label></div>${products.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل / المنتج</th><th>كود الموديل</th><th>الألوان والمقاسات الفرعية</th><th>سعر البيع</th><th>إجمالي الرصيد</th><th>الإجراءات</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('box', 28)}</div><strong>${query ? 'مفيش نتائج مطابقة' : 'الكتالوج لسه فاضي'}</strong><p>${query ? 'جرب كلمة بحث تانية.' : 'أضف الموديل بكوده الأساسي وحدد الألوان والمقاسات، وبعدها استقبل الكميات في فاتورة الشراء.'}</p>${!query ? '<button class="button button-primary" id="empty-new-product">إضافة أول موديل</button>' : ''}</div>`}</section>`;
 }
@@ -1084,7 +1195,7 @@ function inventoryView() {
   return `<div class="page-heading-row"><div><p class="page-lead">${isCashier ? 'متابعة أرصدة المخزون والمقاسات والأسعار المتاحة للبيع.' : 'متابعة وجرد أرصدة المخزون للموديلات والأصناف الحالية وتقييم رأس المال والأرباح المتوقعة.'}</p></div><div class="products-heading-actions">${data.capabilities.canManageStores ? '<button class="button button-secondary" id="new-store-btn">+ إضافة فرع</button>' : ''}${data.capabilities.canTransferInventory && data.stores.length > 1 ? '<button class="button button-secondary" id="transfer-stock-btn">تحويل مخزون بين الفروع</button>' : ''}${data.capabilities.canViewInventory && !isCashier ? '<button class="button button-secondary" id="record-damage-btn">تسجيل تالف / هالك</button><button class="button button-secondary" id="adjust-stock-btn">تسوية جرد فعلي</button>' : ''}<a class="button button-secondary" href="/api/reports/export.csv?type=inventory&storeId=${encodeURIComponent(data.selectedStoreId)}" download>تصدير CSV</a>${!isCashier ? `<button class="button button-primary" data-page="suppliers">فاتورة شراء من تاجر</button>` : ''}</div></div>
   <div class="inventory-summary" style="grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 16px;">${summaryCardsHtml}
   </div>
-  <section class="panel"><div class="panel-heading"><div><h3>أرصدة الموديلات والمقاسات</h3><p>اضغط على الموديل لعرض مصفوفة الألوان والمقاسات</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="ابحث عن الموديل أو الكود أو المقاس" value="${escapeHtml(state.query)}"></label></div>${items.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل</th><th>كود الموديل</th><th>الألوان والمقاسات</th><th style="text-align:center;">إجمالي الرصيد</th>${!isCashier ? '<th>سعر التكلفة (الفعلي)</th><th>سعر البيع</th><th>المكسب المتوقع</th>' : '<th>سعر البيع</th>'}<th>حالة المقاسات</th></tr></thead><tbody>${items.map((product) => `<tr><td><button type="button" class="product-name-action inventory-product-details" data-product-id="${product.id}"><span class="product-avatar">${escapeHtml(product.name.slice(0, 1))}</span><span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand || 'اضغط لعرض جدول المقاسات')}</small></span></button></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${product.matrix.isMatrix ? `<div class="model-sub-badges">${product.matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(product.matrix.colorSummaryLabel)}</span>` : ''}${product.matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(product.matrix.sizeRangeLabel)}</span>` : ''}</div>` : `<small>${product.variants.length} نسخة</small>`}</td><td style="text-align:center;"><strong>${product.quantity}</strong> قطعة</td>${!isCashier ? (() => {
+  <section class="panel"><div class="panel-heading"><div><h3>أرصدة الموديلات والمقاسات</h3><p>اضغط على الموديل لعرض مصفوفة الألوان والمقاسات</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="ابحث عن الموديل أو الكود أو المقاس" value="${escapeHtml(state.query)}"></label></div>${items.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل</th><th>كود الموديل</th><th>الألوان والمقاسات</th><th style="text-align:center;">إجمالي الرصيد</th>${!isCashier ? '<th>سعر التكلفة (الفعلي)</th><th>سعر البيع</th><th>المكسب المتوقع</th>' : '<th>سعر البيع</th>'}<th>حالة المقاسات</th></tr></thead><tbody>${items.map((product) => `<tr><td><button type="button" class="product-name-action inventory-product-details" data-product-id="${product.id}"><span class="product-avatar ${product.imagePath ? 'has-image' : ''}">${product.imagePath ? renderProductThumb(product) : escapeHtml(product.name.slice(0, 1))}</span><span class="product-name-stack"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand || 'اضغط لعرض جدول المقاسات')}</small></span></button></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${product.matrix.isMatrix ? `<div class="model-sub-badges">${product.matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(product.matrix.colorSummaryLabel)}</span>` : ''}${product.matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(product.matrix.sizeRangeLabel)}</span>` : ''}</div>` : `<small>${product.variants.length} نسخة</small>`}</td><td style="text-align:center;"><strong>${product.quantity}</strong> قطعة</td>${!isCashier ? (() => {
   const unitRetail = product.unitRetail;
   const unitCost = product.cost;
   let unitProfitStr = '—';
@@ -3423,7 +3534,11 @@ function posView() {
       </button>
     </div>
   `;
-  return `<div class="pos-layout"><section class="pos-catalog">${shiftBanner}<div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>${mustStartShift ? 'ابدأ الشيفت أولاً لإتاحة اختيار المنتجات وإتمام البيع.' : 'ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.'}</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="${mustStartShift ? 'ابدأ الشيفت أولاً لتفعيل نقطة البيع...' : 'ابحث باسم الموديل أو كود الموديل أو الباركود'}" value="${escapeHtml(state.query)}" ${mustStartShift ? 'disabled' : 'autofocus'}><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="">كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}">${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products" style="${mustStartShift ? 'opacity:0.55;' : ''}">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const allSamePrice = new Set(product.variants.map((variant) => variant.price.amount)).size === 1; const price = allSamePrice ? money(product.variants[0].price) : 'أسعار متعددة'; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${(mustStartShift || (product.itemKind === 'PRODUCT' && stock <= 0n)) ? 'disabled' : ''}><span class="pos-product-art art-${index % 6}">${icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${price}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${mustStartShift ? `<div class="cart-empty"><span class="cart-empty-icon cart-empty-icon-shift">${icon('clock', 23)}</span><strong>يجب بدء الشيفت أولاً</strong><p>لا يمكن إجراء أي عملية بيع قبل تسجيل بدء الشيفت واستلام الدرج.</p><button type="button" id="cart-start-shift-btn" class="button button-sm shift-start-cta" style="margin-top:12px;">${icon('play', 15)}<span>بدء الشيفت الآن</span></button></div>` : state.cart.length ? state.cart.map((item) => `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art">${icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button data-qty="${item.variantId}" data-delta="-1">−</button><span>${item.quantity}</span><button data-qty="${item.variantId}" data-delta="1">+</button></div><strong>${money({ ...item.price, amount: (BigInt(item.price.amount) * BigInt(item.quantity)).toString() })}</strong></div></div>`).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة أو امسح الباركود عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong>${state.cart.reduce((sum, item) => sum + item.quantity, 0)}</strong></div><div><span>الخصم</span><strong>${money({ ...total, amount: '0' })}</strong></div><div class="cart-grand-total"><span>الإجمالي المستحق</span><strong>${money(total)}</strong></div></div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}" ${mustStartShift ? 'disabled' : ''}><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button ${mustStartShift ? 'checkout-button-locked' : ''}" ${(!mustStartShift && state.cart.length && !state.isSaving) ? '' : 'disabled'}><span>${mustStartShift ? 'ابدأ الشيفت أولاً' : 'إتمام البيع'}</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
+  const productByVariantId = new Map();
+  for (const prod of state.data.products ?? []) {
+    for (const v of prod.variants ?? []) productByVariantId.set(v.id, prod);
+  }
+  return `<div class="pos-layout"><section class="pos-catalog">${shiftBanner}<div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>${mustStartShift ? 'ابدأ الشيفت أولاً لإتاحة اختيار المنتجات وإتمام البيع.' : 'ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.'}</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="${mustStartShift ? 'ابدأ الشيفت أولاً لتفعيل نقطة البيع...' : 'ابحث باسم الموديل أو كود الموديل أو الباركود'}" value="${escapeHtml(state.query)}" ${mustStartShift ? 'disabled' : 'autofocus'}><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="">كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}">${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products" style="${mustStartShift ? 'opacity:0.55;' : ''}">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const allSamePrice = new Set(product.variants.map((variant) => variant.price.amount)).size === 1; const price = allSamePrice ? money(product.variants[0].price) : 'أسعار متعددة'; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${(mustStartShift || (product.itemKind === 'PRODUCT' && stock <= 0n)) ? 'disabled' : ''}><span class="pos-product-art ${product.imagePath ? 'has-image' : `art-${index % 6}`}">${product.imagePath ? renderProductThumb(product, '', 'pos-product-thumb') : icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${price}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${mustStartShift ? `<div class="cart-empty"><span class="cart-empty-icon cart-empty-icon-shift">${icon('clock', 23)}</span><strong>يجب بدء الشيفت أولاً</strong><p>لا يمكن إجراء أي عملية بيع قبل تسجيل بدء الشيفت واستلام الدرج.</p><button type="button" id="cart-start-shift-btn" class="button button-sm shift-start-cta" style="margin-top:12px;">${icon('play', 15)}<span>بدء الشيفت الآن</span></button></div>` : state.cart.length ? state.cart.map((item) => { const matchedProd = productByVariantId.get(item.variantId); return `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art ${matchedProd?.imagePath ? 'has-image' : ''}">${matchedProd?.imagePath ? renderProductThumb(matchedProd, icon('box', 16), 'cart-line-thumb') : icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button data-qty="${item.variantId}" data-delta="-1">−</button><span>${item.quantity}</span><button data-qty="${item.variantId}" data-delta="1">+</button></div><strong>${money({ ...item.price, amount: (BigInt(item.price.amount) * BigInt(item.quantity)).toString() })}</strong></div></div>`; }).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة أو امسح الباركود عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong>${state.cart.reduce((sum, item) => sum + item.quantity, 0)}</strong></div><div><span>الخصم</span><strong>${money({ ...total, amount: '0' })}</strong></div><div class="cart-grand-total"><span>الإجمالي المستحق</span><strong>${money(total)}</strong></div></div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}" ${mustStartShift ? 'disabled' : ''}><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button ${mustStartShift ? 'checkout-button-locked' : ''}" ${(!mustStartShift && state.cart.length && !state.isSaving) ? '' : 'disabled'}><span>${mustStartShift ? 'ابدأ الشيفت أولاً' : 'إتمام البيع'}</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
 }
 
 function supplierModal(html, formId, endpoint, convert = (data) => data, successMessage = 'تم حفظ الحركة في سجل التاجر') {
@@ -5505,7 +5620,7 @@ function showProductEditModal(product) {
   const defaultReorder = activeExisting[0]?.reorderPoint ?? '3';
   const initialOptions = (product.options?.length ? product.options : []).map((opt) => ({ key: opt.key, name: opt.name, values: [...(opt.values ?? [])] }));
 
-  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="product-edit-title" style="margin:20px auto;max-width:calc(100vw - 32px);"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">الكتالوج الموحد — توسيع وتعديل الموديل</span><h2 id="product-edit-title">تعديل الموديل: ${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2></div><button type="button" class="modal-close" data-close-modal>×</button></div><form id="product-edit-form" class="form-stack modal-form"><div class="form-grid"><label>اسم الموديل / المنتج<input name="name" required minlength="2" maxlength="120" value="${escapeHtml(product.name)}"></label><label>كود الموديل الأساسي<input name="sku" required maxlength="64" value="${escapeHtml(product.sku)}"></label></div><div class="form-grid"><label>الفئة<select name="categoryId"><option value="">بدون فئة</option>${categoryChoices}</select></label><label>الماركة / المصنع<input name="brand" maxlength="100" value="${escapeHtml(product.brand ?? '')}"></label></div><div class="form-grid" style="background:var(--surface-soft);padding:14px;border-radius:12px;border:1px solid var(--line);margin:4px 0;"><label style="font-weight:750;">سعر البيع الجديد للموديل (${currency})<input name="baseRetailPrice" id="edit-modal-base-price" inputmode="decimal" value="${escapeHtml(defaultPrice)}" placeholder="مثال: 350.00" style="font-weight:800;font-size:15px;color:var(--purple);"><small style="color:var(--muted);font-size:11px;">تحديث وتعديل سعر البيع وتطبيقه على كافة المقاسات والألوان</small></label><div style="display:flex;align-items:flex-end;"><button type="button" class="button button-secondary" id="apply-price-to-all-variants" style="height:42px;width:100%;font-weight:750;">تطبيق هذا السعر على كل المقاسات</button></div></div><div class="form-grid"><label>رابط الصورة<input name="imagePath" type="url" maxlength="300" value="${escapeHtml(product.imagePath ?? '')}"></label><label>وصف الموديل<input name="description" maxlength="2000" value="${escapeHtml(product.description ?? '')}"></label></div>
+  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="product-edit-title" style="margin:20px auto;max-width:calc(100vw - 32px);"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">الكتالوج الموحد — توسيع وتعديل الموديل</span><h2 id="product-edit-title">تعديل الموديل: ${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2></div><button type="button" class="modal-close" data-close-modal>×</button></div><form id="product-edit-form" class="form-stack modal-form"><div class="form-grid"><label>اسم الموديل / المنتج<input name="name" required minlength="2" maxlength="120" value="${escapeHtml(product.name)}"></label><label>كود الموديل الأساسي<input name="sku" required maxlength="64" value="${escapeHtml(product.sku)}"></label></div><div class="form-grid"><label>الفئة<select name="categoryId"><option value="">بدون فئة</option>${categoryChoices}</select></label><label>الماركة / المصنع<input name="brand" maxlength="100" value="${escapeHtml(product.brand ?? '')}"></label></div><div class="form-grid" style="background:var(--surface-soft);padding:14px;border-radius:12px;border:1px solid var(--line);margin:4px 0;"><label style="font-weight:750;">سعر البيع الجديد للموديل (${currency})<input name="baseRetailPrice" id="edit-modal-base-price" inputmode="decimal" value="${escapeHtml(defaultPrice)}" placeholder="مثال: 350.00" style="font-weight:800;font-size:15px;color:var(--purple);"><small style="color:var(--muted);font-size:11px;">تحديث وتعديل سعر البيع وتطبيقه على كافة المقاسات والألوان</small></label><div style="display:flex;align-items:flex-end;"><button type="button" class="button button-secondary" id="apply-price-to-all-variants" style="height:42px;width:100%;font-weight:750;">تطبيق هذا السعر على كل المقاسات</button></div></div><label>وصف الموديل<input name="description" maxlength="2000" value="${escapeHtml(product.description ?? '')}"></label>${renderProductImagePicker(product.imagePath ?? '')}
   ${initialOptions.length ? `<div class="variant-options-section"><div><strong>إضافة ألوان أو مقاسات جديدة لهذا الموديل:</strong></div><div class="model-presets-bar"><span class="preset-label">+ لون جديد:</span>${quickColors.map((c) => `<button type="button" class="color-quick-chip" data-edit-add-color="${c}">+ ${c}</button>`).join('')}</div><div class="model-presets-bar"><span class="preset-label">+ مقاسات سريعة:</span>${quickSizes.map((s) => `<button type="button" class="date-preset-chip" data-edit-add-sizes="${s}">+ (${s})</button>`).join('')}</div><div id="edit-option-rows" class="form-stack">${initialOptions.map((opt) => `<div class="variant-option-row" data-edit-option-key="${escapeHtml(opt.key)}"><input data-edit-option-name value="${escapeHtml(opt.name)}" readonly><input data-edit-option-values value="${escapeHtml(opt.values.join(', '))}" placeholder="القيم مفصولة بفواصل"></div>`).join('')}</div></div>` : ''}
   <div class="matrix-quick-toolbar"><span>الفروع الحالية والجديدة التابعة للموديل (<strong>${activeExisting.length}</strong> فرع مسجل)</span><div class="matrix-quick-actions"><button type="button" class="date-preset-chip" id="edit-generate-barcodes">توليد باركود تلقائي للفروع بدون باركود</button><button type="button" class="date-preset-chip" id="edit-open-print-labels">طباعة استيكرات الباركود</button></div></div>
   <div class="table-scroll"><table class="variant-matrix-table zebra-table"><thead><tr><th>متاحة</th><th>اللون والمقاس الفرعي</th><th>كود الفرع (SKU)</th><th>الباركود</th><th>السعر (${currency})</th><th>حد الطلب</th></tr></thead><tbody id="edit-existing-tbody">${activeExisting.map((variant) => `<tr data-variant-id="${variant.id}" data-variant-attrs="${escapeHtml(JSON.stringify(variant.attributes ?? {}))}"><td><input data-edit-active type="checkbox" checked aria-label="إبقاء التركيبة متاحة"></td><td><strong>${escapeHtml(formatVariantAttributes(product, variant.attributes, product.name))}</strong></td><td><input data-edit-sku maxlength="64" required value="${escapeHtml(variant.sku)}"></td><td><input data-edit-barcode maxlength="64" value="${escapeHtml(variant.barcode ?? '')}" placeholder="باركود العلبة"></td><td><input data-edit-price inputmode="decimal" required value="${escapeHtml(decimalPrice(variant.price))}"></td><td><input data-edit-reorder type="number" min="0" step="1" required value="${escapeHtml(variant.reorderPoint)}"></td></tr>`).join('')}</tbody><tbody id="edit-generated-tbody"></tbody></table></div><div id="new-variant-rows" class="form-stack"></div>${product.options?.length ? '<button type="button" class="button button-secondary button-sm" id="add-edit-variant">+ إضافة فرع مفرد يدويًا</button>' : ''}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">حفظ التعديلات والفروع الجديدة</button></div></form></section></div>`;
@@ -5612,7 +5727,27 @@ function showProductEditModal(product) {
     row.innerHTML = `${selectors}<label>كود النسخة<input data-new-sku required maxlength="64"></label><label>السعر (${currency})<input data-new-price inputmode="decimal" required value="${escapeHtml(defaultPrice)}"></label><label>حد الطلب<input data-new-reorder type="number" min="0" value="${escapeHtml(defaultReorder)}" required></label><button type="button" class="text-action" data-remove-new>حذف</button>`;
     row.querySelector('[data-remove-new]').addEventListener('click', () => row.remove()); newVariantRows.append(row);
   });
-  modal.querySelector('#product-edit-form').addEventListener('submit', async (event) => {
+  const editFormEl = modal.querySelector('#product-edit-form');
+  bindProductImagePicker(editFormEl);
+  const basePriceInput = modal.querySelector('#edit-modal-base-price');
+  editFormEl?.addEventListener('input', (ev) => {
+    if (ev.target instanceof Element && ev.target.matches('[data-edit-price], [data-new-combo-price], [data-new-price]')) {
+      ev.target.dataset.priceEdited = '1';
+    }
+  });
+  basePriceInput?.addEventListener('input', () => {
+    const val = basePriceInput.value.trim();
+    if (!val || Number.isNaN(Number(val)) || Number(val) < 0) return;
+    modal.querySelectorAll('[data-edit-price], [data-new-combo-price], [data-new-price]').forEach((input) => {
+      if (input.dataset.priceEdited !== '1') input.value = val;
+    });
+  });
+  modal.querySelector('#apply-price-to-all-variants')?.addEventListener('click', () => {
+    modal.querySelectorAll('[data-edit-price], [data-new-combo-price], [data-new-price]').forEach((input) => {
+      delete input.dataset.priceEdited;
+    });
+  });
+  editFormEl.addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     const submit = form.querySelector('[type=submit]');
@@ -5654,9 +5789,13 @@ function showProductEditModal(product) {
       state.supplierStats = null;
       state.analyticsKey = null;
       state.salesHistory = null;
+      state.productStats = null;
+      state.analyticsKey = null;
+      state.salesHistory = null;
       await loadData(state.data.selectedStoreId);
+      modal.innerHTML = '';
       render();
-      toast('تم حفظ تعديلات الموديل والفروع الجديدة بنجاح');
+      toast('تم حفظ تعديلات الموديل بنجاح');
     } catch (error) { toast(error.message, 'error'); submit.disabled = false; }
   });
 }
@@ -5751,6 +5890,8 @@ function showProductModal() {
             </label>
           </div>
 
+          ${renderProductImagePicker()}
+
           <!-- Section for Model (Colors & Sizes) -->
           <div id="model-variants-panel" class="variant-options-section">
             <label><strong>1. الألوان المتاحة للموديل:</strong></label>
@@ -5799,6 +5940,7 @@ function showProductModal() {
   `;
 
   const productForm = modal.querySelector('#product-form');
+  bindProductImagePicker(productForm);
   modal.querySelectorAll('[data-close-modal]').forEach((btn) => btn.addEventListener('click', () => { modal.innerHTML = ''; }));
   modal.querySelector('#add-category-inline')?.addEventListener('click', () => showCategoryModal());
 
@@ -6001,6 +6143,7 @@ function showProductModal() {
       if (!sku) sku = name.slice(0, 6).toUpperCase().replace(/\s+/g, '-');
       const categoryId = form.get('categoryId') || undefined;
       const brand = form.get('brand') || undefined;
+      const imagePath = String(form.get('imagePath') || '').trim() || undefined;
       const priceVal = form.get('price');
       const reorderVal = String(form.get('reorderPoint') || '3');
 
@@ -6038,7 +6181,7 @@ function showProductModal() {
         await api('/api/products', {
           method: 'POST',
           body: JSON.stringify({
-            name, sku, itemKind: 'PRODUCT', categoryId, brand,
+            name, sku, itemKind: 'PRODUCT', categoryId, brand, imagePath,
             hasVariants: true, options, variants,
           }),
         });
@@ -6054,7 +6197,7 @@ function showProductModal() {
         await api('/api/products', {
           method: 'POST',
           body: JSON.stringify({
-            name, sku, itemKind: 'PRODUCT', categoryId, brand,
+            name, sku, itemKind: 'PRODUCT', categoryId, brand, imagePath,
             hasVariants: false, options: [], variants,
           }),
         });
