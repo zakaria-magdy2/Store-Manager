@@ -724,4 +724,100 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.equal((await request('/api/data')).response.status, 401);
   const relogin = await request('/api/login', { method: 'POST', authenticated: false, body: { username: 'owner_test', password: 'New-Owner-Password-2026' } });
   assert.equal(relogin.response.status, 200, JSON.stringify(relogin.payload));
+
+  // Verify attendance deduplication across check-in + multiple shifts and late-day calculation against shiftStartTime.
+  const ownerCookieAfter = relogin.response.headers.get('set-cookie').split(';')[0];
+  cookie = ownerCookieAfter;
+  const freshCashier = await request('/api/users', {
+    method: 'POST',
+    body: {
+      username: 'attendance_cashier',
+      password: 'Attendance-Cashier-2026',
+      fullName: 'Attendance Cashier',
+      role: 'CASHIER',
+      storeId,
+      shiftStartTime: '09:00',
+      lateGraceMinutes: 10,
+    },
+  });
+  assert.equal(freshCashier.response.status, 201, JSON.stringify(freshCashier.payload));
+
+  const cashierLogin2 = await request('/api/login', {
+    method: 'POST',
+    authenticated: false,
+    body: { username: 'attendance_cashier', password: 'Attendance-Cashier-2026' },
+  });
+  assert.equal(cashierLogin2.response.status, 200);
+  cookie = cashierLogin2.response.headers.get('set-cookie').split(';')[0];
+
+  const tzOffset = -120;
+  const checkInRes = await request('/api/attendance/check-in', { method: 'POST', body: { tzOffset } });
+  assert.ok(checkInRes.response.status === 200 || checkInRes.response.status === 201);
+  const repeatCheckInRes = await request('/api/attendance/check-in', { method: 'POST', body: { tzOffset } });
+  assert.equal(repeatCheckInRes.response.status, 200);
+  assert.equal(repeatCheckInRes.payload.alreadyCheckedIn, true);
+
+  // Cashier starts & closes two shifts in the same day; must still count as 1 unique employee present today.
+  const shift1 = await request('/api/shifts/start', { method: 'POST', body: { storeId, openingCash: '0', tzOffset } });
+  assert.equal(shift1.response.status, 201, JSON.stringify(shift1.payload));
+  const endShift1 = await request('/api/shifts/end', { method: 'POST', body: { shiftId: shift1.payload.shift.id, actualCash: '0', handoverCash: '0' } });
+  assert.equal(endShift1.response.status, 200);
+  const shift2 = await request('/api/shifts/start', { method: 'POST', body: { storeId, openingCash: '0', tzOffset } });
+  assert.equal(shift2.response.status, 201, JSON.stringify(shift2.payload));
+
+  cookie = ownerCookieAfter;
+  // Owner starts (or restarts) a shift too; owner shift starts must never inflate employee presentCount.
+  const ownerStateBefore = await request(`/api/data?storeId=${storeId}&tzOffset=${tzOffset}`);
+  if (ownerStateBefore.payload.activeShift?.id) {
+    const closePrevOwnerShift = await request('/api/shifts/end', {
+      method: 'POST',
+      body: { shiftId: ownerStateBefore.payload.activeShift.id, actualCash: '0', handoverCash: '0' },
+    });
+    assert.equal(closePrevOwnerShift.response.status, 200);
+  }
+  const ownerShift = await request('/api/shifts/start', { method: 'POST', body: { storeId, openingCash: '0', tzOffset } });
+  assert.equal(ownerShift.response.status, 201, JSON.stringify(ownerShift.payload));
+  const attDashboard = await request(`/api/data?storeId=${storeId}&tzOffset=${tzOffset}`);
+  assert.equal(attDashboard.response.status, 200);
+  const uniqueCashierAttendance = attDashboard.payload.todayAttendance.filter((a) => a.userId === freshCashier.payload.id);
+  assert.equal(uniqueCashierAttendance.length, 1);
+  assert.ok(!attDashboard.payload.todayAttendance.some((a) => a.userId !== freshCashier.payload.id && a.username === 'owner_test'));
+
+  const checkInUtcMs = Date.parse(checkInRes.payload.checkInAt);
+  const shiftedLocal = new Date(checkInUtcMs - tzOffset * 60000);
+  const arrivalTotalMinutes = shiftedLocal.getUTCHours() * 60 + shiftedLocal.getUTCMinutes();
+  const toHHMM = (mins) => `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+  const currentLocalMonth = shiftedLocal.toISOString().slice(0, 7);
+
+  // Schedule on-time: shift starts at exact arrival minute + 5 min grace => 0 late days, 1 on-time day.
+  const setOnTimeSchedule = await request('/api/users/shift-schedule', {
+    method: 'PATCH',
+    body: { userIds: [freshCashier.payload.id], shiftStartTime: toHHMM(arrivalTotalMinutes), lateGraceMinutes: 5 },
+  });
+  assert.equal(setOnTimeSchedule.response.status, 200, JSON.stringify(setOnTimeSchedule.payload));
+  assert.equal(setOnTimeSchedule.payload.updatedCount, 1);
+
+  const historyOnTime = await request(`/api/attendance/history?userId=${freshCashier.payload.id}&month=${currentLocalMonth}&tzOffset=${tzOffset}`);
+  assert.equal(historyOnTime.response.status, 200, JSON.stringify(historyOnTime.payload));
+  assert.equal(historyOnTime.payload.summary.totalDays, 1);
+  assert.equal(historyOnTime.payload.summary.onTimeDays, 1);
+  assert.equal(historyOnTime.payload.summary.lateDays, 0);
+  assert.equal(historyOnTime.payload.history.length, 1);
+  assert.equal(historyOnTime.payload.history[0].status, 'ON_TIME');
+
+  if (arrivalTotalMinutes >= 2) {
+    // Schedule 2 minutes before arrival with 0 grace => 1 late day, >= 2 late minutes.
+    const setLateSchedule = await request('/api/users/shift-schedule', {
+      method: 'PATCH',
+      body: { userIds: [freshCashier.payload.id], shiftStartTime: toHHMM(arrivalTotalMinutes - 2), lateGraceMinutes: 0 },
+    });
+    assert.equal(setLateSchedule.response.status, 200);
+    const historyLate = await request(`/api/attendance/history?userId=${freshCashier.payload.id}&month=${currentLocalMonth}&tzOffset=${tzOffset}`);
+    assert.equal(historyLate.response.status, 200);
+    assert.equal(historyLate.payload.summary.totalDays, 1);
+    assert.equal(historyLate.payload.summary.lateDays, 1);
+    assert.equal(historyLate.payload.summary.onTimeDays, 0);
+    assert.ok(historyLate.payload.summary.totalLateMinutes >= 2);
+    assert.equal(historyLate.payload.history[0].status, 'LATE');
+  }
 });

@@ -332,6 +332,8 @@ function mutationLabel(path, method) {
   if (path.startsWith('/api/suppliers')) return 'حفظ بيانات التاجر';
   if (path.startsWith('/api/returns')) return 'تسجيل المرتجع';
   if (path.startsWith('/api/expenses') || path.startsWith('/api/recurring-expenses')) return 'تسجيل المصروف';
+  if (path === '/api/users/shift-schedule') return 'حفظ مواعيد بدء الشيفت';
+  if (path === '/api/attendance/check-in') return 'تسجيل الحضور اليومي';
   if (path.startsWith('/api/users')) return 'حفظ تغييرات الموظف';
   if (path === '/api/account/password') return 'تغيير كلمة المرور';
   if (path.startsWith('/api/backups')) return 'تنفيذ عملية النسخ الاحتياطي';
@@ -425,6 +427,7 @@ async function loadData(storeId, year = state.selectedExpenseYear, month = state
   if (targetStore) params.set('storeId', targetStore);
   if (year) params.set('year', String(year));
   if (month) params.set('month', String(month));
+  params.set('tzOffset', String(new Date().getTimezoneOffset()));
   const query = params.toString() ? `?${params.toString()}` : '';
   state.data = await api(`/api/data${query}`);
 }
@@ -434,7 +437,7 @@ async function start() {
     state.bootstrap = await api('/api/bootstrap');
     if (state.bootstrap.configured) {
       try {
-        const session = await api('/api/data');
+        const session = await api(`/api/data?tzOffset=${encodeURIComponent(String(new Date().getTimezoneOffset()))}`);
         state.user = session.user;
         state.data = session;
       } catch (error) {
@@ -575,31 +578,118 @@ function auditLogsView() {
   return `<section class="panel"><div class="panel-heading"><div><h3>سجل المراجعة والأمان (غير قابل للتعديل)</h3><p>جميع العمليات الحساسة موثقة ومربوطة بتوقيع رقمي متسلسل (SHA-256).</p></div>${badge}</div>${rows ? `<div class="table-scroll"><table><thead><tr><th>#</th><th>التوقيت</th><th>المستخدم</th><th>نوع العملية</th><th>البيان</th><th>بصمة التدقيق</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="empty-row">لا توجد سجلات مراجعة حالية</div>'}</section>`;
 }
 
-function usersView() {
-  const todayAttendance = state.data.todayAttendance ?? [];
-  const activeUsersCount = (state.data.users ?? []).filter((u) => u.isActive).length;
-  const presentCount = todayAttendance.length;
+function invalidateUsersDerivedCache() {
+  state.report = null;
+  state.reportKey = null;
+  state.productStats = null;
+  state.supplierStats = null;
+  state.analyticsKey = null;
+  state.salesHistory = null;
+}
 
-  const rows = (state.data.users ?? []).map((user) => {
+function formatShiftTime12h(hhmm) {
+  if (!hhmm || !/^([01]\d|2[0-3]):[0-5]\d$/.test(hhmm)) return 'غير محدد';
+  const [hh, mm] = hhmm.split(':').map(Number);
+  const suffix = hh >= 12 ? 'م' : 'ص';
+  const h12 = hh % 12 || 12;
+  return `${String(h12).padStart(2, '0')}:${String(mm).padStart(2, '0')} ${suffix}`;
+}
+
+function formatAttendanceMinutesAr(minutes) {
+  const mins = Math.max(0, Math.round(Number(minutes) || 0));
+  if (mins === 0) return '0 دقيقة';
+  if (mins < 60) return `${mins} دقيقة`;
+  const hrs = Math.floor(mins / 60);
+  const rem = mins % 60;
+  return rem ? `${hrs} ساعة و ${rem} دقيقة` : `${hrs} ساعة`;
+}
+
+function formatYearMonthAr(ym) {
+  if (!ym || !/^\d{4}-\d{2}$/.test(ym)) return ym || '';
+  const [y, m] = ym.split('-').map(Number);
+  return new Intl.DateTimeFormat('ar-EG', { year: 'numeric', month: 'long' }).format(new Date(y, m - 1, 1));
+}
+
+function currentLocalMonthStr() {
+  const d = new Date(Date.now() - new Date().getTimezoneOffset() * 60000);
+  return d.toISOString().slice(0, 7);
+}
+
+function formatLocalDayDateAr(dateStr, createdAtIso) {
+  if (dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    return new Intl.DateTimeFormat('ar-EG', { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' }).format(new Date(y, m - 1, d));
+  }
+  const dt = new Date(createdAtIso);
+  return Number.isNaN(dt.valueOf()) ? '—' : dt.toLocaleDateString('ar-EG', { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+function formatTodayAttendancePill(att, user) {
+  if (user.role === 'OWNER') {
+    return `<span class="status-pill" style="opacity:0.7;font-size:11.5px;">${userRoleLabel(user.role)}</span>`;
+  }
+  if (!att) {
+    return `<span class="status-pill status-low" style="font-size:11.5px;">لم يحضر اليوم بعد</span>`;
+  }
+  const timeText = att.arrivalTime
+    ? formatShiftTime12h(att.arrivalTime)
+    : new Date(att.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+  const multiBadge = att.checkInCount > 1 ? ` <small class="att-repeat-hint">(${att.checkInCount} دخول)</small>` : '';
+  if (att.isLate) {
+    return `<span class="status-pill status-danger" style="font-size:11.5px;font-weight:700;">متأخر +${att.lateMinutes} د (${timeText})${multiBadge}</span>`;
+  }
+  if (user.shiftStartTime) {
+    return `<span class="status-pill status-complete" style="font-size:11.5px;font-weight:700;">في الموعد (${timeText})${multiBadge}</span>`;
+  }
+  return `<span class="status-pill status-complete" style="font-size:11.5px;font-weight:700;">حاضر اليوم (${timeText})${multiBadge}</span>`;
+}
+
+function usersView() {
+  const users = state.data.users ?? [];
+  const todayAttendance = state.data.todayAttendance ?? [];
+  const staffUsers = users.filter((u) => u.role !== 'OWNER');
+  const activeUsersCount = users.filter((u) => u.isActive).length;
+
+  // Deduplicate by userId on the UI too as defense-in-depth and exclude OWNER.
+  const uniqueAttByUser = new Map();
+  for (const a of todayAttendance) {
+    if (!a?.userId || uniqueAttByUser.has(a.userId)) continue;
+    const matched = users.find((u) => u.id === a.userId);
+    if (matched?.role === 'OWNER') continue;
+    uniqueAttByUser.set(a.userId, a);
+  }
+  const presentCount = uniqueAttByUser.size;
+  const lateTodayCount = [...uniqueAttByUser.values()].filter((a) => a.isLate).length;
+  const sampleScheduledStaff = staffUsers.find((u) => u.shiftStartTime);
+  const scheduleSummaryLabel = sampleScheduledStaff
+    ? `${formatShiftTime12h(sampleScheduledStaff.shiftStartTime)}${sampleScheduledStaff.lateGraceMinutes ? ` (سماح ${sampleScheduledStaff.lateGraceMinutes} د)` : ''}`
+    : 'غير محدد';
+
+  const rows = users.map((user) => {
     const isOwner = user.role === 'OWNER';
     const storeOptions = `${state.data.user.role === 'OWNER' ? `<option value="" ${!user.storeId ? 'selected' : ''}>كل الفروع</option>` : ''}${state.data.stores.map((store) => `<option value="${store.id}" ${user.storeId === store.id ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}`;
-    const att = todayAttendance.find((a) => a.userId === user.id);
-    const isEmp = user.role === 'CASHIER';
-    const attBadge = isEmp
-      ? (att
-        ? `<span class="status-pill status-complete" style="font-size:11.5px;font-weight:700;">✓ حاضر اليوم (${new Date(att.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })})</span>`
-        : `<span class="status-pill status-low" style="font-size:11.5px;">لم يحضر اليوم بعد</span>`)
-      : `<span class="status-pill" style="opacity:0.65;font-size:11.5px;">${userRoleLabel(user.role)}</span>`;
-    const historyBtn = `<button type="button" class="button button-secondary button-sm view-attendance-btn" data-user-id="${user.id}" data-user-name="${escapeHtml(user.fullName)}" style="font-size:11.5px;padding:3px 9px;">سجل الحضور</button>`;
+    const att = uniqueAttByUser.get(user.id);
+    const attBadge = formatTodayAttendancePill(att, user);
+    const shiftBadge = isOwner
+      ? '<span class="muted-cell">—</span>'
+      : (user.shiftStartTime
+        ? `<span class="sku-code">${formatShiftTime12h(user.shiftStartTime)}${user.lateGraceMinutes ? ` (+${user.lateGraceMinutes} د)` : ''}</span>`
+        : '<span class="status-pill" style="opacity:0.75;font-size:11px;">غير محدد</span>');
+    const historyBtn = isOwner
+      ? '<span class="muted-cell">—</span>'
+      : `<button type="button" class="button button-secondary button-sm view-attendance-btn" data-user-id="${user.id}" data-user-name="${escapeHtml(user.fullName)}">كشف الحضور</button>`;
 
     const roleField = isOwner
       ? '<span class="status-pill status-complete" style="font-weight:700;">مالك النظام</span><input type="hidden" name="role" value="OWNER">'
       : '<select name="role" aria-label="صلاحية المستخدم"><option value="CASHIER" selected>كاشير</option></select>';
 
-    return `<tr><td><button type="button" class="user-detail-button" data-user-details="${user.id}">${escapeHtml(user.fullName)}<small>عرض الملف</small></button></td><td><span class="sku-code">${escapeHtml(user.username)}</span></td><td><span class="status-pill" style="font-size:11.5px;">${userRoleLabel(user.role)}</span></td><td>${attBadge}</td><td><span class="status-pill ${user.isActive ? 'status-complete' : 'status-low'}">${user.isActive ? 'نشط' : 'موقوف'}</span></td><td>${historyBtn}</td><td><form class="user-update-form" data-user-id="${user.id}">${roleField}<select name="storeId" aria-label="فرع المستخدم">${storeOptions}</select><label class="user-active-toggle"><input type="checkbox" name="isActive" ${user.isActive ? 'checked' : ''}>نشط</label><button class="button button-secondary" type="submit">حفظ</button></form></td></tr>`;
+    const searchTokens = escapeHtml(`${user.fullName} ${user.username} ${userRoleLabel(user.role)}`.toLowerCase());
+    return `<tr data-user-search-row="${searchTokens}"><td><button type="button" class="user-detail-button" data-user-details="${user.id}">${escapeHtml(user.fullName)}<small>${escapeHtml(user.username)}</small></button></td><td><span class="status-pill" style="font-size:11.5px;">${userRoleLabel(user.role)}</span></td><td>${shiftBadge}</td><td>${attBadge}</td><td><span class="status-pill ${user.isActive ? 'status-complete' : 'status-low'}">${user.isActive ? 'نشط' : 'موقوف'}</span></td><td>${historyBtn}</td><td><form class="user-update-form" data-user-id="${user.id}">${roleField}<select name="storeId" aria-label="فرع المستخدم">${storeOptions}</select><label class="user-active-toggle"><input type="checkbox" name="isActive" ${user.isActive ? 'checked' : ''}>نشط</label><button class="button button-secondary" type="submit">حفظ</button></form></td></tr>`;
   }).join('');
   const storeOptions = state.data.stores.map((store) => `<option value="${store.id}">${escapeHtml(store.name)}</option>`).join('');
-  return `<div class="page-heading-row"><div><p class="page-lead">إدارة حسابات الكاشير ومتابعة مواعيد الحضور اليومية في المتجر.</p></div></div>
+  const staffOptions = staffUsers.map((u) => `<option value="${u.id}">${escapeHtml(u.fullName)} (${escapeHtml(u.username)})</option>`).join('');
+
+  return `<div class="page-heading-row"><div><p class="page-lead">إدارة حسابات الكاشير، ضبط مواعيد بدء الشيفت، ومتابعة الحضور والتأخير الشهري بمرونة.</p></div></div>
     <div class="inventory-summary" style="margin-bottom:14px;">
       <div class="inventory-summary-card">
         <span class="summary-badge summary-indigo">${icon('users', 18)}</span>
@@ -607,23 +697,66 @@ function usersView() {
       </div>
       <div class="inventory-summary-card">
         <span class="summary-badge summary-teal">${icon('check', 18)}</span>
-        <div><small>سجلوا الحضور اليوم</small><strong>${presentCount} موظف حاضر</strong></div>
+        <div><small>الحضور الفعلي اليوم</small><strong>${presentCount} موظف حاضر</strong></div>
+      </div>
+      <div class="inventory-summary-card">
+        <span class="summary-badge ${lateTodayCount > 0 ? 'summary-amber' : 'summary-teal'}">${icon('clock', 18)}</span>
+        <div><small>المتأخرون اليوم</small><strong>${lateTodayCount} موظف</strong></div>
+      </div>
+      <div class="inventory-summary-card">
+        <span class="summary-badge summary-indigo">${icon('calendar', 18)}</span>
+        <div><small>موعد بدء الشيفت</small><strong>${scheduleSummaryLabel}</strong></div>
       </div>
     </div>
-    <section class="panel user-create-panel">
-      <div class="user-create-heading"><span class="user-create-icon">${icon('users', 22)}</span><div><span class="eyebrow eyebrow-dark">إدارة الكاشير</span><h3>إضافة كاشير جديد</h3><p>أنشئ بيانات دخول الكاشير للمتجر ونقطة البيع والمخزون.</p></div></div>
-      <form id="user-create-form" class="user-create-form">
-        <label><span>الاسم الكامل</span><input name="fullName" required minlength="2" maxlength="100" placeholder="مثال: أحمد محمد" autocomplete="name"></label>
-        <label><span>رقم الهاتف</span><input name="phone" type="tel" maxlength="32" autocomplete="tel" placeholder="مثال: 01012345678"></label>
-        <label><span>اسم المستخدم</span><input name="username" required minlength="3" maxlength="30" pattern="[a-z0-9_]+" autocomplete="username" placeholder="ahmed_01"><small>أحرف إنجليزية صغيرة وأرقام وشرطة سفلية فقط.</small></label>
-        <label><span>كلمة المرور المؤقتة</span><input name="password" type="password" required minlength="12" maxlength="128" autocomplete="new-password" placeholder="12 حرفًا على الأقل"><small>كلمة قوية، ويمكن للموظف تغييرها من حسابه.</small></label>
-        <label><span>الدور والصلاحية</span><select name="role" required><option value="CASHIER" selected>كاشير (نقطة البيع والمخزون والمبيعات)</option></select><small>النظام محدد لمالك المتجر والكاشير فقط.</small></label>
-        <label><span>الفرع</span><select name="storeId" id="user-store-select">${state.data.user.role === 'OWNER' ? '<option value="">كل الفروع</option>' : ''}${storeOptions}</select></label>
-        <label><span>تاريخ بدء العمل</span><input name="employmentStartDate" type="date" value="${new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10)}" required></label>
-        <div class="user-create-actions"><span>تأكد من اختيار الفرع المناسب قبل إنشاء الحساب.</span><button class="button button-primary" type="submit">${icon('plus', 17)} إنشاء حساب الكاشير</button></div>
-      </form>
-    </section>
-    <section class="panel products-panel"><div class="panel-heading"><div><h3>الموظفون ومتابعة الحضور</h3><p>${(state.data.users ?? []).length} حساب مسجل</p></div></div>${rows ? `<div class="table-scroll"><table><thead><tr><th>الاسم</th><th>المستخدم</th><th>الدور</th><th>حضور اليوم</th><th>الحالة</th><th>سجل الحضور</th><th>الإدارة</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-row">لا يوجد مستخدمون</div>`}</section>`;
+
+    <div class="users-tools-grid">
+      <details class="panel compact-disclosure" id="shift-schedule-disclosure">
+        <summary>
+          <span><strong>مواعيد بدء الشيفت وسماح التأخير</strong><small>حدد ساعة بدء الشيفت لاحتساب أيام التأخير تلقائياً في كشف الحضور</small></span>
+          <span class="status-pill ${sampleScheduledStaff ? 'status-complete' : ''}">${scheduleSummaryLabel}</span>
+        </summary>
+        <div class="disclosure-content">
+          <form id="shift-schedule-form" class="shift-schedule-form">
+            <label><span>تطبيق على</span><select name="targetUserId" id="schedule-target-select"><option value="__ALL_STAFF__">جميع الموظفين النشطين (${staffUsers.filter((u) => u.isActive).length})</option>${staffOptions}</select></label>
+            <label><span>موعد بدء الشيفت</span><input name="shiftStartTime" id="schedule-start-input" type="time" value="${escapeHtml(sampleScheduledStaff?.shiftStartTime ?? '09:00')}" required></label>
+            <label><span>سماح التأخير (دقائق)</span><input name="lateGraceMinutes" id="schedule-grace-input" type="number" min="0" max="180" value="${Number(sampleScheduledStaff?.lateGraceMinutes ?? 10)}" required></label>
+            <div class="shift-schedule-actions">
+              <button class="button button-primary" type="submit">حفظ الموعد</button>
+              <button class="button button-secondary" type="button" id="clear-shift-schedule-btn">إلغاء التحديد</button>
+            </div>
+          </form>
+        </div>
+      </details>
+
+      <details class="panel compact-disclosure" id="user-create-disclosure" ${staffUsers.length === 0 ? 'open' : ''}>
+        <summary>
+          <span><strong>إضافة كاشير أو موظف جديد</strong><small>إنشاء بيانات الدخول وتعيين الفرع وموعد بدء الشيفت اختيارياً</small></span>
+          <span class="status-pill">+ حساب جديد</span>
+        </summary>
+        <div class="disclosure-content">
+          <form id="user-create-form" class="user-create-form">
+            <label><span>الاسم الكامل</span><input name="fullName" required minlength="2" maxlength="100" placeholder="مثال: أحمد محمد" autocomplete="name"></label>
+            <label><span>رقم الهاتف</span><input name="phone" type="tel" maxlength="32" autocomplete="tel" placeholder="مثال: 01012345678"></label>
+            <label><span>اسم المستخدم</span><input name="username" required minlength="3" maxlength="30" pattern="[a-z0-9_]+" autocomplete="username" placeholder="ahmed_01"><small>أحرف إنجليزية صغيرة وأرقام وشرطة سفلية فقط.</small></label>
+            <label><span>كلمة المرور المؤقتة</span><input name="password" type="password" required minlength="12" maxlength="128" autocomplete="new-password" placeholder="12 حرفًا على الأقل"><small>كلمة قوية، ويمكن للموظف تغييرها من حسابه.</small></label>
+            <label><span>الدور والصلاحية</span><select name="role" required><option value="CASHIER" selected>كاشير (نقطة البيع والمخزون والمبيعات)</option></select></label>
+            <label><span>الفرع</span><select name="storeId" id="user-store-select">${state.data.user.role === 'OWNER' ? '<option value="">كل الفروع</option>' : ''}${storeOptions}</select></label>
+            <label><span>تاريخ بدء العمل</span><input name="employmentStartDate" type="date" value="${new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10)}" required></label>
+            <label><span>موعد بدء الشيفت (اختياري)</span><input name="shiftStartTime" type="time" value="${escapeHtml(sampleScheduledStaff?.shiftStartTime ?? '09:00')}"></label>
+            <label><span>سماح التأخير (دقائق)</span><input name="lateGraceMinutes" type="number" min="0" max="180" value="${Number(sampleScheduledStaff?.lateGraceMinutes ?? 10)}"></label>
+            <div class="user-create-actions"><span>تأكد من اختيار الفرع المناسب قبل إنشاء الحساب.</span><button class="button button-primary" type="submit">${icon('plus', 17)} إنشاء حساب الكاشير</button></div>
+          </form>
+        </div>
+      </details>
+    </div>
+
+    <section class="panel products-panel">
+      <div class="panel-heading users-panel-heading">
+        <div><h3>الموظفون ومتابعة الحضور</h3><p>${users.length} حساب مسجل · اضغط «كشف الحضور» لعرض السجل الشهري وأيام التأخير</p></div>
+        <div class="users-filter-bar"><input id="users-search-input" type="search" placeholder="ابحث باسم الموظف أو المستخدم..." aria-label="بحث في الموظفين"></div>
+      </div>
+      ${rows ? `<div class="table-scroll users-table-scroll"><table><thead><tr><th>الاسم</th><th>الدور</th><th>موعد الشيفت</th><th>حضور اليوم</th><th>الحالة</th><th>كشف الحضور</th><th>الإدارة</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-row">لا يوجد مستخدمون</div>`}
+    </section>`;
 }
 
 function employeeDateLabel(value, includeTime = false) {
@@ -650,9 +783,13 @@ function showEmployeeDetails(user) {
   const root = getModalRoot();
   const storeName = state.data.stores.find((store) => store.id === user.storeId)?.name ?? 'كل الفروع';
   const att = (state.data.todayAttendance ?? []).find((a) => a.userId === user.id);
-  const isEmp = user.role === 'CASHIER';
-  const attText = isEmp ? (att ? `✓ حاضر اليوم (${new Date(att.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })})` : 'لم يحضر اليوم بعد') : 'إدارة / مالك';
-  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card employee-profile-card" role="dialog" aria-modal="true" aria-labelledby="employee-profile-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">ملف الموظف</span><h2 id="employee-profile-title">${escapeHtml(user.fullName)}</h2></div><button type="button" class="modal-close" data-close-employee aria-label="إغلاق">×</button></div><div class="employee-profile-body"><div class="employee-profile-meta"><div class="employee-meta-item"><small>اسم المستخدم</small><strong>${escapeHtml(user.username)}</strong></div><div class="employee-meta-item"><small>الدور الوظيفي</small><strong>${userRoleLabel(user.role)}</strong></div><div class="employee-meta-item"><small>الفرع المعين به</small><strong>${escapeHtml(storeName)}</strong></div><div class="employee-meta-item"><small>حالة الحساب</small><strong class="${user.isActive ? 'profile-active' : 'profile-inactive'}">${user.isActive ? 'نشط ومفعل' : 'موقوف'}</strong></div><div class="employee-meta-item"><small>حضور اليوم</small><strong style="color:${att ? 'var(--green, #15803d)' : '#b45309'};">${attText}</strong></div><div class="employee-meta-item"><small>تاريخ الانضمام</small><strong>${employeeDateLabel(user.createdAt, true)}</strong></div><div class="employee-meta-item employee-meta-wide"><small>مدة العمل في المتجر</small><strong>${employeeTenure(user.employmentStartDate)}</strong></div></div><form id="employee-profile-form" data-user-id="${user.id}" class="form-stack"><div class="form-grid"><label><span>رقم الهاتف</span><input name="phone" type="tel" maxlength="32" autocomplete="tel" value="${escapeHtml(user.phone ?? '')}" placeholder="لم يُسجل رقم هاتف"></label><label><span>تاريخ بدء العمل الفعلي</span><input name="employmentStartDate" type="date" required value="${escapeHtml(user.employmentStartDate ?? '')}"></label></div><div class="modal-actions" style="margin-top:10px;"><button type="button" class="button button-secondary" data-close-employee>إغلاق</button><button type="button" class="button button-secondary" id="employee-modal-att-btn">سجل الحضور</button><button type="submit" class="button button-primary">حفظ بيانات الموظف</button></div></form></div></section></div>`;
+  const isEmp = user.role !== 'OWNER';
+  const attTimeLabel = att ? (att.arrivalTime ? formatShiftTime12h(att.arrivalTime) : new Date(att.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })) : '';
+  const attText = isEmp
+    ? (att ? (att.isLate ? `متأخر +${att.lateMinutes} د (${attTimeLabel})` : `حاضر (${attTimeLabel})`) : 'لم يحضر اليوم بعد')
+    : 'إدارة / مالك';
+  const shiftLabel = user.shiftStartTime ? `${formatShiftTime12h(user.shiftStartTime)} (سماح ${user.lateGraceMinutes ?? 0} د)` : 'غير محدد';
+  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card employee-profile-card" role="dialog" aria-modal="true" aria-labelledby="employee-profile-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">ملف الموظف</span><h2 id="employee-profile-title">${escapeHtml(user.fullName)}</h2></div><button type="button" class="modal-close" data-close-employee aria-label="إغلاق">×</button></div><div class="employee-profile-body"><div class="employee-profile-meta"><div class="employee-meta-item"><small>اسم المستخدم</small><strong>${escapeHtml(user.username)}</strong></div><div class="employee-meta-item"><small>الدور الوظيفي</small><strong>${userRoleLabel(user.role)}</strong></div><div class="employee-meta-item"><small>الفرع المعين به</small><strong>${escapeHtml(storeName)}</strong></div><div class="employee-meta-item"><small>حالة الحساب</small><strong class="${user.isActive ? 'profile-active' : 'profile-inactive'}">${user.isActive ? 'نشط ومفعل' : 'موقوف'}</strong></div><div class="employee-meta-item"><small>حضور اليوم</small><strong style="color:${att?.isLate ? 'var(--amber, #b45309)' : (att ? 'var(--green, #15803d)' : 'var(--muted)')};">${attText}</strong></div><div class="employee-meta-item"><small>موعد بدء الشيفت</small><strong>${shiftLabel}</strong></div><div class="employee-meta-item"><small>تاريخ الانضمام</small><strong>${employeeDateLabel(user.createdAt, true)}</strong></div><div class="employee-meta-item"><small>مدة العمل في المتجر</small><strong>${employeeTenure(user.employmentStartDate)}</strong></div></div><form id="employee-profile-form" data-user-id="${user.id}" class="form-stack"><div class="form-grid"><label><span>رقم الهاتف</span><input name="phone" type="tel" maxlength="32" autocomplete="tel" value="${escapeHtml(user.phone ?? '')}" placeholder="لم يُسجل رقم هاتف"></label><label><span>تاريخ بدء العمل الفعلي</span><input name="employmentStartDate" type="date" required value="${escapeHtml(user.employmentStartDate ?? '')}"></label>${isEmp ? `<label><span>موعد بدء الشيفت</span><input name="shiftStartTime" type="time" value="${escapeHtml(user.shiftStartTime ?? '')}"></label><label><span>سماح التأخير (دقائق)</span><input name="lateGraceMinutes" type="number" min="0" max="180" value="${Number(user.lateGraceMinutes ?? 0)}"></label>` : ''}</div><div class="modal-actions" style="margin-top:10px;"><button type="button" class="button button-secondary" data-close-employee>إغلاق</button>${isEmp ? '<button type="button" class="button button-secondary" id="employee-modal-att-btn">كشف الحضور الشهري</button>' : ''}<button type="submit" class="button button-primary">حفظ بيانات الموظف</button></div></form></div></section></div>`;
   root.querySelectorAll('[data-close-employee]').forEach((element) => element.addEventListener('click', (event) => {
     if (element === event.target || element.tagName === 'BUTTON') root.innerHTML = '';
   }));
@@ -663,17 +800,17 @@ function showEmployeeDetails(user) {
     event.preventDefault();
     const form = event.currentTarget;
     const button = form.querySelector('[type=submit]');
-    const body = Object.fromEntries(new FormData(form));
-    body.phone = body.phone || null;
+    const raw = Object.fromEntries(new FormData(form));
+    const body = {
+      phone: raw.phone || null,
+      employmentStartDate: raw.employmentStartDate,
+      ...(raw.shiftStartTime !== undefined ? { shiftStartTime: raw.shiftStartTime ? raw.shiftStartTime : null } : {}),
+      ...(raw.lateGraceMinutes !== undefined ? { lateGraceMinutes: Number(raw.lateGraceMinutes || 0) } : {}),
+    };
     button.disabled = true;
     try {
       await api(`/api/users/${form.dataset.userId}`, { method: 'PATCH', body: JSON.stringify(body) });
-      state.report = null;
-      state.reportKey = null;
-      state.productStats = null;
-      state.supplierStats = null;
-      state.analyticsKey = null;
-      state.salesHistory = null;
+      invalidateUsersDerivedCache();
       await loadData(state.data.selectedStoreId);
       root.innerHTML = '';
       render();
@@ -684,30 +821,218 @@ function showEmployeeDetails(user) {
 
 async function showAttendanceHistoryModal(userId, userName) {
   const root = getModalRoot();
-  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card" role="dialog" aria-modal="true" style="width:min(580px, calc(100vw - 32px));margin:20px auto;"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">سجل حضور الموظف</span><h2>${escapeHtml(userName)}</h2></div><button type="button" class="modal-close" data-close-modal>×</button></div><div style="padding:16px 20px;" id="attendance-history-content"><p style="text-align:center;color:var(--text-soft);">جاري تحميل سجل الحضور...</p></div><div class="modal-actions" style="padding:12px 20px;"><button type="button" class="button button-secondary" data-close-modal>إغلاق</button></div></section></div>`;
+  const PAGE_SIZE = 31;
+  let activeMonth = currentLocalMonthStr();
+  let statusFilter = 'ALL';
+  let currentPage = 1;
+  let didInitialMonthFallback = false;
+
+  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card attendance-modal-card" role="dialog" aria-modal="true" aria-labelledby="attendance-modal-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">كشف الحضور والانضباط الشهري</span><h2 id="attendance-modal-title">${escapeHtml(userName)}</h2></div><button type="button" class="modal-close" data-close-modal>×</button></div><div class="attendance-modal-body" id="attendance-history-content"><p style="text-align:center;color:var(--text-soft);padding:24px;">جاري تحميل كشف الحضور...</p></div><div class="modal-actions" style="padding:12px 20px;"><button type="button" class="button button-secondary" data-close-modal>إغلاق</button></div></section></div>`;
   root.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
-  try {
-    const data = await api(`/api/attendance/history?userId=${encodeURIComponent(userId)}`);
-    const history = data.history ?? [];
+
+  const loadAndRender = async () => {
     const content = root.querySelector('#attendance-history-content');
     if (!content) return;
-    if (!history.length) {
-      content.innerHTML = `<div class="empty-row" style="text-align:center;padding:24px;">لا يوجد سجل حضور مسجل بعد لهذا الموظف.</div>`;
-      return;
+    try {
+      const tzOffset = new Date().getTimezoneOffset();
+      let data = await api(`/api/attendance/history?userId=${encodeURIComponent(userId)}&month=${encodeURIComponent(activeMonth)}&tzOffset=${encodeURIComponent(String(tzOffset))}`);
+      // If current month has no entries yet on initial open, switch cleanly to latest available month.
+      if (!didInitialMonthFallback && (data.history ?? []).length === 0 && (data.availableMonths ?? []).length > 0) {
+        didInitialMonthFallback = true;
+        activeMonth = data.availableMonths[0];
+        data = await api(`/api/attendance/history?userId=${encodeURIComponent(userId)}&month=${encodeURIComponent(activeMonth)}&tzOffset=${encodeURIComponent(String(tzOffset))}`);
+      } else {
+        didInitialMonthFallback = true;
+      }
+
+      const summary = data.summary ?? { totalDays: 0, onTimeDays: 0, lateDays: 0, totalLateMinutes: 0 };
+      const allRows = data.history ?? [];
+      const filteredRows = statusFilter === 'LATE'
+        ? allRows.filter((r) => r.status === 'LATE')
+        : (statusFilter === 'ON_TIME' ? allRows.filter((r) => r.status === 'ON_TIME') : allRows);
+
+      const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
+      if (currentPage > totalPages) currentPage = totalPages;
+      const pageRows = filteredRows.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+
+      const monthChoices = [...new Set([currentLocalMonthStr(), ...(data.availableMonths ?? [])])].sort((a, b) => b.localeCompare(a));
+      const monthOptionsHtml = `<option value="all" ${activeMonth === 'all' ? 'selected' : ''}>كل الأشهر</option>${monthChoices.map((m) => `<option value="${m}" ${activeMonth === m ? 'selected' : ''}>${escapeHtml(formatYearMonthAr(m))}</option>`).join('')}`;
+      const scheduleText = data.shiftStartTime
+        ? `موعد الشيفت: ${formatShiftTime12h(data.shiftStartTime)} (سماح ${data.lateGraceMinutes ?? 0} د)`
+        : 'لم يُحدد موعد بدء الشيفت بعد';
+
+      content.innerHTML = `
+        <div class="att-schedule-bar ${data.shiftStartTime ? '' : 'att-schedule-bar-warn'}">
+          <div class="att-schedule-info">
+            <span class="status-pill ${data.shiftStartTime ? 'status-complete' : 'status-low'}">${escapeHtml(scheduleText)}</span>
+          </div>
+          <form id="att-inline-schedule-form" class="att-inline-schedule-form">
+            <input type="time" name="shiftStartTime" aria-label="موعد بدء الشيفت" value="${escapeHtml(data.shiftStartTime ?? '09:00')}" required>
+            <input type="number" name="lateGraceMinutes" aria-label="سماح التأخير بالدقائق" min="0" max="180" value="${Number(data.lateGraceMinutes ?? 10)}" title="دقائق السماح">
+            <button type="submit" class="button button-secondary button-sm">تحديث الموعد</button>
+          </form>
+        </div>
+
+        <div class="att-kpi-grid">
+          <div class="att-kpi-box"><small>أيام الحضور</small><strong>${summary.totalDays} يوم</strong></div>
+          <div class="att-kpi-box att-kpi-ok"><small>حضر في الموعد</small><strong>${summary.onTimeDays} يوم</strong></div>
+          <div class="att-kpi-box ${summary.lateDays > 0 ? 'att-kpi-late' : ''}"><small>أيام التأخير</small><strong>${summary.lateDays} يوم</strong></div>
+          <div class="att-kpi-box"><small>إجمالي التأخير</small><strong>${formatAttendanceMinutesAr(summary.totalLateMinutes)}</strong></div>
+        </div>
+
+        <div class="att-controls-bar">
+          <label class="att-filter-field">
+            <span>الشهر</span>
+            <select id="att-month-select">${monthOptionsHtml}</select>
+          </label>
+          <div class="att-status-tabs" role="tablist" aria-label="تصفية حسب الانضباط">
+            <button type="button" class="att-tab-btn ${statusFilter === 'ALL' ? 'is-active' : ''}" data-att-status="ALL">الكل (${allRows.length})</button>
+            <button type="button" class="att-tab-btn ${statusFilter === 'LATE' ? 'is-active' : ''}" data-att-status="LATE">المتأخر (${summary.lateDays})</button>
+            <button type="button" class="att-tab-btn ${statusFilter === 'ON_TIME' ? 'is-active' : ''}" data-att-status="ON_TIME">في الموعد (${summary.onTimeDays})</button>
+          </div>
+        </div>
+
+        ${pageRows.length ? `
+          <div class="table-scroll attendance-table-scroll">
+            <table class="compact-table zebra-table">
+              <thead><tr><th>التاريخ</th><th>موعد الشيفت</th><th>أول حضور</th><th>الحالة</th></tr></thead>
+              <tbody>
+                ${pageRows.map((item) => {
+                  const scheduledCell = item.shiftStartTime ? formatShiftTime12h(item.shiftStartTime) : '<span class="muted-cell">غير محدد</span>';
+                  const arrivalCell = item.arrivalTime ? formatShiftTime12h(item.arrivalTime) : new Date(item.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+                  const repeatNote = item.checkInCount > 1 ? ` <small class="att-repeat-hint">(${item.checkInCount} تسجيل)</small>` : '';
+                  const statusBadge = item.status === 'LATE'
+                    ? `<span class="status-pill status-danger" style="font-weight:700;">متأخر +${item.lateMinutes} د</span>`
+                    : (item.status === 'ON_TIME'
+                      ? `<span class="status-pill status-complete" style="font-weight:700;">في الموعد</span>`
+                      : `<span class="status-pill">حاضر</span>`);
+                  return `<tr><td><strong>${escapeHtml(formatLocalDayDateAr(item.date, item.createdAt))}</strong></td><td>${scheduledCell}</td><td><span class="sku-code">${arrivalCell}</span>${repeatNote}</td><td>${statusBadge}</td></tr>`;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+          ${totalPages > 1 ? `
+            <div class="att-pagination-bar">
+              <button type="button" class="button button-secondary button-sm" id="att-prev-page" ${currentPage <= 1 ? 'disabled' : ''}>السابق</button>
+              <span>صفحة ${currentPage} من ${totalPages} (${filteredRows.length} يوم)</span>
+              <button type="button" class="button button-secondary button-sm" id="att-next-page" ${currentPage >= totalPages ? 'disabled' : ''}>التالي</button>
+            </div>
+          ` : ''}
+        ` : `<div class="empty-row" style="text-align:center;padding:24px;">لا توجد أيام حضور مطابقة لهذا الفلتر.</div>`}
+      `;
+
+      content.querySelector('#att-month-select')?.addEventListener('change', (e) => {
+        activeMonth = e.target.value;
+        currentPage = 1;
+        loadAndRender();
+      });
+      content.querySelectorAll('[data-att-status]').forEach((btn) => btn.addEventListener('click', () => {
+        statusFilter = btn.dataset.attStatus;
+        currentPage = 1;
+        loadAndRender();
+      }));
+      content.querySelector('#att-prev-page')?.addEventListener('click', () => {
+        if (currentPage > 1) { currentPage -= 1; loadAndRender(); }
+      });
+      content.querySelector('#att-next-page')?.addEventListener('click', () => {
+        if (currentPage < totalPages) { currentPage += 1; loadAndRender(); }
+      });
+      content.querySelector('#att-inline-schedule-form')?.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        const form = ev.currentTarget;
+        const submitBtn = form.querySelector('[type=submit]');
+        submitBtn.disabled = true;
+        try {
+          const fd = new FormData(form);
+          await api(`/api/users/${encodeURIComponent(userId)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({
+              shiftStartTime: fd.get('shiftStartTime') || null,
+              lateGraceMinutes: Number(fd.get('lateGraceMinutes') || 0),
+            }),
+          });
+          invalidateUsersDerivedCache();
+          await loadData(state.data.selectedStoreId);
+          toast('تم تحديث موعد بدء الشيفت وإعادة احتساب التأخير');
+          await loadAndRender();
+        } catch (err) {
+          toast(err.message, 'error');
+          submitBtn.disabled = false;
+        }
+      });
+    } catch (err) {
+      content.innerHTML = `<div class="status-pill status-low" style="display:block;padding:12px;">فشل تحميل السجل: ${escapeHtml(err.message)}</div>`;
     }
-    content.innerHTML = `<div class="table-scroll analytics-scroll-box" style="max-height:420px; overflow-y:auto;"><table class="compact-table zebra-table" style="width:100%;border-collapse:collapse;"><thead><tr><th>التاريخ</th><th>وقت تسجيل الحضور</th><th>الحالة</th></tr></thead><tbody>${history.map((item) => {
-      const d = new Date(item.createdAt);
-      const dateStr = d.toLocaleDateString('ar-EG', { weekday: 'long', year: 'numeric', month: 'short', day: 'numeric' });
-      const timeStr = d.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
-      return `<tr><td><strong>${dateStr}</strong></td><td><span class="sku-code">${timeStr}</span></td><td><span class="status-pill status-complete" style="font-weight:700;">✓ حاضر</span></td></tr>`;
-    }).join('')}</tbody></table></div>`;
-  } catch (err) {
-    const content = root.querySelector('#attendance-history-content');
-    if (content) content.innerHTML = `<div class="status-pill status-low" style="display:block;padding:12px;">فشل تحميل السجل: ${escapeHtml(err.message)}</div>`;
-  }
+  };
+
+  await loadAndRender();
 }
 
 function bindUsers() {
+  const scheduleForm = document.querySelector('#shift-schedule-form');
+  const scheduleTarget = document.querySelector('#schedule-target-select');
+  const scheduleStartInput = document.querySelector('#schedule-start-input');
+  const scheduleGraceInput = document.querySelector('#schedule-grace-input');
+  scheduleTarget?.addEventListener('change', () => {
+    if (scheduleTarget.value === '__ALL_STAFF__') return;
+    const selected = (state.data.users ?? []).find((u) => u.id === scheduleTarget.value);
+    if (selected) {
+      if (scheduleStartInput && selected.shiftStartTime) scheduleStartInput.value = selected.shiftStartTime;
+      if (scheduleGraceInput) scheduleGraceInput.value = String(selected.lateGraceMinutes ?? 0);
+    }
+  });
+  scheduleForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = scheduleForm.querySelector('[type=submit]');
+    const fd = new FormData(scheduleForm);
+    const targetValue = String(fd.get('targetUserId') ?? '__ALL_STAFF__');
+    const payload = {
+      shiftStartTime: String(fd.get('shiftStartTime') ?? '').trim() || null,
+      lateGraceMinutes: Number(fd.get('lateGraceMinutes') || 0),
+      ...(targetValue !== '__ALL_STAFF__' ? { userIds: [targetValue] } : {}),
+    };
+    button.disabled = true;
+    try {
+      const res = await api('/api/users/shift-schedule', { method: 'PATCH', body: JSON.stringify(payload) });
+      invalidateUsersDerivedCache();
+      await loadData(state.data.selectedStoreId);
+      render();
+      toast(`تم حفظ موعد بدء الشيفت لعدد ${res.updatedCount} موظف`);
+    } catch (error) {
+      toast(error.message, 'error');
+      button.disabled = false;
+    }
+  });
+  document.querySelector('#clear-shift-schedule-btn')?.addEventListener('click', async (event) => {
+    const btn = event.currentTarget;
+    const targetValue = String(scheduleTarget?.value ?? '__ALL_STAFF__');
+    btn.disabled = true;
+    try {
+      await api('/api/users/shift-schedule', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          shiftStartTime: null,
+          lateGraceMinutes: 0,
+          ...(targetValue !== '__ALL_STAFF__' ? { userIds: [targetValue] } : {}),
+        }),
+      });
+      invalidateUsersDerivedCache();
+      await loadData(state.data.selectedStoreId);
+      render();
+      toast('تم إلغاء تحديد موعد بدء الشيفت');
+    } catch (error) {
+      toast(error.message, 'error');
+      btn.disabled = false;
+    }
+  });
+
+  document.querySelector('#users-search-input')?.addEventListener('input', (event) => {
+    const q = event.target.value.trim().toLowerCase();
+    document.querySelectorAll('[data-user-search-row]').forEach((tr) => {
+      tr.hidden = q ? !tr.dataset.userSearchRow.includes(q) : false;
+    });
+  });
+
   const form = document.querySelector('#user-create-form');
   const role = form?.elements.namedItem('role');
   const store = form?.elements.namedItem('storeId');
@@ -717,20 +1042,25 @@ function bindUsers() {
   form?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const button = form.querySelector('[type=submit]');
-    const body = Object.fromEntries(new FormData(form));
-    if (!body.storeId) delete body.storeId;
+    const raw = Object.fromEntries(new FormData(form));
+    const body = {
+      username: raw.username,
+      password: raw.password,
+      fullName: raw.fullName,
+      phone: raw.phone || undefined,
+      employmentStartDate: raw.employmentStartDate,
+      role: raw.role,
+      ...(raw.storeId ? { storeId: raw.storeId } : {}),
+      ...(raw.shiftStartTime ? { shiftStartTime: raw.shiftStartTime } : {}),
+      lateGraceMinutes: Number(raw.lateGraceMinutes || 0),
+    };
     button.disabled = true;
     try {
       await api('/api/users', { method: 'POST', body: JSON.stringify(body) });
-      state.report = null;
-      state.reportKey = null;
-      state.productStats = null;
-      state.supplierStats = null;
-      state.analyticsKey = null;
-      state.salesHistory = null;
+      invalidateUsersDerivedCache();
       await loadData(state.data.selectedStoreId);
       render();
-      toast('\u062a\u0645 \u0625\u0646\u0634\u0627\u0621 \u062d\u0633\u0627\u0628 \u0627\u0644\u0645\u0633\u062a\u062e\u062f\u0645');
+      toast('تم إنشاء حساب المستخدم');
     } catch (error) { toast(error.message, 'error'); button.disabled = false; }
   });
   document.querySelectorAll('[data-user-details]').forEach((button) => button.addEventListener('click', () => {
@@ -750,15 +1080,10 @@ function bindUsers() {
     button.disabled = true;
     try {
       await api(`/api/users/${target.dataset.userId}`, { method: 'PATCH', body: JSON.stringify(data) });
-      state.report = null;
-      state.reportKey = null;
-      state.productStats = null;
-      state.supplierStats = null;
-      state.analyticsKey = null;
-      state.salesHistory = null;
+      invalidateUsersDerivedCache();
       await loadData(state.data.selectedStoreId);
       render();
-      toast('\u062a\u0645 \u062a\u062d\u062f\u064a\u062b \u0635\u0644\u0627\u062d\u064a\u0627\u062a \u0627\u0644\u0645\u0633\u062a\u062e\u062f\u0645');
+      toast('تم تحديث صلاحيات المستخدم');
     } catch (error) { toast(error.message, 'error'); button.disabled = false; }
   }));
 }
@@ -1658,6 +1983,7 @@ function showStartShiftModal() {
           storeId: state.data.selectedStoreId,
           openingCash: openingCashMinor,
           notes: '',
+          tzOffset: new Date().getTimezoneOffset(),
         })
       });
       root.innerHTML = '';
@@ -4794,7 +5120,10 @@ function bindShell() {
     const btn = event.currentTarget;
     btn.disabled = true;
     try {
-      await api('/api/attendance/check-in', { method: 'POST' });
+      await api('/api/attendance/check-in', {
+        method: 'POST',
+        body: JSON.stringify({ tzOffset: new Date().getTimezoneOffset() }),
+      });
       toast('تم تسجيل حضورك اليوم بنجاح');
       state.report = null;
       state.reportKey = null;

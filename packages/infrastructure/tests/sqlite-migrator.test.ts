@@ -5,7 +5,10 @@ import { SqliteDatabaseManager } from '../src/database/sqlite.js';
 import { DatabaseMigrator } from '../src/database/migrator.js';
 import { SqliteUnitOfWork } from '../src/database/unit-of-work.js';
 import { SqliteAuditLogRepository } from '../src/database/repositories/sqlite-audit-log.repository.js';
+import { SqliteUserRepository } from '../src/database/repositories/sqlite-user.repository.js';
+import { User } from '@retailos/core';
 import { up as employeeProfileMigration } from '../src/database/migrations/015_employee_profiles.js';
+import { up as attendanceScheduleMigration } from '../src/database/migrations/020_attendance_schedule.js';
 
 describe('SQLite Database & Migration Engine', () => {
   let dbManager: SqliteDatabaseManager;
@@ -81,6 +84,54 @@ describe('SQLite Database & Migration Engine', () => {
     const user = await db.selectFrom('users').select(['phone', 'employment_start_date']).where('id', '=', 'legacy-user').executeTakeFirstOrThrow();
     expect(user.phone).toBeNull();
     expect(user.employment_start_date).toBe('2024-02-01');
+
+    await attendanceScheduleMigration(db);
+    const updatedUser = await db
+      .selectFrom('users')
+      .select(['shift_start_time', 'late_grace_minutes'])
+      .where('id', '=', 'legacy-user')
+      .executeTakeFirstOrThrow();
+    expect(updatedUser.shift_start_time).toBeNull();
+    expect(updatedUser.late_grace_minutes).toBe(0);
+  });
+
+  it('persists and retrieves employee shiftStartTime and lateGraceMinutes via SqliteUserRepository', async () => {
+    const migrator = new DatabaseMigrator(dbManager.getDb());
+    await migrator.migrateToLatest();
+    const db = dbManager.getDb();
+
+    const tenantId = '018f3a2c-0000-7000-8000-000000000101';
+    const storeId = '018f3a2c-0000-7000-8000-000000000102';
+    const userId = '018f3a2c-0000-7000-8000-000000000103';
+    await db.insertInto('tenants').values({ id: tenantId, name: 'Schedule Co', code: 'SCH_01', currency: 'EGP' }).execute();
+    await db.insertInto('stores').values({ id: storeId, tenant_id: tenantId, name: 'Branch 1', code: 'BR_1' }).execute();
+
+    const repo = new SqliteUserRepository(db);
+    const ctx = new ScopedExecutionContext({
+      tenantId,
+      userId,
+      roleId: 'OWNER',
+      permissions: new Set([Permissions.USERS_MANAGE]),
+      correlationId: 'test-corr-schedule',
+    });
+
+    const cashier = User.create({
+      id: userId,
+      tenantId,
+      storeId,
+      username: 'cashier_sched',
+      passwordHash: 'hash_placeholder_value_123456',
+      fullName: 'Scheduled Cashier',
+      shiftStartTime: '09:30',
+      lateGraceMinutes: 15,
+      role: 'CASHIER',
+    });
+    await repo.save(ctx, cashier);
+
+    const loaded = await repo.findById(ctx, userId);
+    expect(loaded).not.toBeNull();
+    expect(loaded?.shiftStartTime).toBe('09:30');
+    expect(loaded?.lateGraceMinutes).toBe(15);
   });
 
   it('enforces foreign key constraints in SQLite', async () => {

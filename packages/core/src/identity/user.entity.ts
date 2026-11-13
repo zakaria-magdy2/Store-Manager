@@ -8,10 +8,14 @@ export interface UserProps {
   fullName: string;
   phone: string | undefined;
   employmentStartDate: string;
+  shiftStartTime: string | undefined;
+  lateGraceMinutes: number;
   role: Role;
   storeId: string | undefined;
   isActive: boolean;
 }
+
+const SHIFT_START_TIME_REGEX = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 export class User extends Entity<UserProps> {
   private constructor(id: string, props: UserProps, createdAt?: Date, updatedAt?: Date) {
@@ -26,6 +30,8 @@ export class User extends Entity<UserProps> {
     fullName: string;
     phone?: string | undefined;
     employmentStartDate?: string | undefined;
+    shiftStartTime?: string | undefined;
+    lateGraceMinutes?: number | undefined;
     role: Role;
     storeId?: string | undefined;
     isActive?: boolean;
@@ -50,6 +56,15 @@ export class User extends Entity<UserProps> {
       throw new Error('UserError: Cashier must be assigned to a specific store');
     }
 
+    const normalizedShiftStart = params.shiftStartTime?.trim() || undefined;
+    if (normalizedShiftStart && !SHIFT_START_TIME_REGEX.test(normalizedShiftStart)) {
+      throw new Error('UserError: Invalid shiftStartTime format (expected HH:MM)');
+    }
+    const normalizedGrace = params.lateGraceMinutes ?? 0;
+    if (!Number.isInteger(normalizedGrace) || normalizedGrace < 0 || normalizedGrace > 180) {
+      throw new Error('UserError: lateGraceMinutes must be an integer between 0 and 180');
+    }
+
     return new User(
       params.id,
       {
@@ -59,6 +74,8 @@ export class User extends Entity<UserProps> {
         fullName: params.fullName.trim(),
         phone: params.phone?.trim() || undefined,
         employmentStartDate: params.employmentStartDate ?? (params.createdAt ?? new Date()).toISOString().slice(0, 10),
+        shiftStartTime: normalizedShiftStart,
+        lateGraceMinutes: normalizedGrace,
         role: params.role,
         storeId: params.storeId?.trim(),
         isActive: params.isActive ?? true,
@@ -90,6 +107,14 @@ export class User extends Entity<UserProps> {
 
   public get employmentStartDate(): string {
     return this.props.employmentStartDate;
+  }
+
+  public get shiftStartTime(): string | undefined {
+    return this.props.shiftStartTime;
+  }
+
+  public get lateGraceMinutes(): number {
+    return this.props.lateGraceMinutes;
   }
 
   public get role(): Role {

@@ -30,6 +30,8 @@ export interface UsersTable {
   full_name: string;
   phone: string | null;
   employment_start_date: string | null;
+  shift_start_time: Generated<string | null>;
+  late_grace_minutes: Generated<number>;
   role: string;
   is_active: Generated<number>;
   created_at: Generated<string>;

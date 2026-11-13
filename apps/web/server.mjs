@@ -321,7 +321,13 @@ const EmployeeDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value
   return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value;
 });
 const EmployeePhoneSchema = z.string().trim().max(32).regex(/^[+0-9().\-\s]*$/);
-const UpdateUserSchema = z.object({ fullName: z.string().min(2).max(100).trim().optional(), phone: EmployeePhoneSchema.nullable().optional(), employmentStartDate: EmployeeDateSchema.optional(), role: z.enum(['OWNER', 'STORE_MANAGER', 'CASHIER', 'AUDITOR']).optional(), storeId: z.string().uuid().nullable().optional(), isActive: z.boolean().optional() }).refine((body) => Object.keys(body).length > 0);
+const ShiftStartTimeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'صيغة موعد بدء الشيفت يجب أن تكون HH:MM');
+const UpdateUserSchema = z.object({ fullName: z.string().min(2).max(100).trim().optional(), phone: EmployeePhoneSchema.nullable().optional(), employmentStartDate: EmployeeDateSchema.optional(), shiftStartTime: ShiftStartTimeSchema.nullable().optional(), lateGraceMinutes: z.number().int().min(0).max(180).optional(), role: z.enum(['OWNER', 'STORE_MANAGER', 'CASHIER', 'AUDITOR']).optional(), storeId: z.string().uuid().nullable().optional(), isActive: z.boolean().optional() }).refine((body) => Object.keys(body).length > 0);
+const BulkShiftScheduleSchema = z.object({
+  userIds: z.array(z.string().uuid()).max(200).optional(),
+  shiftStartTime: ShiftStartTimeSchema.nullable(),
+  lateGraceMinutes: z.number().int().min(0).max(180).optional(),
+});
 const CreateStoreSchema = z.object({ name: z.string().min(2).max(100).trim(), code: z.string().min(2).max(20).regex(/^[A-Za-z0-9_-]+$/).trim(), address: z.string().max(240).trim().optional(), phone: z.string().max(40).trim().optional() });
 const InventoryTransferSchema = z.object({ fromStoreId: z.string().uuid(), toStoreId: z.string().uuid(), variantId: z.string().uuid(), quantity: z.string().regex(/^[1-9]\d{0,8}$/) });
 const ShiftCloseSchema = z.object({ storeId: z.string().uuid(), idempotencyKey: z.string().uuid(), actualCashAmount: z.string().regex(/^-?\d{1,15}$/), notes: z.string().max(300).trim().optional() });
@@ -349,6 +355,75 @@ const InventoryAdjustSchema = z.object({
   unitCost: z.string().regex(/^\d{1,15}$/).optional(),
   reason: z.string().max(300).trim().optional(),
 });
+
+function normalizeTzOffsetMinutes(raw) {
+  if (raw === undefined || raw === null || raw === '') return new Date().getTimezoneOffset();
+  const parsed = Number.parseInt(String(raw), 10);
+  if (!Number.isFinite(parsed) || parsed < -840 || parsed > 840) return new Date().getTimezoneOffset();
+  return parsed;
+}
+
+function localDayUtcBounds(dateMs = Date.now(), tzOffsetMinutes = new Date().getTimezoneOffset()) {
+  // Date.getTimezoneOffset() = (UTC - Local) in minutes, e.g. -120 for UTC+2.
+  const offsetMs = tzOffsetMinutes * 60000;
+  const shifted = new Date(dateMs - offsetMs);
+  const year = shifted.getUTCFullYear();
+  const month = shifted.getUTCMonth();
+  const day = shifted.getUTCDate();
+  const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  const startUtcMs = Date.UTC(year, month, day, 0, 0, 0, 0) + offsetMs;
+  const endUtcMs = startUtcMs + 86400000;
+  return {
+    dateStr,
+    monthStr: dateStr.slice(0, 7),
+    startIso: new Date(startUtcMs).toISOString(),
+    endIso: new Date(endUtcMs).toISOString(),
+  };
+}
+
+function parseShiftStartMinutes(shiftStartTime) {
+  if (!shiftStartTime || !/^([01]\d|2[0-3]):[0-5]\d$/.test(shiftStartTime)) return null;
+  const [hh, mm] = shiftStartTime.split(':').map(Number);
+  return hh * 60 + mm;
+}
+
+function evaluateAttendanceTimestamp(createdAtIso, shiftStartTime, lateGraceMinutes, tzOffsetMinutes) {
+  const utcMs = Date.parse(createdAtIso);
+  if (Number.isNaN(utcMs)) return null;
+  const shifted = new Date(utcMs - tzOffsetMinutes * 60000);
+  const year = shifted.getUTCFullYear();
+  const month = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(shifted.getUTCDate()).padStart(2, '0');
+  const hour = shifted.getUTCHours();
+  const minute = shifted.getUTCMinutes();
+  const dateStr = `${year}-${month}-${day}`;
+  const arrivalMinutes = hour * 60 + minute;
+  const arrivalTime = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  const scheduledMinutes = parseShiftStartMinutes(shiftStartTime);
+  const grace = Math.max(0, Number(lateGraceMinutes ?? 0) || 0);
+  if (scheduledMinutes === null) {
+    return {
+      dateStr,
+      monthStr: dateStr.slice(0, 7),
+      arrivalTime,
+      arrivalMinutes,
+      isLate: false,
+      lateMinutes: 0,
+      status: 'UNSCHEDULED',
+    };
+  }
+  const isLate = arrivalMinutes > scheduledMinutes + grace;
+  const lateMinutes = isLate ? arrivalMinutes - scheduledMinutes : 0;
+  return {
+    dateStr,
+    monthStr: dateStr.slice(0, 7),
+    arrivalTime,
+    arrivalMinutes,
+    isLate,
+    lateMinutes,
+    status: isLate ? 'LATE' : 'ON_TIME',
+  };
+}
 
 async function computeTreasuryBalancesMinor(conn, tenantId, storeId) {
   const rows = await conn
@@ -1827,21 +1902,58 @@ async function currentData(ctx, url) {
     ? await db.selectFrom('accounting_periods').selectAll().where('tenant_id', '=', ctx.tenantId).orderBy('start_date', 'desc').execute()
     : [];
 
-  const todayDateStr = new Date().toISOString().slice(0, 10);
+  const tzOffsetMinutes = normalizeTzOffsetMinutes(url.searchParams.get('tzOffset'));
+  const todayBounds = localDayUtcBounds(Date.now(), tzOffsetMinutes);
   const rawDatabase = database.getRawDatabase();
   const activeShiftRow = rawDatabase.prepare(
     "SELECT id, shift_number as shiftNumber, started_at as startedAt, opening_cash as openingCash, notes FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' ORDER BY started_at DESC LIMIT 1"
   ).get(ctx.tenantId, ctx.userId);
-  const todayAttendanceRows = rawDatabase.prepare(
-    "SELECT actor_user_id AS userId, actor_username AS username, created_at AS createdAt, summary FROM audit_logs WHERE tenant_id = ? AND action = 'ATTENDANCE_CHECK_IN' AND substr(created_at, 1, 10) = ? ORDER BY sequence_no DESC"
-  ).all(ctx.tenantId, todayDateStr);
-  const userCheckedInRecord = todayAttendanceRows.find((r) => r.userId === ctx.userId);
+  const rawTodayAttendanceRows = rawDatabase.prepare(
+    "SELECT actor_user_id AS userId, actor_username AS username, actor_role AS actorRole, created_at AS createdAt, summary FROM audit_logs WHERE tenant_id = ? AND action = 'ATTENDANCE_CHECK_IN' AND created_at >= ? AND created_at < ? ORDER BY sequence_no ASC"
+  ).all(ctx.tenantId, todayBounds.startIso, todayBounds.endIso);
+
+  const managedUserById = new Map(managedUsers.map((u) => [u.id, u]));
+  const todayAttendanceMap = new Map();
+  let userCheckedInRecord = null;
+  for (const r of rawTodayAttendanceRows) {
+    if (!r.userId) continue;
+    if (r.userId === ctx.userId && !userCheckedInRecord) {
+      userCheckedInRecord = r;
+    }
+    const targetUser = managedUserById.get(r.userId);
+    const effectiveRole = targetUser?.role ?? r.actorRole;
+    if (effectiveRole === 'OWNER') continue;
+    if (managedUsers.length > 0 && !targetUser) continue;
+    const existing = todayAttendanceMap.get(r.userId);
+    if (existing) {
+      existing.checkInCount += 1;
+      continue;
+    }
+    const evalResult = evaluateAttendanceTimestamp(
+      r.createdAt,
+      targetUser?.shiftStartTime ?? null,
+      targetUser?.lateGraceMinutes ?? 0,
+      tzOffsetMinutes,
+    );
+    todayAttendanceMap.set(r.userId, {
+      userId: r.userId,
+      username: r.username,
+      createdAt: r.createdAt,
+      summary: r.summary,
+      checkInCount: 1,
+      arrivalTime: evalResult?.arrivalTime ?? null,
+      isLate: evalResult?.isLate ?? false,
+      lateMinutes: evalResult?.lateMinutes ?? 0,
+      status: evalResult?.status ?? 'UNSCHEDULED',
+    });
+  }
+  const todayAttendance = [...todayAttendanceMap.values()];
   const userCheckedInToday = Boolean(userCheckedInRecord || activeShiftRow);
   const userCheckInTime = userCheckedInRecord?.createdAt ?? activeShiftRow?.startedAt ?? null;
 
   return {
     company: { name: tenant.name, currency: tenant.currency },
-    user: { id: ctx.userId, fullName: signedInUser?.fullName ?? '', role: ctx.roleId, storeId: ctx.storeId ?? null },
+    user: { id: ctx.userId, fullName: signedInUser?.fullName ?? '', role: ctx.roleId, storeId: ctx.storeId ?? null, shiftStartTime: signedInUser?.shiftStartTime ?? null, lateGraceMinutes: signedInUser?.lateGraceMinutes ?? 0 },
     activeShift: activeShiftRow ? {
       id: activeShiftRow.id,
       shiftNumber: activeShiftRow.shiftNumber,
@@ -1849,16 +1961,11 @@ async function currentData(ctx, url) {
       openingCash: String(activeShiftRow.openingCash ?? 0),
       notes: activeShiftRow.notes ?? '',
     } : null,
-    todayAttendance: todayAttendanceRows.map((r) => ({
-      userId: r.userId,
-      username: r.username,
-      createdAt: r.createdAt,
-      summary: r.summary,
-    })),
+    todayAttendance,
     userCheckedInToday,
     userCheckInTime,
     stores: stores.map((store) => ({ id: store.id, name: store.name, code: store.code, address: store.address ?? null, phone: store.phone ?? null })),
-    users: managedUsers.map((user) => ({ id: user.id, username: user.username, fullName: user.fullName, phone: user.phone ?? null, employmentStartDate: user.employmentStartDate, role: user.role, storeId: user.storeId ?? null, isActive: user.isActive, createdAt: user.createdAt.toISOString() })),
+    users: managedUsers.map((user) => ({ id: user.id, username: user.username, fullName: user.fullName, phone: user.phone ?? null, employmentStartDate: user.employmentStartDate, shiftStartTime: user.shiftStartTime ?? null, lateGraceMinutes: user.lateGraceMinutes ?? 0, role: user.role, storeId: user.storeId ?? null, isActive: user.isActive, createdAt: user.createdAt.toISOString() })),
     selectedStoreId: storeId,
     categories: (await categoryRepo.listByTenant(ctx)).map((category) => ({ id: category.id, name: category.name, code: category.code })),
     products: productData,
@@ -2204,11 +2311,13 @@ async function handleApi(req, res, url) {
     if (ctx.roleId === 'OWNER') {
       throw Object.assign(new Error('تسجيل الحضور مخصص للموظفين (الكاشير) فقط، ولا ينطبق على مالك المتجر.'), { status: 403 });
     }
-    const todayDateStr = new Date().toISOString().slice(0, 10);
+    const body = await readJson(req);
+    const tzOffsetMinutes = normalizeTzOffsetMinutes(body?.tzOffset);
+    const todayBounds = localDayUtcBounds(Date.now(), tzOffsetMinutes);
     const rawDatabase = database.getRawDatabase();
     const existing = rawDatabase.prepare(
-      "SELECT id, created_at AS createdAt FROM audit_logs WHERE tenant_id = ? AND actor_user_id = ? AND action = 'ATTENDANCE_CHECK_IN' AND substr(created_at, 1, 10) = ? LIMIT 1"
-    ).get(ctx.tenantId, ctx.userId, todayDateStr);
+      "SELECT id, created_at AS createdAt FROM audit_logs WHERE tenant_id = ? AND actor_user_id = ? AND action = 'ATTENDANCE_CHECK_IN' AND created_at >= ? AND created_at < ? ORDER BY sequence_no ASC LIMIT 1"
+    ).get(ctx.tenantId, ctx.userId, todayBounds.startIso, todayBounds.endIso);
     if (existing) {
       return json(res, 200, { ok: true, alreadyCheckedIn: true, checkInAt: existing.createdAt });
     }
@@ -2234,17 +2343,83 @@ async function handleApi(req, res, url) {
     }
     const targetUserId = url.searchParams.get('userId');
     if (!targetUserId) throw Object.assign(new Error('معرف المستخدم مطلوب'), { status: 400 });
+    const targetUser = await userRepo.findById(ctx, targetUserId);
+    if (!targetUser || (ctx.storeId && targetUser.storeId !== ctx.storeId)) {
+      throw Object.assign(new Error('الموظف غير موجود'), { status: 404 });
+    }
+    const tzOffsetMinutes = normalizeTzOffsetMinutes(url.searchParams.get('tzOffset'));
+    const requestedMonth = url.searchParams.get('month')?.trim() || '';
+    const isMonthFilter = /^\d{4}-\d{2}$/.test(requestedMonth);
+
     const rawDatabase = database.getRawDatabase();
     const rows = rawDatabase.prepare(
-      "SELECT id, actor_user_id AS userId, actor_username AS username, created_at AS createdAt, summary FROM audit_logs WHERE tenant_id = ? AND actor_user_id = ? AND action = 'ATTENDANCE_CHECK_IN' ORDER BY created_at DESC LIMIT 60"
+      "SELECT id, actor_user_id AS userId, actor_username AS username, created_at AS createdAt, summary FROM audit_logs WHERE tenant_id = ? AND actor_user_id = ? AND action = 'ATTENDANCE_CHECK_IN' ORDER BY sequence_no ASC LIMIT 2000"
     ).all(ctx.tenantId, targetUserId);
+
+    const shiftStartTime = targetUser.shiftStartTime ?? null;
+    const lateGraceMinutes = targetUser.lateGraceMinutes ?? 0;
+
+    // Deduplicate to 1 daily record (earliest check-in per local calendar day).
+    const dailyMap = new Map();
+    for (const r of rows) {
+      const evaluated = evaluateAttendanceTimestamp(r.createdAt, shiftStartTime, lateGraceMinutes, tzOffsetMinutes);
+      if (!evaluated) continue;
+      const existing = dailyMap.get(evaluated.dateStr);
+      if (existing) {
+        existing.checkInCount += 1;
+        continue;
+      }
+      dailyMap.set(evaluated.dateStr, {
+        id: r.id,
+        date: evaluated.dateStr,
+        month: evaluated.monthStr,
+        createdAt: r.createdAt,
+        arrivalTime: evaluated.arrivalTime,
+        shiftStartTime,
+        lateGraceMinutes,
+        isLate: evaluated.isLate,
+        lateMinutes: evaluated.lateMinutes,
+        status: evaluated.status,
+        checkInCount: 1,
+        summary: r.summary,
+      });
+    }
+
+    const allDailyDesc = [...dailyMap.values()].sort((a, b) => b.date.localeCompare(a.date));
+    const availableMonths = [...new Set(allDailyDesc.map((d) => d.month))];
+    const filteredDaily = isMonthFilter
+      ? allDailyDesc.filter((d) => d.month === requestedMonth)
+      : allDailyDesc;
+
+    let onTimeDays = 0;
+    let lateDays = 0;
+    let unscheduledDays = 0;
+    let totalLateMinutes = 0;
+    for (const entry of filteredDaily) {
+      if (entry.status === 'LATE') {
+        lateDays += 1;
+        totalLateMinutes += entry.lateMinutes;
+      } else if (entry.status === 'ON_TIME') {
+        onTimeDays += 1;
+      } else {
+        unscheduledDays += 1;
+      }
+    }
+
     return json(res, 200, {
       userId: targetUserId,
-      history: rows.map((r) => ({
-        id: r.id,
-        createdAt: r.createdAt,
-        summary: r.summary,
-      })),
+      shiftStartTime,
+      lateGraceMinutes,
+      selectedMonth: isMonthFilter ? requestedMonth : 'all',
+      availableMonths,
+      summary: {
+        totalDays: filteredDaily.length,
+        onTimeDays,
+        lateDays,
+        unscheduledDays,
+        totalLateMinutes,
+      },
+      history: filteredDaily,
     });
   }
 
@@ -2528,13 +2703,21 @@ async function handleApi(req, res, url) {
       VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?)
     `).run(shiftId, shiftNumber, ctx.tenantId, storeId, ctx.userId, nowIso, openingCash.toString(), notes, nowIso, nowIso);
 
+    const tzOffsetMinutes = normalizeTzOffsetMinutes(body?.tzOffset);
+    const todayBounds = localDayUtcBounds(Date.now(), tzOffsetMinutes);
+    const alreadyCheckedInToday = ctx.roleId === 'OWNER'
+      ? true
+      : Boolean(rawDb.prepare(
+          "SELECT id FROM audit_logs WHERE tenant_id = ? AND actor_user_id = ? AND action = 'ATTENDANCE_CHECK_IN' AND created_at >= ? AND created_at < ? LIMIT 1"
+        ).get(ctx.tenantId, ctx.userId, todayBounds.startIso, todayBounds.endIso));
+
     await recordAudit(ctx, {
       storeId,
-      action: 'ATTENDANCE_CHECK_IN',
+      action: alreadyCheckedInToday ? 'SHIFT_STARTED' : 'ATTENDANCE_CHECK_IN',
       entityType: 'SHIFT',
       entityId: shiftId,
       summary: `بدء الشيفت (${shiftNumber}) برصيد افتتاحي ${openingCash.toString()}`,
-      metadata: { shiftNumber, openingCash: openingCash.toString() }
+      metadata: { shiftNumber, openingCash: openingCash.toString(), occurredAt: nowIso }
     });
 
     return json(res, 201, {
@@ -2784,15 +2967,54 @@ async function handleApi(req, res, url) {
     try {
       const created = await tenantService.createUser(ctx, {
         id: randomUUID(), username: body.username, passwordPlain: body.password,
-        fullName: body.fullName, phone: body.phone || undefined, employmentStartDate: body.employmentStartDate, role: body.role, storeId: body.storeId,
+        fullName: body.fullName, phone: body.phone || undefined, employmentStartDate: body.employmentStartDate,
+        shiftStartTime: body.shiftStartTime ?? undefined, lateGraceMinutes: body.lateGraceMinutes ?? 0,
+        role: body.role, storeId: body.storeId,
       });
-      await recordAudit(ctx, { storeId: created.storeId ?? null, action: 'USER_CREATED', entityType: 'USER', entityId: created.id, summary: `إضافة حساب موظف جديد (${created.username} - ${created.role})`, metadata: { role: created.role, username: created.username } });
+      await recordAudit(ctx, { storeId: created.storeId ?? null, action: 'USER_CREATED', entityType: 'USER', entityId: created.id, summary: `إضافة حساب موظف جديد (${created.username} - ${created.role})`, metadata: { role: created.role, username: created.username, shiftStartTime: created.shiftStartTime ?? null, lateGraceMinutes: created.lateGraceMinutes } });
       return json(res, 201, { id: created.id, username: created.username });
     } catch (error) {
       if (error?.message?.startsWith('UserError:')) throw Object.assign(new Error('Username is already in use'), { status: 409 });
       if (error?.message?.startsWith('StoreError:')) throw Object.assign(new Error('Selected store is unavailable'), { status: 400 });
       throw error;
     }
+  }
+
+  if (method === 'PATCH' && path === '/api/users/shift-schedule') {
+    ctx.assertPermission(Permissions.USERS_MANAGE);
+    const body = validate(BulkShiftScheduleSchema, await readJson(req));
+    const managed = await userRepo.listByTenant(ctx);
+    const allowedUsers = managed.filter((u) => {
+      if (ctx.roleId !== 'OWNER' && u.role !== 'CASHIER') return false;
+      if (ctx.storeId && u.storeId !== ctx.storeId) return false;
+      if (body.userIds?.length) return body.userIds.includes(u.id);
+      return u.role !== 'OWNER' && u.isActive;
+    });
+    if (!allowedUsers.length) {
+      throw Object.assign(new Error('لا يوجد موظفون مطابقون لتحديث موعد بدء الشيفت'), { status: 400 });
+    }
+    const nextShiftStart = body.shiftStartTime || null;
+    const nextGrace = body.lateGraceMinutes;
+    await db.transaction().execute(async (trx) => {
+      for (const u of allowedUsers) {
+        const updateSet = {
+          shift_start_time: nextShiftStart,
+          ...(nextGrace !== undefined ? { late_grace_minutes: nextGrace } : {}),
+        };
+        await trx.updateTable('users').set(updateSet).where('tenant_id', '=', ctx.tenantId).where('id', '=', u.id).execute();
+      }
+    });
+    await recordAudit(ctx, {
+      storeId: ctx.storeId ?? null,
+      action: 'SHIFT_SCHEDULE_UPDATED',
+      entityType: 'USER',
+      entityId: allowedUsers.length === 1 ? allowedUsers[0].id : null,
+      summary: nextShiftStart
+        ? `تحديث موعد بدء الشيفت (${nextShiftStart}، سماح ${nextGrace ?? 0} د) لعدد ${allowedUsers.length} موظف`
+        : `إلغاء تحديد موعد بدء الشيفت لعدد ${allowedUsers.length} موظف`,
+      metadata: { updatedCount: allowedUsers.length, shiftStartTime: nextShiftStart, lateGraceMinutes: nextGrace ?? null },
+    });
+    return json(res, 200, { updatedCount: allowedUsers.length, shiftStartTime: nextShiftStart, lateGraceMinutes: nextGrace ?? 0 });
   }
 
   const userMatch = path.match(/^\/api\/users\/([0-9a-f-]{36})$/i);
@@ -2805,6 +3027,8 @@ async function handleApi(req, res, url) {
     const nextRole = body.role ?? target.role;
     const nextStoreId = body.storeId === undefined ? target.store_id : body.storeId;
     const nextActive = body.isActive === undefined ? Boolean(target.is_active) : body.isActive;
+    const nextShiftStartTime = body.shiftStartTime === undefined ? target.shift_start_time : (body.shiftStartTime || null);
+    const nextLateGraceMinutes = body.lateGraceMinutes === undefined ? Number(target.late_grace_minutes ?? 0) : body.lateGraceMinutes;
     if (target.id === ctx.userId && (nextRole !== target.role || !nextActive)) throw Object.assign(new Error('You cannot change your own role or deactivate your own account'), { status: 400 });
     if (ctx.roleId !== 'OWNER' && (target.role !== 'CASHIER' || nextRole !== 'CASHIER' || nextStoreId !== ctx.storeId)) throw Object.assign(new Error('Store managers can only manage cashiers in their assigned store'), { status: 403 });
     if (nextRole === 'CASHIER' && !nextStoreId) throw Object.assign(new Error('Cashiers must be assigned to a store'), { status: 400 });
@@ -2815,10 +3039,10 @@ async function handleApi(req, res, url) {
     }
     const revokeSessions = nextRole !== target.role || nextStoreId !== target.store_id || Number(nextActive) !== target.is_active;
     await db.transaction().execute(async (trx) => {
-      await trx.updateTable('users').set({ full_name: body.fullName ?? target.full_name, phone: body.phone === undefined ? target.phone : body.phone || null, employment_start_date: body.employmentStartDate ?? target.employment_start_date, role: nextRole, store_id: nextStoreId, is_active: nextActive ? 1 : 0 }).where('tenant_id', '=', ctx.tenantId).where('id', '=', targetId).execute();
+      await trx.updateTable('users').set({ full_name: body.fullName ?? target.full_name, phone: body.phone === undefined ? target.phone : body.phone || null, employment_start_date: body.employmentStartDate ?? target.employment_start_date, shift_start_time: nextShiftStartTime, late_grace_minutes: nextLateGraceMinutes, role: nextRole, store_id: nextStoreId, is_active: nextActive ? 1 : 0 }).where('tenant_id', '=', ctx.tenantId).where('id', '=', targetId).execute();
       if (revokeSessions) await trx.updateTable('sessions').set({ is_revoked: 1 }).where('tenant_id', '=', ctx.tenantId).where('user_id', '=', targetId).execute();
     });
-    await recordAudit(ctx, { storeId: nextStoreId ?? null, action: 'USER_UPDATED', entityType: 'USER', entityId: targetId, summary: `تحديث بيانات الموظف (${target.username})`, metadata: { role: nextRole, isActive: nextActive, sessionsRevoked: revokeSessions } });
+    await recordAudit(ctx, { storeId: nextStoreId ?? null, action: 'USER_UPDATED', entityType: 'USER', entityId: targetId, summary: `تحديث بيانات الموظف (${target.username})`, metadata: { role: nextRole, isActive: nextActive, shiftStartTime: nextShiftStartTime, lateGraceMinutes: nextLateGraceMinutes, sessionsRevoked: revokeSessions } });
     return json(res, 200, { updated: true, sessionsRevoked: revokeSessions });
   }
 

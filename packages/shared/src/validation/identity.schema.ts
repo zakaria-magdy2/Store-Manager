@@ -50,6 +50,8 @@ export const CreateUserSchema = z
       const date = new Date(`${value}T00:00:00.000Z`);
       return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value;
     }).optional(),
+    shiftStartTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Shift start time must be HH:MM').nullable().optional(),
+    lateGraceMinutes: z.number().int().min(0).max(180).optional(),
     role: z.enum(['OWNER', 'STORE_MANAGER', 'CASHIER', 'AUDITOR']),
     storeId: z.string().uuid().optional(),
   })

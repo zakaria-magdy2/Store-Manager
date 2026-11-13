@@ -71,6 +71,8 @@ export class TenantService {
       fullName: string;
       phone?: string | undefined;
       employmentStartDate?: string | undefined;
+      shiftStartTime?: string | undefined;
+      lateGraceMinutes?: number | undefined;
       role: Role;
       storeId?: string | undefined;
     },
@@ -110,6 +112,8 @@ export class TenantService {
       fullName: params.fullName,
       phone: params.phone,
       employmentStartDate: params.employmentStartDate,
+      shiftStartTime: params.shiftStartTime,
+      lateGraceMinutes: params.lateGraceMinutes,
       role: params.role,
       storeId: params.storeId,
     });
