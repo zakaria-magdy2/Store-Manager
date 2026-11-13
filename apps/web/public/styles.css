@@ -643,14 +643,171 @@
   color: #93c5fd !important;
 }
 
-/* POS Shift Banners */
+/* POS Shift Banners & High-Contrast Shift / Notification Controls */
+.pos-shift-banner {
+  border-radius: 12px;
+  padding: 13px 18px;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.pos-shift-meta {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+.pos-shift-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.pos-shift-dot-active {
+  background: #10b981;
+  box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.2);
+}
+.pos-shift-dot-inactive {
+  background: #ef4444;
+  box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.2);
+}
+.pos-shift-banner-active {
+  background: var(--surface);
+  border: 1.5px solid var(--line-strong);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
+}
+.pos-shift-banner-inactive {
+  background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+  border: 1.5px solid #f59e0b;
+  box-shadow: 0 4px 14px rgba(245, 158, 11, 0.14);
+}
 :root[data-theme="dark"] .pos-shift-banner-active {
-  background: rgba(30, 41, 59, 0.6) !important;
-  border-color: #222c3d !important;
+  background: #161f30 !important;
+  border-color: rgba(129, 112, 248, 0.42) !important;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
 }
 :root[data-theme="dark"] .pos-shift-banner-inactive {
-  background: rgba(5, 150, 105, 0.08) !important;
-  border-color: rgba(52, 211, 153, 0.45) !important;
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.16) 0%, rgba(217, 119, 6, 0.08) 100%) !important;
+  border-color: rgba(251, 191, 36, 0.65) !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+.shift-start-cta,
+.button.shift-start-cta,
+.button-primary.shift-start-cta {
+  background: linear-gradient(135deg, #facc15 0%, #f59e0b 100%) !important;
+  border: 1.5px solid #d97706 !important;
+  color: #0f172a !important;
+  font-weight: 800 !important;
+  padding: 7px 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  box-shadow: 0 4px 12px rgba(245, 158, 11, 0.35);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
+}
+.shift-start-cta svg,
+.button.shift-start-cta svg {
+  color: #0f172a !important;
+}
+.shift-start-cta:hover,
+.button.shift-start-cta:hover {
+  background: linear-gradient(135deg, #fde047 0%, #fbbf24 100%) !important;
+  color: #0f172a !important;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(245, 158, 11, 0.45);
+}
+.button-shift-active {
+  background: #5948d8 !important;
+  border: 1.5px solid #5948d8 !important;
+  color: #ffffff !important;
+  box-shadow: 0 2px 8px rgba(89, 72, 216, 0.28);
+  font-weight: 750;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.button-shift-active:hover {
+  background: #4738c0 !important;
+  border-color: #4738c0 !important;
+}
+.shift-end-cta {
+  background: var(--purple-soft, #f1efff) !important;
+  border: 1.5px solid #5948d8 !important;
+  color: #4738c0 !important;
+  font-weight: 800 !important;
+  padding: 6px 14px;
+}
+.shift-end-cta:hover {
+  background: #5948d8 !important;
+  color: #ffffff !important;
+}
+:root[data-theme="dark"] .shift-end-cta {
+  background: rgba(129, 112, 248, 0.18) !important;
+  border-color: #a5b4fc !important;
+  color: #e0e7ff !important;
+}
+:root[data-theme="dark"] .shift-end-cta:hover {
+  background: #8170f8 !important;
+  border-color: #8170f8 !important;
+  color: #ffffff !important;
+}
+.cart-empty-icon-shift {
+  background: #fef3c7 !important;
+  color: #b45309 !important;
+}
+:root[data-theme="dark"] .cart-empty-icon-shift {
+  background: rgba(245, 158, 11, 0.18) !important;
+  color: #fbbf24 !important;
+}
+.checkout-button-locked:disabled {
+  opacity: 0.85 !important;
+  background: #e2e8f0 !important;
+  color: #334155 !important;
+  border: 1.5px dashed #94a3b8 !important;
+  box-shadow: none !important;
+}
+:root[data-theme="dark"] .checkout-button-locked:disabled {
+  background: #1e293b !important;
+  color: #cbd5e1 !important;
+  border: 1.5px dashed #475569 !important;
+}
+.notification-button {
+  overflow: visible;
+}
+.notification-button.has-alerts {
+  color: var(--ink);
+  border-color: rgba(239, 68, 68, 0.35);
+}
+.notif-count-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  display: inline-grid;
+  place-items: center;
+  border: 2px solid var(--surface, #ffffff);
+  box-shadow: 0 2px 6px rgba(239, 68, 68, 0.35);
+  pointer-events: none;
+}
+:root[data-theme="dark"] .notification-button.has-alerts {
+  color: #f8fafc;
+  border-color: rgba(248, 113, 113, 0.45);
+}
+:root[data-theme="dark"] .notif-count-badge {
+  border-color: #101622;
 }
 
 /* Global Financial Text Color Upgrades for High Contrast in Dark Mode */

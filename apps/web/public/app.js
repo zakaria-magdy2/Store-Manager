@@ -408,20 +408,17 @@ function shellView() {
   const menuExtraItems = `${state.data.capabilities.canManageBackups ? `<button type="button" class="account-menu-item" role="menuitem" data-page="backups">${icon('store', 17)}<span>النسخ الاحتياطي اليومي</span></button>` : ''}${state.data.capabilities.canViewAuditLogs ? `<button type="button" class="account-menu-item" role="menuitem" data-page="audit-logs">${icon('scan', 17)}<span>سجل المراجعة والأمان</span></button>` : ''}`;
   const activeShift = state.data.activeShift;
   const shiftControl = activeShift ? `
-    <button type="button" id="header-end-shift-btn" class="button button-sm button-shift-active" style="background:#5948d8;border-color:#5948d8;color:#fff;box-shadow:0 2px 8px rgba(89,72,216,.25);font-weight:750;display:inline-flex;align-items:center;gap:6px;" title="الشيفت مفتوحة حالياً، اضغط لإنهائها وتقفيل الدرج">
+    <button type="button" id="header-end-shift-btn" class="button button-sm button-shift-active" title="الشيفت مفتوحة حالياً، اضغط لإنهائها وتقفيل الدرج">
       ${icon('clock', 15)}<span>إنهاء الشيفت (${escapeHtml(activeShift.shiftNumber)})</span>
     </button>
   ` : `
-    <button type="button" id="header-start-shift-btn" class="button button-sm button-shift-start" style="background:#059669;border-color:#059669;color:#fff;box-shadow:0 2px 8px rgba(5,150,105,.25);font-weight:750;display:inline-flex;align-items:center;gap:6px;" title="بدء شيفت جديد وتسجيل الحضور">
+    <button type="button" id="header-start-shift-btn" class="button button-sm button-shift-start shift-start-cta" title="بدء شيفت جديد وتسجيل الحضور">
       ${icon('play', 15)}<span>بدء الشيفت (تسجيل الحضور)</span>
     </button>
   `;
-  const lowStockCount = state.data.summary?.lowStockCount ?? state.data.lowStock?.length ?? 0;
-  const suppliersDebtCount = (state.data.suppliers ?? []).filter((s) => s.purchases.some((p) => BigInt(p.remainingAmount.amount) > 0n)).length;
-  const monthlyDueCount = (state.data.monthlyExpenses ?? []).filter((m) => m.actual && BigInt(m.actual.remainingAmount.amount) > 0n).length;
-  const totalAlertsCount = lowStockCount + suppliersDebtCount + monthlyDueCount;
+  const { totalCount: totalAlertsCount } = computeSystemAlerts(state.data);
 
-  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'financial-map' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item" role="menuitem" href="mailto:support@retailos.local">${icon('help', 17)}<span>\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u0627\u0644\u062f\u0639\u0645</span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${shiftControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>⌘ K</kbd></label><button class="icon-button notification-button" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount ? '<i></i>' : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${pageView()}</section></main>`;
+  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'financial-map' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item" role="menuitem" href="mailto:support@retailos.local">${icon('help', 17)}<span>\u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u0627\u0644\u062f\u0639\u0645</span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${shiftControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>⌘ K</kbd></label><button type="button" class="icon-button notification-button ${totalAlertsCount > 0 ? 'has-alerts' : ''}" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount > 0 ? `<span class="notif-count-badge">${totalAlertsCount > 99 ? '99+' : totalAlertsCount}</span>` : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${pageView()}</section></main>`;
 }
 
 function roleLabel(role) {
@@ -1523,7 +1520,7 @@ function showStartShiftModal() {
           </label>
           <div class="modal-actions" style="margin-top:16px;padding:16px 0 0;">
             <button type="button" class="button button-secondary" data-close-modal>إلغاء</button>
-            <button type="submit" class="button button-primary" style="background:#059669;border-color:#059669;font-weight:750;padding:8px 20px;">بدء الشيفت الآن</button>
+            <button type="submit" class="button shift-start-cta" style="padding:8px 20px;">بدء الشيفت الآن</button>
           </div>
         </form>
       </section>
@@ -3234,33 +3231,33 @@ function posView() {
   const activeShift = state.data.activeShift;
   const mustStartShift = !activeShift;
   const shiftBanner = activeShift ? `
-    <div class="pos-shift-banner pos-shift-banner-active" style="background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;box-shadow:0 1px 3px rgba(0,0,0,.04);">
-      <div style="display:flex;align-items:center;gap:10px;">
-        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#10b981;"></span>
+    <div class="pos-shift-banner pos-shift-banner-active">
+      <div class="pos-shift-meta">
+        <span class="pos-shift-dot pos-shift-dot-active"></span>
         <div>
           <span style="font-size:13px;color:var(--ink);font-weight:750;">الشيفت نشطة: <strong style="color:var(--purple);font-family:monospace;">${escapeHtml(activeShift.shiftNumber)}</strong></span>
           <span style="font-size:11.5px;color:var(--muted);margin-right:8px;">(بدأت: ${new Date(activeShift.startedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })})</span>
         </div>
       </div>
-      <button type="button" id="pos-end-shift-now-btn" class="button button-sm button-secondary" style="font-weight:750;padding:6px 14px;color:var(--purple);border-color:var(--purple);">
+      <button type="button" id="pos-end-shift-now-btn" class="button button-sm shift-end-cta">
         إنهاء الشيفت وتسليم النقدية
       </button>
     </div>
   ` : `
-    <div class="pos-shift-banner pos-shift-banner-inactive" style="background:var(--surface);border:1.5px dashed #059669;border-radius:12px;padding:12px 18px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;box-shadow:0 1px 3px rgba(0,0,0,.04);">
-      <div style="display:flex;align-items:center;gap:10px;">
-        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ef4444;"></span>
+    <div class="pos-shift-banner pos-shift-banner-inactive">
+      <div class="pos-shift-meta">
+        <span class="pos-shift-dot pos-shift-dot-inactive"></span>
         <div>
-          <strong style="font-size:13px;color:var(--ink);display:block;">لم يتم بدء الشيفت بعد</strong>
-          <span style="font-size:11.5px;color:var(--muted);">${mustStartShift ? 'نقطة البيع مقفولة — ابدأ الشيفت أولاً لتتمكن من تنفيذ أي عملية بيع' : 'اضغط هنا لإدخال عهدة البداية لتسجيل الحضور وتفعيل الكاشير'}</span>
+          <strong style="font-size:13.5px;color:var(--ink);display:block;">لم يتم بدء الشيفت بعد</strong>
+          <span style="font-size:12px;color:var(--ink-soft);">${mustStartShift ? 'نقطة البيع مقفولة — ابدأ الشيفت أولاً لتتمكن من تنفيذ أي عملية بيع' : 'اضغط هنا لإدخال عهدة البداية لتسجيل الحضور وتفعيل الكاشير'}</span>
         </div>
       </div>
-      <button type="button" id="pos-start-shift-now-btn" class="button button-sm" style="background:#059669;border-color:#059669;color:#fff;font-weight:750;padding:6px 16px;box-shadow:0 2px 6px rgba(5,150,105,.2);">
-        بدء الشيفت الآن
+      <button type="button" id="pos-start-shift-now-btn" class="button button-sm shift-start-cta">
+        ${icon('play', 15)}<span>بدء الشيفت الآن</span>
       </button>
     </div>
   `;
-  return `<div class="pos-layout"><section class="pos-catalog">${shiftBanner}<div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>${mustStartShift ? 'ابدأ الشيفت أولاً لإتاحة اختيار المنتجات وإتمام البيع.' : 'ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.'}</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="${mustStartShift ? 'ابدأ الشيفت أولاً لتفعيل نقطة البيع...' : 'ابحث باسم الموديل أو كود الموديل أو الباركود'}" value="${escapeHtml(state.query)}" ${mustStartShift ? 'disabled' : 'autofocus'}><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="">كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}">${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products" style="${mustStartShift ? 'opacity:0.55;' : ''}">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const allSamePrice = new Set(product.variants.map((variant) => variant.price.amount)).size === 1; const price = allSamePrice ? money(product.variants[0].price) : 'أسعار متعددة'; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${(mustStartShift || (product.itemKind === 'PRODUCT' && stock <= 0n)) ? 'disabled' : ''}><span class="pos-product-art art-${index % 6}">${icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${price}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${mustStartShift ? `<div class="cart-empty"><span class="cart-empty-icon">${icon('clock', 23)}</span><strong>يجب بدء الشيفت أولاً</strong><p>لا يمكن إجراء أي عملية بيع قبل تسجيل بدء الشيفت واستلام الدرج.</p><button type="button" id="cart-start-shift-btn" class="button button-primary button-sm" style="margin-top:10px;background:#059669;border-color:#059669;">بدء الشيفت الآن</button></div>` : state.cart.length ? state.cart.map((item) => `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art">${icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button data-qty="${item.variantId}" data-delta="-1">−</button><span>${item.quantity}</span><button data-qty="${item.variantId}" data-delta="1">+</button></div><strong>${money({ ...item.price, amount: (BigInt(item.price.amount) * BigInt(item.quantity)).toString() })}</strong></div></div>`).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة أو امسح الباركود عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong>${state.cart.reduce((sum, item) => sum + item.quantity, 0)}</strong></div><div><span>الخصم</span><strong>${money({ ...total, amount: '0' })}</strong></div><div class="cart-grand-total"><span>الإجمالي المستحق</span><strong>${money(total)}</strong></div></div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}" ${mustStartShift ? 'disabled' : ''}><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button" ${(!mustStartShift && state.cart.length && !state.isSaving) ? '' : 'disabled'}><span>${mustStartShift ? 'ابدأ الشيفت أولاً' : 'إتمام البيع'}</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
+  return `<div class="pos-layout"><section class="pos-catalog">${shiftBanner}<div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>${mustStartShift ? 'ابدأ الشيفت أولاً لإتاحة اختيار المنتجات وإتمام البيع.' : 'ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.'}</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="${mustStartShift ? 'ابدأ الشيفت أولاً لتفعيل نقطة البيع...' : 'ابحث باسم الموديل أو كود الموديل أو الباركود'}" value="${escapeHtml(state.query)}" ${mustStartShift ? 'disabled' : 'autofocus'}><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="">كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}">${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products" style="${mustStartShift ? 'opacity:0.55;' : ''}">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const allSamePrice = new Set(product.variants.map((variant) => variant.price.amount)).size === 1; const price = allSamePrice ? money(product.variants[0].price) : 'أسعار متعددة'; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${(mustStartShift || (product.itemKind === 'PRODUCT' && stock <= 0n)) ? 'disabled' : ''}><span class="pos-product-art art-${index % 6}">${icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${price}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${mustStartShift ? `<div class="cart-empty"><span class="cart-empty-icon cart-empty-icon-shift">${icon('clock', 23)}</span><strong>يجب بدء الشيفت أولاً</strong><p>لا يمكن إجراء أي عملية بيع قبل تسجيل بدء الشيفت واستلام الدرج.</p><button type="button" id="cart-start-shift-btn" class="button button-sm shift-start-cta" style="margin-top:12px;">${icon('play', 15)}<span>بدء الشيفت الآن</span></button></div>` : state.cart.length ? state.cart.map((item) => `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art">${icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button data-qty="${item.variantId}" data-delta="-1">−</button><span>${item.quantity}</span><button data-qty="${item.variantId}" data-delta="1">+</button></div><strong>${money({ ...item.price, amount: (BigInt(item.price.amount) * BigInt(item.quantity)).toString() })}</strong></div></div>`).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة أو امسح الباركود عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong>${state.cart.reduce((sum, item) => sum + item.quantity, 0)}</strong></div><div><span>الخصم</span><strong>${money({ ...total, amount: '0' })}</strong></div><div class="cart-grand-total"><span>الإجمالي المستحق</span><strong>${money(total)}</strong></div></div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}" ${mustStartShift ? 'disabled' : ''}><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button ${mustStartShift ? 'checkout-button-locked' : ''}" ${(!mustStartShift && state.cart.length && !state.isSaving) ? '' : 'disabled'}><span>${mustStartShift ? 'ابدأ الشيفت أولاً' : 'إتمام البيع'}</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
 }
 
 function supplierModal(html, formId, endpoint, convert = (data) => data, successMessage = 'تم حفظ الحركة في سجل التاجر') {
@@ -4347,43 +4344,81 @@ function bindMonthlyExpenses() {
   }));
 }
 
-function showNotificationsModal() {
-  const root = getModalRoot();
-  const lowStock = state.data.lowStock ?? [];
-  const suppliersDue = (state.data.suppliers ?? []).filter((s) => {
-    const due = s.purchases.reduce((sum, p) => sum + BigInt(p.remainingAmount.amount), 0n);
+function computeSystemAlerts(data) {
+  const lowStock = data?.lowStock ?? [];
+  const suppliersDue = (data?.suppliers ?? []).filter((s) => {
+    const due = (Array.isArray(s?.purchases) ? s.purchases : []).reduce((sum, p) => sum + BigInt(p?.remainingAmount?.amount ?? 0), 0n);
     return due > 0n;
   });
-  const monthlyDue = (state.data.monthlyExpenses ?? []).filter((m) => m.actual && BigInt(m.actual.remainingAmount.amount) > 0n);
-  const totalAlerts = lowStock.length + suppliersDue.length + monthlyDue.length;
-  const currency = state.data.company.currency;
+  const monthlyDue = (data?.monthlyExpenses ?? []).filter((m) => m?.actual && BigInt(m.actual?.remainingAmount?.amount ?? 0) > 0n);
+  const backupSafety = data?.capabilities?.canManageBackups ? data?.backupSafety : null;
+  const safetyWarnings = [];
+  if (backupSafety) {
+    if (!backupSafety.integrityOk) {
+      safetyWarnings.push({
+        code: 'INTEGRITY',
+        title: 'تحذير سلامة قاعدة البيانات',
+        detail: 'تم رصد مشكلة سلامة في آخر فحص، يرجى مراجعة الأمان واستعادة أحدث نسخة احتياطية.',
+      });
+    }
+    if (!backupSafety.mirrorPath) {
+      safetyWarnings.push({
+        code: 'MIRROR_UNCONFIGURED',
+        title: 'النسخ الاحتياطي الخارجي غير مفعّل',
+        detail: 'اربط مجلد خارجي (فلاشة / هارد إضافي / OneDrive) لحماية بياناتك لو حصل عطل في الجهاز.',
+      });
+    } else if (!backupSafety.mirrorConnected || backupSafety.lastMirrorStatus === 'DISCONNECTED' || backupSafety.lastMirrorStatus === 'ERROR') {
+      safetyWarnings.push({
+        code: 'MIRROR_DISCONNECTED',
+        title: 'تنبيه المزامنة الخارجية للنسخ الاحتياطي',
+        detail: backupSafety.lastMirrorStatus === 'ERROR'
+          ? 'حدث خطأ أثناء نسخ البيانات للمسار الخارجي، تأكد من الصلاحيات والمسار.'
+          : 'الفلاشة أو المجلد الخارجي غير متصل حالياً لإتمام النسخ الاحتياطي التلقائي.',
+      });
+    }
+  }
+  const lowStockCount = data?.summary?.lowStockCount ?? lowStock.length;
+  const totalCount = lowStockCount + suppliersDue.length + monthlyDue.length + safetyWarnings.length;
+  return { lowStock, lowStockCount, suppliersDue, monthlyDue, safetyWarnings, totalCount };
+}
+
+function showNotificationsModal() {
+  const root = getModalRoot();
+  const { lowStock, suppliersDue, monthlyDue, safetyWarnings, totalCount: totalAlerts } = computeSystemAlerts(state.data);
+  const caps = state.data.capabilities ?? {};
+  const currency = state.data.company?.currency ?? 'EGP';
   const decimals = currencyDecimals(currency);
 
   root.innerHTML = `
     <div class="modal-backdrop">
-      <section class="modal-card" style="width:min(620px, 94vw);max-height:85vh;overflow:auto;" role="dialog" aria-modal="true" aria-labelledby="notifications-modal-title">
+      <section class="modal-card" style="width:min(640px, 94vw);" role="dialog" aria-modal="true" aria-labelledby="notifications-modal-title">
         <div class="modal-heading">
           <div style="display:flex;align-items:center;gap:12px;">
-            <span class="status-pill status-complete" style="font-weight:800;font-size:12px;padding:6px 12px;border-radius:8px;">إشعارات</span>
+            <span class="status-pill ${totalAlerts > 0 ? 'status-low' : 'status-complete'}" style="font-weight:800;font-size:12px;padding:6px 12px;border-radius:8px;">${totalAlerts > 0 ? `${totalAlerts} تنبيه` : 'إشعارات'}</span>
             <div>
               <h2 id="notifications-modal-title" style="margin:0;font-size:17px;font-weight:800;color:var(--ink);">مركز الإشعارات والتنبيهات</h2>
               <p style="margin:2px 0 0;font-size:12px;color:var(--muted);">${totalAlerts > 0 ? `لديك ${totalAlerts} تنبيه يتطلب المتابعة` : 'جميع الحسابات والمخزون في حالة ممتازة'}</p>
             </div>
           </div>
-          <button type="button" class="modal-close" data-close-notifications>×</button>
+          <button type="button" class="modal-close" data-close-notifications data-close-modal aria-label="إغلاق">×</button>
         </div>
 
-        <div style="display:grid;gap:14px;padding:8px 0 16px;">
+        <div class="modal-body" style="display:grid;gap:14px;">
           ${lowStock.length ? `
             <div class="notif-alert-box notif-alert-amber">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;">
                 <strong class="notif-title" style="font-size:13.5px;display:inline-flex;align-items:center;gap:6px;">نواقص المخزون (${lowStock.length} موديل وصل لحد الطلب)</strong>
-                <button type="button" class="button button-sm button-secondary" data-nav-to="inventory" style="font-size:11.5px;padding:3px 10px;height:28px;">فتح المخزون</button>
+                ${caps.canViewInventory ? `<button type="button" class="button button-sm button-secondary" data-nav-to="inventory" style="font-size:11.5px;padding:3px 10px;height:28px;">فتح المخزون</button>` : ''}
               </div>
-              <div style="display:grid;gap:6px;max-height:160px;overflow-y:auto;font-size:12px;">
-                ${lowStock.slice(0, 10).map((p) => {
-                  const qty = p.variants.reduce((sum, v) => sum + BigInt(v.quantity), 0n);
-                  return `<div class="notif-divider" style="display:flex;justify-content:space-between;padding:4px 0;"><span>• <strong>${escapeHtml(p.name)}</strong> (${escapeHtml(p.sku)})</span><span style="font-weight:700;">المتبقي: ${qty} قطعة</span></div>`;
+              <div style="display:grid;gap:6px;max-height:170px;overflow-y:auto;font-size:12px;">
+                ${lowStock.slice(0, 12).map((p) => {
+                  const qty = Array.isArray(p.variants)
+                    ? p.variants.reduce((sum, v) => sum + BigInt(v?.quantity ?? 0), 0n)
+                    : (p.quantity ?? '0');
+                  const productName = p.productName ?? p.name ?? 'منتج غير مسمى';
+                  const sku = p.sku ?? '';
+                  const lowNote = p.lowVariantCount ? ` · ${p.lowVariantCount} مقاس/نسخة ناقصة` : '';
+                  return `<div class="notif-divider" style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:5px 0;"><span>• <strong>${escapeHtml(productName)}</strong>${sku ? ` (${escapeHtml(sku)})` : ''}${escapeHtml(lowNote)}</span><span style="font-weight:750;white-space:nowrap;">المتبقي: ${qty} قطعة</span></div>`;
                 }).join('')}
               </div>
             </div>
@@ -4391,14 +4426,14 @@ function showNotificationsModal() {
 
           ${suppliersDue.length ? `
             <div class="notif-alert-box notif-alert-rose">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;">
                 <strong class="notif-title" style="font-size:13.5px;display:inline-flex;align-items:center;gap:6px;">مستحقات للتجار غير مسددة (${suppliersDue.length} تاجر)</strong>
-                <button type="button" class="button button-sm button-secondary" data-nav-to="suppliers" style="font-size:11.5px;padding:3px 10px;height:28px;">فتح التجار</button>
+                ${caps.canManageCatalog ? `<button type="button" class="button button-sm button-secondary" data-nav-to="suppliers" style="font-size:11.5px;padding:3px 10px;height:28px;">فتح التجار</button>` : ''}
               </div>
-              <div style="display:grid;gap:6px;max-height:160px;overflow-y:auto;font-size:12px;">
+              <div style="display:grid;gap:6px;max-height:170px;overflow-y:auto;font-size:12px;">
                 ${suppliersDue.map((s) => {
-                  const due = s.purchases.reduce((sum, p) => sum + BigInt(p.remainingAmount.amount), 0n);
-                  return `<div class="notif-divider" style="display:flex;justify-content:space-between;padding:4px 0;"><span>• <strong>${escapeHtml(s.name)}</strong></span><span class="notif-amount" style="font-weight:800;">متبقي: ${money({ amount: due.toString(), currency, decimals })}</span></div>`;
+                  const due = (Array.isArray(s?.purchases) ? s.purchases : []).reduce((sum, p) => sum + BigInt(p?.remainingAmount?.amount ?? 0), 0n);
+                  return `<div class="notif-divider" style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:5px 0;"><span>• <strong>${escapeHtml(s.name)}</strong></span><span class="notif-amount" style="font-weight:800;white-space:nowrap;">متبقي: ${money({ amount: due.toString(), currency, decimals })}</span></div>`;
                 }).join('')}
               </div>
             </div>
@@ -4406,15 +4441,32 @@ function showNotificationsModal() {
 
           ${monthlyDue.length ? `
             <div class="notif-alert-box notif-alert-purple">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;">
                 <strong class="notif-title" style="font-size:13.5px;display:inline-flex;align-items:center;gap:6px;">التزامات شهرية مستحقة السداد (${monthlyDue.length} بند)</strong>
-                <button type="button" class="button button-sm button-secondary" data-nav-to="monthly-expenses" style="font-size:11.5px;padding:3px 10px;height:28px;">فتح المصروفات</button>
+                ${caps.canViewMonthlyExpenses ? `<button type="button" class="button button-sm button-secondary" data-nav-to="monthly-expenses" style="font-size:11.5px;padding:3px 10px;height:28px;">فتح المصروفات</button>` : ''}
               </div>
-              <div style="display:grid;gap:6px;max-height:160px;overflow-y:auto;font-size:12px;">
+              <div style="display:grid;gap:6px;max-height:170px;overflow-y:auto;font-size:12px;">
                 ${monthlyDue.map((m) => `
-                  <div class="notif-divider" style="display:flex;justify-content:space-between;padding:4px 0;">
-                    <span>• <strong>${escapeHtml(m.name)}</strong> (${escapeHtml(m.category)})</span>
-                    <span class="notif-amount" style="font-weight:800;">متبقي: ${money(m.actual.remainingAmount)}</span>
+                  <div class="notif-divider" style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:5px 0;">
+                    <span>• <strong>${escapeHtml(m.name)}</strong>${m.category ? ` (${escapeHtml(m.category)})` : ''}</span>
+                    <span class="notif-amount" style="font-weight:800;white-space:nowrap;">متبقي: ${money(m.actual.remainingAmount)}</span>
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+          ` : ''}
+
+          ${safetyWarnings.length ? `
+            <div class="notif-alert-box ${safetyWarnings.some((w) => w.code === 'INTEGRITY') ? 'notif-alert-rose' : 'notif-alert-amber'}">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;">
+                <strong class="notif-title" style="font-size:13.5px;display:inline-flex;align-items:center;gap:6px;">أمان وحماية البيانات (${safetyWarnings.length})</strong>
+                ${caps.canManageBackups ? `<button type="button" class="button button-sm button-secondary" data-nav-to="backups" style="font-size:11.5px;padding:3px 10px;height:28px;">فتح الأمان والنسخ</button>` : ''}
+              </div>
+              <div style="display:grid;gap:6px;font-size:12px;">
+                ${safetyWarnings.map((w) => `
+                  <div class="notif-divider" style="display:grid;gap:2px;padding:5px 0;">
+                    <strong>• ${escapeHtml(w.title)}</strong>
+                    <span style="opacity:.9;">${escapeHtml(w.detail)}</span>
                   </div>
                 `).join('')}
               </div>
@@ -4423,7 +4475,6 @@ function showNotificationsModal() {
 
           ${!totalAlerts ? `
             <div style="text-align:center;padding:34px 16px;">
-              
               <strong style="font-size:16px;color:var(--ink);display:block;">كل الأمور ممتازة وتحت السيطرة!</strong>
               <p style="font-size:12.5px;color:var(--muted);margin:6px 0 0;">لا توجد نواقص في المخزون أو فواتير تجار متأخرة أو التزامات شهرية معلقة حالياً.</p>
             </div>
@@ -4431,14 +4482,13 @@ function showNotificationsModal() {
         </div>
 
         <div class="modal-actions">
-          <button type="button" class="button button-secondary" data-close-notifications>إغلاق</button>
+          <button type="button" class="button button-secondary" data-close-notifications data-close-modal>إغلاق</button>
         </div>
       </section>
     </div>
   `;
 
-  root.querySelectorAll('[data-close-notifications]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
-  // Backdrop click dismissal disabled
+  root.querySelectorAll('[data-close-notifications], [data-close-modal]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
   root.querySelectorAll('[data-nav-to]').forEach((b) => b.addEventListener('click', () => {
     state.page = b.dataset.navTo;
     root.innerHTML = '';
@@ -4451,8 +4501,13 @@ function currencyDecimals(currency) {
 }
 
 function bindShell() {
-  document.querySelector('#global-notifications-btn, .notification-button')?.addEventListener('click', () => {
-    showNotificationsModal();
+  document.querySelector('#global-notifications-btn, .notification-button')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    try {
+      showNotificationsModal();
+    } catch (error) {
+      toast(error?.message || 'تعذر فتح مركز الإشعارات', 'error');
+    }
   });
   document.querySelector('#header-attendance-btn')?.addEventListener('click', async (event) => {
     const btn = event.currentTarget;
