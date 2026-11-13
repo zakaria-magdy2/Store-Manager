@@ -332,6 +332,19 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   data = await request('/api/data');
   assert.equal(data.payload.products.find((item) => item.id === product.id).variants[0].quantity, '5');
 
+  const blockedOwnerCheckout = await request('/api/checkout', {
+    method: 'POST',
+    body: {
+      storeId,
+      idempotencyKey: 'f8d2651b-e1cd-4da7-9e55-6eab7581886f',
+      items: [{ variantId: variant.id, quantity: '1' }],
+      payment: { method: 'CASH', amount: '12500' },
+    },
+  });
+  assert.equal(blockedOwnerCheckout.response.status, 403, 'Owner must also start a shift before checkout');
+  const ownerShiftStart = await request('/api/shifts/start', { method: 'POST', body: { storeId, openingCash: '10000' } });
+  assert.equal(ownerShiftStart.response.status, 201, JSON.stringify(ownerShiftStart.payload));
+
   const sale = await request('/api/checkout', {
     method: 'POST',
     body: {
@@ -343,6 +356,9 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   });
   assert.equal(sale.response.status, 201, JSON.stringify(sale.payload));
   assert.equal(sale.payload.total.amount, '12500');
+  const ownerShiftSales = await request(`/api/shifts/${ownerShiftStart.payload.shift.id}/sales`);
+  assert.equal(ownerShiftSales.response.status, 200, JSON.stringify(ownerShiftSales.payload));
+  assert.equal(ownerShiftSales.payload.sales.length, 1);
   const saleHistory = await request(`/api/sales?storeId=${storeId}&limit=1`);
   assert.equal(saleHistory.response.status, 200, `${JSON.stringify(saleHistory.payload)}\n${serverLog}`);
   assert.ok(saleHistory.payload.payload.total >= 1, JSON.stringify(saleHistory.payload));

@@ -88,7 +88,14 @@ function closeAccountMenu() {
 }
 
 document.addEventListener('click', (event) => {
-  if (event.target instanceof Element && !event.target.closest('.account-control')) closeAccountMenu();
+  if (!(event.target instanceof Element)) return;
+  if (!event.target.closest('.account-control')) closeAccountMenu();
+  const closeBtn = event.target.closest('[data-close-modal], [data-close-employee], [data-close-password], [data-close-breakdown], [data-close-return], [data-close-notifications], [data-close-barcode-modal], [data-close-inventory-details], [data-close-category]');
+  if (closeBtn) {
+    if (closeBtn.matches('.modal-backdrop') && event.target !== closeBtn) return;
+    const overlayContainer = closeBtn.closest('#category-modal-root, #modal-root');
+    if (overlayContainer) overlayContainer.innerHTML = '';
+  }
 });
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
@@ -105,7 +112,7 @@ const navItems = [
   { id: 'products', label: 'المنتجات والموديلات', icon: 'box' },
   { id: 'inventory', label: 'المخزون', icon: 'store' },
   { id: 'sales', label: 'المبيعات', icon: 'chart' },
-  { id: 'shifts', label: 'الورديات', icon: 'clock' },
+  { id: 'shifts', label: 'الشيفتات', icon: 'clock' },
   { id: 'suppliers', label: 'التجار والمشتريات', icon: 'users' },
   { id: 'expenses', label: 'المصروفات', icon: 'wallet' },
   { id: 'financial-map', label: 'المسار المالي', icon: 'chart' },
@@ -113,7 +120,7 @@ const navItems = [
   { id: 'top-products', label: 'التقارير والإحصائيات', icon: 'chart' },
   { id: 'users', label: 'المستخدمون', icon: 'users' },
 ];
-const extraPageTitles = { backups: 'النسخ الاحتياطي اليومي والاستعادة', 'audit-logs': 'سجل المراجعة والأمان', 'monthly-expenses': 'الالتزامات الشهرية', 'financial-map': 'المسار المالي وتدفق الأرباح', shifts: 'سجل الورديات ومتابعة الشفتات' };
+const extraPageTitles = { backups: 'النسخ الاحتياطي اليومي والاستعادة', 'audit-logs': 'سجل المراجعة والأمان', 'monthly-expenses': 'الالتزامات الشهرية', 'financial-map': 'المسار المالي وتدفق الأرباح', shifts: 'سجل الشيفتات ومتابعة الحضور' };
 
 function icon(name, size = 20) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] ?? ''}</svg>`;
@@ -127,7 +134,7 @@ async function api(path, options = {}) {
   const method = String(options.method ?? 'GET').toUpperCase();
   if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && path !== '/api/login') {
     const operation = mutationLabel(path, method);
-    requireMutationConfirmation(operation);
+    await requireMutationConfirmation(operation);
   }
   const response = await fetch(path, {
     credentials: 'same-origin',
@@ -146,8 +153,59 @@ async function api(path, options = {}) {
   return result;
 }
 
-function requireMutationConfirmation(operation) {
-  if (!window.confirm(`هل تريد بالتأكيد ${operation}؟\nاضغط موافق للتأكيد أو إلغاء للرجوع.`)) throw new Error('تم إلغاء العملية');
+function getConfirmModalRoot() {
+  let root = document.querySelector('#confirm-modal-root');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'confirm-modal-root';
+    document.body.append(root);
+  }
+  return root;
+}
+
+function showConfirmModal({ title = 'تأكيد العملية', message = '', confirmText = 'تأكيد ومتابعة', cancelText = 'إلغاء', danger = false } = {}) {
+  return new Promise((resolve) => {
+    const root = getConfirmModalRoot();
+    root.innerHTML = `
+      <div class="confirm-backdrop" role="presentation">
+        <section class="confirm-card" role="alertdialog" aria-modal="true" aria-labelledby="confirm-modal-title" aria-describedby="confirm-modal-msg">
+          <div class="confirm-icon-wrap ${danger ? 'confirm-danger' : ''}">${icon(danger ? 'alert' : 'check', 24)}</div>
+          <h3 id="confirm-modal-title" class="confirm-title">${escapeHtml(title)}</h3>
+          <p id="confirm-modal-msg" class="confirm-message">${escapeHtml(message)}</p>
+          <div class="confirm-actions">
+            <button type="button" class="button button-secondary" data-confirm-cancel>${escapeHtml(cancelText)}</button>
+            <button type="button" class="button ${danger ? 'button-danger' : 'button-primary'}" data-confirm-accept>${escapeHtml(confirmText)}</button>
+          </div>
+        </section>
+      </div>
+    `;
+    const cleanup = (accepted) => {
+      document.removeEventListener('keydown', onKeyDown);
+      root.innerHTML = '';
+      resolve(accepted);
+    };
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') cleanup(false);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    root.querySelector('[data-confirm-cancel]')?.addEventListener('click', () => cleanup(false));
+    root.querySelector('[data-confirm-accept]')?.addEventListener('click', () => cleanup(true));
+    root.querySelector('[data-confirm-accept]')?.focus();
+  });
+}
+
+async function requireMutationConfirmation(operation) {
+  const accepted = await showConfirmModal({
+    title: 'تأكيد تنفيذ العملية',
+    message: `هل تريد بالتأكيد ${operation}؟`,
+    confirmText: 'تأكيد',
+    cancelText: 'إلغاء',
+  });
+  if (!accepted) {
+    const err = new Error('تم إلغاء العملية');
+    err.isCancelled = true;
+    throw err;
+  }
 }
 
 function mutationLabel(path, method) {
@@ -239,8 +297,9 @@ function formatVariantAttributes(product, attributes, fallback = 'النمط ا�
 function toast(message, kind = 'success') {
   const region = document.querySelector('#toast-region');
   if (!region) return;
+  const resolvedKind = message === 'تم إلغاء العملية' ? 'neutral' : kind;
   const node = document.createElement('div');
-  node.className = `toast toast-${kind}`;
+  node.className = `toast toast-${resolvedKind}`;
   node.textContent = message;
   region.append(node);
   setTimeout(() => node.remove(), 3600);
@@ -347,12 +406,12 @@ function shellView() {
   const menuExtraItems = `${state.data.capabilities.canManageBackups ? `<button type="button" class="account-menu-item" role="menuitem" data-page="backups">${icon('store', 17)}<span>النسخ الاحتياطي اليومي</span></button>` : ''}${state.data.capabilities.canViewAuditLogs ? `<button type="button" class="account-menu-item" role="menuitem" data-page="audit-logs">${icon('scan', 17)}<span>سجل المراجعة والأمان</span></button>` : ''}`;
   const activeShift = state.data.activeShift;
   const shiftControl = activeShift ? `
-    <button type="button" id="header-end-shift-btn" class="button button-sm button-shift-active" style="background:#5948d8;border-color:#5948d8;color:#fff;box-shadow:0 2px 8px rgba(89,72,216,.25);font-weight:750;display:inline-flex;align-items:center;gap:6px;" title="الوردية مفتوحة حالياً، اضغط لإنهائها وتقفيل الدرج">
-      ${icon('clock', 15)}<span>إنهاء الوردية (${escapeHtml(activeShift.shiftNumber)})</span>
+    <button type="button" id="header-end-shift-btn" class="button button-sm button-shift-active" style="background:#5948d8;border-color:#5948d8;color:#fff;box-shadow:0 2px 8px rgba(89,72,216,.25);font-weight:750;display:inline-flex;align-items:center;gap:6px;" title="الشيفت مفتوحة حالياً، اضغط لإنهائها وتقفيل الدرج">
+      ${icon('clock', 15)}<span>إنهاء الشيفت (${escapeHtml(activeShift.shiftNumber)})</span>
     </button>
   ` : `
-    <button type="button" id="header-start-shift-btn" class="button button-sm button-shift-start" style="background:#059669;border-color:#059669;color:#fff;box-shadow:0 2px 8px rgba(5,150,105,.25);font-weight:750;display:inline-flex;align-items:center;gap:6px;" title="بدء وردية جديدة وتسجيل الحضور">
-      ${icon('play', 15)}<span>بدء الوردية (تسجيل الحضور)</span>
+    <button type="button" id="header-start-shift-btn" class="button button-sm button-shift-start" style="background:#059669;border-color:#059669;color:#fff;box-shadow:0 2px 8px rgba(5,150,105,.25);font-weight:750;display:inline-flex;align-items:center;gap:6px;" title="بدء شيفت جديدة وتسجيل الحضور">
+      ${icon('play', 15)}<span>بدء الشيفت (تسجيل الحضور)</span>
     </button>
   `;
   const lowStockCount = state.data.summary?.lowStockCount ?? state.data.lowStock?.length ?? 0;
@@ -514,7 +573,7 @@ function showEmployeeDetails(user) {
 
 async function showAttendanceHistoryModal(userId, userName) {
   const root = getModalRoot();
-  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card" role="dialog" aria-modal="true" style="width:min(580px, calc(100vw - 32px));margin:20px auto;"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">سجل حضور الموظف</span><h2>${escapeHtml(userName)}</h2></div><button class="modal-close" data-close-modal>×</button></div><div style="padding:16px 20px;" id="attendance-history-content"><p style="text-align:center;color:var(--text-soft);">جاري تحميل سجل الحضور...</p></div><div class="modal-actions" style="padding:12px 20px;"><button type="button" class="button button-secondary" data-close-modal>إغلاق</button></div></section></div>`;
+  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card" role="dialog" aria-modal="true" style="width:min(580px, calc(100vw - 32px));margin:20px auto;"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">سجل حضور الموظف</span><h2>${escapeHtml(userName)}</h2></div><button type="button" class="modal-close" data-close-modal>×</button></div><div style="padding:16px 20px;" id="attendance-history-content"><p style="text-align:center;color:var(--text-soft);">جاري تحميل سجل الحضور...</p></div><div class="modal-actions" style="padding:12px 20px;"><button type="button" class="button button-secondary" data-close-modal>إغلاق</button></div></section></div>`;
   root.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
   try {
     const data = await api(`/api/attendance/history?userId=${encodeURIComponent(userId)}`);
@@ -1168,7 +1227,7 @@ function shiftsView() {
 
   if (!shiftsData) {
     void loadShifts();
-    return `<div class="panel empty-chart" style="padding:60px 20px;"><div class="empty-illustration">${icon('clock', 32)}</div><strong>جاري تحميل سجل الورديات...</strong><p>يتم تجميع كافة ورديات الشفتات ومبيعات كل كاشير.</p></div>`;
+    return `<div class="panel empty-chart" style="padding:60px 20px;"><div class="empty-illustration">${icon('clock', 32)}</div><strong>جاري تحميل سجل الشيفتات...</strong><p>يتم تجميع كافة الشيفتات ومبيعات كل كاشير.</p></div>`;
   }
 
   const { shifts = [], summary = {} } = shiftsData;
@@ -1176,16 +1235,16 @@ function shiftsView() {
   return `
     <div class="page-heading-row">
       <div>
-        <p class="page-lead">سجل ورديات الموظفين: متابعة بدء وانتهاء الشفتات، جرد الأدراج، المبيعات المحققة، والتوريدات.</p>
+        <p class="page-lead">سجل شيفتات الموظفين: متابعة بدء وانتهاء الشفتات، جرد الأدراج، المبيعات المحققة، والتوريدات.</p>
       </div>
       <div>
         ${state.data.activeShift ? `
           <button type="button" class="button button-primary" id="shifts-end-now-btn" style="background:#5948d8;border-color:#5948d8;">
-            ${icon('clock', 16)} إنهاء الوردية الحالية (${escapeHtml(state.data.activeShift.shiftNumber)})
+            ${icon('clock', 16)} إنهاء الشيفت الحالية (${escapeHtml(state.data.activeShift.shiftNumber)})
           </button>
         ` : `
           <button type="button" class="button button-primary" id="shifts-start-now-btn" style="background:#059669;border-color:#059669;">
-            ${icon('play', 16)} بدء وردية جديدة
+            ${icon('play', 16)} بدء شيفت جديدة
           </button>
         `}
       </div>
@@ -1195,9 +1254,9 @@ function shiftsView() {
       <div class="pro-filter-row">
         <div class="pro-filter-pills">
           <span style="font-size:12px;font-weight:700;color:var(--muted);display:inline-flex;align-items:center;gap:6px;">
-            ${icon('filter', 15)} تصفية الورديات:
+            ${icon('filter', 15)} تصفية الشيفتات:
           </span>
-          <button type="button" class="pro-filter-pill ${activePreset === 'all' ? 'active' : ''}" data-shift-preset="all">كل الورديات</button>
+          <button type="button" class="pro-filter-pill ${activePreset === 'all' ? 'active' : ''}" data-shift-preset="all">كل الشيفتات</button>
           <button type="button" class="pro-filter-pill ${activePreset === 'today' ? 'active' : ''}" data-shift-preset="today">اليوم</button>
           <button type="button" class="pro-filter-pill ${activePreset === 'week' ? 'active' : ''}" data-shift-preset="week">هذا الأسبوع</button>
           <button type="button" class="pro-filter-pill ${activePreset === 'month' ? 'active' : ''}" data-shift-preset="month">هذا الشهر</button>
@@ -1218,18 +1277,18 @@ function shiftsView() {
 
     <div class="fm-card-grid" style="grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 18px;">
       <div class="fm-kpi-card">
-        <small>إجمالي عدد الورديات</small>
-        <strong style="color:var(--ink);">${summary.totalShifts ?? shifts.length} وردية</strong>
+        <small>إجمالي عدد الشيفتات</small>
+        <strong style="color:var(--ink);">${summary.totalShifts ?? shifts.length} شيفت</strong>
         <small style="color:var(--muted);">${activePreset === 'today' ? 'اليوم' : 'في الفترة المحددة'}</small>
       </div>
       <div class="fm-kpi-card">
-        <small>إجمالي مبيعات الورديات</small>
+        <small>إجمالي مبيعات الشيفتات</small>
         <strong style="color:var(--green, #15803d);">${format(summary.totalSales ?? '0')}</strong>
         <small style="color:var(--muted);">المحصل من كافة الفواتير</small>
       </div>
       ${!isCashier ? `
         <div class="fm-kpi-card fm-kpi-profit">
-          <small style="color:var(--purple);font-weight:750;">إجمالي أرباح الورديات</small>
+          <small style="color:var(--purple);font-weight:750;">إجمالي أرباح الشيفتات</small>
           <strong>${format(summary.totalProfit ?? '0')}</strong>
           <small style="color:var(--muted);">مجمل ربح البضاعة المباعة</small>
         </div>
@@ -1246,7 +1305,7 @@ function shiftsView() {
     <section class="panel compact-panel">
       <div class="panel-heading">
         <div>
-          <h3 style="font-size:16px;font-weight:800;color:var(--ink);">قائمة الورديات المسجلة (${shifts.length} وردية)</h3>
+          <h3 style="font-size:16px;font-weight:800;color:var(--ink);">قائمة الشيفتات المسجلة (${shifts.length} شيفت)</h3>
           <p>تفاصيل كل شفت، توقيت الحضور والانصراف، مبيعات الكاشير، ورصيد التوريد والتسليم.</p>
         </div>
       </div>
@@ -1256,7 +1315,7 @@ function shiftsView() {
           <table class="compact-table zebra-table">
             <thead>
               <tr>
-                <th>رقم الوردية</th>
+                <th>رقم الشيفت</th>
                 <th>الموظف المسؤول</th>
                 <th>البداية والانتهاء</th>
                 <th>مدة الشفت</th>
@@ -1308,8 +1367,8 @@ function shiftsView() {
       ` : `
         <div class="empty-chart" style="padding:40px 16px;">
           <div class="empty-illustration">${icon('clock', 32)}</div>
-          <strong>لا توجد ورديات مسجلة في هذه الفترة</strong>
-          <p>ابدأ وردية جديدة ليتم احتساب المبيعات وحركات الدرج تلقائياً.</p>
+          <strong>لا توجد شيفتات مسجلة في هذه الفترة</strong>
+          <p>ابدأ شيفت جديدة ليتم احتساب المبيعات وحركات الدرج تلقائياً.</p>
         </div>
       `}
     </section>
@@ -1323,13 +1382,13 @@ async function showShiftSalesModal(shiftId, shiftNumber) {
       <section class="modal-card invoice-detail-card" role="dialog" aria-modal="true" style="width:min(860px, calc(100vw - 32px)); border-radius:16px;">
         <div class="modal-heading" style="padding:18px 26px; border-bottom:1px solid var(--line);">
           <div>
-            <span class="eyebrow eyebrow-dark">فواتير مبيعات الوردية</span>
+            <span class="eyebrow eyebrow-dark">فواتير مبيعات الشيفت</span>
             <div style="display:flex;align-items:center;gap:8px;margin-top:2px;">
-              <h2 style="margin:0;font-size:18px;font-weight:800;">فواتير الوردية</h2>
+              <h2 style="margin:0;font-size:18px;font-weight:800;">فواتير الشيفت</h2>
               <span class="invoice-number-chip">#${escapeHtml(shiftNumber)}</span>
             </div>
           </div>
-          <button class="modal-close" data-close-modal aria-label="إغلاق">×</button>
+          <button type="button" class="modal-close" data-close-modal aria-label="إغلاق">×</button>
         </div>
         <div id="shift-sales-content" class="modal-body" style="padding:22px 26px; overflow-y:auto;">
           <p style="text-align:center;color:var(--muted);">جاري تحميل الفواتير...</p>
@@ -1352,7 +1411,7 @@ async function showShiftSalesModal(shiftId, shiftNumber) {
     const sales = data.sales ?? [];
 
     if (!sales.length) {
-      content.innerHTML = `<div class="empty-row" style="text-align:center;padding:24px;">لم يتم تسجيل أي فواتير بيع خلال هذه الوردية.</div>`;
+      content.innerHTML = `<div class="empty-row" style="text-align:center;padding:24px;">لم يتم تسجيل أي فواتير بيع خلال هذه الشيفت.</div>`;
       return;
     }
 
@@ -1412,23 +1471,23 @@ function showStartShiftModal() {
   root.innerHTML = `
     <div class="modal-backdrop">
       <section class="modal-card" role="dialog" aria-modal="true" style="width:min(460px, calc(100vw - 32px));margin:20px auto;">
-        <div class="modal-heading">
+        <div class="modal-heading" style="padding:18px 24px;">
           <div>
-            <span class="eyebrow eyebrow-dark">نظام الورديات والحضور</span>
-            <h2>بدء الوردية وتسجيل الحضور</h2>
+            <span class="eyebrow eyebrow-dark">نظام الشيفتات والحضور</span>
+            <h2>بدء الشيفت وتسجيل الحضور</h2>
           </div>
-          <button class="modal-close" data-close-modal>×</button>
+          <button type="button" class="modal-close" data-close-modal aria-label="إغلاق">×</button>
         </div>
-        <form id="start-shift-form" class="form-stack modal-form" style="padding:16px 20px;">
-          <p style="font-size:13px;color:var(--muted);margin:0 0 14px;line-height:1.5;">
+        <form id="start-shift-form" class="form-stack modal-form" style="padding:20px 24px;">
+          <p style="font-size:13px;color:var(--muted);margin:0 0 12px;line-height:1.6;">
             أدخل المبلغ المستلم في الدرج (عهدة البداية) للبدء في البيع وتسجيل الحضور فوراً.
           </p>
-          <label style="font-weight:750;display:flex;flex-direction:column;gap:6px;">المبلغ المستلم في الدرج (${currency}) *
-            <input name="openingCash" id="start-shift-opening-cash" inputmode="decimal" value="0.00" required placeholder="0.00" style="font-size:18px;font-weight:800;color:var(--ink);padding:10px 12px;" autofocus>
+          <label style="font-weight:750;display:flex;flex-direction:column;gap:8px;">المبلغ المستلم في الدرج (${currency}) *
+            <input name="openingCash" id="start-shift-opening-cash" inputmode="decimal" value="0.00" required placeholder="0.00" style="font-size:18px;font-weight:800;color:var(--ink);padding:10px 14px;" autofocus>
           </label>
-          <div class="modal-actions" style="margin-top:20px;padding:0;">
+          <div class="modal-actions" style="margin-top:16px;padding:16px 0 0;">
             <button type="button" class="button button-secondary" data-close-modal>إلغاء</button>
-            <button type="submit" class="button button-primary" style="background:#059669;border-color:#059669;font-weight:750;padding:8px 20px;">بدء الوردية الآن</button>
+            <button type="submit" class="button button-primary" style="background:#059669;border-color:#059669;font-weight:750;padding:8px 20px;">بدء الشيفت الآن</button>
           </div>
         </form>
       </section>
@@ -1457,7 +1516,7 @@ function showStartShiftModal() {
         })
       });
       root.innerHTML = '';
-      toast(`تم بدء الوردية #${res.shift.shiftNumber} بنجاح وتسجيل الحضور`);
+      toast(`تم بدء الشيفت #${res.shift.shiftNumber} بنجاح وتسجيل الحضور`);
       await loadData(state.data.selectedStoreId);
       render();
     } catch (err) {
@@ -1476,16 +1535,16 @@ async function showEndShiftModal() {
 
   root.innerHTML = `
     <div class="modal-backdrop">
-      <section class="modal-card" role="dialog" aria-modal="true" style="width:min(580px, calc(100vw - 32px));margin:20px auto;">
-        <div class="modal-heading">
+      <section class="modal-card" role="dialog" aria-modal="true" style="width:min(600px, calc(100vw - 32px));margin:20px auto;">
+        <div class="modal-heading" style="padding:18px 24px;">
           <div>
-            <span class="eyebrow eyebrow-dark">نظام الورديات والحسابات</span>
-            <h2>تقفيل وتسليم الوردية</h2>
+            <span class="eyebrow eyebrow-dark">نظام الشيفتات والحسابات</span>
+            <h2>تقفيل وتسليم الشيفت</h2>
           </div>
-          <button class="modal-close" data-close-modal>×</button>
+          <button type="button" class="modal-close" data-close-modal aria-label="إغلاق">×</button>
         </div>
-        <div id="end-shift-modal-body" style="padding:16px 20px;">
-          <p style="text-align:center;color:var(--muted);">جاري تجميع حركات الوردية الحالية...</p>
+        <div id="end-shift-modal-body" class="modal-body" style="padding:20px 24px;">
+          <p style="text-align:center;color:var(--muted);padding:16px 0;">جاري تجميع حركات الشيفت الحالي...</p>
         </div>
       </section>
     </div>
@@ -1496,41 +1555,98 @@ async function showEndShiftModal() {
     const { currentShift } = await api(`/api/shifts/current?storeId=${encodeURIComponent(state.data.selectedStoreId)}`);
     if (!currentShift) {
       root.innerHTML = '';
-      toast('لا توجد وردية مفتوحة حالياً', 'error');
+      toast('لا يوجد شيفت مفتوح حالياً', 'error');
       return;
     }
 
     const modalBody = root.querySelector('#end-shift-modal-body');
     if (!modalBody) return;
 
-    if (isCashier) {
-      modalBody.innerHTML = `
-        <div style="background:var(--surface-soft);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:16px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;">
-            <span>الوردية الحالية: <strong style="color:var(--purple);font-family:monospace;">${escapeHtml(currentShift.shiftNumber)}</strong></span>
-            <span>بدأت الساعة: <strong>${new Date(currentShift.startedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</strong></span>
+    const shiftSummaryCard = `
+      <div style="background:var(--surface-soft);border:1px solid var(--line-strong, var(--line));border-radius:14px;padding:16px 18px;margin-bottom:18px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;font-size:13px;">
+          <span>الشيفت الحالي: <strong style="color:var(--purple);font-family:monospace;font-size:14px;">${escapeHtml(currentShift.shiftNumber)}</strong></span>
+          <span style="color:var(--muted);">بدأ الساعة: <strong style="color:var(--ink);">${new Date(currentShift.startedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</strong></span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(190px, 1fr));gap:10px 16px;font-size:12.5px;border-top:1px dashed var(--line-strong, var(--line));padding-top:12px;">
+          <div style="display:flex;justify-content:space-between;gap:8px;">
+            <span style="color:var(--muted);">كاش البداية:</span>
+            <strong style="color:var(--ink);">${format(currentShift.openingCash)}</strong>
           </div>
-          <div style="margin-top:8px;font-size:12px;color:var(--muted);border-top:1px dashed var(--line);padding-top:8px;">
-            المبلغ المستلم عند البداية: <strong style="color:var(--ink);">${format(currentShift.openingCash)}</strong>
+          <div style="display:flex;justify-content:space-between;gap:8px;">
+            <span style="color:var(--muted);">إجمالي المبيعات (${currentShift.salesCount || 0} فاتورة):</span>
+            <strong style="color:var(--purple);">${format(currentShift.totalSales)}</strong>
+          </div>
+          <div style="display:flex;justify-content:space-between;gap:8px;">
+            <span style="color:var(--muted);">مبيعات الكاش المحصلة:</span>
+            <strong style="color:var(--green, #15803d);">+${format(currentShift.cashSales)}</strong>
+          </div>
+          <div style="display:flex;justify-content:space-between;gap:8px;">
+            <span style="color:var(--muted);">مبيعات البطاقة / المحفظة:</span>
+            <strong style="color:var(--ink);">${format(currentShift.electronicSales)}</strong>
+          </div>
+          <div style="display:flex;justify-content:space-between;gap:8px;">
+            <span style="color:var(--muted);">مرتجعات كاش مسددة:</span>
+            <strong style="color:var(--rose, #be123c);">-${format(currentShift.cashReturns)}</strong>
           </div>
         </div>
+        <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line-strong, var(--line));display:flex;justify-content:space-between;align-items:center;gap:12px;">
+          <strong style="font-size:13.5px;color:var(--ink);">النقدية المتوقع وجودها بالدرج:</strong>
+          <strong style="font-size:17px;color:var(--purple);">${format(currentShift.expectedCash)}</strong>
+        </div>
+      </div>
+    `;
 
-        <form id="end-shift-form" class="form-stack">
-          <label style="font-weight:750;display:flex;flex-direction:column;gap:6px;">المبلغ المسلم بنهاية الوردية (${currency}) *
-            <input name="handoverCash" id="shift-handover-cash" inputmode="decimal" required placeholder="0.00" style="font-size:18px;font-weight:800;color:var(--ink);padding:10px 12px;" autofocus>
-            <small style="color:var(--muted);font-size:11.5px;">عِدّ النقدية الموجودة بالدرج وسلّم المبلغ واكتب قيمته هنا للإغلاق.</small>
+    const expectedCashBig = BigInt(currentShift.expectedCash || '0');
+
+    if (isCashier) {
+      modalBody.innerHTML = `
+        ${shiftSummaryCard}
+        <form id="end-shift-form" class="form-stack" style="gap:14px;">
+          <label style="font-weight:750;display:flex;flex-direction:column;gap:6px;">المبلغ المسلم بنهاية الشيفت (${currency}) *
+            <input name="handoverCash" id="shift-handover-cash" inputmode="decimal" required placeholder="0.00" style="font-size:18px;font-weight:800;color:var(--ink);padding:10px 14px;" autofocus>
+            <small style="color:var(--muted);font-size:11.5px;">عِدّ النقدية الموجودة بالدرج وسلّم المبلغ واكتب قيمته هنا لإغلاق الشيفت.</small>
           </label>
-
-          <div class="modal-actions" style="margin-top:20px;padding:0;">
+          <div id="shift-variance-preview" style="display:none;padding:10px 14px;border-radius:10px;font-size:12px;font-weight:750;"></div>
+          <label style="font-weight:750;display:flex;flex-direction:column;gap:6px;">ملاحظات التسليم (اختياري)
+            <input name="notes" maxlength="250" placeholder="مثال: تم تسليم الدرج ومراجعة الفواتير" style="padding:10px 14px;">
+          </label>
+          <div class="modal-actions" style="margin-top:8px;padding:16px 0 0;">
             <button type="button" class="button button-secondary" data-close-modal>إلغاء</button>
-            <button type="submit" class="button button-primary" style="background:#5948d8;border-color:#5948d8;font-weight:750;padding:8px 20px;">تأكيد تسليم النقدية وإنهاء الوردية</button>
+            <button type="submit" class="button button-primary" style="background:#5948d8;border-color:#5948d8;font-weight:750;padding:8px 20px;">تأكيد تسليم النقدية وإنهاء الشيفت</button>
           </div>
         </form>
       `;
 
+      modalBody.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
       const cashInput = modalBody.querySelector('#shift-handover-cash');
+      const variancePreview = modalBody.querySelector('#shift-variance-preview');
       cashInput?.focus();
       cashInput?.select();
+      cashInput?.addEventListener('input', () => {
+        const valStr = cashInput.value.trim();
+        if (!valStr || !variancePreview) {
+          if (variancePreview) variancePreview.style.display = 'none';
+          return;
+        }
+        try {
+          const actualMinor = BigInt(toMinor(valStr, decimals));
+          const diff = actualMinor - expectedCashBig;
+          variancePreview.style.display = 'block';
+          if (diff === 0n) {
+            variancePreview.className = 'variance-box variance-match';
+            variancePreview.textContent = '✓ المبلغ المسلم متطابق تماماً مع مبيعات الشيفت والنقدية المتوقعة.';
+          } else if (diff < 0n) {
+            variancePreview.className = 'variance-box variance-shortage';
+            variancePreview.textContent = `يوجد فرق عجز مقارنة بالمتوقع بمقدار: ${format(diff.toString())}`;
+          } else {
+            variancePreview.className = 'variance-box variance-overage';
+            variancePreview.textContent = `توجد زيادة مقارنة بالمتوقع بمقدار: +${format(diff.toString())}`;
+          }
+        } catch {
+          variancePreview.style.display = 'none';
+        }
+      });
 
       modalBody.querySelector('#end-shift-form')?.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -1546,11 +1662,11 @@ async function showEndShiftModal() {
               shiftId: currentShift.id,
               actualCash: enteredMinor,
               handoverCash: enteredMinor,
-              notes: 'تسليم وردية كاشير',
+              notes: formData.get('notes') || 'تسليم شيفت كاشير',
             })
           });
           root.innerHTML = '';
-          toast(`تم إنهاء الوردية #${res.shift.shiftNumber} بنجاح وتسليم الدرج`);
+          toast(`تم إنهاء الشيفت #${res.shift.shiftNumber} بنجاح وتسليم الدرج`);
           await loadData(state.data.selectedStoreId);
           render();
         } catch (err) {
@@ -1561,49 +1677,32 @@ async function showEndShiftModal() {
       return;
     }
 
-    const expectedCashBig = BigInt(currentShift.expectedCash || '0');
-
     modalBody.innerHTML = `
-      <div style="background:var(--surface-soft);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px;">
-        <div style="display:flex;justify-content:space-between;margin-bottom:8px;font-size:12.5px;">
-          <span>الوردية الحالية: <strong style="color:var(--purple);font-family:monospace;">${escapeHtml(currentShift.shiftNumber)}</strong></span>
-          <span>بدأت الساعة: <strong>${new Date(currentShift.startedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</strong></span>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;margin-top:6px;border-top:1px dashed var(--line);padding-top:8px;">
-          <div>كاش البداية (الافتتاحي): <strong>${format(currentShift.openingCash)}</strong></div>
-          <div>مبيعات الكاش المحصلة: <strong style="color:var(--green, #15803d);">+${format(currentShift.cashSales)}</strong></div>
-          <div>مبيعات الفيزا/المحفظة: <strong>${format(currentShift.electronicSales)}</strong></div>
-          <div>مرتجعات كاش مسددة: <strong style="color:var(--rose,var(--rose, #be123c));">-${format(currentShift.cashReturns)}</strong></div>
-        </div>
-        <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;">
-          <strong style="font-size:13px;color:var(--ink);">النقدية المتوقع وجودها بالدرج:</strong>
-          <strong style="font-size:16px;color:var(--purple);">${format(currentShift.expectedCash)}</strong>
-        </div>
-      </div>
-
-      <form id="end-shift-form" class="form-stack">
-        <label style="font-weight:750;">النقدية الفعلية المعدودة في الدرج الآن (${currency}) *
-          <input name="actualCash" id="shift-actual-cash" inputmode="decimal" required placeholder="المبلغ الفعلي بالدرج" style="font-size:16px;font-weight:800;color:var(--ink);">
+      ${shiftSummaryCard}
+      <form id="end-shift-form" class="form-stack" style="gap:14px;">
+        <label style="font-weight:750;display:flex;flex-direction:column;gap:6px;">النقدية الفعلية المعدودة في الدرج الآن (${currency}) *
+          <input name="actualCash" id="shift-actual-cash" inputmode="decimal" required placeholder="المبلغ الفعلي بالدرج" style="font-size:16px;font-weight:800;color:var(--ink);padding:10px 14px;">
           <small style="color:var(--muted);font-size:11px;">عِدّ النقدية الموجودة في الدرج بدقة واكتب المبلغ هنا</small>
         </label>
 
-        <div id="shift-variance-preview" style="display:none;padding:10px 14px;border-radius:10px;font-size:12px;font-weight:750;margin:4px 0 10px;"></div>
+        <div id="shift-variance-preview" style="display:none;padding:10px 14px;border-radius:10px;font-size:12px;font-weight:750;"></div>
 
-        <label style="font-weight:750;">المبلغ المورد للشفت القادم / الخزينة (${currency})
-          <input name="handoverCash" inputmode="decimal" placeholder="المبلغ المسلم للوردية التالية أو الخزينة" value="0.00">
+        <label style="font-weight:750;display:flex;flex-direction:column;gap:6px;">المبلغ المورد للشيفت القادم / الخزينة (${currency})
+          <input name="handoverCash" inputmode="decimal" placeholder="المبلغ المسلم للشيفت التالي أو الخزينة" value="0.00" style="padding:10px 14px;">
         </label>
 
-        <label style="font-weight:750;">ملاحظات التقفيل والتسليم (اختياري)
-          <input name="notes" maxlength="250" placeholder="مثال: تم تسليم الكاش للزميل أحمد بدون أي عجز">
+        <label style="font-weight:750;display:flex;flex-direction:column;gap:6px;">ملاحظات التقفيل والتسليم (اختياري)
+          <input name="notes" maxlength="250" placeholder="مثال: تم تسليم الكاش بدون أي عجز" style="padding:10px 14px;">
         </label>
 
-        <div class="modal-actions" style="margin-top:14px;padding:0;">
+        <div class="modal-actions" style="margin-top:8px;padding:16px 0 0;">
           <button type="button" class="button button-secondary" data-close-modal>إلغاء</button>
-          <button type="submit" class="button button-primary" style="background:#5948d8;border-color:#5948d8;">تأكيد إنهاء الوردية وتقفيل الدرج</button>
+          <button type="submit" class="button button-primary" style="background:#5948d8;border-color:#5948d8;">تأكيد إنهاء الشيفت وتقفيل الدرج</button>
         </div>
       </form>
     `;
 
+    modalBody.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
     const actualInput = modalBody.querySelector('#shift-actual-cash');
     const variancePreview = modalBody.querySelector('#shift-variance-preview');
 
@@ -1651,7 +1750,7 @@ async function showEndShiftModal() {
           })
         });
         root.innerHTML = '';
-        toast(`تم إنهاء الوردية #${res.shift.shiftNumber} وتقفيل الدرج بنجاح`);
+        toast(`تم إنهاء الشيفت #${res.shift.shiftNumber} وتقفيل الدرج بنجاح`);
         await loadData(state.data.selectedStoreId);
         render();
       } catch (err) {
@@ -3097,18 +3196,18 @@ function posView() {
   const decimals = state.cart[0]?.price.decimals ?? currencyDecimals(currency);
   const total = { amount: totalMinor.toString(), currency, decimals };
   const activeShift = state.data.activeShift;
-  const mustStartShift = state.data.user.role !== 'OWNER' && !activeShift;
+  const mustStartShift = !activeShift;
   const shiftBanner = activeShift ? `
     <div class="pos-shift-banner pos-shift-banner-active" style="background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;box-shadow:0 1px 3px rgba(0,0,0,.04);">
       <div style="display:flex;align-items:center;gap:10px;">
         <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#10b981;"></span>
         <div>
-          <span style="font-size:13px;color:var(--ink);font-weight:750;">الوردية نشطة: <strong style="color:var(--purple);font-family:monospace;">${escapeHtml(activeShift.shiftNumber)}</strong></span>
+          <span style="font-size:13px;color:var(--ink);font-weight:750;">الشيفت نشطة: <strong style="color:var(--purple);font-family:monospace;">${escapeHtml(activeShift.shiftNumber)}</strong></span>
           <span style="font-size:11.5px;color:var(--muted);margin-right:8px;">(بدأت: ${new Date(activeShift.startedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })})</span>
         </div>
       </div>
       <button type="button" id="pos-end-shift-now-btn" class="button button-sm button-secondary" style="font-weight:750;padding:6px 14px;color:var(--purple);border-color:var(--purple);">
-        إنهاء الوردية وتسليم النقدية
+        إنهاء الشيفت وتسليم النقدية
       </button>
     </div>
   ` : `
@@ -3116,23 +3215,23 @@ function posView() {
       <div style="display:flex;align-items:center;gap:10px;">
         <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ef4444;"></span>
         <div>
-          <strong style="font-size:13px;color:var(--ink);display:block;">لم يتم بدء الوردية بعد</strong>
-          <span style="font-size:11.5px;color:var(--muted);">${mustStartShift ? 'نقطة البيع مقفولة — ابدأ الوردية أولاً لتتمكن من تنفيذ أي عملية بيع' : 'اضغط هنا لإدخال عهدة البداية لتسجيل الحضور وتفعيل الكاشير'}</span>
+          <strong style="font-size:13px;color:var(--ink);display:block;">لم يتم بدء الشيفت بعد</strong>
+          <span style="font-size:11.5px;color:var(--muted);">${mustStartShift ? 'نقطة البيع مقفولة — ابدأ الشيفت أولاً لتتمكن من تنفيذ أي عملية بيع' : 'اضغط هنا لإدخال عهدة البداية لتسجيل الحضور وتفعيل الكاشير'}</span>
         </div>
       </div>
       <button type="button" id="pos-start-shift-now-btn" class="button button-sm" style="background:#059669;border-color:#059669;color:#fff;font-weight:750;padding:6px 16px;box-shadow:0 2px 6px rgba(5,150,105,.2);">
-        بدء الوردية الآن
+        بدء الشيفت الآن
       </button>
     </div>
   `;
-  return `<div class="pos-layout"><section class="pos-catalog">${shiftBanner}<div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>${mustStartShift ? 'ابدأ الوردية أولاً لإتاحة اختيار المنتجات وإتمام البيع.' : 'ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.'}</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="${mustStartShift ? 'ابدأ الوردية أولاً لتفعيل نقطة البيع...' : 'ابحث باسم الموديل أو كود الموديل أو الباركود'}" value="${escapeHtml(state.query)}" ${mustStartShift ? 'disabled' : 'autofocus'}><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="">كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}">${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products" style="${mustStartShift ? 'opacity:0.55;' : ''}">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const allSamePrice = new Set(product.variants.map((variant) => variant.price.amount)).size === 1; const price = allSamePrice ? money(product.variants[0].price) : 'أسعار متعددة'; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${(mustStartShift || (product.itemKind === 'PRODUCT' && stock <= 0n)) ? 'disabled' : ''}><span class="pos-product-art art-${index % 6}">${icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${price}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${mustStartShift ? `<div class="cart-empty"><span class="cart-empty-icon">${icon('clock', 23)}</span><strong>يجب بدء الوردية أولاً</strong><p>لا يمكن إجراء أي عملية بيع قبل تسجيل بدء الوردية واستلام الدرج.</p><button type="button" id="cart-start-shift-btn" class="button button-primary button-sm" style="margin-top:10px;background:#059669;border-color:#059669;">بدء الوردية الآن</button></div>` : state.cart.length ? state.cart.map((item) => `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art">${icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button data-qty="${item.variantId}" data-delta="-1">−</button><span>${item.quantity}</span><button data-qty="${item.variantId}" data-delta="1">+</button></div><strong>${money({ ...item.price, amount: (BigInt(item.price.amount) * BigInt(item.quantity)).toString() })}</strong></div></div>`).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة أو امسح الباركود عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong>${state.cart.reduce((sum, item) => sum + item.quantity, 0)}</strong></div><div><span>الخصم</span><strong>${money({ ...total, amount: '0' })}</strong></div><div class="cart-grand-total"><span>الإجمالي المستحق</span><strong>${money(total)}</strong></div></div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}" ${mustStartShift ? 'disabled' : ''}><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button" ${(!mustStartShift && state.cart.length && !state.isSaving) ? '' : 'disabled'}><span>${mustStartShift ? 'ابدأ الوردية أولاً' : 'إتمام البيع'}</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
+  return `<div class="pos-layout"><section class="pos-catalog">${shiftBanner}<div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>${mustStartShift ? 'ابدأ الشيفت أولاً لإتاحة اختيار المنتجات وإتمام البيع.' : 'ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.'}</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="${mustStartShift ? 'ابدأ الشيفت أولاً لتفعيل نقطة البيع...' : 'ابحث باسم الموديل أو كود الموديل أو الباركود'}" value="${escapeHtml(state.query)}" ${mustStartShift ? 'disabled' : 'autofocus'}><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="">كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}">${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products" style="${mustStartShift ? 'opacity:0.55;' : ''}">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const allSamePrice = new Set(product.variants.map((variant) => variant.price.amount)).size === 1; const price = allSamePrice ? money(product.variants[0].price) : 'أسعار متعددة'; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${(mustStartShift || (product.itemKind === 'PRODUCT' && stock <= 0n)) ? 'disabled' : ''}><span class="pos-product-art art-${index % 6}">${icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${price}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${mustStartShift ? `<div class="cart-empty"><span class="cart-empty-icon">${icon('clock', 23)}</span><strong>يجب بدء الشيفت أولاً</strong><p>لا يمكن إجراء أي عملية بيع قبل تسجيل بدء الشيفت واستلام الدرج.</p><button type="button" id="cart-start-shift-btn" class="button button-primary button-sm" style="margin-top:10px;background:#059669;border-color:#059669;">بدء الشيفت الآن</button></div>` : state.cart.length ? state.cart.map((item) => `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art">${icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button data-qty="${item.variantId}" data-delta="-1">−</button><span>${item.quantity}</span><button data-qty="${item.variantId}" data-delta="1">+</button></div><strong>${money({ ...item.price, amount: (BigInt(item.price.amount) * BigInt(item.quantity)).toString() })}</strong></div></div>`).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة أو امسح الباركود عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong>${state.cart.reduce((sum, item) => sum + item.quantity, 0)}</strong></div><div><span>الخصم</span><strong>${money({ ...total, amount: '0' })}</strong></div><div class="cart-grand-total"><span>الإجمالي المستحق</span><strong>${money(total)}</strong></div></div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}" ${mustStartShift ? 'disabled' : ''}><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button" ${(!mustStartShift && state.cart.length && !state.isSaving) ? '' : 'disabled'}><span>${mustStartShift ? 'ابدأ الشيفت أولاً' : 'إتمام البيع'}</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
 }
 
 function supplierModal(html, formId, endpoint, convert = (data) => data, successMessage = 'تم حفظ الحركة في سجل التاجر') {
   const root = getModalRoot();
   const isPayment = formId === 'monthly-payment-form' || formId === 'purchase-payment-form';
   const submitText = isPayment ? 'تأكيد السداد' : 'حفظ';
-  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card ${formId === 'purchase-form' ? 'product-variants-modal' : ''}" role="dialog" aria-modal="true"><div class="modal-heading"><h2>${formId === 'supplier-form' ? 'إضافة تاجر' : formId === 'purchase-form' ? 'تسجيل فاتورة شراء من تاجر (نظام الموديل والألوان والمقاسات)' : formId === 'expense-form' ? 'تسجيل مصروف' : formId === 'return-form' ? 'تسجيل مرتجع مرتبط بالفاتورة' : formId === 'supplier-return-form' ? 'تسجيل مرتجع للمورد' : formId === 'monthly-obligation-form' ? 'إضافة التزام شهري' : formId === 'monthly-actual-form' ? 'تأكيد المصروف الفعلي' : 'تسجيل سداد'}</h2><button class="modal-close" data-close-modal aria-label="إغلاق">×</button></div><form id="${formId}" class="form-stack modal-form">${html}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">${submitText}</button></div></form></section></div>`;
+  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card ${formId === 'purchase-form' ? 'product-variants-modal' : ''}" role="dialog" aria-modal="true"><div class="modal-heading"><h2>${formId === 'supplier-form' ? 'إضافة تاجر' : formId === 'purchase-form' ? 'تسجيل فاتورة شراء من تاجر (نظام الموديل والألوان والمقاسات)' : formId === 'expense-form' ? 'تسجيل مصروف' : formId === 'return-form' ? 'تسجيل مرتجع مرتبط بالفاتورة' : formId === 'supplier-return-form' ? 'تسجيل مرتجع للمورد' : formId === 'monthly-obligation-form' ? 'إضافة التزام شهري' : formId === 'monthly-actual-form' ? 'تأكيد المصروف الفعلي' : 'تسجيل سداد'}</h2><button type="button" class="modal-close" data-close-modal aria-label="إغلاق">×</button></div><form id="${formId}" class="form-stack modal-form">${html}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">${submitText}</button></div></form></section></div>`;
   root.querySelectorAll('[data-close-modal]').forEach((button) => button.addEventListener('click', () => { root.innerHTML = ''; }));
   // Modal backdrop click dismissal disabled: tapping outside does NOT discard the popup.
   root.querySelector(`#${formId}`).addEventListener('submit', async (event) => {
@@ -3741,7 +3840,7 @@ function showSaleDetails(sale) {
               </div>
             </div>
           </div>
-          <button class="modal-close" data-close-modal aria-label="إغلاق">×</button>
+          <button type="button" class="modal-close" data-close-modal aria-label="إغلاق">×</button>
         </div>
 
         <div class="modal-body invoice-modal-body">
@@ -4440,7 +4539,7 @@ async function showThermalReceiptModal(saleId) {
               <span class="thermal-receipt-chip">إيصال حراري ${escapeHtml(receipt.width || '80mm')}</span>
               <h2 id="thermal-preview-title" style="margin:0;font-size:16px;font-weight:800;">معاينة الإيصال قبل الطباعة</h2>
             </div>
-            <button class="modal-close" data-close-modal aria-label="إغلاق">×</button>
+            <button type="button" class="modal-close" data-close-modal aria-label="إغلاق">×</button>
           </div>
 
           <div class="modal-body thermal-receipt-body">
@@ -4536,7 +4635,7 @@ async function showThermalReceiptModal(saleId) {
     toast(error.message, 'error');
   }
 }
-function bindAccounting() { const decimals = currencyDecimals(state.data.company.currency); document.querySelectorAll('#treasury-transfer-btn').forEach((btn) => btn.addEventListener('click', () => { supplierModal(`<p>تحويل النقدية بين الدرج والخزينة والبنك مع ترحيل قيد مزدوج فوري.</p><label>من حساب<select name="fromAccount" required><option value="1010">درج النقدية (1010)</option><option value="1015">الخزينة الرئيسية (1015)</option><option value="1020">البنك والتحصيل الإلكتروني (1020)</option></select></label><label>إلى حساب<select name="toAccount" required><option value="1015">الخزينة الرئيسية (1015)</option><option value="1020">البنك والتحصيل الإلكتروني (1020)</option><option value="1010">درج النقدية (1010)</option></select></label><label>المبلغ (${state.data.company.currency})<input name="amount" inputmode="decimal" required></label><label>ملاحظات (اختياري)<input name="notes" maxlength="300" placeholder="مثال: توريد نقدية نهاية اليوم"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'treasury-transfer-form', '/api/accounting/treasury-transfer', (data) => ({ ...data, amount: toMinor(data.amount, decimals) }), 'تم تحويل النقدية وترحيل القيد المحاسبي بنجاح'); })); document.querySelectorAll('#close-shift-btn').forEach((btn) => btn.addEventListener('click', () => { const bookLabel = state.data.drawerBookBalance ? money(state.data.drawerBookBalance) : '—'; supplierModal(`<p>الرصيد الدفتري الحالي لدرج النقدية (1010): <strong>${bookLabel}</strong>. أدخل النقدية الفعلية المعدودة في الدرج لإثبات التطابق أو تسوية العجز/الزيادة محاسبيًا.</p><label>النقدية الفعلية في الدرج (${state.data.company.currency})<input name="actualCashAmount" inputmode="decimal" required></label><label>ملاحظات التقفيل (اختياري)<input name="notes" maxlength="300"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'shift-close-form', '/api/accounting/shift-close', (data) => ({ ...data, actualCashAmount: toMinor(data.actualCashAmount, decimals) }), 'تم تقفيل الوردية وتسوية رصيد درج النقدية'); })); document.querySelectorAll('.close-period-btn').forEach((btn) => btn.addEventListener('click', async () => { if (!window.confirm(`هل تريد إقفال الفترة المحاسبية (${btn.dataset.periodName}) نهائيًا؟ لا يمكن تسجيل قيود بتاريخ قديم داخلها بعد الإقفال.`)) return; btn.disabled = true; try { await api('/api/accounting/periods/close', { method: 'POST', body: JSON.stringify({ periodId: btn.dataset.periodId }) }); await loadData(state.data.selectedStoreId); render(); toast('تم إقفال الفترة المحاسبية بنجاح'); } catch (error) { toast(error.message, 'error'); btn.disabled = false; } })); }
+function bindAccounting() { const decimals = currencyDecimals(state.data.company.currency); document.querySelectorAll('#treasury-transfer-btn').forEach((btn) => btn.addEventListener('click', () => { supplierModal(`<p>تحويل النقدية بين الدرج والخزينة والبنك مع ترحيل قيد مزدوج فوري.</p><label>من حساب<select name="fromAccount" required><option value="1010">درج النقدية (1010)</option><option value="1015">الخزينة الرئيسية (1015)</option><option value="1020">البنك والتحصيل الإلكتروني (1020)</option></select></label><label>إلى حساب<select name="toAccount" required><option value="1015">الخزينة الرئيسية (1015)</option><option value="1020">البنك والتحصيل الإلكتروني (1020)</option><option value="1010">درج النقدية (1010)</option></select></label><label>المبلغ (${state.data.company.currency})<input name="amount" inputmode="decimal" required></label><label>ملاحظات (اختياري)<input name="notes" maxlength="300" placeholder="مثال: توريد نقدية نهاية اليوم"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'treasury-transfer-form', '/api/accounting/treasury-transfer', (data) => ({ ...data, amount: toMinor(data.amount, decimals) }), 'تم تحويل النقدية وترحيل القيد المحاسبي بنجاح'); })); document.querySelectorAll('#close-shift-btn').forEach((btn) => btn.addEventListener('click', () => { const bookLabel = state.data.drawerBookBalance ? money(state.data.drawerBookBalance) : '—'; supplierModal(`<p>الرصيد الدفتري الحالي لدرج النقدية (1010): <strong>${bookLabel}</strong>. أدخل النقدية الفعلية المعدودة في الدرج لإثبات التطابق أو تسوية العجز/الزيادة محاسبيًا.</p><label>النقدية الفعلية في الدرج (${state.data.company.currency})<input name="actualCashAmount" inputmode="decimal" required></label><label>ملاحظات التقفيل (اختياري)<input name="notes" maxlength="300"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'shift-close-form', '/api/accounting/shift-close', (data) => ({ ...data, actualCashAmount: toMinor(data.actualCashAmount, decimals) }), 'تم تقفيل الشيفت وتسوية رصيد درج النقدية'); })); document.querySelectorAll('.close-period-btn').forEach((btn) => btn.addEventListener('click', async () => { const accepted = await showConfirmModal({ title: 'إقفال الفترة المحاسبية', message: `هل تريد إقفال الفترة المحاسبية (${btn.dataset.periodName}) نهائيًا؟ لا يمكن تسجيل قيود بتاريخ قديم داخلها بعد الإقفال.`, confirmText: 'تأكيد الإقفال', cancelText: 'إلغاء', danger: true }); if (!accepted) return; btn.disabled = true; try { await api('/api/accounting/periods/close', { method: 'POST', body: JSON.stringify({ periodId: btn.dataset.periodId }) }); await loadData(state.data.selectedStoreId); render(); toast('تم إقفال الفترة المحاسبية بنجاح'); } catch (error) { toast(error.message, 'error'); btn.disabled = false; } })); }
 function backupView() {
   const daily = state.dailyBackups;
   const backupsList = daily?.backups ?? [];
@@ -4578,7 +4677,7 @@ function bindBackups() {
     if (data.passphrase !== data.confirmPassphrase) { toast('\u0643\u0644\u0645\u062a\u0627 \u0627\u0644\u0645\u0631\u0648\u0631 \u063a\u064a\u0631 \u0645\u062a\u0637\u0627\u0628\u0642\u062a\u064a\u0646', 'error'); return; }
     const button = form.querySelector('[type=submit]'); button.disabled = true;
     try {
-      requireMutationConfirmation('تنزيل النسخة الاحتياطية');
+      await requireMutationConfirmation('تنزيل النسخة الاحتياطية');
       const response = await fetch('/api/backups/export', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ passphrase: data.passphrase }) });
       if (!response.ok) { const result = await response.json().catch(() => ({})); throw new Error(result.error || 'Backup export failed'); }
       const blob = await response.blob(), url = URL.createObjectURL(blob), link = document.createElement('a');
@@ -4589,7 +4688,8 @@ function bindBackups() {
     event.preventDefault();
     const form = event.currentTarget;
     const data = Object.fromEntries(new FormData(form));
-    if (!window.confirm('\u0633\u064a\u062a\u0645 \u0627\u0633\u062a\u0628\u062f\u0627\u0644 \u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0645\u062d\u0644 \u0627\u0644\u062d\u0627\u0644\u064a\u0629 \u0648\u0625\u0639\u0627\u062f\u0629 \u062a\u0634\u063a\u064a\u0644 \u0627\u0644\u0646\u0638\u0627\u0645. \u0647\u0644 \u062a\u0631\u064a\u062f \u0627\u0644\u0645\u062a\u0627\u0628\u0639\u0629\u061f')) return;
+    const accepted = await showConfirmModal({ title: 'استعادة نسخة احتياطية', message: 'سيتم استبدال بيانات المحل الحالية وإعادة تشغيل النظام. هل تريد المتابعة؟', confirmText: 'استعادة الآن', cancelText: 'إلغاء', danger: true });
+    if (!accepted) return;
     const button = form.querySelector('[type=submit]'); button.disabled = true;
     try {
       const bytes = new TextEncoder().encode(data.passphrase); let binary = '';
@@ -4927,7 +5027,7 @@ function showProductEditModal(product) {
   const defaultReorder = activeExisting[0]?.reorderPoint ?? '3';
   const initialOptions = (product.options?.length ? product.options : []).map((opt) => ({ key: opt.key, name: opt.name, values: [...(opt.values ?? [])] }));
 
-  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="product-edit-title" style="margin:20px auto;max-width:calc(100vw - 32px);"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">الكتالوج الموحد — توسيع وتعديل الموديل</span><h2 id="product-edit-title">تعديل الموديل: ${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2></div><button class="modal-close" data-close-modal>×</button></div><form id="product-edit-form" class="form-stack modal-form"><div class="form-grid"><label>اسم الموديل / المنتج<input name="name" required minlength="2" maxlength="120" value="${escapeHtml(product.name)}"></label><label>كود الموديل الأساسي<input name="sku" required maxlength="64" value="${escapeHtml(product.sku)}"></label></div><div class="form-grid"><label>الفئة<select name="categoryId"><option value="">بدون فئة</option>${categoryChoices}</select></label><label>الماركة / المصنع<input name="brand" maxlength="100" value="${escapeHtml(product.brand ?? '')}"></label></div><div class="form-grid" style="background:var(--surface-soft);padding:14px;border-radius:12px;border:1px solid var(--line);margin:4px 0;"><label style="font-weight:750;">سعر البيع الجديد للموديل (${currency})<input name="baseRetailPrice" id="edit-modal-base-price" inputmode="decimal" value="${escapeHtml(defaultPrice)}" placeholder="مثال: 350.00" style="font-weight:800;font-size:15px;color:var(--purple);"><small style="color:var(--muted);font-size:11px;">تحديث وتعديل سعر البيع وتطبيقه على كافة المقاسات والألوان</small></label><div style="display:flex;align-items:flex-end;"><button type="button" class="button button-secondary" id="apply-price-to-all-variants" style="height:42px;width:100%;font-weight:750;">تطبيق هذا السعر على كل المقاسات</button></div></div><div class="form-grid"><label>رابط الصورة<input name="imagePath" type="url" maxlength="300" value="${escapeHtml(product.imagePath ?? '')}"></label><label>وصف الموديل<input name="description" maxlength="2000" value="${escapeHtml(product.description ?? '')}"></label></div>
+  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="product-edit-title" style="margin:20px auto;max-width:calc(100vw - 32px);"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">الكتالوج الموحد — توسيع وتعديل الموديل</span><h2 id="product-edit-title">تعديل الموديل: ${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2></div><button type="button" class="modal-close" data-close-modal>×</button></div><form id="product-edit-form" class="form-stack modal-form"><div class="form-grid"><label>اسم الموديل / المنتج<input name="name" required minlength="2" maxlength="120" value="${escapeHtml(product.name)}"></label><label>كود الموديل الأساسي<input name="sku" required maxlength="64" value="${escapeHtml(product.sku)}"></label></div><div class="form-grid"><label>الفئة<select name="categoryId"><option value="">بدون فئة</option>${categoryChoices}</select></label><label>الماركة / المصنع<input name="brand" maxlength="100" value="${escapeHtml(product.brand ?? '')}"></label></div><div class="form-grid" style="background:var(--surface-soft);padding:14px;border-radius:12px;border:1px solid var(--line);margin:4px 0;"><label style="font-weight:750;">سعر البيع الجديد للموديل (${currency})<input name="baseRetailPrice" id="edit-modal-base-price" inputmode="decimal" value="${escapeHtml(defaultPrice)}" placeholder="مثال: 350.00" style="font-weight:800;font-size:15px;color:var(--purple);"><small style="color:var(--muted);font-size:11px;">تحديث وتعديل سعر البيع وتطبيقه على كافة المقاسات والألوان</small></label><div style="display:flex;align-items:flex-end;"><button type="button" class="button button-secondary" id="apply-price-to-all-variants" style="height:42px;width:100%;font-weight:750;">تطبيق هذا السعر على كل المقاسات</button></div></div><div class="form-grid"><label>رابط الصورة<input name="imagePath" type="url" maxlength="300" value="${escapeHtml(product.imagePath ?? '')}"></label><label>وصف الموديل<input name="description" maxlength="2000" value="${escapeHtml(product.description ?? '')}"></label></div>
   ${initialOptions.length ? `<div class="variant-options-section"><div><strong>إضافة ألوان أو مقاسات جديدة لهذا الموديل:</strong></div><div class="model-presets-bar"><span class="preset-label">+ لون جديد:</span>${quickColors.map((c) => `<button type="button" class="color-quick-chip" data-edit-add-color="${c}">+ ${c}</button>`).join('')}</div><div class="model-presets-bar"><span class="preset-label">+ مقاسات سريعة:</span>${quickSizes.map((s) => `<button type="button" class="date-preset-chip" data-edit-add-sizes="${s}">+ (${s})</button>`).join('')}</div><div id="edit-option-rows" class="form-stack">${initialOptions.map((opt) => `<div class="variant-option-row" data-edit-option-key="${escapeHtml(opt.key)}"><input data-edit-option-name value="${escapeHtml(opt.name)}" readonly><input data-edit-option-values value="${escapeHtml(opt.values.join(', '))}" placeholder="القيم مفصولة بفواصل"></div>`).join('')}</div></div>` : ''}
   <div class="matrix-quick-toolbar"><span>الفروع الحالية والجديدة التابعة للموديل (<strong>${activeExisting.length}</strong> فرع مسجل)</span><div class="matrix-quick-actions"><button type="button" class="date-preset-chip" id="edit-generate-barcodes">توليد باركود تلقائي للفروع بدون باركود</button><button type="button" class="date-preset-chip" id="edit-open-print-labels">طباعة استيكرات الباركود</button></div></div>
   <div class="table-scroll"><table class="variant-matrix-table zebra-table"><thead><tr><th>متاحة</th><th>اللون والمقاس الفرعي</th><th>كود الفرع (SKU)</th><th>الباركود</th><th>السعر (${currency})</th><th>حد الطلب</th></tr></thead><tbody id="edit-existing-tbody">${activeExisting.map((variant) => `<tr data-variant-id="${variant.id}" data-variant-attrs="${escapeHtml(JSON.stringify(variant.attributes ?? {}))}"><td><input data-edit-active type="checkbox" checked aria-label="إبقاء التركيبة متاحة"></td><td><strong>${escapeHtml(formatVariantAttributes(product, variant.attributes, product.name))}</strong></td><td><input data-edit-sku maxlength="64" required value="${escapeHtml(variant.sku)}"></td><td><input data-edit-barcode maxlength="64" value="${escapeHtml(variant.barcode ?? '')}" placeholder="باركود العلبة"></td><td><input data-edit-price inputmode="decimal" required value="${escapeHtml(decimalPrice(variant.price))}"></td><td><input data-edit-reorder type="number" min="0" step="1" required value="${escapeHtml(variant.reorderPoint)}"></td></tr>`).join('')}</tbody><tbody id="edit-generated-tbody"></tbody></table></div><div id="new-variant-rows" class="form-stack"></div>${product.options?.length ? '<button type="button" class="button button-secondary button-sm" id="add-edit-variant">+ إضافة فرع مفرد يدويًا</button>' : ''}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">حفظ التعديلات والفروع الجديدة</button></div></form></section></div>`;
@@ -5594,7 +5694,7 @@ function bindPos() {
       const unavailable = product.itemKind === 'PRODUCT' && BigInt(variant.quantity) <= 0n;
       return `<button type="button" class="pos-size-tile ${unavailable ? 'tile-empty' : ''}" data-pos-variant="${variant.id}" ${unavailable ? 'disabled' : ''}><strong>مقاس ${escapeHtml(size)}</strong><span>${money(variant.price)}</span><small>${unavailable ? 'نفد' : `متاح ${variant.quantity}`}</small></button>`;
     }).join('')}</div></div>`).join('')}</div>` : `<div class="form-stack">${variants.map((variant) => { const label = formatVariantAttributes(product, variant.attributes, variant.sku); const unavailable = product.itemKind === 'PRODUCT' && BigInt(variant.quantity) <= 0n; return `<button class="button button-secondary" data-pos-variant="${variant.id}" ${unavailable ? 'disabled' : ''}>${escapeHtml(label)} · ${escapeHtml(variant.sku)} · ${money(variant.price)} · متاح ${variant.quantity}</button>`; }).join('')}</div>`;
-    modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">اختيار اللون والمقاس — كود الموديل ${escapeHtml(product.sku)}</span><h2>${escapeHtml(product.name)}</h2></div><button class="modal-close" data-close-modal>×</button></div>${groupedHtml}</section></div>`;
+    modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">اختيار اللون والمقاس — كود الموديل ${escapeHtml(product.sku)}</span><h2>${escapeHtml(product.name)}</h2></div><button type="button" class="modal-close" data-close-modal>×</button></div>${groupedHtml}</section></div>`;
     modal.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { modal.innerHTML = ''; }));
     modal.querySelectorAll('[data-pos-variant]').forEach((choice) => choice.addEventListener('click', () => { const id = choice.dataset.posVariant; modal.innerHTML = ''; addToCart(id); }));
   }));
@@ -5615,8 +5715,8 @@ function bindPos() {
 }
 
 function addToCart(variantId) {
-  if (state.data?.user?.role !== 'OWNER' && !state.data?.activeShift) {
-    toast('يجب بدء الوردية أولاً قبل إجراء أي عملية بيع', 'error');
+  if (!state.data?.activeShift) {
+    toast('يجب بدء الشيفت أولاً قبل إجراء أي عملية بيع', 'error');
     showStartShiftModal();
     return;
   }
@@ -5647,8 +5747,8 @@ function changeQuantity(variantId, delta) {
 }
 
 async function doCheckout() {
-  if (state.data?.user?.role !== 'OWNER' && !state.data?.activeShift) {
-    toast('يجب بدء الوردية أولاً قبل إجراء أي عملية بيع', 'error');
+  if (!state.data?.activeShift) {
+    toast('يجب بدء الشيفت أولاً قبل إجراء أي عملية بيع', 'error');
     showStartShiftModal();
     return;
   }

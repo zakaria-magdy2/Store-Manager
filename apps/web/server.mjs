@@ -2090,7 +2090,7 @@ async function handleApi(req, res, url) {
       "SELECT id FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' LIMIT 1"
     ).get(ctx.tenantId, ctx.userId);
     if (existing) {
-      throw Object.assign(new Error('يوجد وردية مفتوحة بالفعل لك. يجب إنهاؤها أولاً.'), { status: 409 });
+      throw Object.assign(new Error('يوجد شيفت مفتوح بالفعل لك. يجب إنهاؤه أولاً.'), { status: 409 });
     }
 
     const shiftId = randomUUID();
@@ -2109,7 +2109,7 @@ async function handleApi(req, res, url) {
       action: 'ATTENDANCE_CHECK_IN',
       entityType: 'SHIFT',
       entityId: shiftId,
-      summary: `بدء الوردية (${shiftNumber}) برصيد افتتاحي ${openingCash.toString()}`,
+      summary: `بدء الشيفت (${shiftNumber}) برصيد افتتاحي ${openingCash.toString()}`,
       metadata: { shiftNumber, openingCash: openingCash.toString() }
     });
 
@@ -2183,7 +2183,7 @@ async function handleApi(req, res, url) {
       action: 'SHIFT_CLOSED',
       entityType: 'SHIFT',
       entityId: shift.id,
-      summary: `إنهاء الوردية (${shift.shift_number}): متوقع ${expectedCashMinor.toString()}، فعلي ${actualCash.toString()}، الفارق ${varianceMinor.toString()}`,
+      summary: `إنهاء الشيفت (${shift.shift_number}): متوقع ${expectedCashMinor.toString()}، فعلي ${actualCash.toString()}، الفارق ${varianceMinor.toString()}`,
       metadata: { shiftNumber: shift.shift_number, expectedCash: expectedCashMinor.toString(), actualCash: actualCash.toString(), variance: varianceMinor.toString(), handoverCash: handoverCash.toString() }
     });
 
@@ -2207,7 +2207,7 @@ async function handleApi(req, res, url) {
   if (method === 'GET' && path === '/api/shifts') {
     const isCashier = ctx.roleId === 'CASHIER' || !ctx.hasPermission(Permissions.REPORTS_COGS_VIEW);
     if (ctx.roleId === 'CASHIER') {
-      throw Object.assign(new Error('غير مصرح للكاشير بعرض سجل الورديات العام'), { status: 403 });
+      throw Object.assign(new Error('غير مصرح للكاشير بعرض سجل الشيفتات العام'), { status: 403 });
     }
     const stores = await storeRepo.listByTenant(ctx);
     const requestedStore = url.searchParams.get('storeId');
@@ -2312,13 +2312,14 @@ async function handleApi(req, res, url) {
 
   const shiftSalesMatch = method === 'GET' ? path.match(/^\/api\/shifts\/([0-9a-f-]+)\/sales$/i) : null;
   if (shiftSalesMatch) {
+    const isCashier = ctx.roleId === 'CASHIER' || !ctx.hasPermission(Permissions.REPORTS_COGS_VIEW);
     if (ctx.roleId === 'CASHIER') {
-      throw Object.assign(new Error('غير مصرح للكاشير بعرض فواتير الوردية'), { status: 403 });
+      throw Object.assign(new Error('غير مصرح للكاشير بعرض فواتير الشيفت'), { status: 403 });
     }
     const shiftId = shiftSalesMatch[1];
     const rawDb = database.getRawDatabase();
     const shift = rawDb.prepare("SELECT * FROM cashier_shifts WHERE id = ? AND tenant_id = ?").get(shiftId, ctx.tenantId);
-    if (!shift) throw Object.assign(new Error('الوردية غير موجودة'), { status: 404 });
+    if (!shift) throw Object.assign(new Error('الشيفت غير موجود'), { status: 404 });
     const tenant = await tenantRepo.findById(ctx.tenantId);
     const currency = tenant?.currency ?? 'EGP';
     const endTime = shift.ended_at || new Date().toISOString();
@@ -2862,7 +2863,7 @@ async function handleApi(req, res, url) {
           idempotencyKey: `shift-close:${body.idempotencyKey}`,
           description: `تسوية عجز درج النقدية${body.notes ? ` (${body.notes})` : ''}`,
           lines: [
-            { accountCode: '6090', side: 'DEBIT', amount: shortageAmount, memo: 'عجز جرد درج النقدية عند تقفيل الوردية' },
+            { accountCode: '6090', side: 'DEBIT', amount: shortageAmount, memo: 'عجز جرد درج النقدية عند تقفيل الشيفت' },
             { accountCode: '1010', side: 'CREDIT', amount: shortageAmount, memo: 'تخفيض درج النقدية بقيمة العجز الفعلي' },
           ],
         });
@@ -2877,13 +2878,13 @@ async function handleApi(req, res, url) {
           description: `تسوية فائض درج النقدية${body.notes ? ` (${body.notes})` : ''}`,
           lines: [
             { accountCode: '1010', side: 'DEBIT', amount: varianceMinor, memo: 'زيادة درج النقدية بقيمة الفائض الفعلي' },
-            { accountCode: '4010', side: 'CREDIT', amount: varianceMinor, memo: 'فائض جرد درج النقدية عند تقفيل الوردية' },
+            { accountCode: '4010', side: 'CREDIT', amount: varianceMinor, memo: 'فائض جرد درج النقدية عند تقفيل الشيفت' },
           ],
         });
       }
       return { bookMinor, varianceMinor, status };
     });
-    await recordAudit(ctx, { storeId: body.storeId, action: 'SHIFT_CLOSED', entityType: 'CASH_DRAWER', entityId: body.idempotencyKey, summary: `تقفيل وردية وجرد درج النقدية (${shiftResult.status})`, metadata: { status: shiftResult.status, bookBalance: shiftResult.bookMinor.toString(), actualCash: actualMinor.toString(), variance: shiftResult.varianceMinor.toString() } });
+    await recordAudit(ctx, { storeId: body.storeId, action: 'SHIFT_CLOSED', entityType: 'CASH_DRAWER', entityId: body.idempotencyKey, summary: `تقفيل شيفت وجرد درج النقدية (${shiftResult.status})`, metadata: { status: shiftResult.status, bookBalance: shiftResult.bookMinor.toString(), actualCash: actualMinor.toString(), variance: shiftResult.varianceMinor.toString() } });
     return json(res, 201, {
       status: shiftResult.status,
       bookBalance: moneyJson(Money.fromMinor(shiftResult.bookMinor, tenant.currency)),
@@ -2907,16 +2908,14 @@ async function handleApi(req, res, url) {
   if (method === 'POST' && path === '/api/checkout') {
     ctx.assertPermission(Permissions.POS_CHECKOUT);
     const body = validate(CheckoutSchema, await readJson(req));
-    if (ctx.roleId !== 'OWNER') {
-      const openShift = database.getRawDatabase().prepare(
-        "SELECT id, store_id FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' LIMIT 1"
-      ).get(ctx.tenantId, ctx.userId);
-      if (!openShift) {
-        throw Object.assign(new Error('يجب بدء الوردية أولاً قبل إجراء أي عملية بيع'), { status: 403 });
-      }
-      if (openShift.store_id !== body.storeId) {
-        throw Object.assign(new Error('الوردية المفتوحة مسجلة على فرع آخر'), { status: 403 });
-      }
+    const openShift = database.getRawDatabase().prepare(
+      "SELECT id, store_id FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' LIMIT 1"
+    ).get(ctx.tenantId, ctx.userId);
+    if (!openShift) {
+      throw Object.assign(new Error('يجب بدء الشيفت أولاً قبل إجراء أي عملية بيع'), { status: 403 });
+    }
+    if (openShift.store_id !== body.storeId) {
+      throw Object.assign(new Error('الشيفت المفتوح مسجل على فرع آخر'), { status: 403 });
     }
     const tenant = await tenantRepo.findById(ctx.tenantId);
     if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
