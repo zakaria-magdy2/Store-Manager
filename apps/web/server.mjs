@@ -2907,6 +2907,17 @@ async function handleApi(req, res, url) {
   if (method === 'POST' && path === '/api/checkout') {
     ctx.assertPermission(Permissions.POS_CHECKOUT);
     const body = validate(CheckoutSchema, await readJson(req));
+    if (ctx.roleId !== 'OWNER') {
+      const openShift = database.getRawDatabase().prepare(
+        "SELECT id, store_id FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' LIMIT 1"
+      ).get(ctx.tenantId, ctx.userId);
+      if (!openShift) {
+        throw Object.assign(new Error('يجب بدء الوردية أولاً قبل إجراء أي عملية بيع'), { status: 403 });
+      }
+      if (openShift.store_id !== body.storeId) {
+        throw Object.assign(new Error('الوردية المفتوحة مسجلة على فرع آخر'), { status: 403 });
+      }
+    }
     const tenant = await tenantRepo.findById(ctx.tenantId);
     if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
     let cart = Cart.empty(tenant.currency);

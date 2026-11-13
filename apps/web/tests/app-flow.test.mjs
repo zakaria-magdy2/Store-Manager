@@ -206,6 +206,17 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
 
   // Cashier shift permissions and workflow
   assert.equal((await request('/api/shifts')).response.status, 403, 'Cashier must be blocked from general shifts page');
+  const cashierVariantId = cashierData.payload.products.find((item) => item.id === createdProduct.payload.id).variants[0].id;
+  const blockedCheckoutWithoutShift = await request('/api/checkout', {
+    method: 'POST',
+    body: {
+      storeId,
+      idempotencyKey: 'e2f6a68f-036d-4f05-a47c-c3157d4c6df5',
+      items: [{ variantId: cashierVariantId, quantity: '1' }],
+      payment: { method: 'CASH', amount: '12500' },
+    },
+  });
+  assert.equal(blockedCheckoutWithoutShift.response.status, 403, 'Cashier must be blocked from checkout without an active shift');
   const cashierShiftStart = await request('/api/shifts/start', { method: 'POST', body: { storeId, openingCash: '25000' } });
   assert.equal(cashierShiftStart.response.status, 201, JSON.stringify(cashierShiftStart.payload));
   const startedShiftId = cashierShiftStart.payload.shift.id;
