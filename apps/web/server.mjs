@@ -2957,8 +2957,10 @@ const server = createServer(async (req, res) => {
     const isDomainClientError = error instanceof DomainError;
     const status = Number.isInteger(error?.status) ? error.status : error?.message?.startsWith('UnauthorizedError') ? 403 : databaseConflict ? 409 : isDomainClientError ? 400 : 500;
     if (status >= 500) {
-      const safeError = String(error?.stack ?? error?.message ?? error ?? 'Unknown error').replace(/[\r\n\x00-\x1f\x7f]+/g, ' ');
-      console.error('Request failed:', safeError);
+      const safeError = String(error?.stack ?? error?.message ?? error ?? 'Unknown error')
+        .replace(/[\r\n]/g, ' ')
+        .replace(/[\x00-\x1f\x7f]/g, ' ');
+      console.error(`Request failed: ${safeError}`);
     }
     const message = status >= 500 ? 'حصل خطأ داخلي. لم يتم تنفيذ العملية.' : error?.message ?? 'حدث خطأ غير متوقع';
     json(res, status, { error: message });
