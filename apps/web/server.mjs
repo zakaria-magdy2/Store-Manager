@@ -2205,6 +2205,7 @@ async function handleApi(req, res, url) {
   }
 
   if (method === 'GET' && path === '/api/shifts') {
+    const isCashier = ctx.roleId === 'CASHIER' || !ctx.hasPermission(Permissions.REPORTS_COGS_VIEW);
     if (ctx.roleId === 'CASHIER') {
       throw Object.assign(new Error('غير مصرح للكاشير بعرض سجل الورديات العام'), { status: 403 });
     }

@@ -1152,6 +1152,8 @@ async function loadShifts() {
     state.shiftsData = await api(`/api/shifts${q}`);
     render();
   } catch (err) {
+    state.shiftsData = { shifts: [], summary: {}, loadError: err.message };
+    render();
     toast(err.message, 'error');
   }
 }
