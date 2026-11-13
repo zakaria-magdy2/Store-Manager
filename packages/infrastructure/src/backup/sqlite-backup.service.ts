@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { appendFile, copyFile, mkdtemp, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import Database, { type Database as DatabaseInstance } from 'better-sqlite3';
@@ -62,16 +62,16 @@ export async function createEncryptedSqliteBackup(
     await pipeline(createReadStream(snapshotPath), cipher, createWriteStream(ciphertextPath, { flags: 'wx' }));
     const output = await open(outputPath, 'wx');
     try {
-      await output.writeFile(Buffer.concat([MAGIC, salt, iv]));
+      await output.write(Buffer.concat([MAGIC, salt, iv]));
+      for await (const chunk of createReadStream(ciphertextPath)) {
+        await output.write(Buffer.from(chunk as Uint8Array));
+      }
+      await output.write(cipher.getAuthTag());
+      const result = await output.stat();
+      return { path: outputPath, size: result.size };
+    } finally {
       await output.close();
-    } catch (error) {
-      await output.close();
-      throw error;
     }
-    await pipeline(createReadStream(ciphertextPath), createWriteStream(outputPath, { flags: 'a' }));
-    await appendFile(outputPath, cipher.getAuthTag());
-    const result = await stat(outputPath);
-    return { path: outputPath, size: result.size };
   } catch (error) {
     await rm(workspace, { recursive: true, force: true });
     throw error;
@@ -158,23 +158,21 @@ export async function prepareEncryptedSqliteRestore(
   passphrase: string,
   expectedTenant: RestoreTenantIdentity,
 ): Promise<PreparedSqliteRestore> {
-  const archiveStats = await stat(archivePath);
-  if (archiveStats.size < HEADER_BYTES + TAG_BYTES || archiveStats.size > MAX_DATABASE_BYTES + HEADER_BYTES + TAG_BYTES || archiveStats.size > 2 * 1024 * 1024 * 1024) throw new Error('Backup archive size is invalid');
   const archive = await open(archivePath, 'r');
   const header = Buffer.alloc(HEADER_BYTES), tag = Buffer.alloc(TAG_BYTES);
-  try {
-    await archive.read(header, 0, HEADER_BYTES, 0);
-    await archive.read(tag, 0, TAG_BYTES, archiveStats.size - TAG_BYTES);
-  } finally { await archive.close(); }
-  if (!header.subarray(0, MAGIC.length).equals(MAGIC)) throw new Error('Invalid backup archive');
-  const salt = header.subarray(MAGIC.length, MAGIC.length + SALT_BYTES);
-  const iv = header.subarray(MAGIC.length + SALT_BYTES, HEADER_BYTES);
   const workspace = await mkdtemp(join(workingDirectory, '.retailos-restore-'));
   const candidatePath = join(workspace, 'candidate.sqlite');
-  const decipher = createDecipheriv('aes-256-gcm', deriveKey(passphrase, salt), iv);
-  decipher.setAuthTag(tag);
   try {
-    await pipeline(createReadStream(archivePath, { start: HEADER_BYTES, end: archiveStats.size - TAG_BYTES - 1 }), decipher, createWriteStream(candidatePath, { flags: 'wx', mode: 0o600 }));
+    const archiveStats = await archive.stat();
+    if (archiveStats.size < HEADER_BYTES + TAG_BYTES || archiveStats.size > MAX_DATABASE_BYTES + HEADER_BYTES + TAG_BYTES || archiveStats.size > 2 * 1024 * 1024 * 1024) throw new Error('Backup archive size is invalid');
+    await archive.read(header, 0, HEADER_BYTES, 0);
+    await archive.read(tag, 0, TAG_BYTES, archiveStats.size - TAG_BYTES);
+    if (!header.subarray(0, MAGIC.length).equals(MAGIC)) throw new Error('Invalid backup archive');
+    const salt = header.subarray(MAGIC.length, MAGIC.length + SALT_BYTES);
+    const iv = header.subarray(MAGIC.length + SALT_BYTES, HEADER_BYTES);
+    const decipher = createDecipheriv('aes-256-gcm', deriveKey(passphrase, salt), iv);
+    decipher.setAuthTag(tag);
+    await pipeline(archive.createReadStream({ start: HEADER_BYTES, end: archiveStats.size - TAG_BYTES - 1, autoClose: false }), decipher, createWriteStream(candidatePath, { flags: 'wx', mode: 0o600 }));
     const candidateStats = await stat(candidatePath);
     if (candidateStats.size === 0 || candidateStats.size > MAX_DATABASE_BYTES) throw new Error('Restored database size is invalid');
     const tenant = verifySqliteFile(candidatePath, expectedTenant);
@@ -182,6 +180,8 @@ export async function prepareEncryptedSqliteRestore(
   } catch (error) {
     await rm(workspace, { recursive: true, force: true });
     throw error;
+  } finally {
+    await archive.close();
   }
 }
 
@@ -257,8 +257,14 @@ export async function installPreparedSqliteRestore(
 
 export async function recoverPendingSqliteRestore(workingDirectory: string, activePath: string, expectedCompanyCode: string): Promise<boolean> {
   const root = resolve(workingDirectory), markerPath = join(root, RESTORE_MARKER);
-  if (!await stat(markerPath).then(() => true, () => false)) return false;
-  const marker = JSON.parse(await readFile(markerPath, 'utf8')) as RestoreMarker;
+  let markerRaw: string;
+  try {
+    markerRaw = await readFile(markerPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return false;
+    throw error;
+  }
+  const marker = JSON.parse(markerRaw) as RestoreMarker;
   if (marker.version !== 1 || !['PREPARED', 'OLD_MOVED', 'CANDIDATE_INSTALLED'].includes(marker.stage) || resolve(marker.activePath) !== resolve(activePath) || marker.tenant.code !== expectedCompanyCode) throw new Error('Restore recovery marker is invalid; database was not opened');
   assertChildPath(root, marker.workspace);
   assertChildPath(marker.workspace, marker.candidatePath);
