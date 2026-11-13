@@ -897,17 +897,29 @@ function inventoryView() {
   let totalStockUnits = 0n;
   let totalStockCostMinor = 0n;
   let totalStockRetailMinor = 0n;
+  let lowStockModelsCount = 0;
+  let inStockModelsCount = 0;
   for (const p of catalogProducts) {
-    for (const v of p.variants.filter((item) => item.isActive)) {
+    const activeVariants = p.variants.filter((item) => item.isActive);
+    let modelHasStock = false;
+    let modelHasLow = false;
+    for (const v of activeVariants) {
       const q = BigInt(v.quantity);
+      const rp = BigInt(v.reorderPoint ?? 0);
+      if (q <= rp) modelHasLow = true;
       if (q > 0n) {
+        modelHasStock = true;
         totalStockUnits += q;
         if (v.wac) totalStockCostMinor += q * BigInt(v.wac.amount);
         totalStockRetailMinor += q * BigInt(v.price?.amount ?? v.retailPrice?.amount ?? 0);
       }
     }
+    if (modelHasLow) lowStockModelsCount += 1;
+    if (modelHasStock) inStockModelsCount += 1;
   }
-  const expectedStockProfitMinor = totalStockRetailMinor > totalStockCostMinor ? totalStockRetailMinor - totalStockCostMinor : 0n;
+  const expectedStockProfitMinor = totalStockRetailMinor - totalStockCostMinor;
+  const isNegativeExpectedProfit = expectedStockProfitMinor < 0n;
+  const expectedProfitColor = isNegativeExpectedProfit ? 'var(--rose, #be123c)' : '#15803d';
 
   const items = data.products.filter((product) => product.itemKind === 'PRODUCT').map((product) => {
     const matrix = extractProductMatrix(product);
@@ -915,17 +927,54 @@ function inventoryView() {
     const quantity = variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n);
     const reorderPoint = variants.reduce((sum, variant) => sum + BigInt(variant.reorderPoint), 0n);
     const hasLowVariant = variants.some((variant) => BigInt(variant.quantity) <= BigInt(variant.reorderPoint));
-    const cost = variants.every((variant) => variant.wac) ? (() => {
-      const weight = variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n);
+    const cost = variants.length && variants.every((variant) => variant.wac) ? (() => {
+      const weight = variants.reduce((sum, variant) => sum + (BigInt(variant.quantity) > 0n ? BigInt(variant.quantity) : 0n), 0n);
       if (weight <= 0n) return variants[0]?.wac ?? null;
-      const amount = variants.reduce((sum, variant) => sum + BigInt(variant.quantity) * BigInt(variant.wac.amount), 0n) / weight;
+      const amount = variants.reduce((sum, variant) => {
+        const q = BigInt(variant.quantity);
+        return q > 0n ? sum + q * BigInt(variant.wac.amount) : sum;
+      }, 0n) / weight;
       return { ...variants[0].wac, amount: amount.toString() };
     })() : null;
-    return { ...product, matrix, variants, quantity, reorderPoint, hasLowVariant, cost };
+    const unitRetail = (() => {
+      const priced = variants.filter((variant) => variant.price ?? variant.retailPrice);
+      if (!priced.length) return null;
+      const weight = priced.reduce((sum, variant) => sum + (BigInt(variant.quantity) > 0n ? BigInt(variant.quantity) : 0n), 0n);
+      const firstPrice = priced[0].price ?? priced[0].retailPrice;
+      if (weight <= 0n) return firstPrice;
+      const amount = priced.reduce((sum, variant) => {
+        const q = BigInt(variant.quantity);
+        const p = variant.price ?? variant.retailPrice;
+        return q > 0n ? sum + q * BigInt(p.amount) : sum;
+      }, 0n) / weight;
+      return { ...firstPrice, amount: amount.toString() };
+    })();
+    return { ...product, matrix, variants, quantity, reorderPoint, hasLowVariant, cost, unitRetail };
   }).filter((product) => product.isActive && (!state.query.trim() || `${product.name} ${product.sku} ${product.brand ?? ''} ${product.variants.map((variant) => `${variant.sku} ${Object.values(variant.attributes ?? {}).join(' ')}`).join(' ')}`.toLowerCase().includes(state.query.trim().toLowerCase())));
 
-  return `<div class="page-heading-row"><div><p class="page-lead">متابعة وجرد أرصدة المخزون للموديلات والأصناف الحالية وتقييم رأس المال والأرباح المتوقعة.</p></div><div class="products-heading-actions">${data.capabilities.canManageStores ? '<button class="button button-secondary" id="new-store-btn">+ إضافة فرع</button>' : ''}${data.capabilities.canTransferInventory && data.stores.length > 1 ? '<button class="button button-secondary" id="transfer-stock-btn">تحويل مخزون بين الفروع</button>' : ''}${data.capabilities.canViewInventory && !data.capabilities.cashierMode ? '<button class="button button-secondary" id="record-damage-btn">تسجيل تالف / هالك</button><button class="button button-secondary" id="adjust-stock-btn">تسوية جرد فعلي</button>' : ''}<a class="button button-secondary" href="/api/reports/export.csv?type=inventory&storeId=${encodeURIComponent(data.selectedStoreId)}" download>تصدير CSV</a>${!data.capabilities.cashierMode ? `<button class="button button-primary" data-page="suppliers">فاتورة شراء من تاجر</button>` : ''}</div></div>
-  <div class="inventory-summary" style="grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 16px;">
+  const isCashier = Boolean(data.capabilities.cashierMode);
+  const summaryCardsHtml = isCashier ? `
+    <div class="inventory-summary-card">
+      <div>
+        <small style="color:var(--muted);font-size:11.5px;font-weight:700;">إجمالي البضاعة بالمخزن</small>
+        <strong style="font-size:18px;display:block;margin-top:2px;">${totalStockUnits} قطعة</strong>
+        <span style="font-size:11px;color:var(--muted);">${catalogProducts.length} موديل مسجل</span>
+      </div>
+    </div>
+    <div class="inventory-summary-card">
+      <div>
+        <small style="color:var(--muted);font-size:11.5px;font-weight:700;">موديلات متوفرة</small>
+        <strong style="font-size:18px;display:block;margin-top:2px;color:#15803d;">${inStockModelsCount} موديل</strong>
+        <span style="font-size:11px;color:var(--muted);">متاح للبيع حالياً</span>
+      </div>
+    </div>
+    <div class="inventory-summary-card">
+      <div>
+        <small style="color:var(--muted);font-size:11.5px;font-weight:700;">مقاسات تحتاج طلب</small>
+        <strong style="font-size:18px;display:block;margin-top:2px;color:${lowStockModelsCount > 0 ? '#d97706' : '#15803d'};">${lowStockModelsCount} موديل</strong>
+        <span style="font-size:11px;color:var(--muted);">وصلت لحد إعادة الطلب</span>
+      </div>
+    </div>` : `
     <div class="inventory-summary-card">
       <div>
         <small style="color:var(--muted);font-size:11.5px;font-weight:700;">إجمالي البضاعة بالمخزن</small>
@@ -950,28 +999,32 @@ function inventoryView() {
     <div class="inventory-summary-card">
       <div>
         <small style="color:var(--muted);font-size:11.5px;font-weight:700;">المكسب والربح المتوقع منها</small>
-        <strong style="font-size:18px;display:block;margin-top:2px;color:#15803d;">${money({ amount: expectedStockProfitMinor.toString(), currency, decimals })}</strong>
-        <span style="font-size:11px;color:#15803d;font-weight:600;">هامش ربح تقريبي عند البيع</span>
+        <strong style="font-size:18px;display:block;margin-top:2px;color:${expectedProfitColor};">${money({ amount: expectedStockProfitMinor.toString(), currency, decimals })}</strong>
+        <span style="font-size:11px;color:${expectedProfitColor};font-weight:600;">${isNegativeExpectedProfit ? 'عجز متوقع مقارنة بالتكلفة' : 'هامش ربح تقريبي عند البيع'}</span>
       </div>
-    </div>
+    </div>`;
+
+  return `<div class="page-heading-row"><div><p class="page-lead">${isCashier ? 'متابعة أرصدة المخزون والمقاسات والأسعار المتاحة للبيع.' : 'متابعة وجرد أرصدة المخزون للموديلات والأصناف الحالية وتقييم رأس المال والأرباح المتوقعة.'}</p></div><div class="products-heading-actions">${data.capabilities.canManageStores ? '<button class="button button-secondary" id="new-store-btn">+ إضافة فرع</button>' : ''}${data.capabilities.canTransferInventory && data.stores.length > 1 ? '<button class="button button-secondary" id="transfer-stock-btn">تحويل مخزون بين الفروع</button>' : ''}${data.capabilities.canViewInventory && !isCashier ? '<button class="button button-secondary" id="record-damage-btn">تسجيل تالف / هالك</button><button class="button button-secondary" id="adjust-stock-btn">تسوية جرد فعلي</button>' : ''}<a class="button button-secondary" href="/api/reports/export.csv?type=inventory&storeId=${encodeURIComponent(data.selectedStoreId)}" download>تصدير CSV</a>${!isCashier ? `<button class="button button-primary" data-page="suppliers">فاتورة شراء من تاجر</button>` : ''}</div></div>
+  <div class="inventory-summary" style="grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 16px;">${summaryCardsHtml}
   </div>
-  <section class="panel"><div class="panel-heading"><div><h3>أرصدة الموديلات والمقاسات</h3><p>اضغط على الموديل لعرض مصفوفة الألوان والمقاسات</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="ابحث عن الموديل أو الكود أو المقاس" value="${escapeHtml(state.query)}"></label></div>${items.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل</th><th>كود الموديل</th><th>الألوان والمقاسات</th><th style="text-align:center;">إجمالي الرصيد</th>${!data.capabilities.cashierMode ? '<th>سعر التكلفة (الفعلي)</th><th>سعر البيع</th><th>المكسب المتوقع</th>' : '<th>سعر البيع</th>'}<th>حالة المقاسات</th></tr></thead><tbody>${items.map((product) => `<tr><td><button type="button" class="product-name-action inventory-product-details" data-product-id="${product.id}"><span class="product-avatar">${escapeHtml(product.name.slice(0, 1))}</span><span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand || 'اضغط لعرض جدول المقاسات')}</small></span></button></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${product.matrix.isMatrix ? `<div class="model-sub-badges">${product.matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(product.matrix.colorSummaryLabel)}</span>` : ''}${product.matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(product.matrix.sizeRangeLabel)}</span>` : ''}</div>` : `<small>${product.variants.length} نسخة</small>`}</td><td style="text-align:center;"><strong>${product.quantity}</strong> قطعة</td>${!data.capabilities.cashierMode ? (() => {
-  const v0 = product.variants[0];
-  const unitRetail = v0?.retailPrice ?? v0?.price ?? null;
+  <section class="panel"><div class="panel-heading"><div><h3>أرصدة الموديلات والمقاسات</h3><p>اضغط على الموديل لعرض مصفوفة الألوان والمقاسات</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="ابحث عن الموديل أو الكود أو المقاس" value="${escapeHtml(state.query)}"></label></div>${items.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل</th><th>كود الموديل</th><th>الألوان والمقاسات</th><th style="text-align:center;">إجمالي الرصيد</th>${!isCashier ? '<th>سعر التكلفة (الفعلي)</th><th>سعر البيع</th><th>المكسب المتوقع</th>' : '<th>سعر البيع</th>'}<th>حالة المقاسات</th></tr></thead><tbody>${items.map((product) => `<tr><td><button type="button" class="product-name-action inventory-product-details" data-product-id="${product.id}"><span class="product-avatar">${escapeHtml(product.name.slice(0, 1))}</span><span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand || 'اضغط لعرض جدول المقاسات')}</small></span></button></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${product.matrix.isMatrix ? `<div class="model-sub-badges">${product.matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(product.matrix.colorSummaryLabel)}</span>` : ''}${product.matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(product.matrix.sizeRangeLabel)}</span>` : ''}</div>` : `<small>${product.variants.length} نسخة</small>`}</td><td style="text-align:center;"><strong>${product.quantity}</strong> قطعة</td>${!isCashier ? (() => {
+  const unitRetail = product.unitRetail;
   const unitCost = product.cost;
   let unitProfitStr = '—';
+  let unitProfitColor = '#15803d';
   if (unitRetail && unitCost) {
     const profitMinor = BigInt(unitRetail.amount) - BigInt(unitCost.amount);
+    if (profitMinor < 0n) unitProfitColor = 'var(--rose, #be123c)';
     unitProfitStr = money({ amount: profitMinor.toString(), currency: unitRetail.currency, decimals: unitRetail.decimals });
   }
   return `
     <td>${unitCost ? money(unitCost) : '—'}</td>
     <td><strong style="color:var(--purple);">${unitRetail ? money(unitRetail) : '—'}</strong></td>
-    <td><strong style="color:#15803d;">${unitProfitStr}</strong><br><small style="color:var(--muted);font-size:10px;">لكل قطعة</small></td>
+    <td><strong style="color:${unitProfitColor};">${unitProfitStr}</strong><br><small style="color:var(--muted);font-size:10px;">لكل قطعة</small></td>
   `;
 })() : `
-  <td><strong style="color:var(--purple);">${product.variants[0]?.retailPrice ? money(product.variants[0].retailPrice) : '—'}</strong></td>
-`}<td>${product.hasLowVariant ? '<span class="status-pill status-low">مقاسات تحتاج طلب</span>' : '<span class="status-pill status-complete">متوفر</span>'}</td></tr>`).join('')}</tbody></table></div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('box', 28)}</div><strong>مفيش منتجات في المخزون</strong><p>سجّل فاتورة شراء لإضافة البضاعة للمخزون.</p>${!data.capabilities.cashierMode ? '<button class="button button-primary" data-page="suppliers">فاتورة شراء</button>' : ''}</div>`}</section>`;
+  <td><strong style="color:var(--purple);">${product.unitRetail ? money(product.unitRetail) : '—'}</strong></td>
+`}<td>${product.hasLowVariant ? '<span class="status-pill status-low">مقاسات تحتاج طلب</span>' : '<span class="status-pill status-complete">متوفر</span>'}</td></tr>`).join('')}</tbody></table></div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('box', 28)}</div><strong>مفيش منتجات في المخزون</strong><p>سجّل فاتورة شراء لإضافة البضاعة للمخزون.</p>${!isCashier ? '<button class="button button-primary" data-page="suppliers">فاتورة شراء</button>' : ''}</div>`}</section>`;
 }
 
 function salesView() {
@@ -5490,7 +5543,7 @@ function showInventoryProductDetails(product) {
         </table>
       </div>
     </div>` : '';
-  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="inventory-product-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">تفاصيل الموديل والمقاسات</span><h2 id="inventory-product-title">${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2><p>إجمالي الرصيد: <strong>${total}</strong> قطعة · ${variants.length} فرع (لون/مقاس)</p></div><button type="button" class="modal-close" data-close-inventory-details aria-label="إغلاق">×</button></div>${matrixGridHtml}${variants.length ? `<details class="compact-disclosure" ${matrix.isMatrix ? '' : 'open'} style="margin: 10px 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden;"><summary style="padding: 12px 16px;"><span>القائمة التفصيلية للفروع والأكواد (SKUs)</span><div style="display:flex;align-items:center;gap:10px;"><span class="status-pill status-complete">${variants.length} فرع</span><span class="disclosure-chevron" style="width:28px;height:28px;" aria-hidden="true">${icon('chevron', 14)}</span></div></summary><div class="disclosure-content"><div class="table-scroll"><table><thead><tr><th>التركيبة</th><th>SKU</th><th>الكمية</th><th>حد التنبيه</th><th>${state.data.capabilities.cashierMode ? 'سعر البيع' : 'متوسط التكلفة'}</th><th>الحالة</th>${state.data.capabilities.canManageCatalog ? '<th>الإجراء</th>' : ''}</tr></thead><tbody>${variants.map((variant) => { const label = formatVariantAttributes(product, variant.attributes, 'النسخة الأساسية'); const low = BigInt(variant.quantity) <= BigInt(variant.reorderPoint); const removeAction = state.data.capabilities.canManageCatalog ? `<td>${BigInt(variant.quantity) === 0n ? `<button type="button" class="text-action product-delete" data-remove-variant="${variant.id}">حذف</button>` : '<small>صفّر الرصيد أولًا للحذف</small>'}</td>` : ''; return `<tr><td><strong>${escapeHtml(label)}</strong></td><td><span class="sku-code">${escapeHtml(variant.sku)}</span></td><td><strong>${variant.quantity}</strong></td><td>${variant.reorderPoint}</td><td>${state.data.capabilities.cashierMode ? (variant.retailPrice ? money(variant.retailPrice) : '—') : (variant.wac ? money(variant.wac) : '—')}</td><td>${low ? '<span class="status-pill status-low">مخزون منخفض</span>' : '<span class="status-pill status-complete">متوفر</span>'}</td>${removeAction}</tr>`; }).join('')}</tbody></table></div></div></details>` : '<div class="empty-row">لا توجد تركيبات نشطة لهذا المنتج.</div>'}<div class="modal-actions">${state.data.capabilities.canManageCatalog ? `<button type="button" class="button button-secondary" id="inventory-edit-model-btn">توسيع/تعديل الألوان والمقاسات</button>` : ''}<button type="button" class="button button-primary" id="inventory-print-labels-btn">طباعة باركود العلب</button><button type="button" class="button button-secondary" data-close-inventory-details>إغلاق</button></div></section></div>`;
+  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="inventory-product-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">تفاصيل الموديل والمقاسات</span><h2 id="inventory-product-title">${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2><p>إجمالي الرصيد: <strong>${total}</strong> قطعة · ${variants.length} فرع (لون/مقاس)</p></div><button type="button" class="modal-close" data-close-inventory-details aria-label="إغلاق">×</button></div>${matrixGridHtml}${variants.length ? `<details class="compact-disclosure" ${matrix.isMatrix ? '' : 'open'} style="margin: 10px 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden;"><summary style="padding: 12px 16px;"><span>القائمة التفصيلية للفروع والأكواد (SKUs)</span><div style="display:flex;align-items:center;gap:10px;"><span class="status-pill status-complete">${variants.length} فرع</span><span class="disclosure-chevron" style="width:28px;height:28px;" aria-hidden="true">${icon('chevron', 14)}</span></div></summary><div class="disclosure-content"><div class="table-scroll"><table><thead><tr><th>التركيبة</th><th>SKU</th><th>الكمية</th><th>حد التنبيه</th><th>${state.data.capabilities.cashierMode ? 'سعر البيع' : 'متوسط التكلفة'}</th><th>الحالة</th>${state.data.capabilities.canManageCatalog ? '<th>الإجراء</th>' : ''}</tr></thead><tbody>${variants.map((variant) => { const label = formatVariantAttributes(product, variant.attributes, 'النسخة الأساسية'); const low = BigInt(variant.quantity) <= BigInt(variant.reorderPoint); const removeAction = state.data.capabilities.canManageCatalog ? `<td>${BigInt(variant.quantity) === 0n ? `<button type="button" class="text-action product-delete" data-remove-variant="${variant.id}">حذف</button>` : '<small>صفّر الرصيد أولًا للحذف</small>'}</td>` : ''; return `<tr><td><strong>${escapeHtml(label)}</strong></td><td><span class="sku-code">${escapeHtml(variant.sku)}</span></td><td><strong>${variant.quantity}</strong></td><td>${variant.reorderPoint}</td><td>${state.data.capabilities.cashierMode ? ((variant.retailPrice ?? variant.price) ? money(variant.retailPrice ?? variant.price) : '—') : (variant.wac ? money(variant.wac) : '—')}</td><td>${low ? '<span class="status-pill status-low">مخزون منخفض</span>' : '<span class="status-pill status-complete">متوفر</span>'}</td>${removeAction}</tr>`; }).join('')}</tbody></table></div></div></details>` : '<div class="empty-row">لا توجد تركيبات نشطة لهذا المنتج.</div>'}<div class="modal-actions">${state.data.capabilities.canManageCatalog ? `<button type="button" class="button button-secondary" id="inventory-edit-model-btn">توسيع/تعديل الألوان والمقاسات</button>` : ''}<button type="button" class="button button-primary" id="inventory-print-labels-btn">طباعة باركود العلب</button><button type="button" class="button button-secondary" data-close-inventory-details>إغلاق</button></div></section></div>`;
   modal.querySelectorAll('[data-close-inventory-details]').forEach((button) => button.addEventListener('click', () => { modal.innerHTML = ''; }));
   modal.querySelector('#inventory-print-labels-btn')?.addEventListener('click', () => showBarcodeLabelsModal({ product }));
   modal.querySelector('#inventory-edit-model-btn')?.addEventListener('click', () => showProductEditModal(product));
