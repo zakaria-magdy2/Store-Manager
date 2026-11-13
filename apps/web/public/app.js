@@ -214,6 +214,8 @@ function mutationLabel(path, method) {
   if (/^\/api\/products\/[^/?]+\/variants\/[^/?]+$/.test(path) && method === 'DELETE') return 'حذف تركيبة المنتج من القوائم (مع الاحتفاظ بسجلها وفواتيرها)';
   if (/^\/api\/products\/[^/?]+$/.test(path)) return method === 'DELETE' ? 'حذف المنتج من قائمة البيع' : 'حفظ تعديلات المنتج';
   if (path === '/api/checkout') return 'تسجيل عملية البيع';
+  if (path === '/api/shifts/start') return 'بدء الشيفت';
+  if (path === '/api/shifts/end') return 'إنهاء الشيفت وتقفيل الدرج';
   if (path.startsWith('/api/purchases')) return 'حفظ عملية المشتريات أو السداد';
   if (path.startsWith('/api/suppliers')) return 'حفظ بيانات التاجر';
   if (path.startsWith('/api/returns')) return 'تسجيل المرتجع';
@@ -410,7 +412,7 @@ function shellView() {
       ${icon('clock', 15)}<span>إنهاء الشيفت (${escapeHtml(activeShift.shiftNumber)})</span>
     </button>
   ` : `
-    <button type="button" id="header-start-shift-btn" class="button button-sm button-shift-start" style="background:#059669;border-color:#059669;color:#fff;box-shadow:0 2px 8px rgba(5,150,105,.25);font-weight:750;display:inline-flex;align-items:center;gap:6px;" title="بدء شيفت جديدة وتسجيل الحضور">
+    <button type="button" id="header-start-shift-btn" class="button button-sm button-shift-start" style="background:#059669;border-color:#059669;color:#fff;box-shadow:0 2px 8px rgba(5,150,105,.25);font-weight:750;display:inline-flex;align-items:center;gap:6px;" title="بدء شيفت جديد وتسجيل الحضور">
       ${icon('play', 15)}<span>بدء الشيفت (تسجيل الحضور)</span>
     </button>
   `;
@@ -1240,11 +1242,11 @@ function shiftsView() {
       <div>
         ${state.data.activeShift ? `
           <button type="button" class="button button-primary" id="shifts-end-now-btn" style="background:#5948d8;border-color:#5948d8;">
-            ${icon('clock', 16)} إنهاء الشيفت الحالية (${escapeHtml(state.data.activeShift.shiftNumber)})
+            ${icon('clock', 16)} إنهاء الشيفت الحالي (${escapeHtml(state.data.activeShift.shiftNumber)})
           </button>
         ` : `
           <button type="button" class="button button-primary" id="shifts-start-now-btn" style="background:#059669;border-color:#059669;">
-            ${icon('play', 16)} بدء شيفت جديدة
+            ${icon('play', 16)} بدء شيفت جديد
           </button>
         `}
       </div>
@@ -1368,7 +1370,7 @@ function shiftsView() {
         <div class="empty-chart" style="padding:40px 16px;">
           <div class="empty-illustration">${icon('clock', 32)}</div>
           <strong>لا توجد شيفتات مسجلة في هذه الفترة</strong>
-          <p>ابدأ شيفت جديدة ليتم احتساب المبيعات وحركات الدرج تلقائياً.</p>
+          <p>ابدأ شيفت جديد ليتم احتساب المبيعات وحركات الدرج تلقائياً.</p>
         </div>
       `}
     </section>
@@ -1411,7 +1413,7 @@ async function showShiftSalesModal(shiftId, shiftNumber) {
     const sales = data.sales ?? [];
 
     if (!sales.length) {
-      content.innerHTML = `<div class="empty-row" style="text-align:center;padding:24px;">لم يتم تسجيل أي فواتير بيع خلال هذه الشيفت.</div>`;
+      content.innerHTML = `<div class="empty-row" style="text-align:center;padding:24px;">لم يتم تسجيل أي فواتير بيع خلال هذا الشيفت.</div>`;
       return;
     }
 
