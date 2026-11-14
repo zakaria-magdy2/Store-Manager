@@ -9,6 +9,7 @@ export interface PurchaseLineInput {
   variantId: string;
   quantity: bigint;
   unitCost: Money;
+  retailPrice?: Money | undefined;
 }
 
 export interface RecordPurchaseInput {
@@ -20,6 +21,8 @@ export interface RecordPurchaseInput {
   totalAmount: Money;
   initialPayment: Money;
   paymentMethod: 'CASH' | 'BANK_TRANSFER' | 'CARD' | 'MOBILE';
+  targetProfitPercent?: number | null | undefined;
+  expectedRetailTotal?: Money | undefined;
   referenceNumber?: string | undefined;
   notes?: string | undefined;
   purchasedAt: Date;
@@ -66,6 +69,19 @@ export class SqlitePurchasingRepository {
     if (input.totalAmount.currency.code !== input.initialPayment.currency.code) throw badRequest('Purchase currency mismatch');
     if (input.initialPayment.amount > input.totalAmount.amount) throw badRequest('Initial payment exceeds purchase total');
     if (input.lines.length === 0) throw badRequest('Purchase requires at least one stock item');
+    if (
+      input.targetProfitPercent !== undefined &&
+      input.targetProfitPercent !== null &&
+      (!Number.isFinite(input.targetProfitPercent) || input.targetProfitPercent < 0 || input.targetProfitPercent > 100000)
+    ) {
+      throw badRequest('نسبة الربح المستهدفة غير صالحة');
+    }
+    if (
+      input.expectedRetailTotal !== undefined &&
+      (input.expectedRetailTotal.currency.code !== input.totalAmount.currency.code || input.expectedRetailTotal.isNegative())
+    ) {
+      throw badRequest('إجمالي سعر البيع المتوقع غير صالح');
+    }
     const calculatedLinesTotal = input.lines.reduce((sum, line) => sum + line.unitCost.amount * line.quantity, 0n);
     if (calculatedLinesTotal !== input.totalAmount.amount) throw badRequest('قيمة الفاتورة لازم تساوي مجموع أصنافها');
 
@@ -78,14 +94,17 @@ export class SqlitePurchasingRepository {
         const existingInitialPayment = await trx.selectFrom('supplier_payments').selectAll()
           .where('tenant_id', '=', ctx.tenantId).where('purchase_id', '=', replay.id)
           .where('idempotency_key', '=', `${input.idempotencyKey}:initial`).executeTakeFirst();
+        const replayExpectedRetail = replay.expected_retail_total === null ? null : BigInt(replay.expected_retail_total);
         const sameRequest = replay.supplier_id === input.supplierId && replay.store_id === input.storeId
           && replay.invoice_number === (input.invoiceNumber ?? null)
           && BigInt(replay.total_amount) === input.totalAmount.amount
           && replay.currency === input.totalAmount.currency.code
+          && replayExpectedRetail === (input.expectedRetailTotal?.amount ?? null)
           && existingLines.length === input.lines.length
           && existingLines.every((line, index) => line.variant_id === input.lines[index]?.variantId
             && BigInt(line.quantity) === input.lines[index]?.quantity
-            && BigInt(line.unit_cost) === input.lines[index]?.unitCost.amount)
+            && BigInt(line.unit_cost) === input.lines[index]?.unitCost.amount
+            && (line.retail_price === null ? null : BigInt(line.retail_price)) === (input.lines[index]?.retailPrice?.amount ?? null))
           && BigInt(existingInitialPayment?.amount ?? 0) === input.initialPayment.amount
           && (!existingInitialPayment || existingInitialPayment.payment_method === input.paymentMethod);
         if (!sameRequest) throw conflict('مفتاح العملية مستخدم لفاتورة مشتريات مختلفة');
@@ -106,6 +125,8 @@ export class SqlitePurchasingRepository {
         total_amount: input.totalAmount.amount,
         initial_paid_amount: 0n,
         currency: input.totalAmount.currency.code,
+        target_profit_percent: input.targetProfitPercent ?? null,
+        expected_retail_total: input.expectedRetailTotal?.amount ?? null,
         notes: input.notes ?? null,
         created_by_user_id: ctx.userId,
       }).execute();
@@ -129,6 +150,11 @@ export class SqlitePurchasingRepository {
       for (const [index, line] of input.lines.entries()) {
         if (line.quantity <= 0n || line.unitCost.isNegative()) throw badRequest('Purchase item quantity or cost is invalid');
         if (line.unitCost.currency.code !== input.totalAmount.currency.code) throw badRequest('Purchase item currency mismatch');
+        if (line.retailPrice !== undefined) {
+          if (line.retailPrice.isNegative() || line.retailPrice.currency.code !== input.totalAmount.currency.code) {
+            throw badRequest('سعر البيع المحدد للبند غير صالح');
+          }
+        }
         const variant = await trx.selectFrom('product_variants')
           .innerJoin('products', 'products.id', 'product_variants.product_id')
           .select([
@@ -160,8 +186,18 @@ export class SqlitePurchasingRepository {
           sku: variant.sku,
           quantity: line.quantity,
           unit_cost: line.unitCost.amount,
+          retail_price: line.retailPrice?.amount ?? null,
           currency: input.totalAmount.currency.code,
         }).execute();
+
+        if (line.retailPrice !== undefined) {
+          await trx
+            .updateTable('product_variants')
+            .set({ retail_price: line.retailPrice.amount })
+            .where('tenant_id', '=', ctx.tenantId)
+            .where('id', '=', variant.variantId)
+            .execute();
+        }
 
         await applyStockMovementInTransaction(trx, ctx, {
           id: `${input.id}:movement:${index}`,

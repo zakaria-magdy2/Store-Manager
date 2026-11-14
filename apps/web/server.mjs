@@ -313,7 +313,7 @@ const CheckoutSchema = z.object({
   payment: z.object({ method: z.enum(['CASH', 'CARD', 'MOBILE', 'OTHER']), amount: z.string().regex(/^\d{1,15}$/) }),
 });
 const SupplierSchema = z.object({ name: z.string().min(2).max(120).trim(), phone: z.string().max(40).trim().optional(), notes: z.string().max(500).trim().optional() });
-const PurchaseSchema = z.object({ idempotencyKey: z.string().uuid(), supplierId: z.string().uuid(), storeId: z.string().uuid(), invoiceNumber: z.string().max(80).trim().optional(), totalAmount: z.string().regex(/^[1-9]\d{0,14}$/), paidAmount: z.string().regex(/^\d{1,15}$/), paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'CARD', 'MOBILE']).default('CASH'), referenceNumber: z.string().max(80).trim().optional(), notes: z.string().max(500).trim().optional(), items: z.array(z.object({ variantId: z.string().uuid(), quantity: z.string().regex(/^[1-9]\d{0,8}$/), unitCost: z.string().regex(/^\d{1,15}$/) })).min(1).max(100) });
+const PurchaseSchema = z.object({ idempotencyKey: z.string().uuid(), supplierId: z.string().uuid(), storeId: z.string().uuid(), invoiceNumber: z.string().max(80).trim().optional(), totalAmount: z.string().regex(/^[1-9]\d{0,14}$/), paidAmount: z.string().regex(/^\d{1,15}$/), paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'CARD', 'MOBILE']).default('CASH'), targetProfitPercent: z.number().min(0).max(100000).nullable().optional(), referenceNumber: z.string().max(80).trim().optional(), notes: z.string().max(500).trim().optional(), items: z.array(z.object({ variantId: z.string().uuid(), quantity: z.string().regex(/^[1-9]\d{0,8}$/), unitCost: z.string().regex(/^\d{1,15}$/), retailPrice: z.string().regex(/^\d{1,15}$/).nullable().optional() })).min(1).max(100) });
 const SupplierPaymentSchema = z.object({ idempotencyKey: z.string().uuid(), amount: z.string().regex(/^[1-9]\d{0,14}$/), paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'CARD', 'MOBILE']), referenceNumber: z.string().max(80).trim().optional() });
 const ExpenseSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), categoryCode: z.enum(['RENT', 'UTILITIES', 'TRANSPORT', 'MAINTENANCE', 'SUPPLIES', 'OTHER']), amount: z.string().regex(/^[1-9]\d{0,14}$/), paymentMethod: z.enum(['CASH_DRAWER', 'CASH_SAFE', 'BANK_TRANSFER']), expenseDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), notes: z.string().max(500).trim().optional(), referenceNumber: z.string().max(80).trim().optional() });
 const CustomerReturnSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), paymentMethod: z.enum(['CASH', 'CARD', 'MOBILE', 'OTHER']), items: z.array(z.object({ originalSaleItemId: z.string().min(1).max(80), quantity: z.string().regex(/^[1-9]\d{0,8}$/) })).min(1).max(100) });
@@ -2181,7 +2181,7 @@ async function currentData(ctx, url) {
       const vendorReturns = supplierReturnRows.filter((item) => item.purchase_id === purchase.id);
       const paid = BigInt(purchase.initial_paid_amount) + payments.reduce((sum, payment) => sum + BigInt(payment.amount), 0n);
       const returnCredit = vendorReturns.reduce((sum, item) => sum + BigInt(item.credit_amount), 0n);
-      return { id: purchase.id, invoiceNumber: purchase.invoice_number, purchasedAt: purchase.purchased_at, createdByUserId: purchase.created_by_user_id, createdByName: userMap.get(purchase.created_by_user_id) || 'المسؤول', totalAmount: moneyJson(Money.fromMinor(BigInt(purchase.total_amount), purchase.currency)), paidAmount: moneyJson(Money.fromMinor(paid, purchase.currency)), returnedCredit: moneyJson(Money.fromMinor(returnCredit, purchase.currency)), remainingAmount: moneyJson(Money.fromMinor(BigInt(purchase.total_amount) - paid - returnCredit, purchase.currency)), notes: purchase.notes, items: purchaseItems.filter((line) => line.purchase_id === purchase.id).map((line) => { const returned = returnedQuantityByPurchaseItem.get(line.id) ?? 0n; return { id: line.id, productName: line.product_name, sku: line.sku, quantity: line.quantity.toString(), returnableQuantity: (BigInt(line.quantity) - returned).toString(), unitCost: moneyJson(Money.fromMinor(BigInt(line.unit_cost), line.currency)) }; }), payments: payments.map((payment) => ({ id: payment.id, amount: moneyJson(Money.fromMinor(BigInt(payment.amount), payment.currency)), paymentMethod: payment.payment_method, referenceNumber: payment.reference_number, paidAt: payment.paid_at, createdByUserId: payment.created_by_user_id, createdByName: userMap.get(payment.created_by_user_id) || 'المسؤول' })), returns: vendorReturns.map((item) => ({ id: item.id, returnNumber: item.return_number, creditAmount: moneyJson(Money.fromMinor(BigInt(item.credit_amount), item.currency)), createdAt: item.created_at })) };
+      return { id: purchase.id, invoiceNumber: purchase.invoice_number, purchasedAt: purchase.purchased_at, createdByUserId: purchase.created_by_user_id, createdByName: userMap.get(purchase.created_by_user_id) || 'المسؤول', totalAmount: moneyJson(Money.fromMinor(BigInt(purchase.total_amount), purchase.currency)), paidAmount: moneyJson(Money.fromMinor(paid, purchase.currency)), returnedCredit: moneyJson(Money.fromMinor(returnCredit, purchase.currency)), remainingAmount: moneyJson(Money.fromMinor(BigInt(purchase.total_amount) - paid - returnCredit, purchase.currency)), targetProfitPercent: purchase.target_profit_percent ?? null, expectedRetailTotal: purchase.expected_retail_total !== null && purchase.expected_retail_total !== undefined ? moneyJson(Money.fromMinor(BigInt(purchase.expected_retail_total), purchase.currency)) : null, notes: purchase.notes, items: purchaseItems.filter((line) => line.purchase_id === purchase.id).map((line) => { const returned = returnedQuantityByPurchaseItem.get(line.id) ?? 0n; return { id: line.id, productName: line.product_name, sku: line.sku, quantity: line.quantity.toString(), returnableQuantity: (BigInt(line.quantity) - returned).toString(), unitCost: moneyJson(Money.fromMinor(BigInt(line.unit_cost), line.currency)), retailPrice: line.retail_price !== null && line.retail_price !== undefined ? moneyJson(Money.fromMinor(BigInt(line.retail_price), line.currency)) : null }; }), payments: payments.map((payment) => ({ id: payment.id, amount: moneyJson(Money.fromMinor(BigInt(payment.amount), payment.currency)), paymentMethod: payment.payment_method, referenceNumber: payment.reference_number, paidAt: payment.paid_at, createdByUserId: payment.created_by_user_id, createdByName: userMap.get(payment.created_by_user_id) || 'المسؤول' })), returns: vendorReturns.map((item) => ({ id: item.id, returnNumber: item.return_number, creditAmount: moneyJson(Money.fromMinor(BigInt(item.credit_amount), item.currency)), createdAt: item.created_at })) };
     });
     return { id: supplier.id, name: supplier.name, phone: supplier.phone, notes: supplier.notes, purchases: entries, totalPurchased: entries.reduce((sum, item) => sum + BigInt(item.totalAmount.amount), 0n).toString(), totalPaid: entries.reduce((sum, item) => sum + BigInt(item.paidAmount.amount), 0n).toString(), balanceDue: entries.reduce((sum, item) => sum + BigInt(item.remainingAmount.amount), 0n).toString(), currency: tenant.currency };
   });
@@ -3606,16 +3606,36 @@ async function handleApi(req, res, url) {
     if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
     const id = randomUUID();
     const invoiceNumber = body.invoiceNumber?.trim() || generateNextPurchaseNumber(ctx.tenantId);
+    let hasAnyRetailPrice = false;
+    let computedRetailTotalMinor = 0n;
+    const lines = body.items.map((line) => {
+      const qty = BigInt(line.quantity);
+      const hasRetail = line.retailPrice !== undefined && line.retailPrice !== null;
+      if (hasRetail) {
+        hasAnyRetailPrice = true;
+        computedRetailTotalMinor += BigInt(line.retailPrice) * qty;
+      }
+      return {
+        variantId: line.variantId,
+        quantity: qty,
+        unitCost: Money.fromMinor(BigInt(line.unitCost), tenant.currency),
+        ...(hasRetail ? { retailPrice: Money.fromMinor(BigInt(line.retailPrice), tenant.currency) } : {}),
+      };
+    });
+    const expectedRetailTotal = hasAnyRetailPrice ? Money.fromMinor(computedRetailTotalMinor, tenant.currency) : undefined;
     await purchasing.recordPurchase(ctx, {
       id, idempotencyKey: body.idempotencyKey, storeId: body.storeId, supplierId: body.supplierId,
       invoiceNumber,
       totalAmount: Money.fromMinor(BigInt(body.totalAmount), tenant.currency),
       initialPayment: Money.fromMinor(BigInt(body.paidAmount), tenant.currency),
-      paymentMethod: body.paymentMethod, referenceNumber: body.referenceNumber,
+      paymentMethod: body.paymentMethod,
+      targetProfitPercent: body.targetProfitPercent ?? null,
+      expectedRetailTotal,
+      referenceNumber: body.referenceNumber,
       notes: body.notes, purchasedAt: new Date(),
-      lines: body.items.map((line) => ({ variantId: line.variantId, quantity: BigInt(line.quantity), unitCost: Money.fromMinor(BigInt(line.unitCost), tenant.currency) })),
+      lines,
     });
-    await recordAudit(ctx, { storeId: body.storeId, action: 'PURCHASE_RECORDED', entityType: 'PURCHASE', entityId: id, summary: `تسجيل فاتورة شراء (${invoiceNumber})`, metadata: { invoiceNumber, totalAmount: body.totalAmount, paidAmount: body.paidAmount } });
+    await recordAudit(ctx, { storeId: body.storeId, action: 'PURCHASE_RECORDED', entityType: 'PURCHASE', entityId: id, summary: `تسجيل فاتورة شراء (${invoiceNumber})`, metadata: { invoiceNumber, totalAmount: body.totalAmount, paidAmount: body.paidAmount, targetProfitPercent: body.targetProfitPercent ?? null, expectedRetailTotal: expectedRetailTotal?.amount.toString() ?? null } });
     return json(res, 201, { id });
   }
 
@@ -3917,6 +3937,7 @@ async function handleApi(req, res, url) {
       if (!variant) throw Object.assign(new Error('أحد المنتجات لم يعد متاحًا'), { status: 400 });
       const product = await productRepo.findById(ctx, variant.productId);
       if (!product) throw Object.assign(new Error('أحد المنتجات لم يعد متاحًا'), { status: 400 });
+      if (variant.retailPrice.amount <= 0n) throw Object.assign(new Error(`الصنف "${product.name}" لم يتم تسعيره للبيع بعد — حدّد سعر البيع عند الشراء من التاجر أو من تعديل المنتج`), { status: 400 });
       const optionLabel = Object.entries(variant.attributes).map(([key, value]) => `${product.options.find((option) => option.key === key)?.name ?? key}: ${String(value)}`).join(' - ');
       cart = cart.addItem({ lineId: `line-${index}-${randomUUID()}`, variantId: variant.id, productId: product.id, productName: optionLabel ? `${product.name} - ${optionLabel}` : product.name, sku: variant.sku, unitPrice: variant.retailPrice, quantity: BigInt(item.quantity) });
     }

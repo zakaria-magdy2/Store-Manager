@@ -1263,3 +1263,207 @@ test('executes full professional stocktake lifecycle with permissions, blind cou
     await rm(stkDataDir, { recursive: true, force: true }).catch(() => {});
   }
 });
+
+test('supports unpriced product catalog creation, supplier purchase wholesale+retail pricing with optional target profit %, and POS checkout guard', async () => {
+  const purDataDir = await mkdtemp(join(appDir, '.test-purchase-pricing-'));
+  const purPort = await reservePort();
+  const purUrl = `http://127.0.0.1:${purPort}`;
+  let purLog = '';
+  const purServer = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+    cwd: workspace,
+    env: {
+      ...process.env,
+      PORT: String(purPort),
+      RETAILOS_DATA_DIR: purDataDir,
+      RETAILOS_COMPANY_NAME: 'متجر التسعير',
+      RETAILOS_COMPANY_CODE: 'PRC_TEST',
+      RETAILOS_CURRENCY: 'EGP',
+      RETAILOS_STORE_NAME: 'الفرع الرئيسي',
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  purServer.stderr.on('data', (chunk) => { purLog += chunk.toString(); });
+
+  const purReq = async (path, { method = 'GET', body, cookieStr } = {}) => {
+    const headers = { Origin: purUrl };
+    if (body) headers['Content-Type'] = 'application/json';
+    if (cookieStr) headers.Cookie = cookieStr;
+    const response = await fetch(`${purUrl}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const payload = await response.json();
+    return { response, payload };
+  };
+
+  try {
+    let purReady = false;
+    for (let i = 0; i < 240; i += 1) {
+      if (purServer.exitCode !== null) throw new Error(`purServer exited early (${purServer.exitCode}): ${purLog}`);
+      try {
+        const res = await fetch(`${purUrl}/api/bootstrap`);
+        if (res.ok) { purReady = true; break; }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 125));
+    }
+    assert.ok(purReady, `purServer did not become ready: ${purLog}`);
+
+    assert.equal((await purReq('/api/setup', {
+      method: 'POST',
+      body: { ownerUsername: 'prc_owner', ownerName: 'مالك التسعير', password: 'Pricing-Owner-2026' },
+    })).response.status, 201, purLog);
+
+    const loginOwner = await purReq('/api/login', {
+      method: 'POST',
+      body: { username: 'prc_owner', password: 'Pricing-Owner-2026' },
+    });
+    assert.equal(loginOwner.response.status, 200);
+    const ownerCookie = loginOwner.response.headers.get('set-cookie').split(';')[0];
+
+    const initialData = await purReq('/api/data', { cookieStr: ownerCookie });
+    const storeId = initialData.payload.selectedStoreId;
+
+    const supplier = await purReq('/api/suppliers', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { name: 'تاجر الجملة التجريبي' },
+    });
+    assert.equal(supplier.response.status, 201);
+
+    // 1. Add 3 unpriced products (retailPrice: '0')
+    const p1 = await purReq('/api/products', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { name: 'جاكيت شتوي', sku: 'JKT-01', variants: [{ sku: 'JKT-01-BASE', retailPrice: '0', reorderPoint: '1' }] },
+    });
+    const p2 = await purReq('/api/products', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { name: 'بلوفر صوف', sku: 'PLV-02', variants: [{ sku: 'PLV-02-BASE', retailPrice: '0', reorderPoint: '1' }] },
+    });
+    const p3 = await purReq('/api/products', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { name: 'تيشيرت بانتظار التسعير', sku: 'TSH-03', variants: [{ sku: 'TSH-03-BASE', retailPrice: '0', reorderPoint: '1' }] },
+    });
+    assert.equal(p1.response.status, 201);
+    assert.equal(p2.response.status, 201);
+    assert.equal(p3.response.status, 201);
+
+    const cat1 = await purReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie });
+    const v1 = cat1.payload.products.find((p) => p.id === p1.payload.id).variants[0];
+    const v2 = cat1.payload.products.find((p) => p.id === p2.payload.id).variants[0];
+    const v3 = cat1.payload.products.find((p) => p.id === p3.payload.id).variants[0];
+    assert.equal(v1.price.amount, '0');
+    assert.equal(v3.price.amount, '0');
+
+    // 2. Receive purchase WITH targetProfitPercent: 100 and explicit retailPrice for v1 & v2, leaving v3 unpriced
+    const purchase1 = await purReq('/api/purchases', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: crypto.randomUUID(),
+        supplierId: supplier.payload.id,
+        storeId,
+        totalAmount: '60000', // 1*30000 + 2*15000 = 600.00 EGP
+        paidAmount: '0',
+        targetProfitPercent: 100,
+        items: [
+          { variantId: v1.id, quantity: '1', unitCost: '30000', retailPrice: '60000' },
+          { variantId: v2.id, quantity: '2', unitCost: '15000', retailPrice: '30000' },
+        ],
+      },
+    });
+    assert.equal(purchase1.response.status, 201, JSON.stringify(purchase1.payload));
+
+    const purchase2 = await purReq('/api/purchases', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: crypto.randomUUID(),
+        supplierId: supplier.payload.id,
+        storeId,
+        totalAmount: '10000',
+        paidAmount: '0',
+        items: [
+          { variantId: v3.id, quantity: '2', unitCost: '5000' }, // retailPrice omitted => remains unpriced (0)
+        ],
+      },
+    });
+    assert.equal(purchase2.response.status, 201, JSON.stringify(purchase2.payload));
+
+    const afterPur = await purReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie });
+    const prod1After = afterPur.payload.products.find((p) => p.id === p1.payload.id);
+    const prod2After = afterPur.payload.products.find((p) => p.id === p2.payload.id);
+    const prod3After = afterPur.payload.products.find((p) => p.id === p3.payload.id);
+    assert.equal(prod1After.variants[0].price.amount, '60000');
+    assert.equal(prod2After.variants[0].price.amount, '30000');
+    assert.equal(prod3After.variants[0].price.amount, '0');
+
+    const supAfter = afterPur.payload.suppliers.find((s) => s.id === supplier.payload.id);
+    const savedPur1 = supAfter.purchases.find((p) => p.id === purchase1.payload.id);
+    const savedPur2 = supAfter.purchases.find((p) => p.id === purchase2.payload.id);
+    assert.equal(savedPur1.targetProfitPercent, 100);
+    assert.equal(savedPur1.expectedRetailTotal.amount, '120000');
+    assert.equal(savedPur1.items.find((l) => l.sku === 'JKT-01-BASE').retailPrice.amount, '60000');
+    assert.equal(savedPur1.items.find((l) => l.sku === 'PLV-02-BASE').retailPrice.amount, '30000');
+    assert.equal(savedPur2.targetProfitPercent, null);
+    assert.equal(savedPur2.expectedRetailTotal, null);
+    assert.equal(savedPur2.items[0].retailPrice, null);
+
+    // 3. Open shift & verify unpriced item checkout is rejected with 400 while priced item checkout succeeds
+    const shiftStart = await purReq('/api/shifts/start', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { storeId, openingCash: '0', idempotencyKey: crypto.randomUUID() },
+    });
+    assert.equal(shiftStart.response.status, 201);
+
+    const blockedSale = await purReq('/api/checkout', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: crypto.randomUUID(),
+        storeId,
+        items: [{ variantId: v3.id, quantity: '1' }],
+        payment: { method: 'CASH', amount: '1000' },
+      },
+    });
+    assert.equal(blockedSale.response.status, 400);
+    assert.match(blockedSale.payload.error, /لم يتم تسعيره/);
+
+    const okSale = await purReq('/api/checkout', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: crypto.randomUUID(),
+        storeId,
+        items: [{ variantId: v1.id, quantity: '1' }],
+        payment: { method: 'CASH', amount: '60000' },
+      },
+    });
+    assert.equal(okSale.response.status, 201, JSON.stringify(okSale.payload));
+
+    // 4. Editing product from Products page can later price prod3
+    const editProd3 = await purReq(`/api/products/${p3.payload.id}`, {
+      method: 'PATCH',
+      cookieStr: ownerCookie,
+      body: {
+        name: 'تيشيرت تم تسعيره بالتعديل',
+        sku: 'TSH-03',
+        categoryId: null,
+        brand: null,
+        description: null,
+        imagePath: null,
+        options: [],
+        variants: [{ id: v3.id, sku: 'TSH-03-BASE', barcode: null, attributes: {}, retailPrice: '12500', reorderPoint: '1' }],
+      },
+    });
+    assert.equal(editProd3.response.status, 200, JSON.stringify(editProd3.payload));
+    const afterEdit = await purReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie });
+    assert.equal(afterEdit.payload.products.find((p) => p.id === p3.payload.id).variants[0].price.amount, '12500');
+  } finally {
+    if (purServer.exitCode === null) {
+      purServer.kill('SIGTERM');
+      await Promise.race([once(purServer, 'exit'), new Promise((resolve) => setTimeout(resolve, 3000))]);
+    }
+    await rm(purDataDir, { recursive: true, force: true }).catch(() => {});
+  }
+});

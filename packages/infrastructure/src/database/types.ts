@@ -305,6 +305,7 @@ export interface SupplierPurchasesTable {
   id: string; tenant_id: string; store_id: string; supplier_id: string; invoice_number: string | null;
   idempotency_key: string;
   purchased_at: string; total_amount: bigint; initial_paid_amount: Generated<bigint>; currency: string;
+  target_profit_percent: number | null; expected_retail_total: bigint | null;
   notes: string | null; created_by_user_id: string; created_at: Generated<string>;
 }
 
@@ -318,7 +319,7 @@ export interface SupplierPaymentsTable {
 export interface SupplierPurchaseItemsTable {
   id: string; tenant_id: string; store_id: string; purchase_id: string; variant_id: string;
   product_id: string; product_name: string; sku: string; quantity: bigint; unit_cost: bigint;
-  currency: string; created_at: Generated<string>;
+  retail_price: bigint | null; currency: string; created_at: Generated<string>;
 }
 
 export interface CustomerReturnsTable {

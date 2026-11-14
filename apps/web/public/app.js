@@ -128,7 +128,7 @@ async function compressProductImageFile(file) {
 
   const maxLimit = 220_000;
   let dataUrl = '';
-  for (const maxDim of [320, 256, 192]) {
+  for (const maxDim of [640, 480, 320, 256, 192]) {
     const scale = Math.min(1, maxDim / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
     const width = Math.max(1, Math.round((img.naturalWidth || 1) * scale));
     const height = Math.max(1, Math.round((img.naturalHeight || 1) * scale));
@@ -239,6 +239,8 @@ document.addEventListener('click', (event) => {
 });
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
+    const lightbox = document.querySelector('.pos-image-lightbox');
+    if (lightbox) { lightbox.remove(); return; }
     const menu = document.querySelector('#account-menu');
     const toggle = document.querySelector('#account-menu-toggle');
     if (menu && toggle && !menu.hidden) { closeAccountMenu(); toggle.focus(); }
@@ -1426,6 +1428,47 @@ function extractProductMatrix(product) {
   };
 }
 
+function computeProductActualWac(variants) {
+  const list = (variants ?? []).filter((v) => v?.isActive !== false && v.wac);
+  if (!list.length) return null;
+  const weight = list.reduce((sum, v) => sum + (BigInt(v.quantity ?? 0) > 0n ? BigInt(v.quantity) : 0n), 0n);
+  if (weight > 0n) {
+    const weighted = list.reduce((sum, v) => {
+      const q = BigInt(v.quantity ?? 0);
+      return q > 0n ? sum + q * BigInt(v.wac.amount) : sum;
+    }, 0n) / weight;
+    return { ...list[0].wac, amount: weighted.toString() };
+  }
+  const nonZero = list.find((v) => BigInt(v.wac.amount) > 0n);
+  return nonZero ? nonZero.wac : null;
+}
+
+function summarizeProductPricing(product) {
+  const activeVariants = (product?.variants ?? []).filter((v) => v?.isActive !== false);
+  if (!activeVariants.length) {
+    return { activeVariants, allUnpriced: true, samePrice: true, singlePrice: null, labelText: 'لم يُسعّر بعد', badgeHtml: '<span class="status-pill" style="background:var(--amber-soft);color:var(--amber);">بانتظار التسعير</span>' };
+  }
+  const priced = activeVariants.filter((v) => BigInt(v.price?.amount ?? 0) > 0n);
+  if (!priced.length) {
+    return { activeVariants, allUnpriced: true, samePrice: true, singlePrice: activeVariants[0].price, labelText: 'لم يُسعّر بعد', badgeHtml: '<span class="status-pill" style="background:var(--amber-soft);color:var(--amber);">بانتظار التسعير</span>' };
+  }
+  const uniqueAmounts = new Set(priced.map((v) => String(v.price.amount)));
+  const samePrice = uniqueAmounts.size === 1 && priced.length === activeVariants.length;
+  const minVar = priced.reduce((m, v) => (BigInt(v.price.amount) < BigInt(m.price.amount) ? v : m), priced[0]);
+  const maxVar = priced.reduce((m, v) => (BigInt(v.price.amount) > BigInt(m.price.amount) ? v : m), priced[0]);
+  const labelText = uniqueAmounts.size === 1 ? money(minVar.price) : `${money(minVar.price)} – ${money(maxVar.price)}`;
+  return {
+    activeVariants,
+    allUnpriced: false,
+    samePrice,
+    singlePrice: minVar.price,
+    labelText,
+    badgeHtml: priced.length < activeVariants.length
+      ? `${escapeHtml(labelText)} <small style="color:var(--amber);display:block;font-size:10px;">بعض الفروع بانتظار التسعير</small>`
+      : escapeHtml(labelText),
+  };
+}
+
 function productsView() {
   const query = state.query.trim().toLowerCase();
   const products = state.data.products.filter((product) => !query || `${product.name} ${product.sku} ${product.brand ?? ''} ${product.variants.map((item) => `${item.sku} ${item.barcode ?? ''} ${Object.values(item.attributes ?? {}).join(' ')}`).join(' ')}`.toLowerCase().includes(query));
@@ -1433,11 +1476,11 @@ function productsView() {
     const matrix = extractProductMatrix(product);
     const activeVariants = matrix.activeVariants;
     const totalQuantity = activeVariants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n);
-    const priceRange = activeVariants.length ? (new Set(activeVariants.map((variant) => variant.price.amount)).size === 1 ? money(activeVariants[0].price) : `${money(activeVariants.reduce((min, variant) => BigInt(variant.price.amount) < BigInt(min.price.amount) ? variant : min, activeVariants[0]).price)} – ${money(activeVariants.reduce((max, variant) => BigInt(variant.price.amount) > BigInt(max.price.amount) ? variant : max, activeVariants[0]).price)}`) : '—';
+    const pricingSummary = summarizeProductPricing(product);
     const subSummary = matrix.isMatrix
       ? `<div class="model-sub-badges">${matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(matrix.colorSummaryLabel)}</span>` : ''}${matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(matrix.sizeRangeLabel)}</span>` : ''}<small class="model-sub-count">${activeVariants.length} فرع (لون×مقاس)</small></div>`
       : `<span class="model-sub-count">${activeVariants.length === 1 ? 'صنف مباشر (بدون مقاسات)' : `${activeVariants.length} تركيبة`}</span>`;
-    return `<tr><td><div class="product-table-name"><span class="product-avatar ${product.imagePath ? 'has-image' : ''}">${product.imagePath ? renderProductThumb(product) : escapeHtml(product.name.slice(0, 1))}</span><span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand ? `${product.brand} · كود الموديل ${product.sku}` : `كود الموديل: ${product.sku}`)}</small></span></div></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${subSummary}</td><td class="table-total">${priceRange}</td><td><strong>${totalQuantity}</strong> قطعة</td><td class="product-actions"><button type="button" class="text-action product-print-labels" data-product-id="${product.id}">طباعة باركود</button><button type="button" class="text-action product-edit" data-product-id="${product.id}">المقاسات والتعديل</button><button type="button" class="text-action product-delete" data-product-id="${product.id}">حذف</button></td></tr>`;
+    return `<tr><td><div class="product-table-name"><span class="product-avatar ${product.imagePath ? 'has-image' : ''}">${product.imagePath ? renderProductThumb(product) : escapeHtml(product.name.slice(0, 1))}</span><span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand ? `${product.brand} · كود الموديل ${product.sku}` : `كود الموديل: ${product.sku}`)}</small></span></div></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${subSummary}</td><td class="table-total">${pricingSummary.badgeHtml}</td><td><strong>${totalQuantity}</strong> قطعة</td><td class="product-actions"><button type="button" class="text-action product-print-labels" data-product-id="${product.id}">طباعة باركود</button><button type="button" class="text-action product-edit" data-product-id="${product.id}">المقاسات والتعديل</button><button type="button" class="text-action product-delete" data-product-id="${product.id}">حذف</button></td></tr>`;
   }).join('');
   return `<div class="page-heading-row"><div><p class="page-lead">إدارة وتعديل أصناف وكتالوج المتجر بسهولة وسرعة.</p></div><div class="products-heading-actions"><button class="button button-secondary" id="add-category">${icon('plus', 18)} إضافة فئة</button><button class="button button-primary" id="new-product">${icon('plus', 18)} إضافة موديل / منتج</button></div></div><section class="panel products-panel"><div class="panel-heading"><div><h3>كتالوج الموديلات والمنتجات</h3><p>${state.data.products.length} موديل أساسي في الكتالوج</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="بحث باسم الموديل أو الكود أو اللون أو المقاس" value="${escapeHtml(state.query)}"></label></div>${products.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل / المنتج</th><th>كود الموديل</th><th>الألوان والمقاسات الفرعية</th><th>سعر البيع</th><th>إجمالي الرصيد</th><th>الإجراءات</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('box', 28)}</div><strong>${query ? 'مفيش نتائج مطابقة' : 'الكتالوج لسه فاضي'}</strong><p>${query ? 'جرب كلمة بحث تانية.' : 'أضف الموديل بكوده الأساسي وحدد الألوان والمقاسات، وبعدها استقبل الكميات في فاتورة الشراء.'}</p>${!query ? '<button class="button button-primary" id="empty-new-product">إضافة أول موديل</button>' : ''}</div>`}</section>`;
 }
@@ -1564,20 +1607,21 @@ function inventoryView() {
   <section class="panel"><div class="panel-heading"><div><h3>أرصدة الموديلات والمقاسات</h3><p>اضغط على الموديل لعرض مصفوفة الألوان والمقاسات</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="ابحث عن الموديل أو الكود أو المقاس" value="${escapeHtml(state.query)}"></label></div>${items.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل</th><th>كود الموديل</th><th>الألوان والمقاسات</th><th style="text-align:center;">إجمالي الرصيد</th>${!isCashier ? '<th>سعر التكلفة (الفعلي)</th><th>سعر البيع</th><th>المكسب المتوقع</th>' : '<th>سعر البيع</th>'}<th>حالة المقاسات</th></tr></thead><tbody>${items.map((product) => `<tr><td><button type="button" class="product-name-action inventory-product-details" data-product-id="${product.id}"><span class="product-avatar ${product.imagePath ? 'has-image' : ''}">${product.imagePath ? renderProductThumb(product) : escapeHtml(product.name.slice(0, 1))}</span><span class="product-name-stack"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand || 'اضغط لعرض جدول المقاسات')}</small></span></button></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${product.matrix.isMatrix ? `<div class="model-sub-badges">${product.matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(product.matrix.colorSummaryLabel)}</span>` : ''}${product.matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(product.matrix.sizeRangeLabel)}</span>` : ''}</div>` : `<small>${product.variants.length} نسخة</small>`}</td><td style="text-align:center;"><strong>${product.quantity}</strong> قطعة</td>${!isCashier ? (() => {
   const unitRetail = product.unitRetail;
   const unitCost = product.cost;
+  const hasRetail = unitRetail && BigInt(unitRetail.amount) > 0n;
   let unitProfitStr = '—';
   let unitProfitColor = 'var(--green, #15803d)';
-  if (unitRetail && unitCost) {
+  if (hasRetail && unitCost) {
     const profitMinor = BigInt(unitRetail.amount) - BigInt(unitCost.amount);
     if (profitMinor < 0n) unitProfitColor = 'var(--rose, var(--rose, #be123c))';
     unitProfitStr = money({ amount: profitMinor.toString(), currency: unitRetail.currency, decimals: unitRetail.decimals });
   }
   return `
     <td>${unitCost ? money(unitCost) : '—'}</td>
-    <td><strong style="color:var(--purple);">${unitRetail ? money(unitRetail) : '—'}</strong></td>
-    <td><strong style="color:${unitProfitColor};">${unitProfitStr}</strong><br><small style="color:var(--muted);font-size:10px;">لكل قطعة</small></td>
+    <td>${hasRetail ? `<strong style="color:var(--purple);">${money(unitRetail)}</strong>` : '<span class="status-pill" style="background:var(--amber-soft);color:var(--amber);">بانتظار التسعير</span>'}</td>
+    <td><strong style="color:${unitProfitColor};">${unitProfitStr}</strong>${hasRetail && unitCost ? '<br><small style="color:var(--muted);font-size:10px;">لكل قطعة</small>' : ''}</td>
   `;
 })() : `
-  <td><strong style="color:var(--purple);">${product.unitRetail ? money(product.unitRetail) : '—'}</strong></td>
+  <td>${product.unitRetail && BigInt(product.unitRetail.amount) > 0n ? `<strong style="color:var(--purple);">${money(product.unitRetail)}</strong>` : '<span class="status-pill" style="background:var(--amber-soft);color:var(--amber);">بانتظار التسعير</span>'}</td>
 `}<td>${product.hasLowVariant ? '<span class="status-pill status-low">مقاسات تحتاج طلب</span>' : '<span class="status-pill status-complete">متوفر</span>'}</td></tr>`).join('')}</tbody></table></div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('box', 28)}</div><strong>مفيش منتجات في المخزون</strong><p>سجّل فاتورة شراء لإضافة البضاعة للمخزون.</p>${!isCashier ? '<button class="button button-primary" data-page="suppliers">فاتورة شراء</button>' : ''}</div>`}</section>`;
 }
 
@@ -2366,6 +2410,8 @@ function groupPurchaseItemsByModel(purchase, productsCatalog) {
         totalQuantity: 0n,
         totalReturnable: 0n,
         totalCostMinor: 0n,
+        totalRetailMinor: 0n,
+        retailPricedQuantity: 0n,
         currency: item.unitCost.currency,
         decimals: item.unitCost.decimals,
       };
@@ -2378,6 +2424,10 @@ function groupPurchaseItemsByModel(purchase, productsCatalog) {
     group.totalQuantity += qty;
     group.totalReturnable += BigInt(item.returnableQuantity ?? item.quantity);
     group.totalCostMinor += qty * cost;
+    if (item.retailPrice && BigInt(item.retailPrice.amount) > 0n) {
+      group.totalRetailMinor += qty * BigInt(item.retailPrice.amount);
+      group.retailPricedQuantity += qty;
+    }
   }
   return [...modelMap.values()];
 }
@@ -2394,7 +2444,7 @@ function showPurchaseModelVariantsModal(modelGroup, purchase, supplier) {
           <div>
             <span class="eyebrow eyebrow-dark">فاتورة شراء: ${escapeHtml(purchase.invoiceNumber || purchase.id.slice(0, 8))} · التاجر: ${escapeHtml(supplier.name)}</span>
             <h2 id="purchase-model-breakdown-title">${escapeHtml(modelGroup.name)} (كود الموديل: ${escapeHtml(modelGroup.modelSku)})</h2>
-            <p>إجمالي المستلم من هذا الموديل: <strong>${modelGroup.totalQuantity} قطعة</strong> · التكلفة: <strong>${money({ amount: modelGroup.totalCostMinor.toString(), currency, decimals })}</strong></p>
+            <p>إجمالي المستلم من هذا الموديل: <strong>${modelGroup.totalQuantity} قطعة</strong> · إجمالي الجملة: <strong>${money({ amount: modelGroup.totalCostMinor.toString(), currency, decimals })}</strong>${modelGroup.totalRetailMinor > 0n ? ` · إجمالي البيع: <strong>${money({ amount: modelGroup.totalRetailMinor.toString(), currency, decimals })}</strong>` : ''}</p>
           </div>
           <button type="button" class="modal-close" data-close-breakdown>×</button>
         </div>
@@ -2407,8 +2457,9 @@ function showPurchaseModelVariantsModal(modelGroup, purchase, supplier) {
                   <th>اللون والمقاس الفرعي</th>
                   <th>كود الفرع (SKU)</th>
                   <th style="text-align:center;">الكمية المستلمة</th>
-                  <th>تكلفة القطعة</th>
-                  <th>الإجمالي</th>
+                  <th>سعر الجملة (الشراء)</th>
+                  <th>سعر البيع المحدد</th>
+                  <th>إجمالي الجملة</th>
                   <th>المتاح للإرجاع</th>
                   <th>إجراء</th>
                 </tr>
@@ -2427,6 +2478,7 @@ function showPurchaseModelVariantsModal(modelGroup, purchase, supplier) {
                       <td><span class="sku-code">${escapeHtml(item.sku)}</span></td>
                       <td style="text-align:center;"><strong>${item.quantity}</strong> قطعة</td>
                       <td>${money(item.unitCost)}</td>
+                      <td>${item.retailPrice ? `<strong style="color:var(--purple);">${money(item.retailPrice)}</strong>` : '—'}</td>
                       <td class="table-total">${money({ amount: itemLineTotal, currency, decimals })}</td>
                       <td>${item.returnableQuantity} قطعة</td>
                       <td>
@@ -2504,6 +2556,8 @@ function suppliersView() {
     const invoiceLabel = purchase.invoiceNumber || `PUR-${purchase.id.slice(0, 8).toUpperCase()}`;
     const dateFormatted = new Intl.DateTimeFormat('ar-EG', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(purchase.purchasedAt));
     const totalPieces = modelGroups.reduce((sum, g) => sum + g.totalQuantity, 0n);
+    const hasExpectedRetail = purchase.expectedRetailTotal && BigInt(purchase.expectedRetailTotal.amount) > 0n;
+    const expectedProfitMinor = hasExpectedRetail ? (BigInt(purchase.expectedRetailTotal.amount) - BigInt(purchase.totalAmount.amount)) : null;
 
     return `
       <details class="purchase-card">
@@ -2513,6 +2567,7 @@ function suppliersView() {
             <span class="purchase-date-pill">${icon('calendar', 14)} ${dateFormatted}</span>
             <span class="purchase-meta-pill">المستلم: <strong>${escapeHtml(purchase.createdByName || 'المسؤول')}</strong></span>
             <span class="purchase-meta-pill"><strong>${totalPieces} قطعة</strong> في ${modelGroups.length} موديل</span>
+            ${purchase.targetProfitPercent !== null && purchase.targetProfitPercent !== undefined ? `<span class="purchase-meta-pill" style="color:var(--purple);">هدف ربح: <strong>${purchase.targetProfitPercent}%</strong></span>` : ''}
           </div>
           <div class="purchase-summary-finances">
             <div class="purchase-summary-total">
@@ -2540,10 +2595,17 @@ function suppliersView() {
               <small>المتبقي للتاجر</small>
               <strong>${money(purchase.remainingAmount)}</strong>
             </div>
-            <div class="purchase-finance-box">
-              <small>المسؤول والملاحظات</small>
-              <strong style="font-size:13px;">${escapeHtml(purchase.createdByName || 'المسؤول')}${purchase.notes ? ` · ${escapeHtml(purchase.notes)}` : ''}</strong>
-            </div>
+            ${hasExpectedRetail ? `
+              <div class="purchase-finance-box">
+                <small>إجمالي البيع المتوقع / الربح الفعلي</small>
+                <strong style="font-size:13px;color:var(--purple);">${money(purchase.expectedRetailTotal)} <span style="color:${expectedProfitMinor >= 0n ? 'var(--green)' : 'var(--rose)'};">(${expectedProfitMinor >= 0n ? '+' : ''}${money({ ...purchase.expectedRetailTotal, amount: expectedProfitMinor.toString() })})</span></strong>
+              </div>
+            ` : `
+              <div class="purchase-finance-box">
+                <small>المسؤول والملاحظات</small>
+                <strong style="font-size:13px;">${escapeHtml(purchase.createdByName || 'المسؤول')}${purchase.notes ? ` · ${escapeHtml(purchase.notes)}` : ''}</strong>
+              </div>
+            `}
           </div>
 
           <div class="table-scroll">
@@ -2552,7 +2614,8 @@ function suppliersView() {
                 <tr>
                   <th>الموديل الأساسي / المنتج</th>
                   <th style="text-align:center;">إجمالي الكمية</th>
-                  <th>متوسط التكلفة للقطعة</th>
+                  <th>سعر الجملة (للتاجر)</th>
+                  <th>سعر البيع المحدد</th>
                   <th>إجمالي تكلفة الموديل</th>
                   <th>المقاسات والألوان الفرعية</th>
                 </tr>
@@ -2560,6 +2623,7 @@ function suppliersView() {
               <tbody>
                 ${modelGroups.map((group) => {
                   const avgCost = group.totalQuantity > 0n ? (group.totalCostMinor / group.totalQuantity).toString() : '0';
+                  const avgRetail = group.retailPricedQuantity > 0n ? (group.totalRetailMinor / group.retailPricedQuantity).toString() : null;
                   return `
                     <tr>
                       <td>
@@ -2577,6 +2641,7 @@ function suppliersView() {
                         <span class="status-pill status-complete" style="font-size:12.5px;font-weight:800;">${group.totalQuantity} قطعة</span>
                       </td>
                       <td>${money({ amount: avgCost, currency: group.currency, decimals: group.decimals })}</td>
+                      <td>${avgRetail !== null ? `<strong style="color:var(--purple);">${money({ amount: avgRetail, currency: group.currency, decimals: group.decimals })}</strong>` : '<span style="color:var(--muted);">—</span>'}</td>
                       <td class="table-total">${money({ amount: group.totalCostMinor.toString(), currency: group.currency, decimals: group.decimals })}</td>
                       <td>
                         <button type="button" class="button button-secondary button-sm view-model-sizes-btn" data-purchase-id="${purchase.id}" data-model-key="${group.key}" style="font-size:11.5px;padding:4px 12px;height:32px;">
@@ -3905,7 +3970,7 @@ function posView() {
   for (const prod of state.data.products ?? []) {
     for (const v of prod.variants ?? []) productByVariantId.set(v.id, prod);
   }
-  return `<div class="pos-layout"><section class="pos-catalog">${shiftBanner}<div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>${mustStartShift ? 'ابدأ الشيفت أولاً لإتاحة اختيار المنتجات وإتمام البيع.' : 'ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.'}</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="${mustStartShift ? 'ابدأ الشيفت أولاً لتفعيل نقطة البيع...' : 'ابحث باسم الموديل أو كود الموديل أو الباركود'}" value="${escapeHtml(state.query)}" ${mustStartShift ? 'disabled' : 'autofocus'}><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="">كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}">${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products" style="${mustStartShift ? 'opacity:0.55;' : ''}">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const allSamePrice = new Set(product.variants.map((variant) => variant.price.amount)).size === 1; const price = allSamePrice ? money(product.variants[0].price) : 'أسعار متعددة'; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${(mustStartShift || (product.itemKind === 'PRODUCT' && stock <= 0n)) ? 'disabled' : ''}><span class="pos-product-art ${product.imagePath ? 'has-image' : `art-${index % 6}`}">${product.imagePath ? renderProductThumb(product, '', 'pos-product-thumb') : icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${price}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${mustStartShift ? `<div class="cart-empty"><span class="cart-empty-icon cart-empty-icon-shift">${icon('clock', 23)}</span><strong>يجب بدء الشيفت أولاً</strong><p>لا يمكن إجراء أي عملية بيع قبل تسجيل بدء الشيفت واستلام الدرج.</p><button type="button" id="cart-start-shift-btn" class="button button-sm shift-start-cta" style="margin-top:12px;">${icon('play', 15)}<span>بدء الشيفت الآن</span></button></div>` : state.cart.length ? state.cart.map((item) => { const matchedProd = productByVariantId.get(item.variantId); return `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art ${matchedProd?.imagePath ? 'has-image' : ''}">${matchedProd?.imagePath ? renderProductThumb(matchedProd, icon('box', 16), 'cart-line-thumb') : icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button data-qty="${item.variantId}" data-delta="-1">−</button><span>${item.quantity}</span><button data-qty="${item.variantId}" data-delta="1">+</button></div><strong>${money({ ...item.price, amount: (BigInt(item.price.amount) * BigInt(item.quantity)).toString() })}</strong></div></div>`; }).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة بالبحث أو اللمس (أو بالباركود إن وجد) عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong>${state.cart.reduce((sum, item) => sum + item.quantity, 0)}</strong></div><div><span>الخصم</span><strong>${money({ ...total, amount: '0' })}</strong></div><div class="cart-grand-total"><span>الإجمالي المستحق</span><strong>${money(total)}</strong></div></div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}" ${mustStartShift ? 'disabled' : ''}><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button ${mustStartShift ? 'checkout-button-locked' : ''}" ${(!mustStartShift && state.cart.length && !state.isSaving) ? '' : 'disabled'}><span>${mustStartShift ? 'ابدأ الشيفت أولاً' : 'إتمام البيع'}</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
+  return `<div class="pos-layout"><section class="pos-catalog">${shiftBanner}<div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>${mustStartShift ? 'ابدأ الشيفت أولاً لإتاحة اختيار المنتجات وإتمام البيع.' : 'ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.'}</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="${mustStartShift ? 'ابدأ الشيفت أولاً لتفعيل نقطة البيع...' : 'ابحث باسم الموديل أو كود الموديل أو الباركود'}" value="${escapeHtml(state.query)}" ${mustStartShift ? 'disabled' : 'autofocus'}><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="">كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}">${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products" style="${mustStartShift ? 'opacity:0.55;' : ''}">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const pricingSummary = summarizeProductPricing(product); const price = pricingSummary.labelText; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${(mustStartShift || (product.itemKind === 'PRODUCT' && stock <= 0n)) ? 'disabled' : ''}><span class="pos-product-art ${product.imagePath ? 'has-image' : `art-${index % 6}`}">${product.imagePath ? renderProductThumb(product, '', 'pos-product-thumb') : icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${escapeHtml(price)}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${mustStartShift ? `<div class="cart-empty"><span class="cart-empty-icon cart-empty-icon-shift">${icon('clock', 23)}</span><strong>يجب بدء الشيفت أولاً</strong><p>لا يمكن إجراء أي عملية بيع قبل تسجيل بدء الشيفت واستلام الدرج.</p><button type="button" id="cart-start-shift-btn" class="button button-sm shift-start-cta" style="margin-top:12px;">${icon('play', 15)}<span>بدء الشيفت الآن</span></button></div>` : state.cart.length ? state.cart.map((item) => { const matchedProd = productByVariantId.get(item.variantId); return `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art ${matchedProd?.imagePath ? 'has-image' : ''}">${matchedProd?.imagePath ? renderProductThumb(matchedProd, icon('box', 16), 'cart-line-thumb') : icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button data-qty="${item.variantId}" data-delta="-1">−</button><span>${item.quantity}</span><button data-qty="${item.variantId}" data-delta="1">+</button></div><strong>${money({ ...item.price, amount: (BigInt(item.price.amount) * BigInt(item.quantity)).toString() })}</strong></div></div>`; }).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة بالبحث أو اللمس (أو بالباركود إن وجد) عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong>${state.cart.reduce((sum, item) => sum + item.quantity, 0)}</strong></div><div><span>الخصم</span><strong>${money({ ...total, amount: '0' })}</strong></div><div class="cart-grand-total"><span>الإجمالي المستحق</span><strong>${money(total)}</strong></div></div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}" ${mustStartShift ? 'disabled' : ''}><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button ${mustStartShift ? 'checkout-button-locked' : ''}" ${(!mustStartShift && state.cart.length && !state.isSaving) ? '' : 'disabled'}><span>${mustStartShift ? 'ابدأ الشيفت أولاً' : 'إتمام البيع'}</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
 }
 
 function supplierModal(html, formId, endpoint, convert = (data) => data, successMessage = 'تم حفظ الحركة في سجل التاجر') {
@@ -3988,31 +4053,35 @@ function bindSuppliers() {
     const groupMarkup = (index) => `
       <section class="invoice-model-card" data-purchase-group="${index}">
         <div class="invoice-model-head">
-          <div style="display:flex;align-items:center;gap:12px;flex:1;flex-wrap:wrap;">
-            <label style="min-width:240px;margin:0;"><strong>الموديل أو الصنف:</strong>
+          <div class="purchase-group-inputs">
+            <label style="margin:0;"><strong>الموديل أو الصنف:</strong>
               <select name="purchaseProduct_${index}" style="margin-top:4px;">
                 ${products.map((product) => `<option value="${product.id}">${escapeHtml(product.name)} (${escapeHtml(product.sku)})</option>`).join('')}
               </select>
             </label>
-            <label style="min-width:160px;margin:0;"><strong>سعر الشراء للقطعة (${currency}):</strong>
-              <input name="purchaseCost_${index}" inputmode="decimal" required placeholder="مثال: 450" style="margin-top:4px;">
+            <label style="margin:0;"><strong>سعر الجملة — الشراء للقطعة (${currency}):</strong>
+              <input name="purchaseCost_${index}" inputmode="decimal" required placeholder="مثال: 300" style="margin-top:4px;">
+            </label>
+            <label style="margin:0;"><strong>سعر البيع للجمهور — للقطعة (${currency}):</strong>
+              <input name="purchaseRetailPrice_${index}" inputmode="decimal" placeholder="اختياري — اتركه للتسعير لاحقًا" style="margin-top:4px;">
             </label>
           </div>
           <button type="button" class="text-action remove-purchase-group" style="color:var(--rose,var(--rose, #be123c));">× حذف الموديل</button>
         </div>
         <div class="invoice-model-body">
+          <div class="purchase-model-meta-strip" data-group-meta="${index}"></div>
           <div class="purchase-variant-grid"></div>
         </div>
       </section>
     `;
 
     const modalHtml = `
-      <div style="margin-bottom:14px;">
-        <h2 style="font-size:18px;margin-bottom:4px;">فاتورة شراء واستلام بضاعة</h2>
-        <p style="color:var(--muted);font-size:12px;margin:0;">سجل استلام بضاعة من التاجر وتحديث أرصدة المقاسات فوراً</p>
+      <div style="margin-bottom:12px;">
+        <h2 style="font-size:18px;margin-bottom:4px;">فاتورة شراء وتسعير بضاعة جديدة</h2>
+        <p style="color:var(--muted);font-size:12px;margin:0;">أدخل سعر الجملة وسعر البيع الفعلي لكل موديل، ويمكنك اختياريًا تفعيل نسبة الربح المستهدفة لتوجيه تسعير الفاتورة.</p>
       </div>
 
-      <div class="form-grid" style="margin-bottom:14px;">
+      <div class="form-grid" style="margin-bottom:12px;">
         <label>التاجر / المورد
           <select name="supplierId">
             ${state.data.suppliers.map((supplier) => `<option value="${supplier.id}" ${supplier.id === supplierId ? 'selected' : ''}>${escapeHtml(supplier.name)}</option>`).join('')}
@@ -4021,6 +4090,62 @@ function bindSuppliers() {
         <label>رقم فاتورة التاجر (اختياري)
           <input name="invoiceNumber" maxlength="80" placeholder="يُنشأ رقم تلقائي إذا تُرك فارغاً">
         </label>
+      </div>
+
+      <div class="purchase-live-planner" id="purchase-live-planner" style="margin-bottom:14px;">
+        <div class="purchase-metrics-strip">
+          <div class="purchase-metric-cell">
+            <small>إجمالي الجملة الفعلي</small>
+            <strong id="planner-cost-total">0.00 ${currency}</strong>
+            <span id="planner-pieces-count">0 قطعة</span>
+          </div>
+          <div class="purchase-metric-cell">
+            <small>إجمالي البيع المسعّر</small>
+            <strong id="planner-retail-total" style="color:var(--purple);">0.00 ${currency}</strong>
+            <span id="planner-priced-count">0 قطعة مسعّرة</span>
+          </div>
+          <div class="purchase-metric-cell">
+            <small>صافي الربح الفعلي المتوقع</small>
+            <strong id="planner-profit-total">—</strong>
+            <span id="planner-profit-sub">أدخل سعر البيع لحساب الربح</span>
+          </div>
+          <div class="purchase-metric-cell">
+            <small>هدف البيع المطلوب</small>
+            <strong id="planner-target-total">اختياري</strong>
+            <span id="planner-target-sub">فعّل نسبة الربح بالأسفل</span>
+          </div>
+        </div>
+
+        <div class="purchase-target-box">
+          <div class="purchase-target-toggle-row">
+            <label class="purchase-target-check">
+              <input type="checkbox" id="purchase-target-enabled" name="targetProfitEnabled">
+              <span>تحديد نسبة ربح مستهدفة لهذه الفاتورة (اختياري)</span>
+            </label>
+            <small style="color:var(--muted);font-size:11.5px;">احسب إجمالي البيع المطلوب وتابع المتبقي لحظيًا مع تسعير كل قطعة</small>
+          </div>
+
+          <div class="purchase-target-panel" id="purchase-target-panel" hidden>
+            <div class="purchase-target-controls">
+              <label class="purchase-target-input-wrap">
+                <span>نسبة الربح المستهدفة %:</span>
+                <input type="number" id="purchase-target-percent" name="targetProfitPercent" min="0" max="100000" step="0.5" placeholder="100">
+              </label>
+              <div class="purchase-target-presets">
+                <button type="button" class="date-preset-chip" data-target-preset="30">30%</button>
+                <button type="button" class="date-preset-chip" data-target-preset="50">50%</button>
+                <button type="button" class="date-preset-chip" data-target-preset="75">75%</button>
+                <button type="button" class="date-preset-chip" data-target-preset="100">100%</button>
+                <button type="button" class="date-preset-chip" data-target-preset="150">150%</button>
+              </div>
+            </div>
+            <div class="purchase-target-formula-banner" id="purchase-target-formula-banner"></div>
+            <div class="purchase-target-progress-track">
+              <div class="purchase-target-progress-fill" id="purchase-target-progress-fill" style="width:0%"></div>
+            </div>
+            <div class="purchase-target-remaining-banner" id="purchase-target-remaining-banner"></div>
+          </div>
+        </div>
       </div>
 
       <div id="purchase-lines">${groupMarkup(groupIndex)}</div>
@@ -4032,8 +4157,16 @@ function bindSuppliers() {
       <!-- Clean Payment & Summary Box -->
       <div class="invoice-summary-box">
         <div class="invoice-summary-row grand-total">
-          <span>إجمالي الفاتورة:</span>
+          <span>إجمالي الفاتورة المستحق للتاجر (سعر الجملة):</span>
           <strong id="invoice-grand-total-text">0.00 ${currency}</strong>
+        </div>
+        <div class="invoice-summary-row">
+          <span>إجمالي قيمة البيع المحددة (سعر البيع الفعلي):</span>
+          <strong id="invoice-expected-retail-text" style="color:var(--purple);">0.00 ${currency}</strong>
+        </div>
+        <div class="invoice-summary-row">
+          <span>صافي الربح الفعلي المتوقع عند البيع:</span>
+          <strong id="invoice-expected-profit-text">—</strong>
         </div>
 
         <div style="display:grid;gap:6px;">
@@ -4081,13 +4214,45 @@ function bindSuppliers() {
         const match = key.match(/^purchaseQty_(\d+)_([0-9a-f-]+)$/i);
         if (!match) continue;
         const [, index, variantId] = match;
-        const unitCostVal = data[`purchaseCost_${index}`];
+        const unitCostVal = String(data[`purchaseCost_${index}`] ?? '').trim();
         if (!unitCostVal) throw new Error('يرجى كتابة سعر الشراء للقطعة لكل موديل في الفاتورة');
-        items.push({ variantId, quantity, unitCost: toMinor(unitCostVal, decimals) });
+        const unitCostMinor = toMinor(unitCostVal, decimals);
+        if (BigInt(unitCostMinor) <= 0n) throw new Error('سعر الجملة (الشراء) للقطعة يجب أن يكون أكبر من صفر');
+
+        const retailVal = String(data[`purchaseRetailPrice_${index}`] ?? '').trim();
+        let retailMinor;
+        if (retailVal) {
+          retailMinor = toMinor(retailVal, decimals);
+          if (BigInt(retailMinor) <= 0n) throw new Error('سعر البيع للقطعة يجب أن يكون أكبر من صفر، أو اتركه فارغًا للتسعير لاحقًا');
+        }
+        items.push({
+          variantId,
+          quantity,
+          unitCost: unitCostMinor,
+          ...(retailMinor ? { retailPrice: retailMinor } : {}),
+        });
       }
       if (!items.length) throw new Error('حدد كمية لتركيبة واحدة على الأقل في الفاتورة');
+
+      let targetProfitPercent = null;
+      if (data.targetProfitEnabled) {
+        const rawPct = String(data.targetProfitPercent ?? '').trim().replace(',', '.');
+        if (!rawPct) throw new Error('أدخل نسبة الربح المستهدفة أو ألغِ تفعيل خيار نسبة الربح');
+        const parsedPct = Number(rawPct);
+        if (!Number.isFinite(parsedPct) || parsedPct < 0 || parsedPct > 100000) {
+          throw new Error('نسبة الربح المستهدفة يجب أن تكون رقمًا صحيحًا بين 0 و 100000');
+        }
+        targetProfitPercent = parsedPct;
+      }
+
       return {
-        ...data,
+        idempotencyKey: data.idempotencyKey,
+        supplierId: data.supplierId,
+        storeId: data.storeId,
+        invoiceNumber: data.invoiceNumber ? String(data.invoiceNumber).trim() : undefined,
+        notes: data.notes ? String(data.notes).trim() : undefined,
+        paymentMethod: data.paymentMethod,
+        targetProfitPercent,
         items,
         totalAmount: toMinor(data.totalAmount, decimals),
         paidAmount: toMinor(data.paidAmount, decimals),
@@ -4097,23 +4262,256 @@ function bindSuppliers() {
     const root = getModalRoot();
     const form = root.querySelector('#purchase-form');
     let currentPayMode = 'FULL_CASH';
+    const fmtMoney = (minor) => money({ amount: minor.toString(), currency, decimals });
 
-    const updatePurchaseTotal = () => {
-      let totalMinor = 0n;
-      for (const [index, selection] of selections) {
-        if (!selection.size) continue;
-        const costInput = form.elements.namedItem(`purchaseCost_${index}`);
-        const unitCost = costInput ? costInput.value.trim() : '';
-        if (!unitCost) continue;
-        try {
-          const minor = BigInt(toMinor(unitCost, decimals));
-          for (const quantity of selection.values()) totalMinor += minor * BigInt(quantity);
-        } catch {}
+    const syncGroupDefaultRetailPrice = (section) => {
+      if (!section) return;
+      const index = section.dataset.purchaseGroup;
+      const productId = section.querySelector(`[name="purchaseProduct_${index}"]`)?.value;
+      const product = products.find((item) => item.id === productId);
+      const costInput = section.querySelector(`[name="purchaseCost_${index}"]`);
+      const retailInput = section.querySelector(`[name="purchaseRetailPrice_${index}"]`);
+      if (!product || !retailInput) return;
+
+      const actualWac = computeProductActualWac(product.variants);
+      if (costInput) {
+        costInput.placeholder = actualWac && BigInt(actualWac.amount) > 0n
+          ? `الفعلي: ${decimalPrice(actualWac)}`
+          : 'مثال: 300';
       }
 
-      const totalFormatted = decimalPrice({ amount: totalMinor.toString(), decimals });
+      const pricing = summarizeProductPricing(product);
+      if (!pricing.allUnpriced && pricing.samePrice && pricing.singlePrice) {
+        const existingDec = decimalPrice(pricing.singlePrice);
+        retailInput.value = existingDec;
+        retailInput.placeholder = `مثال: ${existingDec}`;
+      } else {
+        retailInput.value = '';
+        retailInput.placeholder = pricing.allUnpriced
+          ? 'بانتظار التسعير (اتركه إذا لم يُسعّر بعد)'
+          : 'سعر بيع موحّد جديد (اختياري)';
+      }
+    };
+
+    const updatePurchaseTotal = () => {
+      let totalCostMinor = 0n;
+      let totalAssignedRetailMinor = 0n;
+      let pricedCostMinor = 0n;
+      let totalPieces = 0n;
+      let pricedPieces = 0n;
+      let unpricedPieces = 0n;
+      const groupSnapshots = [];
+
+      root.querySelectorAll('[data-purchase-group]').forEach((section) => {
+        const index = section.dataset.purchaseGroup;
+        const productId = section.querySelector(`[name="purchaseProduct_${index}"]`)?.value;
+        const product = products.find((item) => item.id === productId);
+        const groupSel = selections.get(index) ?? new Map();
+        let groupQty = 0n;
+        for (const q of groupSel.values()) groupQty += BigInt(q);
+
+        const costStr = String(section.querySelector(`[name="purchaseCost_${index}"]`)?.value ?? '').trim();
+        let unitCostMinor = null;
+        if (costStr) {
+          try {
+            const parsedCost = BigInt(toMinor(costStr, decimals));
+            if (parsedCost > 0n) unitCostMinor = parsedCost;
+          } catch {}
+        }
+
+        const retailStr = String(section.querySelector(`[name="purchaseRetailPrice_${index}"]`)?.value ?? '').trim();
+        let unitRetailMinor = null;
+        let retailInvalid = false;
+        if (retailStr) {
+          try {
+            const parsedRetail = BigInt(toMinor(retailStr, decimals));
+            if (parsedRetail > 0n) unitRetailMinor = parsedRetail;
+            else retailInvalid = true;
+          } catch {
+            retailInvalid = true;
+          }
+        }
+
+        const groupCostTotalMinor = (unitCostMinor ?? 0n) * groupQty;
+        const hasGroupRetail = unitRetailMinor !== null && unitRetailMinor > 0n;
+        const groupRetailTotalMinor = (hasGroupRetail ? unitRetailMinor : 0n) * groupQty;
+
+        totalPieces += groupQty;
+        totalCostMinor += groupCostTotalMinor;
+        totalAssignedRetailMinor += groupRetailTotalMinor;
+        if (hasGroupRetail) {
+          pricedPieces += groupQty;
+          pricedCostMinor += groupCostTotalMinor;
+        } else {
+          unpricedPieces += groupQty;
+        }
+
+        groupSnapshots.push({
+          section,
+          index,
+          product,
+          groupQty,
+          unitCostMinor,
+          unitRetailMinor,
+          hasGroupRetail,
+          retailInvalid,
+          groupCostTotalMinor,
+          groupRetailTotalMinor,
+        });
+      });
+
+      const totalFormatted = decimalPrice({ amount: totalCostMinor.toString(), decimals });
       form.querySelector('#purchase-total-hidden').value = totalFormatted;
-      form.querySelector('#invoice-grand-total-text').textContent = `${totalFormatted} ${currency}`;
+      form.querySelector('#invoice-grand-total-text').textContent = fmtMoney(totalCostMinor);
+      form.querySelector('#invoice-expected-retail-text').textContent = fmtMoney(totalAssignedRetailMinor);
+
+      const plannerCostEl = form.querySelector('#planner-cost-total');
+      const plannerPiecesEl = form.querySelector('#planner-pieces-count');
+      const plannerRetailEl = form.querySelector('#planner-retail-total');
+      const plannerPricedEl = form.querySelector('#planner-priced-count');
+      const plannerProfitEl = form.querySelector('#planner-profit-total');
+      const plannerProfitSubEl = form.querySelector('#planner-profit-sub');
+      const invoiceProfitEl = form.querySelector('#invoice-expected-profit-text');
+
+      if (plannerCostEl) plannerCostEl.textContent = fmtMoney(totalCostMinor);
+      if (plannerPiecesEl) plannerPiecesEl.textContent = `${totalPieces.toString()} قطعة`;
+      if (plannerRetailEl) plannerRetailEl.textContent = fmtMoney(totalAssignedRetailMinor);
+      if (plannerPricedEl) plannerPricedEl.textContent = `${pricedPieces.toString()} من ${totalPieces.toString()} قطعة مسعّرة`;
+
+      if (pricedPieces === 0n) {
+        if (plannerProfitEl) { plannerProfitEl.textContent = '—'; plannerProfitEl.style.color = ''; }
+        if (plannerProfitSubEl) plannerProfitSubEl.textContent = 'أدخل سعر البيع لحساب الربح';
+        if (invoiceProfitEl) { invoiceProfitEl.textContent = '—'; invoiceProfitEl.style.color = ''; }
+      } else if (unpricedPieces > 0n) {
+        const partialProfit = totalAssignedRetailMinor - pricedCostMinor;
+        const profitColor = partialProfit < 0n ? 'var(--rose, #be123c)' : 'var(--green, #15803d)';
+        if (plannerProfitEl) { plannerProfitEl.textContent = fmtMoney(partialProfit); plannerProfitEl.style.color = profitColor; }
+        if (plannerProfitSubEl) plannerProfitSubEl.textContent = `على القطع المسعّرة (${pricedPieces.toString()}) · باقي ${unpricedPieces.toString()} بلا سعر`;
+        if (invoiceProfitEl) { invoiceProfitEl.textContent = `${fmtMoney(partialProfit)} (للقطع المسعّرة فقط)`; invoiceProfitEl.style.color = profitColor; }
+      } else {
+        const netProfit = totalAssignedRetailMinor - totalCostMinor;
+        const roiPct = totalCostMinor > 0n ? (Number((netProfit * 1000n) / totalCostMinor) / 10).toFixed(1) : '0';
+        const profitColor = netProfit < 0n ? 'var(--rose, #be123c)' : 'var(--green, #15803d)';
+        if (plannerProfitEl) { plannerProfitEl.textContent = fmtMoney(netProfit); plannerProfitEl.style.color = profitColor; }
+        if (plannerProfitSubEl) plannerProfitSubEl.textContent = `نسبة ربح فعلية ${roiPct}%`;
+        if (invoiceProfitEl) { invoiceProfitEl.textContent = `${fmtMoney(netProfit)} (${roiPct}%)`; invoiceProfitEl.style.color = profitColor; }
+      }
+
+      const targetEnabled = Boolean(form.querySelector('#purchase-target-enabled')?.checked);
+      const targetPanel = form.querySelector('#purchase-target-panel');
+      const targetPctInput = form.querySelector('#purchase-target-percent');
+      const plannerTargetEl = form.querySelector('#planner-target-total');
+      const plannerTargetSubEl = form.querySelector('#planner-target-sub');
+      const formulaBannerEl = form.querySelector('#purchase-target-formula-banner');
+      const progressFillEl = form.querySelector('#purchase-target-progress-fill');
+      const remainingBannerEl = form.querySelector('#purchase-target-remaining-banner');
+
+      if (targetPanel) targetPanel.hidden = !targetEnabled;
+
+      let targetSalesMinor = 0n;
+      let targetProfitMinor = 0n;
+      let remainingToTargetMinor = 0n;
+      let activeTargetValid = false;
+
+      const rawPctStr = String(targetPctInput?.value ?? '').trim().replace(',', '.');
+      const parsedPct = rawPctStr !== '' ? Number(rawPctStr) : NaN;
+      form.querySelectorAll('[data-target-preset]').forEach((chip) => {
+        chip.classList.toggle('active', targetEnabled && Number(chip.dataset.targetPreset) === parsedPct);
+      });
+
+      if (!targetEnabled) {
+        if (plannerTargetEl) plannerTargetEl.textContent = 'اختياري';
+        if (plannerTargetSubEl) plannerTargetSubEl.textContent = 'فعّل نسبة الربح بالأسفل';
+      } else if (!Number.isFinite(parsedPct) || parsedPct < 0) {
+        if (plannerTargetEl) plannerTargetEl.textContent = '—';
+        if (plannerTargetSubEl) plannerTargetSubEl.textContent = 'اكتب نسبة الربح % المطلوبة';
+        if (formulaBannerEl) formulaBannerEl.textContent = 'أدخل نسبة الربح المستهدفة (مثال: 100%) أو اختر من النسب السريعة أعلاه.';
+        if (progressFillEl) progressFillEl.style.width = '0%';
+        if (remainingBannerEl) {
+          remainingBannerEl.className = 'purchase-target-remaining-banner';
+          remainingBannerEl.innerHTML = '<span>اكتب نسبة الربح أولًا لعرض المبلغ المستهدف والمتبقي.</span>';
+        }
+      } else {
+        activeTargetValid = true;
+        const pctBps = BigInt(Math.round(parsedPct * 100));
+        targetProfitMinor = (totalCostMinor * pctBps + 5000n) / 10000n;
+        targetSalesMinor = totalCostMinor + targetProfitMinor;
+        remainingToTargetMinor = targetSalesMinor - totalAssignedRetailMinor;
+
+        if (plannerTargetEl) plannerTargetEl.textContent = fmtMoney(targetSalesMinor);
+        if (plannerTargetSubEl) plannerTargetSubEl.textContent = `ربح ${parsedPct}% = ${fmtMoney(targetProfitMinor)}`;
+
+        if (formulaBannerEl) {
+          formulaBannerEl.innerHTML = totalCostMinor === 0n
+            ? `حدّدت نسبة ربح <strong>${parsedPct}%</strong> — أدخل سعر الجملة والكميات لحساب إجمالي البيع المطلوب.`
+            : `نسبة الـ <strong>${parsedPct}%</strong> تعني أنك تحتاج بيع هذه البضاعة بإجمالي <strong style="color:var(--purple);">${escapeHtml(fmtMoney(targetSalesMinor))}</strong> (رأس مال الجملة ${escapeHtml(fmtMoney(totalCostMinor))} + ربح مستهدف ${escapeHtml(fmtMoney(targetProfitMinor))}).`;
+        }
+
+        const progressPct = targetSalesMinor > 0n
+          ? Math.min(100, Math.max(0, Number((totalAssignedRetailMinor * 1000n) / targetSalesMinor) / 10))
+          : 0;
+        if (progressFillEl) progressFillEl.style.width = `${progressPct.toFixed(1)}%`;
+
+        if (remainingBannerEl) {
+          if (totalCostMinor === 0n) {
+            remainingBannerEl.className = 'purchase-target-remaining-banner';
+            remainingBannerEl.innerHTML = '<span>في انتظار إدخال سعر الجملة والكميات لحساب المتبقي.</span>';
+          } else if (remainingToTargetMinor > 0n) {
+            remainingBannerEl.className = 'purchase-target-remaining-banner is-pending';
+            if (unpricedPieces === 1n) {
+              remainingBannerEl.innerHTML = `<div><strong>فاضل لك ${escapeHtml(fmtMoney(remainingToTargetMinor))}</strong> عشان توصل للمبلغ المستهدف — باقي <strong>قطعة واحدة غير مسعّرة</strong>، لو اتسعرت بـ <strong>${escapeHtml(fmtMoney(remainingToTargetMinor))}</strong> توصل للهدف تمامًا.</div>`;
+            } else if (unpricedPieces > 1n) {
+              const avgPerUnpriced = (remainingToTargetMinor + unpricedPieces - 1n) / unpricedPieces;
+              remainingBannerEl.innerHTML = `<div><strong>فاضل لك ${escapeHtml(fmtMoney(remainingToTargetMinor))}</strong> عشان توصل للمبلغ المستهدف (${escapeHtml(fmtMoney(targetSalesMinor))}) — باقي <strong>${unpricedPieces.toString()} قطع غير مسعّرة</strong> (متوسط <strong>${escapeHtml(fmtMoney(avgPerUnpriced))}</strong> للقطعة).</div>`;
+            } else {
+              remainingBannerEl.innerHTML = `<div><strong>فاضل لك ${escapeHtml(fmtMoney(remainingToTargetMinor))}</strong> عشان توصل للمبلغ المستهدف — كل القطع الحالية مسعّرة، أضف موديل جديد أو عدّل أسعار البيع.</div>`;
+            }
+          } else if (remainingToTargetMinor === 0n) {
+            remainingBannerEl.className = 'purchase-target-remaining-banner is-reached';
+            remainingBannerEl.innerHTML = `<div><strong>وصلت للهدف تمامًا!</strong> إجمالي البيع المسعّر <strong>${escapeHtml(fmtMoney(totalAssignedRetailMinor))}</strong> يُحقق ربحًا صافيًا <strong>${escapeHtml(fmtMoney(totalAssignedRetailMinor - totalCostMinor))}</strong> (${parsedPct}%).</div>`;
+          } else {
+            const surplus = -remainingToTargetMinor;
+            remainingBannerEl.className = 'purchase-target-remaining-banner is-exceeded';
+            remainingBannerEl.innerHTML = `<div><strong>تجاوزت الهدف بـ +${escapeHtml(fmtMoney(surplus))}!</strong> إجمالي البيع المسعّر <strong>${escapeHtml(fmtMoney(totalAssignedRetailMinor))}</strong> (ربح متوقع ${escapeHtml(fmtMoney(totalAssignedRetailMinor - totalCostMinor))}).</div>`;
+          }
+        }
+      }
+
+      groupSnapshots.forEach((snap) => {
+        const metaEl = snap.section.querySelector(`[data-group-meta="${snap.index}"]`);
+        if (!metaEl || !snap.product) return;
+        const actualWac = computeProductActualWac(snap.product.variants);
+        const pricing = summarizeProductPricing(snap.product);
+        const chips = [];
+
+        chips.push(`<span class="purchase-meta-chip-actual">الجملة الفعلي بالمخزن: <strong>${actualWac && BigInt(actualWac.amount) > 0n ? escapeHtml(money(actualWac)) : 'بانتظار أول شراء'}</strong></span>`);
+        chips.push(`<span class="purchase-meta-chip-actual">سعر البيع الفعلي الحالي: <strong>${!pricing.allUnpriced ? escapeHtml(pricing.labelText) : 'غير مسعّر بعد'}</strong></span>`);
+
+        if (snap.retailInvalid) {
+          chips.push('<span class="purchase-meta-chip-actual" style="border-color:var(--rose,#be123c);color:var(--rose,#be123c);">أدخل سعر بيع أكبر من صفر أو اتركه فارغًا</span>');
+        } else if (snap.hasGroupRetail && snap.unitCostMinor) {
+          const unitProfit = snap.unitRetailMinor - snap.unitCostMinor;
+          const marginPct = (Number((unitProfit * 1000n) / snap.unitCostMinor) / 10).toFixed(1);
+          const color = unitProfit < 0n ? 'var(--rose, #be123c)' : 'var(--green, #15803d)';
+          chips.push(`<span class="purchase-meta-chip-actual" style="color:${color};border-color:${color};">ربح القطعة: <strong>${escapeHtml(fmtMoney(unitProfit))} (${marginPct}%)</strong>${unitProfit < 0n ? ' · أقل من الجملة!' : ''}</span>`);
+        }
+
+        if (snap.groupQty > 0n) {
+          chips.push(`<span class="purchase-meta-chip-actual">المستلم: <strong>${snap.groupQty.toString()} قطعة</strong> · جملة الموديل: <strong>${escapeHtml(fmtMoney(snap.groupCostTotalMinor))}</strong>${snap.hasGroupRetail ? ` · بيع الموديل: <strong style="color:var(--purple);">${escapeHtml(fmtMoney(snap.groupRetailTotalMinor))}</strong>` : ''}</span>`);
+        }
+
+        let targetSuggestBtn = '';
+        if (activeTargetValid && targetSalesMinor > 0n && remainingToTargetMinor > 0n && snap.groupQty > 0n && !snap.hasGroupRetail) {
+          const suggestedUnitMinor = (remainingToTargetMinor + snap.groupQty - 1n) / snap.groupQty;
+          const suggestedDec = decimalPrice({ amount: suggestedUnitMinor.toString(), decimals });
+          const btnLabel = snap.groupQty === 1n
+            ? `تسعير بـ ${suggestedDec} ${currency} (يغلق المتبقي للهدف)`
+            : `تسعير بـ ${suggestedDec} ${currency} للقطعة (يغطي المتبقي ${fmtMoney(remainingToTargetMinor)})`;
+          targetSuggestBtn = `<button type="button" class="date-preset-chip fill-group-to-target" data-suggest-decimal="${escapeHtml(suggestedDec)}">${escapeHtml(btnLabel)}</button>`;
+        }
+
+        metaEl.innerHTML = `<div class="purchase-model-meta-pills">${chips.join('')}</div>${targetSuggestBtn}`;
+      });
 
       const paidInput = form.querySelector('#purchase-paid-input');
       if (currentPayMode === 'FULL_CASH') {
@@ -4131,7 +4529,7 @@ function bindSuppliers() {
         paidMinor = BigInt(toMinor(paidInput.value || '0', decimals));
       } catch {}
 
-      const remainingMinor = totalMinor > paidMinor ? totalMinor - paidMinor : 0n;
+      const remainingMinor = totalCostMinor > paidMinor ? totalCostMinor - paidMinor : 0n;
       const remainingFormatted = decimalPrice({ amount: remainingMinor.toString(), decimals });
       form.querySelector('#invoice-remaining-text').textContent = `${remainingFormatted} ${currency}`;
     };
@@ -4153,6 +4551,26 @@ function bindSuppliers() {
       try { paidMinor = BigInt(toMinor(form.querySelector('#purchase-paid-input').value || '0', decimals)); } catch {}
       const rem = totalMinor > paidMinor ? totalMinor - paidMinor : 0n;
       form.querySelector('#invoice-remaining-text').textContent = `${decimalPrice({ amount: rem.toString(), decimals })} ${currency}`;
+    });
+
+    form.querySelector('#purchase-target-enabled')?.addEventListener('change', (e) => {
+      updatePurchaseTotal();
+      if (e.target.checked) {
+        const pctInput = form.querySelector('#purchase-target-percent');
+        if (pctInput && !pctInput.value) pctInput.focus();
+      }
+    });
+
+    form.querySelector('#purchase-target-percent')?.addEventListener('input', updatePurchaseTotal);
+
+    form.querySelectorAll('[data-target-preset]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const chk = form.querySelector('#purchase-target-enabled');
+        const pctInput = form.querySelector('#purchase-target-percent');
+        if (chk) chk.checked = true;
+        if (pctInput) pctInput.value = btn.dataset.targetPreset ?? '';
+        updatePurchaseTotal();
+      });
     });
 
     const renderGroup = (section) => {
@@ -4240,12 +4658,14 @@ function bindSuppliers() {
       }
     };
 
-    renderGroup(root.querySelector('[data-purchase-group]'));
+    const firstGroup = root.querySelector('[data-purchase-group]');
+    renderGroup(firstGroup);
+    syncGroupDefaultRetailPrice(firstGroup);
     updatePurchaseTotal();
 
     // Listeners for invoice lines
     root.querySelector('#purchase-lines')?.addEventListener('input', (e) => {
-      if (e.target.matches('[name^="purchaseCost_"]')) updatePurchaseTotal();
+      if (e.target.matches('[name^="purchaseCost_"], [name^="purchaseRetailPrice_"]')) updatePurchaseTotal();
       const qtyInput = e.target.closest('[data-qty-variant]');
       if (qtyInput) {
         const section = qtyInput.closest('[data-purchase-group]');
@@ -4266,6 +4686,7 @@ function bindSuppliers() {
         const idx = section.dataset.purchaseGroup;
         selections.set(idx, new Map());
         renderGroup(section);
+        syncGroupDefaultRetailPrice(section);
         updatePurchaseTotal();
       }
     });
@@ -4276,6 +4697,16 @@ function bindSuppliers() {
       const idx = section.dataset.purchaseGroup;
       const product = products.find((item) => item.id === section.querySelector(`[name="purchaseProduct_${idx}"]`)?.value);
       const matrix = product ? extractProductMatrix(product) : { sizes: [] };
+
+      const suggestBtn = e.target.closest('.fill-group-to-target');
+      if (suggestBtn) {
+        const retailInput = section.querySelector(`[name="purchaseRetailPrice_${idx}"]`);
+        if (retailInput) {
+          retailInput.value = suggestBtn.dataset.suggestDecimal ?? '';
+          updatePurchaseTotal();
+        }
+        return;
+      }
 
       if (e.target.closest('.remove-purchase-group')) {
         if (root.querySelectorAll('[data-purchase-group]').length > 1) {
@@ -4323,7 +4754,9 @@ function bindSuppliers() {
     root.querySelector('#add-purchase-product')?.addEventListener('click', () => {
       const newIdx = ++groupIndex;
       root.querySelector('#purchase-lines').insertAdjacentHTML('beforeend', groupMarkup(newIdx));
-      renderGroup(root.querySelector(`[data-purchase-group="${newIdx}"]`));
+      const newSection = root.querySelector(`[data-purchase-group="${newIdx}"]`);
+      renderGroup(newSection);
+      syncGroupDefaultRetailPrice(newSection);
       updatePurchaseTotal();
     });
   };
@@ -5991,9 +6424,10 @@ function showProductEditModal(product) {
   const activeExisting = product.variants.filter((variant) => variant.isActive);
   const defaultPrice = activeExisting[0] ? decimalPrice(activeExisting[0].price) : '0';
   const defaultReorder = activeExisting[0]?.reorderPoint ?? '3';
+  const actualWac = computeProductActualWac(activeExisting);
   const initialOptions = (product.options?.length ? product.options : []).map((opt) => ({ key: opt.key, name: opt.name, values: [...(opt.values ?? [])] }));
 
-  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="product-edit-title" style="margin:20px auto;max-width:calc(100vw - 32px);"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">الكتالوج الموحد — توسيع وتعديل الموديل</span><h2 id="product-edit-title">تعديل الموديل: ${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2></div><button type="button" class="modal-close" data-close-modal>×</button></div><form id="product-edit-form" class="form-stack modal-form"><div class="form-grid"><label>اسم الموديل / المنتج<input name="name" required minlength="2" maxlength="120" value="${escapeHtml(product.name)}"></label><label>كود الموديل الأساسي<input name="sku" required maxlength="64" value="${escapeHtml(product.sku)}"></label></div><div class="form-grid"><label>الفئة<select name="categoryId"><option value="">بدون فئة</option>${categoryChoices}</select></label><label>الماركة / المصنع<input name="brand" maxlength="100" value="${escapeHtml(product.brand ?? '')}"></label></div><div class="form-grid" style="background:var(--surface-soft);padding:14px;border-radius:12px;border:1px solid var(--line);margin:4px 0;"><label style="font-weight:750;">سعر البيع الجديد للموديل (${currency})<input name="baseRetailPrice" id="edit-modal-base-price" inputmode="decimal" value="${escapeHtml(defaultPrice)}" placeholder="مثال: 350.00" style="font-weight:800;font-size:15px;color:var(--purple);"><small style="color:var(--muted);font-size:11px;">تحديث وتعديل سعر البيع وتطبيقه على كافة المقاسات والألوان</small></label><div style="display:flex;align-items:flex-end;"><button type="button" class="button button-secondary" id="apply-price-to-all-variants" style="height:42px;width:100%;font-weight:750;">تطبيق هذا السعر على كل المقاسات</button></div></div><label>وصف الموديل<input name="description" maxlength="2000" value="${escapeHtml(product.description ?? '')}"></label>${renderProductImagePicker(product.imagePath ?? '')}
+  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="product-edit-title" style="margin:20px auto;max-width:calc(100vw - 32px);"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">الكتالوج الموحد — توسيع وتعديل الموديل</span><h2 id="product-edit-title">تعديل الموديل: ${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2></div><button type="button" class="modal-close" data-close-modal>×</button></div><form id="product-edit-form" class="form-stack modal-form"><div class="form-grid"><label>اسم الموديل / المنتج<input name="name" required minlength="2" maxlength="120" value="${escapeHtml(product.name)}"></label><label>كود الموديل الأساسي<input name="sku" required maxlength="64" value="${escapeHtml(product.sku)}"></label></div><div class="form-grid"><label>الفئة<select name="categoryId"><option value="">بدون فئة</option>${categoryChoices}</select></label><label>الماركة / المصنع<input name="brand" maxlength="100" value="${escapeHtml(product.brand ?? '')}"></label></div><div class="form-grid" style="background:var(--surface-soft);padding:14px;border-radius:12px;border:1px solid var(--line);margin:4px 0;"><label style="font-weight:750;">سعر البيع الجديد للموديل (${currency})<input name="baseRetailPrice" id="edit-modal-base-price" inputmode="decimal" value="${escapeHtml(defaultPrice)}" placeholder="مثال: 350.00" style="font-weight:800;font-size:15px;color:var(--purple);"><small style="color:var(--muted);font-size:11px;">تحديث وتعديل سعر البيع وتطبيقه على كافة المقاسات والألوان${actualWac && BigInt(actualWac.amount) > 0n ? ` · <strong style="color:var(--ink);">التكلفة الفعلية الحالية (سعر الجملة): ${money(actualWac)}</strong>` : ''}</small></label><div style="display:flex;align-items:flex-end;"><button type="button" class="button button-secondary" id="apply-price-to-all-variants" style="height:42px;width:100%;font-weight:750;">تطبيق هذا السعر على كل المقاسات</button></div></div><label>وصف الموديل<input name="description" maxlength="2000" value="${escapeHtml(product.description ?? '')}"></label>${renderProductImagePicker(product.imagePath ?? '')}
   ${initialOptions.length ? `<div class="variant-options-section"><div><strong>إضافة ألوان أو مقاسات جديدة لهذا الموديل:</strong></div><div class="model-presets-bar"><span class="preset-label">+ لون جديد:</span>${quickColors.map((c) => `<button type="button" class="color-quick-chip" data-edit-add-color="${c}">+ ${c}</button>`).join('')}</div><div class="model-presets-bar"><span class="preset-label">+ مقاسات سريعة:</span>${quickSizes.map((s) => `<button type="button" class="date-preset-chip" data-edit-add-sizes="${s}">+ (${s})</button>`).join('')}</div><div id="edit-option-rows" class="form-stack">${initialOptions.map((opt) => `<div class="variant-option-row" data-edit-option-key="${escapeHtml(opt.key)}"><input data-edit-option-name value="${escapeHtml(opt.name)}" readonly><input data-edit-option-values value="${escapeHtml(opt.values.join(', '))}" placeholder="القيم مفصولة بفواصل"></div>`).join('')}</div></div>` : ''}
   <div class="matrix-quick-toolbar"><span>الفروع الحالية والجديدة التابعة للموديل (<strong>${activeExisting.length}</strong> فرع مسجل)</span><div class="matrix-quick-actions"><button type="button" class="date-preset-chip" id="edit-generate-barcodes">توليد باركود تلقائي للفروع بدون باركود</button><button type="button" class="date-preset-chip" id="edit-open-print-labels">طباعة استيكرات الباركود</button></div></div>
   <div class="table-scroll"><table class="variant-matrix-table zebra-table"><thead><tr><th>متاحة</th><th>اللون والمقاس الفرعي</th><th>كود الفرع (SKU)</th><th>الباركود</th><th>السعر (${currency})</th><th>حد الطلب</th></tr></thead><tbody id="edit-existing-tbody">${activeExisting.map((variant) => `<tr data-variant-id="${variant.id}" data-variant-qty="${escapeHtml(variant.quantity ?? '0')}" data-variant-attrs="${escapeHtml(JSON.stringify(variant.attributes ?? {}))}"><td><input data-edit-active type="checkbox" checked aria-label="إبقاء التركيبة متاحة"></td><td><strong>${escapeHtml(formatVariantAttributes(product, variant.attributes, product.name))}</strong></td><td><input data-edit-sku maxlength="64" required value="${escapeHtml(variant.sku)}"></td><td><input data-edit-barcode maxlength="64" value="${escapeHtml(variant.barcode ?? '')}" placeholder="باركود العلبة"></td><td><input data-edit-price inputmode="decimal" required value="${escapeHtml(decimalPrice(variant.price))}"></td><td><input data-edit-reorder type="number" min="0" step="1" required value="${escapeHtml(variant.reorderPoint)}"></td></tr>`).join('')}</tbody><tbody id="edit-generated-tbody"></tbody></table></div><div id="new-variant-rows" class="form-stack"></div>${product.options?.length ? '<button type="button" class="button button-secondary button-sm" id="add-edit-variant">+ إضافة فرع مفرد يدويًا</button>' : ''}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">حفظ التعديلات والفروع الجديدة</button></div></form></section></div>`;
@@ -6290,12 +6724,12 @@ function showProductModal() {
           </div>
 
           <div class="form-grid">
-            <label>سعر البيع للجمهور (${currency})
-              <input name="price" required inputmode="decimal" placeholder="مثال: 650">
-            </label>
             <label>حد التنبيه لنقص المخزون
               <input name="reorderPoint" type="number" required min="0" step="1" value="3">
             </label>
+            <div style="display:flex;align-items:center;padding:10px 14px;border-radius:10px;background:var(--surface-soft);border:1px dashed var(--line-strong);font-size:12px;color:var(--ink-soft);line-height:1.55;">
+              تُحدّد أسعار الجملة (الشراء) وسعر البيع لاحقاً أثناء تسجيل فاتورة الشراء من التاجر أو عبر التعديل.
+            </div>
           </div>
 
           ${renderProductImagePicker()}
@@ -6318,13 +6752,13 @@ function showProductModal() {
             <input class="custom-tags-input" id="sizes-tags-input" value="41, 42, 43, 44, 45" placeholder="المقاسات مفصولة بفاصلة">
 
             <div class="simple-summary-banner" id="model-summary-box">
-              <span id="model-summary-info">تم تجهيز 10 مقاسات وفروع جاهزة للبيع</span>
-              <button type="button" class="text-action" id="toggle-advanced-variants" style="font-size:12px;">تخصيص الباركود أو السعر لكل مقاس ⌄</button>
+              <span id="model-summary-info">تم تجهيز 10 مقاسات وفروع</span>
+              <button type="button" class="text-action" id="toggle-advanced-variants" style="font-size:12px;">تخصيص الباركود وكود كل مقاس ⌄</button>
             </div>
 
             <div id="advanced-matrix-area" hidden>
               <div class="matrix-quick-toolbar">
-                <span>تعديل باركود أو سعر فرع معين (اختياري)</span>
+                <span>تعديل باركود أو حد التنبيه لفرع معين (اختياري)</span>
                 <button type="button" class="date-preset-chip" id="btn-auto-all-barcodes">توليد باركود تلقائي للكل</button>
               </div>
               <div class="variant-matrix-scroll" id="advanced-matrix-table-container"></div>
@@ -6336,6 +6770,9 @@ function showProductModal() {
             <label>باركود الصنف (اختياري)
               <input name="singleBarcode" maxlength="64" placeholder="مسح بالباركود أو اتركه فارغاً">
             </label>
+            <div style="display:flex;align-items:center;padding:10px 14px;border-radius:10px;background:var(--surface-soft);border:1px solid var(--line);font-size:12px;color:var(--muted);">
+              يتم تسعير الصنف (سعر الجملة وسعر البيع) عند الشراء من التاجر.
+            </div>
           </div>
 
           <div class="modal-actions">
@@ -6370,7 +6807,6 @@ function showProductModal() {
     const sizes = getActiveSizes();
     const colors = [...selectedColors];
     const baseSku = (productForm.elements.namedItem('sku').value.trim() || 'ITEM').slice(0, 48);
-    const defaultPrice = productForm.elements.namedItem('price').value.trim() || '0';
     const defaultReorder = productForm.elements.namedItem('reorderPoint').value.trim() || '3';
     const combinations = [];
     for (const c of colors) {
@@ -6386,7 +6822,6 @@ function showProductModal() {
             <th>الفرع (اللون والمقاس)</th>
             <th>كود الفرع (SKU)</th>
             <th>الباركود</th>
-            <th>السعر (${currency})</th>
             <th>حد التنبيه</th>
           </tr>
         </thead>
@@ -6398,14 +6833,12 @@ function showProductModal() {
             const sku = saved.sku || generatedSku;
             usedSkus.add(sku.toLowerCase());
             const barcode = saved.barcode || '';
-            const price = saved.price || defaultPrice;
             const reorder = saved.reorder || defaultReorder;
             return `
               <tr data-adv-key="${escapeHtml(key)}">
                 <td><strong>${escapeHtml(attr.option_1)} · مقاس ${escapeHtml(attr.option_2)}</strong></td>
                 <td><input data-adv-sku maxlength="64" value="${escapeHtml(sku)}"></td>
                 <td><input data-adv-barcode maxlength="64" value="${escapeHtml(barcode)}" placeholder="تلقائي"></td>
-                <td><input data-adv-price inputmode="decimal" value="${escapeHtml(price)}"></td>
                 <td><input data-adv-reorder type="number" min="0" step="1" value="${escapeHtml(reorder)}"></td>
               </tr>
             `;
@@ -6420,7 +6853,6 @@ function showProductModal() {
         customVariantData.set(key, {
           sku: tr.querySelector('[data-adv-sku]').value.trim(),
           barcode: tr.querySelector('[data-adv-barcode]').value.trim(),
-          price: tr.querySelector('[data-adv-price]').value.trim(),
           reorder: tr.querySelector('[data-adv-reorder]').value.trim(),
         });
       });
@@ -6432,10 +6864,9 @@ function showProductModal() {
     const colorCount = selectedColors.size;
     const sizeCount = sizes.length;
     const totalVariants = colorCount * sizeCount;
-    const price = productForm.elements.namedItem('price').value.trim() || '0';
     if (currentKind === 'MODEL') {
       summaryInfo.textContent = totalVariants > 0
-        ? `تم تجهيز: ${colorCount} ألوان × ${sizeCount} مقاسات = ${totalVariants} فرع جاهز للبيع بسعر ${price} ${currency}`
+        ? `تم تجهيز: ${colorCount} ألوان × ${sizeCount} مقاسات = ${totalVariants} فرع — يُحدّد سعر الجملة والبيع عند الشراء من التاجر`
         : 'حدد لونًا ومقاسًا واحدًا على الأقل للموديل';
     }
     renderAdvancedTable();
@@ -6514,7 +6945,6 @@ function showProductModal() {
   });
 
   sizesInput.addEventListener('input', updateSummary);
-  productForm.elements.namedItem('price').addEventListener('input', updateSummary);
   productForm.elements.namedItem('sku').addEventListener('input', updateSummary);
 
   // Toggle Advanced Matrix
@@ -6552,7 +6982,6 @@ function showProductModal() {
       const categoryId = form.get('categoryId') || undefined;
       const brand = form.get('brand') || undefined;
       const imagePath = String(form.get('imagePath') || '').trim() || undefined;
-      const priceVal = form.get('price');
       const reorderVal = String(form.get('reorderPoint') || '3');
 
       if (currentKind === 'MODEL') {
@@ -6581,7 +7010,7 @@ function showProductModal() {
             sku: varSku,
             barcode: custom.barcode || undefined,
             attributes: attr,
-            retailPrice: toMinor(custom.price || priceVal, currencyDecimals(currency)),
+            retailPrice: '0',
             reorderPoint: custom.reorder || reorderVal,
           };
         });
@@ -6598,7 +7027,7 @@ function showProductModal() {
         const variants = [{
           sku: `${sku}-01`,
           barcode: singleBarcode,
-          retailPrice: toMinor(priceVal, currencyDecimals(currency)),
+          retailPrice: '0',
           reorderPoint: reorderVal,
         }];
 
@@ -6699,6 +7128,83 @@ function showInventoryProductDetails(product) {
   }));
 }
 
+function showPosProductPickerModal(product) {
+  const matrix = extractProductMatrix(product);
+  const variants = matrix.activeVariants;
+  if (!variants.length) return;
+  const modal = getModalRoot();
+  const pricingSummary = summarizeProductPricing(product);
+  const totalStock = variants.reduce((sum, v) => sum + BigInt(v.quantity), 0n);
+  const categoryName = state.data.categories.find((c) => c.id === product.categoryId)?.name ?? '';
+
+  const heroHtml = `
+    <div class="pos-picker-hero">
+      <div class="pos-picker-image-box">
+        ${product.imagePath
+          ? `<button type="button" class="pos-picker-image-trigger" data-zoom-pos-image aria-label="تكبير صورة المنتج">
+              <img src="${escapeHtml(product.imagePath)}" alt="${escapeHtml(product.name)}" class="pos-picker-hero-img">
+              <span class="pos-picker-zoom-hint">${icon('search', 13)} تكبير أوضح</span>
+            </button>`
+          : `<div class="pos-picker-no-image">${icon('box', 40)}<span>لا توجد صورة لهذا المنتج</span></div>`}
+      </div>
+      <div class="pos-picker-info">
+        <div class="pos-picker-meta-line">
+          <span class="sku-code">${escapeHtml(product.sku)}</span>
+          ${product.brand ? `<span>· ${escapeHtml(product.brand)}</span>` : ''}
+          ${categoryName ? `<span>· ${escapeHtml(categoryName)}</span>` : ''}
+        </div>
+        <h3>${escapeHtml(product.name)}</h3>
+        ${product.description ? `<p style="margin:0;font-size:12px;color:var(--muted);line-height:1.45;">${escapeHtml(product.description)}</p>` : ''}
+        <div class="pos-picker-badges">
+          <span class="pos-picker-price-pill ${pricingSummary.allUnpriced ? 'is-unpriced' : ''}">${escapeHtml(pricingSummary.labelText)}</span>
+          <span class="pos-picker-stock-pill">${product.itemKind === 'SERVICE' ? 'خدمة متاحة' : `المتاح بالمخزن: ${totalStock} قطعة`}</span>
+        </div>
+        <p class="pos-picker-prompt">${variants.length > 1 ? 'راجع الصورة وتأكد من الشكل ثم اختر المقاس أو اللون لإضافته للفاتورة:' : 'تأكد من صورة الصنف ثم اضغط على إضافة للفاتورة بالأسفل:'}</p>
+      </div>
+    </div>
+  `;
+
+  const groupedHtml = matrix.isMatrix
+    ? `<div class="pos-matrix-picker">${matrix.colors.map((color) => `<div class="pos-color-group"><div class="pos-color-title"><span>اللون: <strong>${escapeHtml(color)}</strong></span><small>اختر المقاس لإضافته للفاتورة</small></div><div class="pos-size-grid">${matrix.sizes.map((size) => {
+      const variant = matrix.matrixMap.get(`${color}:::${size}`);
+      if (!variant) return '';
+      const unavailable = product.itemKind === 'PRODUCT' && BigInt(variant.quantity) <= 0n;
+      const unpriced = BigInt(variant.price?.amount ?? 0) <= 0n;
+      const disabled = unavailable || unpriced;
+      return `<button type="button" class="pos-size-tile ${disabled ? 'tile-empty' : ''}" data-pos-variant="${variant.id}" ${disabled ? 'disabled' : ''}><strong>مقاس ${escapeHtml(size)}</strong><span>${unpriced ? 'غير مسعّر' : money(variant.price)}</span><small>${unavailable ? 'نفد' : unpriced ? 'سعّره أولاً' : `متاح ${variant.quantity}`}</small></button>`;
+    }).join('')}</div></div>`).join('')}</div>`
+    : `<div class="pos-single-picker-grid">${variants.map((variant) => {
+      const label = formatVariantAttributes(product, variant.attributes, product.name);
+      const unavailable = product.itemKind === 'PRODUCT' && BigInt(variant.quantity) <= 0n;
+      const unpriced = BigInt(variant.price?.amount ?? 0) <= 0n;
+      const disabled = unavailable || unpriced;
+      return `<button type="button" class="pos-single-variant-btn" data-pos-variant="${variant.id}" ${disabled ? 'disabled' : ''}>
+        <div>
+          <strong>${escapeHtml(label)}</strong>
+          <small>${escapeHtml(variant.sku)} · ${unpriced ? 'غير مسعّر' : money(variant.price)} · ${unavailable ? 'نفد المخزون' : `متاح ${variant.quantity}`}</small>
+        </div>
+        <span class="pos-single-variant-cta">${unavailable ? 'غير متوفر' : unpriced ? 'غير مسعّر' : 'إضافة للفاتورة +'}</span>
+      </button>`;
+    }).join('')}</div>`;
+
+  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">معاينة المنتج واختيار الصنف — ${escapeHtml(product.sku)}</span><h2>${escapeHtml(product.name)}</h2></div><button type="button" class="modal-close" data-close-modal>×</button></div><div class="pos-picker-body">${heroHtml}${groupedHtml}</div></section></div>`;
+  modal.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { modal.innerHTML = ''; }));
+  modal.querySelector('[data-zoom-pos-image]')?.addEventListener('click', () => {
+    if (!product.imagePath) return;
+    const box = document.createElement('div');
+    box.className = 'pos-image-lightbox';
+    box.innerHTML = `<div class="pos-image-lightbox-card"><div class="pos-image-lightbox-head"><div><strong>${escapeHtml(product.name)}</strong> <span class="sku-code">${escapeHtml(product.sku)}</span></div><button type="button" class="modal-close" data-close-zoom aria-label="إغلاق التكبير">×</button></div><img src="${escapeHtml(product.imagePath)}" alt="${escapeHtml(product.name)}"></div>`;
+    modal.append(box);
+    box.querySelector('[data-close-zoom]')?.addEventListener('click', () => box.remove());
+    box.addEventListener('click', (ev) => { if (ev.target === box) box.remove(); });
+  });
+  modal.querySelectorAll('[data-pos-variant]').forEach((choice) => choice.addEventListener('click', () => {
+    const id = choice.dataset.posVariant;
+    modal.innerHTML = '';
+    addToCart(id);
+  }));
+}
+
 function bindPos() {
   const search = document.querySelector('#pos-search');
   search?.focus();
@@ -6718,17 +7224,8 @@ function bindPos() {
     if (!product) return;
     const matrix = extractProductMatrix(product);
     const variants = matrix.activeVariants;
-    if (variants.length === 1) { addToCart(variants[0].id); return; }
-    const modal = getModalRoot();
-    const groupedHtml = matrix.isMatrix ? `<div class="pos-matrix-picker">${matrix.colors.map((color) => `<div class="pos-color-group"><div class="pos-color-title"><span>اللون: <strong>${escapeHtml(color)}</strong></span><small>اختر المقاس لإضافته للفاتورة</small></div><div class="pos-size-grid">${matrix.sizes.map((size) => {
-      const variant = matrix.matrixMap.get(`${color}:::${size}`);
-      if (!variant) return '';
-      const unavailable = product.itemKind === 'PRODUCT' && BigInt(variant.quantity) <= 0n;
-      return `<button type="button" class="pos-size-tile ${unavailable ? 'tile-empty' : ''}" data-pos-variant="${variant.id}" ${unavailable ? 'disabled' : ''}><strong>مقاس ${escapeHtml(size)}</strong><span>${money(variant.price)}</span><small>${unavailable ? 'نفد' : `متاح ${variant.quantity}`}</small></button>`;
-    }).join('')}</div></div>`).join('')}</div>` : `<div class="form-stack">${variants.map((variant) => { const label = formatVariantAttributes(product, variant.attributes, variant.sku); const unavailable = product.itemKind === 'PRODUCT' && BigInt(variant.quantity) <= 0n; return `<button class="button button-secondary" data-pos-variant="${variant.id}" ${unavailable ? 'disabled' : ''}>${escapeHtml(label)} · ${escapeHtml(variant.sku)} · ${money(variant.price)} · متاح ${variant.quantity}</button>`; }).join('')}</div>`;
-    modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">اختيار اللون والمقاس — كود الموديل ${escapeHtml(product.sku)}</span><h2>${escapeHtml(product.name)}</h2></div><button type="button" class="modal-close" data-close-modal>×</button></div>${groupedHtml}</section></div>`;
-    modal.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { modal.innerHTML = ''; }));
-    modal.querySelectorAll('[data-pos-variant]').forEach((choice) => choice.addEventListener('click', () => { const id = choice.dataset.posVariant; modal.innerHTML = ''; addToCart(id); }));
+    if (variants.length === 1 && !product.imagePath) { addToCart(variants[0].id); return; }
+    showPosProductPickerModal(product);
   }));
   document.querySelectorAll('[data-qty]').forEach((button) => button.addEventListener('click', () => changeQuantity(button.dataset.qty, Number(button.dataset.delta))));
   document.querySelectorAll('[data-remove]').forEach((button) => button.addEventListener('click', () => { state.cart = state.cart.filter((item) => item.variantId !== button.dataset.remove); render(); }));
@@ -6757,6 +7254,10 @@ function addToCart(variantId) {
   if (!product || !variant) return;
   const stockTracked = product.itemKind !== 'SERVICE';
   if (stockTracked && BigInt(variant.quantity) <= 0n) { toast('الصنف غير متوفر في المخزون', 'error'); return; }
+  if (BigInt(variant.price?.amount ?? 0) <= 0n) {
+    toast('لم يتم تسعير هذا الصنف للبيع بعد — حدّد سعر البيع عند الشراء من التاجر أو من تعديل المنتج', 'error');
+    return;
+  }
   const existing = state.cart.find((item) => item.variantId === variantId);
   if (existing) {
     if (stockTracked && BigInt(existing.quantity) >= BigInt(variant.quantity)) { toast('الكمية المطلوبة أكبر من الرصيد المتاح', 'error'); return; }
