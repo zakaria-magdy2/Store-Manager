@@ -1629,9 +1629,9 @@ function salesView() {
   const allReturns = state.data.customerReturns ?? [];
   const sales = state.salesHistory ?? state.data.sales ?? [];
   const totalCount = state.salesHistoryTotal ?? state.data.sales?.length ?? sales.length;
-  const preset = state.salesPreset ?? 'all';
   const from = state.salesFrom ?? '';
   const to = state.salesTo ?? '';
+  const preset = syncPresetWithDates(state.salesPreset, from, to, ['all', 'today', 'week', 'month'], 'rolling7', 'all');
   const searchQuery = (state.salesHistorySearch ?? '').trim().toLowerCase();
   const hasReturnFilter = Boolean((from && to) || searchQuery);
   const matchingSaleNumbers = new Set(sales.map((sale) => String(sale.saleNumber ?? '').toLowerCase()).filter(Boolean));
@@ -1777,7 +1777,10 @@ function shiftsView() {
   const decimals = currencyDecimals(currency);
   const format = (v) => money({ amount: v, currency, decimals });
   const isCashier = state.data.user.role === 'CASHIER' || Boolean(state.data.capabilities.cashierMode);
-  const activePreset = state.shiftPreset || 'today';
+  const shiftFrom = state.shiftFrom || '';
+  const shiftTo = state.shiftTo || '';
+  const activePreset = syncPresetWithDates(state.shiftPreset, shiftFrom, shiftTo, ['all', 'today', 'week', 'month'], 'weekMonday', 'all');
+  const shiftPeriodLabels = { all: 'جميع الشيفتات المسجلة', today: 'اليوم', week: 'هذا الأسبوع', month: 'هذا الشهر', custom: 'في الفترة المحددة' };
   const shiftsData = state.shiftsData;
 
   if (!shiftsData) {
@@ -1826,6 +1829,7 @@ function shiftsView() {
             <input type="date" name="to" value="${state.shiftTo || ''}">
           </div>
           <button type="submit" class="button button-primary button-sm" style="height:38px;padding:0 14px;">تطبيق</button>
+          ${shiftFrom || shiftTo ? '<button type="button" id="reset-shifts-filter" class="text-action" style="font-size:12px;color:var(--rose, #be123c);font-weight:700;">مسح الفلتر</button>' : ''}
         </form>
       </div>
     </section>
@@ -1834,7 +1838,7 @@ function shiftsView() {
       <div class="fm-kpi-card">
         <small>إجمالي عدد الشيفتات</small>
         <strong style="color:var(--ink);">${summary.totalShifts ?? shifts.length} شيفت</strong>
-        <small style="color:var(--muted);">${activePreset === 'today' ? 'اليوم' : 'في الفترة المحددة'}</small>
+        <small style="color:var(--muted);">${shiftPeriodLabels[activePreset] ?? 'جميع الشيفتات المسجلة'}</small>
       </div>
       <div class="fm-kpi-card">
         <small>إجمالي مبيعات الشيفتات</small>
@@ -2330,27 +2334,10 @@ function bindShifts() {
   document.querySelectorAll('[data-shift-preset]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const preset = btn.dataset.shiftPreset;
+      const range = computeHistoryPresetRange(preset, 'weekMonday');
       state.shiftPreset = preset;
-      const today = new Date().toISOString().slice(0, 10);
-      if (preset === 'today') {
-        state.shiftFrom = today;
-        state.shiftTo = today;
-      } else if (preset === 'week') {
-        const d = new Date();
-        const day = d.getDay();
-        const diff = d.getDate() - day + (day === 0 ? -6 : 1);
-        const start = new Date(d.setDate(diff)).toISOString().slice(0, 10);
-        state.shiftFrom = start;
-        state.shiftTo = today;
-      } else if (preset === 'month') {
-        const d = new Date();
-        const start = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
-        state.shiftFrom = start;
-        state.shiftTo = today;
-      } else {
-        state.shiftFrom = '';
-        state.shiftTo = '';
-      }
+      state.shiftFrom = range.from;
+      state.shiftTo = range.to;
       await loadShifts();
     });
   });
@@ -2359,9 +2346,26 @@ function bindShifts() {
   filterForm?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const data = new FormData(filterForm);
-    state.shiftFrom = data.get('from') || '';
-    state.shiftTo = data.get('to') || '';
-    state.shiftPreset = 'custom';
+    const from = String(data.get('from') || '').trim();
+    const to = String(data.get('to') || '').trim();
+    if ((from && !to) || (!from && to)) {
+      toast('يجب تحديد تاريخي البداية والنهاية معاً أو تركهما فارغين', 'error');
+      return;
+    }
+    if (from && to && from > to) {
+      toast('تاريخ البداية لازم يكون قبل تاريخ النهاية', 'error');
+      return;
+    }
+    state.shiftFrom = from;
+    state.shiftTo = to;
+    state.shiftPreset = syncPresetWithDates(null, from, to, ['all', 'today', 'week', 'month'], 'weekMonday', 'all');
+    await loadShifts();
+  });
+
+  document.querySelector('#reset-shifts-filter')?.addEventListener('click', async () => {
+    state.shiftPreset = 'all';
+    state.shiftFrom = '';
+    state.shiftTo = '';
     await loadShifts();
   });
 
@@ -2518,9 +2522,9 @@ function suppliersView() {
   const suppliers = state.data.suppliers;
   const currency = state.data.company.currency;
   const today = new Date().toISOString().slice(0, 10);
-  const preset = state.supplierDatePreset ?? 'all';
   const from = state.supplierFrom ?? '';
   const to = state.supplierTo ?? '';
+  const preset = syncPresetWithDates(state.supplierDatePreset, from, to, ['all', 'today', 'week', 'month'], 'weekSunday', 'all');
 
   const filterPurchase = (p) => {
     if (!from && !to) return true;
@@ -2797,7 +2801,7 @@ function profitLossView() {
   });
   const today = new Date().toISOString().slice(0, 10);
   const from = state.reportFrom ?? today, to = state.reportTo ?? today;
-  const activePlRange = state.plRange ?? (from === today && to === today ? 'today' : 'custom');
+  const activePlRange = syncPresetWithDates(state.plRange, from, to, ['today', '7d', '30d', 'month', 'year'], null, 'today');
   const report = state.report;
   const currency = state.data.company.currency;
   const decimals = currencyDecimals(currency);
@@ -2922,6 +2926,7 @@ function topProductsView() {
   const today = new Date().toISOString().slice(0, 10);
   const from = state.analyticsFrom ?? (() => { const date = new Date(); date.setUTCDate(date.getUTCDate() - 29); return date.toISOString().slice(0, 10); })();
   const to = state.analyticsTo ?? today;
+  const activeAnalyticsRange = syncPresetWithDates(state.analyticsRange, from, to, ['7d', '30d', 'month', 'year'], null, '30d');
   const section = state.analyticsSection ?? 'all';
   const currency = state.data.company.currency;
   const decimals = currencyDecimals(currency);
@@ -3018,10 +3023,10 @@ function topProductsView() {
           <span class="pro-filter-label">
             ${icon('calendar', 15)} الفترة الزمنية:
           </span>
-          <button type="button" class="pro-filter-pill ${(state.analyticsRange ?? '30d') === '7d' ? 'active' : ''}" data-analytics-range="7d">7 أيام</button>
-          <button type="button" class="pro-filter-pill ${(state.analyticsRange ?? '30d') === '30d' ? 'active' : ''}" data-analytics-range="30d">30 يوم</button>
-          <button type="button" class="pro-filter-pill ${(state.analyticsRange ?? '30d') === 'month' ? 'active' : ''}" data-analytics-range="month">هذا الشهر</button>
-          <button type="button" class="pro-filter-pill ${(state.analyticsRange ?? '30d') === 'year' ? 'active' : ''}" data-analytics-range="year">السنة</button>
+          <button type="button" class="pro-filter-pill ${activeAnalyticsRange === '7d' ? 'active' : ''}" data-analytics-range="7d">7 أيام</button>
+          <button type="button" class="pro-filter-pill ${activeAnalyticsRange === '30d' ? 'active' : ''}" data-analytics-range="30d">30 يوم</button>
+          <button type="button" class="pro-filter-pill ${activeAnalyticsRange === 'month' ? 'active' : ''}" data-analytics-range="month">هذا الشهر</button>
+          <button type="button" class="pro-filter-pill ${activeAnalyticsRange === 'year' ? 'active' : ''}" data-analytics-range="year">السنة</button>
         </div>
         <form id="analytics-filter" class="pro-date-inputs">
           <div class="pro-input-wrap">
@@ -3497,7 +3502,9 @@ function financialMapView() {
   }
 
   const { summary, timeline, range } = mapData;
-  const activePreset = state.financialMapRange || 'all';
+  const fmFrom = range?.from ?? '';
+  const fmTo = range?.to ?? '';
+  const activePreset = syncPresetWithDates(state.financialMapRange, fmFrom, fmTo, ['all', 'today', 'week', 'month'], 'rolling7', 'all');
 
   return `
     <div class="page-heading-row">
@@ -3530,6 +3537,7 @@ function financialMapView() {
             <input type="date" name="to" value="${range?.to ?? ''}">
           </div>
           <button type="submit" class="button button-primary button-sm" style="height:38px;padding:0 14px;">تطبيق</button>
+          ${fmFrom || fmTo ? '<button type="button" id="reset-fm-filter" class="text-action" style="font-size:12px;color:var(--rose, #be123c);font-weight:700;">مسح الفلتر</button>' : ''}
         </form>
       </div>
     </section>
@@ -4010,18 +4018,36 @@ function bindFinancialMap() {
   document.querySelector('#fm-date-filter')?.addEventListener('submit', (e) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
-    const from = fd.get('from');
-    const to = fd.get('to');
+    const from = String(fd.get('from') || '').trim();
+    const to = String(fd.get('to') || '').trim();
+    if ((from && !to) || (!from && to)) {
+      toast('يجب تحديد تاريخي البداية والنهاية معاً أو تركهما فارغين', 'error');
+      return;
+    }
+    if (from && to && from > to) {
+      toast('تاريخ البداية لازم يكون قبل تاريخ النهاية', 'error');
+      return;
+    }
+    if (!from && !to) {
+      state.financialMapRange = 'all';
+      state.financialMapKey = null;
+      void loadFinancialMap('all');
+      return;
+    }
     const storeId = state.data?.selectedStoreId;
-    const query = new URLSearchParams({ storeId });
-    if (from) query.set('from', from);
-    if (to) query.set('to', to);
-    state.financialMapRange = 'custom';
+    const query = new URLSearchParams({ storeId, from, to });
+    state.financialMapRange = syncPresetWithDates(null, from, to, ['all', 'today', 'week', 'month'], 'rolling7', 'all');
     state.financialMapKey = `${storeId}:${from}:${to}`;
     void api(`/api/reports/financial-map?${query.toString()}`).then((res) => {
       state.financialMap = res;
       render();
     }).catch((err) => toast(err.message, 'error'));
+  });
+
+  document.querySelector('#reset-fm-filter')?.addEventListener('click', () => {
+    state.financialMapRange = 'all';
+    state.financialMapKey = null;
+    void loadFinancialMap('all');
   });
 }
 
@@ -4054,19 +4080,19 @@ function bindSuppliers() {
       <section class="invoice-model-card" data-purchase-group="${index}">
         <div class="invoice-model-head">
           <div class="purchase-group-inputs">
-            <label style="margin:0;"><strong>الموديل أو الصنف:</strong>
+            <label style="margin:0;"><strong>الموديل:</strong>
               <select name="purchaseProduct_${index}" style="margin-top:4px;">
                 ${products.map((product) => `<option value="${product.id}">${escapeHtml(product.name)} (${escapeHtml(product.sku)})</option>`).join('')}
               </select>
             </label>
-            <label style="margin:0;"><strong>سعر الجملة — الشراء للقطعة (${currency}):</strong>
+            <label style="margin:0;"><strong>سعر الجملة (${currency}):</strong>
               <input name="purchaseCost_${index}" inputmode="decimal" required placeholder="مثال: 300" style="margin-top:4px;">
             </label>
-            <label style="margin:0;"><strong>سعر البيع للجمهور — للقطعة (${currency}):</strong>
-              <input name="purchaseRetailPrice_${index}" inputmode="decimal" placeholder="اختياري — اتركه للتسعير لاحقًا" style="margin-top:4px;">
+            <label style="margin:0;"><strong>سعر البيع (${currency}):</strong>
+              <input name="purchaseRetailPrice_${index}" inputmode="decimal" placeholder="اختياري" style="margin-top:4px;">
             </label>
           </div>
-          <button type="button" class="text-action remove-purchase-group" style="color:var(--rose,var(--rose, #be123c));">× حذف الموديل</button>
+          <button type="button" class="text-action remove-purchase-group" style="color:var(--rose,var(--rose, #be123c));">× حذف</button>
         </div>
         <div class="invoice-model-body">
           <div class="purchase-model-meta-strip" data-group-meta="${index}"></div>
@@ -4076,12 +4102,7 @@ function bindSuppliers() {
     `;
 
     const modalHtml = `
-      <div style="margin-bottom:12px;">
-        <h2 style="font-size:18px;margin-bottom:4px;">فاتورة شراء وتسعير بضاعة جديدة</h2>
-        <p style="color:var(--muted);font-size:12px;margin:0;">أدخل سعر الجملة وسعر البيع الفعلي لكل موديل، ويمكنك اختياريًا تفعيل نسبة الربح المستهدفة لتوجيه تسعير الفاتورة.</p>
-      </div>
-
-      <div class="form-grid" style="margin-bottom:12px;">
+      <div class="form-grid" style="margin-bottom:8px;gap:10px;">
         <label>التاجر / المورد
           <select name="supplierId">
             ${state.data.suppliers.map((supplier) => `<option value="${supplier.id}" ${supplier.id === supplierId ? 'selected' : ''}>${escapeHtml(supplier.name)}</option>`).join('')}
@@ -4092,59 +4113,55 @@ function bindSuppliers() {
         </label>
       </div>
 
-      <div class="purchase-live-planner" id="purchase-live-planner" style="margin-bottom:14px;">
-        <div class="purchase-metrics-strip">
-          <div class="purchase-metric-cell">
-            <small>إجمالي الجملة الفعلي</small>
-            <strong id="planner-cost-total">0.00 ${currency}</strong>
-            <span id="planner-pieces-count">0 قطعة</span>
+      <div class="purchase-live-planner" id="purchase-live-planner" style="margin-bottom:10px;">
+        <div class="purchase-compact-bar">
+          <div class="purchase-compact-stats">
+            <span class="purchase-stat-chip">
+              <small>الجملة:</small>
+              <strong id="planner-cost-total">0.00 ${currency}</strong>
+              <em id="planner-pieces-count" class="planner-sub-muted">(0 قطعة)</em>
+            </span>
+            <span class="purchase-stat-chip">
+              <small>البيع:</small>
+              <strong id="planner-retail-total" style="color:var(--purple);">0.00 ${currency}</strong>
+              <em id="planner-priced-count" class="planner-sub-muted">(0/0)</em>
+            </span>
+            <span class="purchase-stat-chip">
+              <small>الربح:</small>
+              <strong id="planner-profit-total">—</strong>
+              <em id="planner-profit-sub" class="planner-sub-muted"></em>
+            </span>
           </div>
-          <div class="purchase-metric-cell">
-            <small>إجمالي البيع المسعّر</small>
-            <strong id="planner-retail-total" style="color:var(--purple);">0.00 ${currency}</strong>
-            <span id="planner-priced-count">0 قطعة مسعّرة</span>
-          </div>
-          <div class="purchase-metric-cell">
-            <small>صافي الربح الفعلي المتوقع</small>
-            <strong id="planner-profit-total">—</strong>
-            <span id="planner-profit-sub">أدخل سعر البيع لحساب الربح</span>
-          </div>
-          <div class="purchase-metric-cell">
-            <small>هدف البيع المطلوب</small>
-            <strong id="planner-target-total">اختياري</strong>
-            <span id="planner-target-sub">فعّل نسبة الربح بالأسفل</span>
-          </div>
+          <label class="purchase-target-check">
+            <input type="checkbox" id="purchase-target-enabled" name="targetProfitEnabled">
+            <span>تحديد نسبة ربح (اختياري)</span>
+          </label>
         </div>
 
-        <div class="purchase-target-box">
-          <div class="purchase-target-toggle-row">
-            <label class="purchase-target-check">
-              <input type="checkbox" id="purchase-target-enabled" name="targetProfitEnabled">
-              <span>تحديد نسبة ربح مستهدفة لهذه الفاتورة (اختياري)</span>
+        <div class="purchase-target-panel" id="purchase-target-panel" hidden>
+          <div class="purchase-target-controls">
+            <label class="purchase-target-input-wrap">
+              <span>نسبة الربح %:</span>
+              <input type="number" id="purchase-target-percent" name="targetProfitPercent" min="0" max="100000" step="0.5" placeholder="100">
             </label>
-            <small style="color:var(--muted);font-size:11.5px;">احسب إجمالي البيع المطلوب وتابع المتبقي لحظيًا مع تسعير كل قطعة</small>
-          </div>
-
-          <div class="purchase-target-panel" id="purchase-target-panel" hidden>
-            <div class="purchase-target-controls">
-              <label class="purchase-target-input-wrap">
-                <span>نسبة الربح المستهدفة %:</span>
-                <input type="number" id="purchase-target-percent" name="targetProfitPercent" min="0" max="100000" step="0.5" placeholder="100">
-              </label>
-              <div class="purchase-target-presets">
-                <button type="button" class="date-preset-chip" data-target-preset="30">30%</button>
-                <button type="button" class="date-preset-chip" data-target-preset="50">50%</button>
-                <button type="button" class="date-preset-chip" data-target-preset="75">75%</button>
-                <button type="button" class="date-preset-chip" data-target-preset="100">100%</button>
-                <button type="button" class="date-preset-chip" data-target-preset="150">150%</button>
-              </div>
+            <div class="purchase-target-presets">
+              <button type="button" class="date-preset-chip" data-target-preset="30">30%</button>
+              <button type="button" class="date-preset-chip" data-target-preset="50">50%</button>
+              <button type="button" class="date-preset-chip" data-target-preset="75">75%</button>
+              <button type="button" class="date-preset-chip" data-target-preset="100">100%</button>
+              <button type="button" class="date-preset-chip" data-target-preset="150">150%</button>
             </div>
-            <div class="purchase-target-formula-banner" id="purchase-target-formula-banner"></div>
-            <div class="purchase-target-progress-track">
-              <div class="purchase-target-progress-fill" id="purchase-target-progress-fill" style="width:0%"></div>
+            <div class="purchase-target-inline-goal">
+              <small>المطلوب بيعه:</small>
+              <strong id="planner-target-total">—</strong>
+              <span id="planner-target-sub" class="planner-sub-muted"></span>
             </div>
-            <div class="purchase-target-remaining-banner" id="purchase-target-remaining-banner"></div>
           </div>
+          <div class="purchase-target-formula-banner" id="purchase-target-formula-banner" hidden></div>
+          <div class="purchase-target-progress-track">
+            <div class="purchase-target-progress-fill" id="purchase-target-progress-fill" style="width:0%"></div>
+          </div>
+          <div class="purchase-target-remaining-banner" id="purchase-target-remaining-banner"></div>
         </div>
       </div>
 
@@ -4374,26 +4391,26 @@ function bindSuppliers() {
       const invoiceProfitEl = form.querySelector('#invoice-expected-profit-text');
 
       if (plannerCostEl) plannerCostEl.textContent = fmtMoney(totalCostMinor);
-      if (plannerPiecesEl) plannerPiecesEl.textContent = `${totalPieces.toString()} قطعة`;
+      if (plannerPiecesEl) plannerPiecesEl.textContent = `(${totalPieces.toString()} قطعة)`;
       if (plannerRetailEl) plannerRetailEl.textContent = fmtMoney(totalAssignedRetailMinor);
-      if (plannerPricedEl) plannerPricedEl.textContent = `${pricedPieces.toString()} من ${totalPieces.toString()} قطعة مسعّرة`;
+      if (plannerPricedEl) plannerPricedEl.textContent = `(${pricedPieces.toString()}/${totalPieces.toString()} مسعّرة)`;
 
       if (pricedPieces === 0n) {
         if (plannerProfitEl) { plannerProfitEl.textContent = '—'; plannerProfitEl.style.color = ''; }
-        if (plannerProfitSubEl) plannerProfitSubEl.textContent = 'أدخل سعر البيع لحساب الربح';
+        if (plannerProfitSubEl) plannerProfitSubEl.textContent = '';
         if (invoiceProfitEl) { invoiceProfitEl.textContent = '—'; invoiceProfitEl.style.color = ''; }
       } else if (unpricedPieces > 0n) {
         const partialProfit = totalAssignedRetailMinor - pricedCostMinor;
         const profitColor = partialProfit < 0n ? 'var(--rose, #be123c)' : 'var(--green, #15803d)';
         if (plannerProfitEl) { plannerProfitEl.textContent = fmtMoney(partialProfit); plannerProfitEl.style.color = profitColor; }
-        if (plannerProfitSubEl) plannerProfitSubEl.textContent = `على القطع المسعّرة (${pricedPieces.toString()}) · باقي ${unpricedPieces.toString()} بلا سعر`;
+        if (plannerProfitSubEl) plannerProfitSubEl.textContent = `(للمسعّر)`;
         if (invoiceProfitEl) { invoiceProfitEl.textContent = `${fmtMoney(partialProfit)} (للقطع المسعّرة فقط)`; invoiceProfitEl.style.color = profitColor; }
       } else {
         const netProfit = totalAssignedRetailMinor - totalCostMinor;
         const roiPct = totalCostMinor > 0n ? (Number((netProfit * 1000n) / totalCostMinor) / 10).toFixed(1) : '0';
         const profitColor = netProfit < 0n ? 'var(--rose, #be123c)' : 'var(--green, #15803d)';
         if (plannerProfitEl) { plannerProfitEl.textContent = fmtMoney(netProfit); plannerProfitEl.style.color = profitColor; }
-        if (plannerProfitSubEl) plannerProfitSubEl.textContent = `نسبة ربح فعلية ${roiPct}%`;
+        if (plannerProfitSubEl) plannerProfitSubEl.textContent = `(${roiPct}%)`;
         if (invoiceProfitEl) { invoiceProfitEl.textContent = `${fmtMoney(netProfit)} (${roiPct}%)`; invoiceProfitEl.style.color = profitColor; }
       }
 
@@ -4420,16 +4437,17 @@ function bindSuppliers() {
       });
 
       if (!targetEnabled) {
-        if (plannerTargetEl) plannerTargetEl.textContent = 'اختياري';
-        if (plannerTargetSubEl) plannerTargetSubEl.textContent = 'فعّل نسبة الربح بالأسفل';
+        if (plannerTargetEl) plannerTargetEl.textContent = '—';
+        if (plannerTargetSubEl) plannerTargetSubEl.textContent = '';
+        if (formulaBannerEl) formulaBannerEl.hidden = true;
       } else if (!Number.isFinite(parsedPct) || parsedPct < 0) {
         if (plannerTargetEl) plannerTargetEl.textContent = '—';
-        if (plannerTargetSubEl) plannerTargetSubEl.textContent = 'اكتب نسبة الربح % المطلوبة';
-        if (formulaBannerEl) formulaBannerEl.textContent = 'أدخل نسبة الربح المستهدفة (مثال: 100%) أو اختر من النسب السريعة أعلاه.';
+        if (plannerTargetSubEl) plannerTargetSubEl.textContent = '';
+        if (formulaBannerEl) formulaBannerEl.hidden = true;
         if (progressFillEl) progressFillEl.style.width = '0%';
         if (remainingBannerEl) {
           remainingBannerEl.className = 'purchase-target-remaining-banner';
-          remainingBannerEl.innerHTML = '<span>اكتب نسبة الربح أولًا لعرض المبلغ المستهدف والمتبقي.</span>';
+          remainingBannerEl.innerHTML = '<span>اكتب نسبة الربح % (مثال: 100) لحساب إجمالي البيع المطلوب والمتبقي.</span>';
         }
       } else {
         activeTargetValid = true;
@@ -4439,13 +4457,8 @@ function bindSuppliers() {
         remainingToTargetMinor = targetSalesMinor - totalAssignedRetailMinor;
 
         if (plannerTargetEl) plannerTargetEl.textContent = fmtMoney(targetSalesMinor);
-        if (plannerTargetSubEl) plannerTargetSubEl.textContent = `ربح ${parsedPct}% = ${fmtMoney(targetProfitMinor)}`;
-
-        if (formulaBannerEl) {
-          formulaBannerEl.innerHTML = totalCostMinor === 0n
-            ? `حدّدت نسبة ربح <strong>${parsedPct}%</strong> — أدخل سعر الجملة والكميات لحساب إجمالي البيع المطلوب.`
-            : `نسبة الـ <strong>${parsedPct}%</strong> تعني أنك تحتاج بيع هذه البضاعة بإجمالي <strong style="color:var(--purple);">${escapeHtml(fmtMoney(targetSalesMinor))}</strong> (رأس مال الجملة ${escapeHtml(fmtMoney(totalCostMinor))} + ربح مستهدف ${escapeHtml(fmtMoney(targetProfitMinor))}).`;
-        }
+        if (plannerTargetSubEl) plannerTargetSubEl.textContent = `(ربح ${escapeHtml(String(parsedPct))}% = ${escapeHtml(fmtMoney(targetProfitMinor))})`;
+        if (formulaBannerEl) formulaBannerEl.hidden = true;
 
         const progressPct = targetSalesMinor > 0n
           ? Math.min(100, Math.max(0, Number((totalAssignedRetailMinor * 1000n) / targetSalesMinor) / 10))
@@ -4793,32 +4806,29 @@ function bindSuppliers() {
 
   document.querySelectorAll('[data-sup-preset]').forEach((btn) => btn.addEventListener('click', () => {
     const preset = btn.dataset.supPreset;
+    const range = computeHistoryPresetRange(preset, 'weekSunday');
     state.supplierDatePreset = preset;
-    const today = new Date().toISOString().slice(0, 10);
-    if (preset === 'all') {
-      state.supplierFrom = '';
-      state.supplierTo = '';
-    } else if (preset === 'today') {
-      state.supplierFrom = today;
-      state.supplierTo = today;
-    } else if (preset === 'week') {
-      const now = new Date();
-      const firstDay = new Date(now.setDate(now.getDate() - now.getDay()));
-      state.supplierFrom = firstDay.toISOString().slice(0, 10);
-      state.supplierTo = today;
-    } else if (preset === 'month') {
-      state.supplierFrom = `${today.slice(0, 7)}-01`;
-      state.supplierTo = today;
-    }
+    state.supplierFrom = range.from;
+    state.supplierTo = range.to;
     render();
   }));
 
   document.querySelector('#supplier-date-filter')?.addEventListener('submit', (event) => {
     event.preventDefault();
     const fd = new FormData(event.currentTarget);
-    state.supplierDatePreset = 'custom';
-    state.supplierFrom = String(fd.get('from') ?? '').trim();
-    state.supplierTo = String(fd.get('to') ?? '').trim();
+    const from = String(fd.get('from') ?? '').trim();
+    const to = String(fd.get('to') ?? '').trim();
+    if ((from && !to) || (!from && to)) {
+      toast('يجب تحديد تاريخي البداية والنهاية معاً أو تركهما فارغين', 'error');
+      return;
+    }
+    if (from && to && from > to) {
+      toast('تاريخ البداية لازم يكون قبل تاريخ النهاية', 'error');
+      return;
+    }
+    state.supplierFrom = from;
+    state.supplierTo = to;
+    state.supplierDatePreset = syncPresetWithDates(null, from, to, ['all', 'today', 'week', 'month'], 'weekSunday', 'all');
     render();
   });
 
@@ -4834,25 +4844,10 @@ async function bindSalesHistory() {
   document.querySelectorAll('[data-sales-preset]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const preset = btn.dataset.salesPreset;
+      const range = computeHistoryPresetRange(preset, 'rolling7');
       state.salesPreset = preset;
-      const today = new Date().toISOString().slice(0, 10);
-      if (preset === 'today') {
-        state.salesFrom = today;
-        state.salesTo = today;
-      } else if (preset === 'week') {
-        const d = new Date();
-        d.setDate(d.getDate() - 7);
-        state.salesFrom = d.toISOString().slice(0, 10);
-        state.salesTo = today;
-      } else if (preset === 'month') {
-        const d = new Date();
-        d.setDate(1);
-        state.salesFrom = d.toISOString().slice(0, 10);
-        state.salesTo = today;
-      } else {
-        state.salesFrom = '';
-        state.salesTo = '';
-      }
+      state.salesFrom = range.from;
+      state.salesTo = range.to;
       state.salesHistory = [];
       state.salesHistoryTotal = 0;
       await fetchSalesHistory(0, false);
@@ -4874,7 +4869,7 @@ async function bindSalesHistory() {
       toast('تاريخ البداية لازم يكون قبل تاريخ النهاية', 'error');
       return;
     }
-    state.salesPreset = 'custom';
+    state.salesPreset = (!from && !to) ? 'all' : syncPresetWithDates(null, from, to, ['all', 'today', 'week', 'month'], 'rolling7', 'all');
     state.salesHistorySearch = search;
     state.salesFrom = from;
     state.salesTo = to;
@@ -4886,6 +4881,7 @@ async function bindSalesHistory() {
   document.querySelector('#reset-sales-filter')?.addEventListener('click', async () => {
     state.salesPreset = 'all';
     state.salesHistorySearch = '';
+    state.salesPreset = 'all';
     state.salesFrom = '';
     state.salesTo = '';
     state.salesHistory = [];
@@ -5627,6 +5623,11 @@ function bindShell() {
       state.analyticsKey = null;
       state.salesHistory = null;
       state.salesHistoryTotal = 0;
+      state.shiftsData = null;
+      state.financialMap = null;
+      state.financialMapKey = null;
+      state.growthForecast = null;
+      state.growthForecastKey = null;
       resetStocktakeUiState();
       await loadData(event.target.value);
       render();
@@ -5651,6 +5652,27 @@ function bindShell() {
     state.user = null;
     state.data = null;
     state.cart = [];
+    state.shiftPreset = null;
+    state.shiftFrom = '';
+    state.shiftTo = '';
+    state.shiftsData = null;
+    state.salesPreset = null;
+    state.salesFrom = '';
+    state.salesTo = '';
+    state.salesHistory = null;
+    state.supplierDatePreset = null;
+    state.supplierFrom = '';
+    state.supplierTo = '';
+    state.financialMapRange = 'all';
+    state.financialMap = null;
+    state.financialMapKey = null;
+    state.plRange = null;
+    state.reportFrom = null;
+    state.reportTo = null;
+    state.analyticsRange = null;
+    state.analyticsFrom = null;
+    state.analyticsTo = null;
+    state.growthViewMode = null;
     resetStocktakeUiState();
     render();
   });
@@ -5668,8 +5690,9 @@ function bindShell() {
         state.salesHistorySearch = term;
         state.salesHistory = result.payload.sales;
         state.salesHistoryTotal = result.payload.total;
-        state.salesFrom = '1970-01-01';
-        state.salesTo = new Date().toISOString().slice(0, 10);
+        state.salesPreset = 'all';
+        state.salesFrom = '';
+        state.salesTo = '';
         state.page = 'sales';
       } else {
         state.page = state.data.capabilities.cashierMode ? 'inventory' : 'products';
@@ -6112,6 +6135,44 @@ function computePresetRange(preset) {
   return { from: to, to };
 }
 
+function computeHistoryPresetRange(preset, weekStyle = 'rolling7') {
+  if (preset === 'all' || !preset) return { from: '', to: '' };
+  const now = new Date();
+  const to = now.toISOString().slice(0, 10);
+  if (preset === 'today') return { from: to, to };
+  if (preset === 'week') {
+    const d = new Date(now);
+    if (weekStyle === 'weekMonday') {
+      const day = d.getUTCDay();
+      d.setUTCDate(d.getUTCDate() - (day === 0 ? 6 : day - 1));
+    } else if (weekStyle === 'weekSunday') {
+      d.setUTCDate(d.getUTCDate() - d.getUTCDay());
+    } else {
+      d.setUTCDate(d.getUTCDate() - 7);
+    }
+    return { from: d.toISOString().slice(0, 10), to };
+  }
+  if (preset === 'month') return { from: `${to.slice(0, 7)}-01`, to };
+  return { from: '', to: '' };
+}
+
+function syncPresetWithDates(explicitPreset, from, to, allowedPresets, weekStyle = 'rolling7', emptyDefault = 'all') {
+  const f = String(from || '').trim();
+  const t = String(to || '').trim();
+  if (!f && !t) return emptyDefault;
+  const getRange = (p) => (weekStyle === null ? computePresetRange(p) : computeHistoryPresetRange(p, weekStyle));
+  if (explicitPreset && explicitPreset !== 'custom' && allowedPresets.includes(explicitPreset)) {
+    const expected = getRange(explicitPreset);
+    if (expected.from === f && expected.to === t) return explicitPreset;
+  }
+  for (const p of allowedPresets) {
+    if (p === 'all') continue;
+    const expected = getRange(p);
+    if (expected.from === f && expected.to === t) return p;
+  }
+  return 'custom';
+}
+
 function bindTopProducts() {
   document.querySelector('#analytics-section-select')?.addEventListener('change', (event) => {
     state.analyticsSection = event.currentTarget.value;
@@ -6134,9 +6195,10 @@ function bindTopProducts() {
   document.querySelector('#analytics-filter')?.addEventListener('submit', (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    const from = String(data.get('from') ?? ''), to = String(data.get('to') ?? '');
+    const from = String(data.get('from') ?? '').trim(), to = String(data.get('to') ?? '').trim();
+    if (!from || !to) { toast('يجب تحديد تاريخ البداية والنهاية معاً', 'error'); return; }
     if (from > to) { toast('تاريخ البداية لازم يكون قبل تاريخ النهاية', 'error'); return; }
-    state.analyticsRange = 'custom';
+    state.analyticsRange = syncPresetWithDates(null, from, to, ['7d', '30d', 'month', 'year'], null, '30d');
     state.analyticsFrom = from;
     state.analyticsTo = to;
     state.productStats = null;
@@ -6239,9 +6301,11 @@ function bindProfitLoss() {
   }));
   document.querySelector('#profit-loss-filter')?.addEventListener('submit', (event) => {
     event.preventDefault();
-    state.plRange = 'custom';
-    const from = document.querySelector('#report-from').value;
-    const to = document.querySelector('#report-to').value;
+    const from = String(document.querySelector('#report-from')?.value ?? '').trim();
+    const to = String(document.querySelector('#report-to')?.value ?? '').trim();
+    if (!from || !to) { toast('يجب تحديد تاريخ البداية والنهاية معاً', 'error'); return; }
+    if (from > to) { toast('تاريخ البداية لازم يكون قبل تاريخ النهاية', 'error'); return; }
+    state.plRange = syncPresetWithDates(null, from, to, ['today', '7d', '30d', 'month', 'year'], null, 'today');
     state.reportKey = null;
     void load(from, to);
   });
@@ -7137,42 +7201,40 @@ function showPosProductPickerModal(product) {
   const totalStock = variants.reduce((sum, v) => sum + BigInt(v.quantity), 0n);
   const categoryName = state.data.categories.find((c) => c.id === product.categoryId)?.name ?? '';
 
-  const heroHtml = `
-    <div class="pos-picker-hero">
-      <div class="pos-picker-image-box">
+  const sideHtml = `
+    <aside class="pos-picker-side">
+      <div class="pos-picker-image-box ${product.imagePath ? '' : 'is-empty'}">
         ${product.imagePath
           ? `<button type="button" class="pos-picker-image-trigger" data-zoom-pos-image aria-label="تكبير صورة المنتج">
               <img src="${escapeHtml(product.imagePath)}" alt="${escapeHtml(product.name)}" class="pos-picker-hero-img">
-              <span class="pos-picker-zoom-hint">${icon('search', 13)} تكبير أوضح</span>
+              <span class="pos-picker-zoom-hint">${icon('search', 12)} تكبير</span>
             </button>`
-          : `<div class="pos-picker-no-image">${icon('box', 40)}<span>لا توجد صورة لهذا المنتج</span></div>`}
+          : `<div class="pos-picker-no-image">${icon('box', 30)}<span>بدون صورة</span></div>`}
       </div>
-      <div class="pos-picker-info">
-        <div class="pos-picker-meta-line">
-          <span class="sku-code">${escapeHtml(product.sku)}</span>
-          ${product.brand ? `<span>· ${escapeHtml(product.brand)}</span>` : ''}
-          ${categoryName ? `<span>· ${escapeHtml(categoryName)}</span>` : ''}
-        </div>
-        <h3>${escapeHtml(product.name)}</h3>
-        ${product.description ? `<p style="margin:0;font-size:12px;color:var(--muted);line-height:1.45;">${escapeHtml(product.description)}</p>` : ''}
+      <div class="pos-picker-side-meta">
         <div class="pos-picker-badges">
           <span class="pos-picker-price-pill ${pricingSummary.allUnpriced ? 'is-unpriced' : ''}">${escapeHtml(pricingSummary.labelText)}</span>
-          <span class="pos-picker-stock-pill">${product.itemKind === 'SERVICE' ? 'خدمة متاحة' : `المتاح بالمخزن: ${totalStock} قطعة`}</span>
+          <span class="pos-picker-stock-pill">${product.itemKind === 'SERVICE' ? 'خدمة متاحة' : `${totalStock} متاح`}</span>
         </div>
-        <p class="pos-picker-prompt">${variants.length > 1 ? 'راجع الصورة وتأكد من الشكل ثم اختر المقاس أو اللون لإضافته للفاتورة:' : 'تأكد من صورة الصنف ثم اضغط على إضافة للفاتورة بالأسفل:'}</p>
+        ${(product.brand || categoryName) ? `<div class="pos-picker-meta-line">${[product.brand, categoryName].filter(Boolean).map(escapeHtml).join(' · ')}</div>` : ''}
+        ${product.description ? `<p class="pos-picker-desc">${escapeHtml(product.description)}</p>` : ''}
       </div>
-    </div>
+    </aside>
   `;
 
   const groupedHtml = matrix.isMatrix
-    ? `<div class="pos-matrix-picker">${matrix.colors.map((color) => `<div class="pos-color-group"><div class="pos-color-title"><span>اللون: <strong>${escapeHtml(color)}</strong></span><small>اختر المقاس لإضافته للفاتورة</small></div><div class="pos-size-grid">${matrix.sizes.map((size) => {
-      const variant = matrix.matrixMap.get(`${color}:::${size}`);
-      if (!variant) return '';
-      const unavailable = product.itemKind === 'PRODUCT' && BigInt(variant.quantity) <= 0n;
-      const unpriced = BigInt(variant.price?.amount ?? 0) <= 0n;
-      const disabled = unavailable || unpriced;
-      return `<button type="button" class="pos-size-tile ${disabled ? 'tile-empty' : ''}" data-pos-variant="${variant.id}" ${disabled ? 'disabled' : ''}><strong>مقاس ${escapeHtml(size)}</strong><span>${unpriced ? 'غير مسعّر' : money(variant.price)}</span><small>${unavailable ? 'نفد' : unpriced ? 'سعّره أولاً' : `متاح ${variant.quantity}`}</small></button>`;
-    }).join('')}</div></div>`).join('')}</div>`
+    ? `<div class="pos-matrix-picker">${matrix.colors.map((color) => {
+      const colorVariants = matrix.sizes.map((size) => matrix.matrixMap.get(`${color}:::${size}`)).filter(Boolean);
+      const colorStock = colorVariants.reduce((sum, v) => sum + BigInt(v.quantity ?? 0), 0n);
+      return `<div class="pos-color-group"><div class="pos-color-title"><span>اللون: <strong>${escapeHtml(color)}</strong></span><small>${product.itemKind === 'SERVICE' ? `${colorVariants.length} خيار` : `${colorStock} متاح`}</small></div><div class="pos-size-grid">${matrix.sizes.map((size) => {
+        const variant = matrix.matrixMap.get(`${color}:::${size}`);
+        if (!variant) return '';
+        const unavailable = product.itemKind === 'PRODUCT' && BigInt(variant.quantity) <= 0n;
+        const unpriced = BigInt(variant.price?.amount ?? 0) <= 0n;
+        const disabled = unavailable || unpriced;
+        return `<button type="button" class="pos-size-tile ${disabled ? 'tile-empty' : ''}" data-pos-variant="${variant.id}" ${disabled ? 'disabled' : ''}><strong>${escapeHtml(size)}</strong><span>${unpriced ? 'غير مسعّر' : money(variant.price)}</span><small>${unavailable ? 'نفد' : unpriced ? 'سعّره أولاً' : `متاح ${variant.quantity}`}</small></button>`;
+      }).join('')}</div></div>`;
+    }).join('')}</div>`
     : `<div class="pos-single-picker-grid">${variants.map((variant) => {
       const label = formatVariantAttributes(product, variant.attributes, product.name);
       const unavailable = product.itemKind === 'PRODUCT' && BigInt(variant.quantity) <= 0n;
@@ -7187,7 +7249,7 @@ function showPosProductPickerModal(product) {
       </button>`;
     }).join('')}</div>`;
 
-  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">معاينة المنتج واختيار الصنف — ${escapeHtml(product.sku)}</span><h2>${escapeHtml(product.name)}</h2></div><button type="button" class="modal-close" data-close-modal>×</button></div><div class="pos-picker-body">${heroHtml}${groupedHtml}</div></section></div>`;
+  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal pos-picker-modal" role="dialog" aria-modal="true"><div class="modal-heading"><div class="modal-heading-copy"><span class="sku-code" style="margin-bottom:4px;display:inline-block;">${escapeHtml(product.sku)}</span><h2>${escapeHtml(product.name)}</h2></div><button type="button" class="modal-close" data-close-modal>×</button></div><div class="pos-picker-body pos-picker-split">${sideHtml}<div class="pos-picker-main">${groupedHtml}</div></div></section></div>`;
   modal.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { modal.innerHTML = ''; }));
   modal.querySelector('[data-zoom-pos-image]')?.addEventListener('click', () => {
     if (!product.imagePath) return;
@@ -7297,6 +7359,7 @@ async function doCheckout() {
     state.salesHistory = null;
     state.salesHistoryTotal = undefined;
     state.salesHistorySearch = '';
+    state.salesPreset = 'all';
     state.salesFrom = '';
     state.salesTo = '';
     state.report = null;
