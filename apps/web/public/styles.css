@@ -941,6 +941,8 @@
   }
   .invoice-detail-card,
   .invoice-detail-card *,
+  .stocktake-print-card,
+  .stocktake-print-card *,
   .thermal-receipt-paper,
   .thermal-receipt-paper * {
     visibility: visible !important;
@@ -4649,6 +4651,448 @@ html .button-shift-start:hover {
   .att-kpi-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+
+/* =========================================================
+   Full Stocktake (الجرد الشامل) Workspace & Report Styles
+   ========================================================= */
+.stocktake-draft-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  margin-bottom: 18px;
+  border-radius: 14px;
+  border: 1.5px solid rgba(89, 72, 216, 0.35);
+  background: linear-gradient(135deg, rgba(89, 72, 216, 0.08), rgba(16, 185, 129, 0.06));
+}
+.stocktake-draft-banner-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.stocktake-draft-banner-copy strong { font-size: 14.5px; color: var(--ink); }
+.stocktake-draft-banner-copy span { font-size: 12.5px; color: var(--muted); }
+
+.stocktake-create-form { display: flex; flex-direction: column; gap: 16px; }
+.stocktake-form-top {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+}
+.stocktake-scope-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.stocktake-scope-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1.5px solid var(--line);
+  background: var(--surface-soft, var(--panel));
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+.stocktake-scope-card input[type="radio"] {
+  position: absolute;
+  top: 14px;
+  inset-inline-end: 14px;
+}
+.stocktake-scope-card strong { font-size: 13.5px; padding-inline-end: 24px; color: var(--ink); }
+.stocktake-scope-card small { font-size: 12px; color: var(--muted); line-height: 1.55; }
+.stocktake-scope-card.is-selected {
+  border-color: var(--purple, #5948d8);
+  background: rgba(89, 72, 216, 0.06);
+  box-shadow: 0 0 0 3px rgba(89, 72, 216, 0.12);
+}
+.stocktake-category-wrap { max-width: 380px; }
+.stocktake-toggles-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+.stocktake-checkbox-pill {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 11px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  cursor: pointer;
+}
+.stocktake-checkbox-pill input { margin-top: 3px; flex-shrink: 0; }
+.stocktake-checkbox-pill span { display: flex; flex-direction: column; gap: 3px; }
+.stocktake-checkbox-pill strong { font-size: 13px; color: var(--ink); }
+.stocktake-checkbox-pill small { font-size: 12px; color: var(--muted); }
+.stocktake-form-actions { display: flex; justify-content: flex-end; }
+
+.stocktake-row-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.stocktake-muted { color: var(--muted); font-size: 12px; }
+.stocktake-text-surplus { color: #15803d; font-weight: 800; }
+.stocktake-text-shortage { color: #be123c; font-weight: 800; }
+.stocktake-status-draft {
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+.stocktake-blind-chip, .stocktake-blind-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(99, 102, 241, 0.12);
+  color: #4f46e5;
+}
+.stocktake-mini-progress { display: flex; flex-direction: column; gap: 5px; min-width: 120px; font-size: 12px; }
+.stocktake-mini-track, .stocktake-progress-track {
+  width: 100%;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+.stocktake-mini-track i, .stocktake-progress-track i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--purple, #5948d8), #10b981);
+  transition: width 0.25s ease;
+}
+
+.stocktake-workspace-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.stocktake-header-title { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.stocktake-title-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.stocktake-title-line h3 { margin: 0; font-size: 17px; }
+.stocktake-header-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.stocktake-save-pill {
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+.stocktake-save-pill.is-saving { background: rgba(59, 130, 246, 0.14); color: #1d4ed8; }
+.stocktake-save-pill.is-dirty { background: rgba(245, 158, 11, 0.16); color: #b45309; }
+.stocktake-save-pill.is-saved { background: rgba(16, 185, 129, 0.14); color: #047857; }
+
+.stocktake-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.stocktake-kpi-grid .kpi-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.stocktake-kpi-grid .kpi-value { margin: 6px 0; font-size: 20px; font-weight: 800; }
+
+.stocktake-info-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+  padding: 11px 16px;
+  margin-bottom: 16px;
+  border-radius: 11px;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: var(--ink);
+  font-size: 12.5px;
+}
+
+.stocktake-scanner-panel { display: flex; flex-direction: column; gap: 12px; }
+.stocktake-scanner-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+.stocktake-scan-field {
+  flex: 1 1 290px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  border: 2px solid var(--purple, #5948d8);
+  border-radius: 12px;
+  background: var(--surface, #fff);
+  min-height: 46px;
+}
+.stocktake-scan-field input {
+  flex: 1;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 8px 0 !important;
+  font-size: 14px;
+  font-weight: 600;
+}
+.stocktake-step-selector {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.stocktake-step-chip {
+  padding: 6px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  font-weight: 700;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.stocktake-step-chip.is-active {
+  background: var(--purple, #5948d8);
+  border-color: var(--purple, #5948d8);
+  color: #fff;
+}
+.stocktake-step-selector input { width: 70px !important; text-align: center; padding: 6px 8px !important; }
+
+.stocktake-quickadd-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+.stocktake-quickadd-picker {
+  display: flex;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 300px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.stocktake-quickadd-picker span { white-space: nowrap; }
+.stocktake-quickadd-picker select { flex: 1; min-width: 220px; }
+
+.stocktake-recent-scans {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 6px;
+}
+.stocktake-recent-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  font-size: 12px;
+}
+.stocktake-recent-pill button {
+  border: 0;
+  border-radius: 6px;
+  padding: 2px 7px;
+  background: var(--surface, #fff);
+  color: var(--ink);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.stocktake-table-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.stocktake-filter-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.stocktake-table-search-group { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.stocktake-table-search-group select { min-width: 155px; }
+
+.stocktake-lines-table tr.is-last-scanned {
+  background: rgba(16, 185, 129, 0.08);
+  box-shadow: inset 3px 0 0 #10b981;
+}
+.stocktake-lines-table tr.is-needs-cost {
+  background: rgba(245, 158, 11, 0.08);
+}
+.stocktake-product-cell { display: flex; flex-direction: column; gap: 3px; }
+.stocktake-variant-sub { font-size: 12px; color: var(--muted); }
+.stocktake-code-row { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.stocktake-barcode-pill, .stocktake-scanned-pill {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.stocktake-scanned-pill {
+  background: rgba(16, 185, 129, 0.14);
+  border-color: rgba(16, 185, 129, 0.3);
+  color: #047857;
+  font-weight: 700;
+}
+.stocktake-expected-cell { display: flex; flex-direction: column; gap: 2px; align-items: center; }
+.stocktake-moved-tag {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(245, 158, 11, 0.15);
+  color: #b45309;
+  font-weight: 700;
+}
+
+.stocktake-count-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.stocktake-qty-input {
+  width: 72px !important;
+  text-align: center;
+  font-weight: 800;
+  font-size: 14px;
+  padding: 6px 6px !important;
+}
+.stocktake-step-btn, .stocktake-match-btn, .stocktake-clear-btn {
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  font-weight: 700;
+  cursor: pointer;
+}
+.stocktake-step-btn { width: 30px; font-size: 15px; }
+.stocktake-match-btn { padding: 0 9px; font-size: 11.5px; color: var(--purple, #5948d8); }
+.stocktake-match-btn:hover { background: rgba(89, 72, 216, 0.1); border-color: var(--purple, #5948d8); }
+.stocktake-clear-btn { width: 28px; color: #be123c; }
+
+.stocktake-var-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.stocktake-var-pill.is-pending { background: var(--panel); color: var(--muted); border: 1px solid var(--line); }
+.stocktake-var-pill.is-matched { background: rgba(16, 185, 129, 0.14); color: #047857; }
+.stocktake-var-pill.is-surplus { background: rgba(5, 150, 105, 0.16); color: #065f46; }
+.stocktake-var-pill.is-shortage { background: rgba(225, 29, 72, 0.15); color: #be123c; }
+
+.stocktake-fin-cell { display: flex; flex-direction: column; gap: 4px; }
+.stocktake-override-cost-wrap { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: #b45309; font-weight: 700; }
+.stocktake-override-cost-wrap.is-required input { border-color: #f59e0b !important; }
+.stocktake-cost-input { width: 110px !important; padding: 4px 8px !important; font-size: 12px !important; }
+.stocktake-reason-input { min-width: 140px; font-size: 12.5px !important; padding: 6px 9px !important; }
+
+.stocktake-commit-modal { width: min(680px, calc(100vw - 28px)); max-height: calc(100vh - 28px); overflow: auto; }
+.stocktake-review-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.stocktake-review-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  border-radius: 11px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+.stocktake-review-box span { font-size: 11.5px; color: var(--muted); }
+.stocktake-review-box strong { font-size: 14.5px; color: var(--ink); }
+.stocktake-review-box.is-surplus strong { color: #047857; }
+.stocktake-review-box.is-shortage strong { color: #be123c; }
+.stocktake-review-box.is-net { border-color: rgba(89, 72, 216, 0.35); background: rgba(89, 72, 216, 0.06); }
+
+.stocktake-commit-form { display: flex; flex-direction: column; gap: 14px; }
+.stocktake-strategy-group { display: flex; flex-direction: column; gap: 8px; }
+.stocktake-strategy-group > strong { font-size: 13px; color: var(--ink); }
+.stocktake-strategy-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 14px;
+  border-radius: 10px;
+  border: 1.5px solid var(--line);
+  background: var(--panel);
+  cursor: pointer;
+}
+.stocktake-strategy-option.is-disabled { opacity: 0.55; cursor: not-allowed; }
+.stocktake-strategy-option span { display: flex; flex-direction: column; gap: 2px; }
+.stocktake-strategy-option strong { font-size: 13px; color: var(--ink); }
+.stocktake-strategy-option small { font-size: 12px; color: var(--muted); }
+
+.stocktake-print-header h2 { margin: 0 0 6px; font-size: 18px; }
+.stocktake-print-header p { margin: 2px 0; font-size: 12.5px; color: var(--muted); }
+.stocktake-print-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.stocktake-print-table th, .stocktake-print-table td { border: 1px solid var(--line); padding: 7px 8px; }
+.stocktake-print-signatures {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+  margin-top: 32px;
+  padding-top: 16px;
+}
+.stocktake-print-signatures span { font-size: 12px; color: var(--muted); display: block; margin-bottom: 28px; }
+.stocktake-print-signatures .sig-line { border-bottom: 1.5px solid var(--ink); }
+
+:root[data-theme="dark"] .stocktake-scan-field { background: rgba(15, 23, 42, 0.85); }
+:root[data-theme="dark"] .stocktake-recent-pill button { background: rgba(30, 41, 59, 0.9); color: #f8fafc; }
+:root[data-theme="dark"] .stocktake-text-surplus { color: #34d399; }
+:root[data-theme="dark"] .stocktake-text-shortage { color: #fb7185; }
+:root[data-theme="dark"] .stocktake-var-pill.is-surplus { color: #34d399; }
+:root[data-theme="dark"] .stocktake-var-pill.is-shortage { color: #fb7185; }
+:root[data-theme="dark"] .stocktake-var-pill.is-matched { color: #34d399; }
+:root[data-theme="dark"] .stocktake-status-draft { color: #fbbf24; }
+:root[data-theme="dark"] .stocktake-save-pill.is-saved { color: #34d399; }
+:root[data-theme="dark"] .stocktake-blind-chip, :root[data-theme="dark"] .stocktake-blind-tag { color: #a5b4fc; }
+
+@media print {
+  .stocktake-print-card {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    max-height: none;
+    box-shadow: none;
+    border: 0;
+    background: #fff !important;
+    color: #000 !important;
+  }
+  .stocktake-print-table th, .stocktake-print-table td { border-color: #333 !important; color: #000 !important; }
+}
+@media (max-width: 960px) {
+  .stocktake-scope-grid { grid-template-columns: 1fr; }
+  .stocktake-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 600px) {
+  .stocktake-kpi-grid { grid-template-columns: 1fr; }
+  .stocktake-print-signatures { grid-template-columns: 1fr; gap: 18px; }
 }
 
 

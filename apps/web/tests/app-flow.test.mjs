@@ -821,3 +821,328 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
     assert.equal(historyLate.payload.history[0].status, 'LATE');
   }
 });
+
+test('executes full professional stocktake lifecycle with permissions, blind count, barcode scan, atomic reconciliation, and CSV export', async () => {
+  const stkDataDir = await mkdtemp(join(appDir, '.test-stk-data-'));
+  const stkPort = await reservePort();
+  const stkUrl = `http://127.0.0.1:${stkPort}`;
+  let stkLog = '';
+  const stkServer = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+    cwd: workspace,
+    env: {
+      ...process.env,
+      PORT: String(stkPort),
+      RETAILOS_DATA_DIR: stkDataDir,
+      RETAILOS_COMPANY_NAME: 'متجر الجرد',
+      RETAILOS_COMPANY_CODE: 'STK_TEST',
+      RETAILOS_CURRENCY: 'EGP',
+      RETAILOS_STORE_NAME: 'الفرع الرئيسي',
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  stkServer.stderr.on('data', (chunk) => { stkLog += chunk.toString(); });
+
+  const stkReq = async (path, { method = 'GET', body, cookieStr } = {}) => {
+    const headers = { Origin: stkUrl };
+    if (body) headers['Content-Type'] = 'application/json';
+    if (cookieStr) headers.Cookie = cookieStr;
+    const response = await fetch(`${stkUrl}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const payload = await response.json();
+    return { response, payload };
+  };
+
+  try {
+    let stkReady = false;
+    for (let i = 0; i < 240; i += 1) {
+      if (stkServer.exitCode !== null) throw new Error(`stkServer exited early (${stkServer.exitCode}): ${stkLog}`);
+      try {
+        const res = await fetch(`${stkUrl}/api/bootstrap`);
+        if (res.ok) { stkReady = true; break; }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 125));
+    }
+    assert.ok(stkReady, `stkServer did not become ready: ${stkLog}`);
+
+    assert.equal((await stkReq('/api/setup', {
+      method: 'POST',
+      body: { ownerUsername: 'stk_owner', ownerName: 'مالك الجرد', password: 'Stocktake-Owner-2026' },
+    })).response.status, 201, stkLog);
+
+    const loginOwner = await stkReq('/api/login', {
+      method: 'POST',
+      body: { username: 'stk_owner', password: 'Stocktake-Owner-2026' },
+    });
+    assert.equal(loginOwner.response.status, 200);
+    const ownerCookie = loginOwner.response.headers.get('set-cookie').split(';')[0];
+
+    const initialData = await stkReq('/api/data', { cookieStr: ownerCookie });
+    assert.equal(initialData.response.status, 200);
+    assert.equal(initialData.payload.capabilities.canAdjustInventory, true);
+    const storeId = initialData.payload.selectedStoreId;
+
+    // Create Cashier & verify 403 isolation
+    const createdCashier = await stkReq('/api/users', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { username: 'stk_cashier', password: 'Stocktake-Cashier-2026', fullName: 'كاشير الجرد', role: 'CASHIER', storeId },
+    });
+    assert.equal(createdCashier.response.status, 201);
+    const loginCashier = await stkReq('/api/login', {
+      method: 'POST',
+      body: { username: 'stk_cashier', password: 'Stocktake-Cashier-2026' },
+    });
+    assert.equal(loginCashier.response.status, 200);
+    const cashierCookie = loginCashier.response.headers.get('set-cookie').split(';')[0];
+
+    const cashierData = await stkReq('/api/data', { cookieStr: cashierCookie });
+    assert.equal(cashierData.payload.capabilities.canAdjustInventory, false);
+    assert.equal((await stkReq(`/api/stocktakes?storeId=${storeId}`, { cookieStr: cashierCookie })).response.status, 403);
+    assert.equal((await stkReq('/api/stocktakes', { method: 'POST', cookieStr: cashierCookie, body: { storeId, scope: 'FULL' } })).response.status, 403);
+
+    // Create supplier & 3 products (A shortage, B surplus, Z zero-WAC surplus)
+    const supplier = await stkReq('/api/suppliers', { method: 'POST', cookieStr: ownerCookie, body: { name: 'مورد الجرد' } });
+    assert.equal(supplier.response.status, 201);
+
+    const prodA = await stkReq('/api/products', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { name: 'تيشيرت جرد أ', sku: 'STK-PROD-A', barcode: '622990011001', variants: [{ sku: 'STK-VAR-A', barcode: '622990011001', retailPrice: '10000', reorderPoint: '1' }] },
+    });
+    const prodB = await stkReq('/api/products', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { name: 'بنطلون جرد ب', sku: 'STK-PROD-B', barcode: '622990011002', variants: [{ sku: 'STK-VAR-B', barcode: '622990011002', retailPrice: '15000', reorderPoint: '1' }] },
+    });
+    const prodZ = await stkReq('/api/products', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { name: 'كاب جرد صفر', sku: 'STK-PROD-Z', barcode: '622990011003', variants: [{ sku: 'STK-VAR-Z', barcode: '622990011003', retailPrice: '5000', reorderPoint: '0' }] },
+    });
+    assert.equal(prodA.response.status, 201);
+    assert.equal(prodB.response.status, 201);
+    assert.equal(prodZ.response.status, 201);
+
+    const catalogAfterProducts = await stkReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie });
+    const varAId = catalogAfterProducts.payload.products.find((p) => p.id === prodA.payload.id).variants[0].id;
+    const varBId = catalogAfterProducts.payload.products.find((p) => p.id === prodB.payload.id).variants[0].id;
+    const varZId = catalogAfterProducts.payload.products.find((p) => p.id === prodZ.payload.id).variants[0].id;
+
+    // Receive A (10 @ 2000) & B (5 @ 4000) via purchase
+    const purchaseRes = await stkReq('/api/purchases', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: crypto.randomUUID(),
+        supplierId: supplier.payload.id,
+        storeId,
+        totalAmount: '40000',
+        paidAmount: '0',
+        items: [
+          { variantId: varAId, quantity: '10', unitCost: '2000' },
+          { variantId: varBId, quantity: '5', unitCost: '4000' },
+        ],
+      },
+    });
+    assert.equal(purchaseRes.response.status, 201, JSON.stringify(purchaseRes.payload));
+
+    // Create FULL blind stocktake
+    const createdDraft = await stkReq('/api/stocktakes', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { storeId, title: 'جرد شامل اختباري', scope: 'FULL', blindMode: true, includeZeroStock: true },
+    });
+    assert.equal(createdDraft.response.status, 201, JSON.stringify(createdDraft.payload));
+    const sessionId = createdDraft.payload.session.id;
+    assert.equal(createdDraft.payload.session.status, 'DRAFT');
+    assert.equal(createdDraft.payload.session.blindHidden, true);
+
+    const lineA = createdDraft.payload.lines.find((l) => l.variantId === varAId);
+    const lineB = createdDraft.payload.lines.find((l) => l.variantId === varBId);
+    const lineZ = createdDraft.payload.lines.find((l) => l.variantId === varZId);
+    assert.ok(lineA && lineB && lineZ);
+    assert.equal(lineA.expectedQuantity, null);
+
+    // ?review=1 exposes expected qty for manager inspection
+    const reviewDraft = await stkReq(`/api/stocktakes/${sessionId}?review=1`, { cookieStr: ownerCookie });
+    assert.equal(reviewDraft.response.status, 200);
+    assert.equal(reviewDraft.payload.session.blindHidden, false);
+    assert.equal(reviewDraft.payload.lines.find((l) => l.id === lineA.id).expectedQuantity, 10);
+
+    // Disable blindMode via settings
+    const unblinded = await stkReq(`/api/stocktakes/${sessionId}/settings`, {
+      method: 'PATCH',
+      cookieStr: ownerCookie,
+      body: { blindMode: false },
+    });
+    assert.equal(unblinded.response.status, 200);
+    assert.equal(unblinded.payload.session.blindHidden, false);
+
+    // Barcode scan A with delta=8 (-2 shortage @ 2000 = -4000)
+    const scannedA = await stkReq(`/api/stocktakes/${sessionId}/lines`, {
+      method: 'PATCH',
+      cookieStr: ownerCookie,
+      body: { scanCode: '622990011001', delta: 8 },
+    });
+    assert.equal(scannedA.response.status, 200, JSON.stringify(scannedA.payload));
+    const updatedA = scannedA.payload.lines.find((l) => l.id === lineA.id);
+    assert.equal(updatedA.countedQuantity, 8);
+    assert.equal(updatedA.varianceQty, -2);
+    assert.equal(updatedA.scannedCount, 1);
+
+    // Unknown barcode returns 404
+    assert.equal((await stkReq(`/api/stocktakes/${sessionId}/lines`, {
+      method: 'PATCH',
+      cookieStr: ownerCookie,
+      body: { scanCode: 'NO-SUCH-BARCODE-999' },
+    })).response.status, 404);
+
+    // Count B=6 (+1 @ 4000) and Z=2 (+2 @ 0 WAC)
+    const patchedBZ = await stkReq(`/api/stocktakes/${sessionId}/lines`, {
+      method: 'PATCH',
+      cookieStr: ownerCookie,
+      body: {
+        lines: [
+          { lineId: lineB.id, countedQuantity: 6, reason: 'زيادة بالرف' },
+          { lineId: lineZ.id, countedQuantity: 2 },
+        ],
+      },
+    });
+    assert.equal(patchedBZ.response.status, 200);
+    assert.equal(patchedBZ.payload.session.missingCostCount, 1);
+
+    // Reject commit if 0-WAC surplus lacks overrideUnitCost
+    assert.equal((await stkReq(`/api/stocktakes/${sessionId}/commit`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { idempotencyKey: crypto.randomUUID(), uncountedStrategy: 'SKIP_UNCOUNTED' },
+    })).response.status, 400);
+
+    // Set override cost 1500 minor units (15.00 EGP) for Z
+    const patchedZCost = await stkReq(`/api/stocktakes/${sessionId}/lines`, {
+      method: 'PATCH',
+      cookieStr: ownerCookie,
+      body: { lines: [{ lineId: lineZ.id, overrideUnitCost: '1500', reason: 'بونص مورد' }] },
+    });
+    assert.equal(patchedZCost.response.status, 200);
+    assert.equal(patchedZCost.payload.session.missingCostCount, 0);
+
+    // Atomic commit
+    const commitKey = crypto.randomUUID();
+    const committed = await stkReq(`/api/stocktakes/${sessionId}/commit`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { idempotencyKey: commitKey, uncountedStrategy: 'SKIP_UNCOUNTED', notes: 'اعتماد نهائي' },
+    });
+    assert.equal(committed.response.status, 200, JSON.stringify(committed.payload));
+    assert.equal(committed.payload.session.status, 'COMMITTED');
+    assert.equal(committed.payload.session.surplusQty, 3);
+    assert.equal(committed.payload.session.shortageQty, 2);
+    assert.equal(committed.payload.session.totalSurplusCost.amount, '7000');
+    assert.equal(committed.payload.session.totalShortageCost.amount, '4000');
+    assert.equal(committed.payload.session.netVarianceCost.amount, '3000');
+    assert.ok(committed.payload.session.journalEntryId);
+
+    // Idempotent replay succeeds
+    const replay = await stkReq(`/api/stocktakes/${sessionId}/commit`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { idempotencyKey: commitKey, uncountedStrategy: 'SKIP_UNCOUNTED' },
+    });
+    assert.equal(replay.response.status, 200);
+
+    // New commit key or post-commit edit rejects with 409
+    assert.equal((await stkReq(`/api/stocktakes/${sessionId}/commit`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { idempotencyKey: crypto.randomUUID(), uncountedStrategy: 'SKIP_UNCOUNTED' },
+    })).response.status, 409);
+    assert.equal((await stkReq(`/api/stocktakes/${sessionId}/lines`, {
+      method: 'PATCH',
+      cookieStr: ownerCookie,
+      body: { lines: [{ lineId: lineA.id, countedQuantity: 99 }] },
+    })).response.status, 409);
+
+    // Verify live stock reflects physical counts
+    const dataAfter = await stkReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie });
+    const getQty = (pid) => Number(dataAfter.payload.products.find((p) => p.id === pid).variants[0].quantity);
+    assert.equal(getQty(prodA.payload.id), 8);
+    assert.equal(getQty(prodB.payload.id), 6);
+    assert.equal(getQty(prodZ.payload.id), 2);
+
+    // Verify CSV export starts with UTF-8 BOM
+    const csvRes = await fetch(`${stkUrl}/api/stocktakes/${sessionId}/export.csv`, {
+      headers: { Origin: stkUrl, Cookie: ownerCookie },
+    });
+    assert.equal(csvRes.status, 200);
+    const csvBuf = Buffer.from(await csvRes.arrayBuffer());
+    assert.equal(csvBuf[0], 0xef);
+    assert.equal(csvBuf[1], 0xbb);
+    assert.equal(csvBuf[2], 0xbf);
+    const csvText = csvBuf.slice(3).toString('utf8');
+    assert.match(csvText, /تيشيرت جرد أ/);
+    assert.ok(csvText.includes(createdDraft.payload.session.sessionNumber));
+
+    // Partial stocktake dynamic scan + cancel flow
+    const partialDraft = await stkReq('/api/stocktakes', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { storeId, scope: 'PARTIAL', title: 'جرد انتقائي للباركود' },
+    });
+    assert.equal(partialDraft.response.status, 201);
+    assert.equal(partialDraft.payload.lines.length, 0);
+    const partialScan = await stkReq(`/api/stocktakes/${partialDraft.payload.session.id}/lines`, {
+      method: 'PATCH',
+      cookieStr: ownerCookie,
+      body: { scanCode: '622990011001', delta: 3 },
+    });
+    assert.equal(partialScan.response.status, 200);
+    assert.equal(partialScan.payload.lines.length, 1);
+    assert.equal(partialScan.payload.lines[0].countedQuantity, 3);
+    const cancelled = await stkReq(`/api/stocktakes/${partialDraft.payload.session.id}/cancel`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {},
+    });
+    assert.equal(cancelled.response.status, 200);
+    assert.equal(cancelled.payload.session.status, 'CANCELLED');
+
+    // Closed accounting period blocks stocktake commit with 409
+    const draftForPeriodClose = await stkReq('/api/stocktakes', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { storeId, scope: 'FULL', includeZeroStock: false },
+    });
+    assert.equal(draftForPeriodClose.response.status, 201);
+    const lineInOpenPeriod = draftForPeriodClose.payload.lines.find((l) => l.variantId === varAId);
+    await stkReq(`/api/stocktakes/${draftForPeriodClose.payload.session.id}/lines`, {
+      method: 'PATCH',
+      cookieStr: ownerCookie,
+      body: { lines: [{ lineId: lineInOpenPeriod.id, countedQuantity: 7 }] },
+    });
+    const periodClose = await stkReq('/api/accounting/periods/close', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { periodId: dataAfter.payload.accountingPeriods[0].id },
+    });
+    assert.equal(periodClose.response.status, 200);
+    assert.equal((await stkReq(`/api/stocktakes/${draftForPeriodClose.payload.session.id}/commit`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { idempotencyKey: crypto.randomUUID(), uncountedStrategy: 'SKIP_UNCOUNTED' },
+    })).response.status, 409);
+
+    // Verify audit logs recorded STOCKTAKE_CREATED, STOCKTAKE_COMMITTED, STOCKTAKE_CANCELLED
+    const auditRes = await stkReq(`/api/audit-logs?storeId=${storeId}&limit=100`, { cookieStr: ownerCookie });
+    assert.equal(auditRes.response.status, 200);
+    const actions = new Set(auditRes.payload.entries.map((e) => e.action));
+    assert.ok(actions.has('STOCKTAKE_CREATED'));
+    assert.ok(actions.has('STOCKTAKE_COMMITTED'));
+    assert.ok(actions.has('STOCKTAKE_CANCELLED'));
+  } finally {
+    if (stkServer.exitCode === null) {
+      stkServer.kill('SIGTERM');
+      await Promise.race([once(stkServer, 'exit'), new Promise((resolve) => setTimeout(resolve, 3000))]);
+    }
+    await rm(stkDataDir, { recursive: true, force: true }).catch(() => {});
+  }
+});

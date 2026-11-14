@@ -362,6 +362,65 @@ export interface AuditLogsTable {
   created_at: string;
 }
 
+export interface StocktakeSessionsTable {
+  id: string;
+  tenant_id: string;
+  store_id: string;
+  session_number: string;
+  title: string;
+  scope: 'FULL' | 'CATEGORY' | 'PARTIAL';
+  category_id: string | null;
+  blind_mode: number;
+  include_zero_stock: number;
+  status: 'DRAFT' | 'COMMITTED' | 'CANCELLED';
+  idempotency_key: string | null;
+  uncounted_strategy: 'SKIP_UNCOUNTED' | 'ZERO_UNCOUNTED' | null;
+  currency: string;
+  notes: string | null;
+  total_lines: number;
+  counted_lines: number;
+  total_variance_qty: number;
+  total_surplus_cost: number;
+  total_shortage_cost: number;
+  net_variance_cost: number;
+  net_variance_retail: number;
+  journal_entry_id: string | null;
+  created_by_user_id: string;
+  committed_by_user_id: string | null;
+  created_at: string;
+  updated_at: string;
+  committed_at: string | null;
+  cancelled_at: string | null;
+}
+
+export interface StocktakeLinesTable {
+  id: string;
+  session_id: string;
+  tenant_id: string;
+  store_id: string;
+  variant_id: string;
+  product_id: string;
+  product_name: string;
+  sku: string;
+  barcode: string | null;
+  category_id: string | null;
+  category_name: string | null;
+  expected_quantity: number;
+  counted_quantity: number | null;
+  unit_wac: number;
+  retail_price: number;
+  override_unit_cost: number | null;
+  scanned_count: number;
+  reason: string | null;
+  committed_expected_quantity: number | null;
+  committed_variance_qty: number | null;
+  committed_variance_cost: number | null;
+  committed_unit_cost: number | null;
+  last_counted_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface RetailOSDatabase {
   tenants: TenantsTable;
   stores: StoresTable;
@@ -393,4 +452,6 @@ export interface RetailOSDatabase {
   supplier_returns: SupplierReturnsTable;
   supplier_return_items: SupplierReturnItemsTable;
   audit_logs: AuditLogsTable;
+  stocktake_sessions: StocktakeSessionsTable;
+  stocktake_lines: StocktakeLinesTable;
 }

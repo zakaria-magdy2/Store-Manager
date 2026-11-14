@@ -27,6 +27,18 @@ const state = {
   financialMapRange: 'all',
   growthForecast: null,
   growthForecastKey: null,
+  stocktakeList: null,
+  stocktakeListStoreId: null,
+  stocktakeActive: null,
+  stocktakeTab: 'ALL',
+  stocktakeQuery: '',
+  stocktakeCategory: '',
+  stocktakeScanStep: 1,
+  stocktakeLastScans: [],
+  stocktakeDirtyMap: {},
+  stocktakeSaving: false,
+  stocktakeLastSavedAt: null,
+  stocktakeCreating: false,
 };
 
 function getModalRoot() {
@@ -223,6 +235,7 @@ const navItems = [
   { id: 'pos', label: 'نقطة البيع', icon: 'bag' },
   { id: 'products', label: 'المنتجات والموديلات', icon: 'box' },
   { id: 'inventory', label: 'المخزون', icon: 'store' },
+  { id: 'stocktake', label: 'الجرد الشامل', icon: 'scan' },
   { id: 'sales', label: 'المبيعات', icon: 'chart' },
   { id: 'shifts', label: 'الشيفتات', icon: 'clock' },
   { id: 'suppliers', label: 'التجار والمشتريات', icon: 'users' },
@@ -244,7 +257,7 @@ function escapeHtml(value) {
 
 async function api(path, options = {}) {
   const method = String(options.method ?? 'GET').toUpperCase();
-  if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && path !== '/api/login') {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && path !== '/api/login' && !options.skipConfirm) {
     const operation = mutationLabel(path, method);
     await requireMutationConfirmation(operation);
   }
@@ -336,6 +349,9 @@ function mutationLabel(path, method) {
   if (path === '/api/attendance/check-in') return 'تسجيل الحضور اليومي';
   if (path.startsWith('/api/users')) return 'حفظ تغييرات الموظف';
   if (path === '/api/account/password') return 'تغيير كلمة المرور';
+  if (path.startsWith('/api/stocktakes/') && path.endsWith('/commit')) return 'اعتماد وترحيل نتائج الجرد الشامل نهائيًا';
+  if (path.startsWith('/api/stocktakes/') && path.endsWith('/cancel')) return 'إلغاء مسودة الجرد الشامل';
+  if (path === '/api/stocktakes') return 'إنشاء جلسة جرد شامل جديدة';
   if (path.startsWith('/api/backups')) return 'تنفيذ عملية النسخ الاحتياطي';
   if (path === '/api/logout') return 'تسجيل الخروج';
   if (path === '/api/setup') return 'إنشاء حساب المدير';
@@ -533,7 +549,7 @@ function shellView() {
   `;
   const { totalCount: totalAlertsCount } = computeSystemAlerts(state.data);
 
-  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'financial-map' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item account-menu-whatsapp" role="menuitem" href="https://wa.me/201200562966" target="_blank" rel="noopener noreferrer">${icon('message', 17)}<span>تواصل مع الدعم (واتساب)<small class="support-phone-sub">01200562966</small></span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${shiftControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>⌘ K</kbd></label><button type="button" class="icon-button notification-button ${totalAlertsCount > 0 ? 'has-alerts' : ''}" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount > 0 ? `<span class="notif-count-badge">${totalAlertsCount > 99 ? '99+' : totalAlertsCount}</span>` : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${pageView()}</section></main>`;
+  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'financial-map' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'stocktake' || state.data.capabilities.canAdjustInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item account-menu-whatsapp" role="menuitem" href="https://wa.me/201200562966" target="_blank" rel="noopener noreferrer">${icon('message', 17)}<span>تواصل مع الدعم (واتساب)<small class="support-phone-sub">01200562966</small></span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${shiftControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>⌘ K</kbd></label><button type="button" class="icon-button notification-button ${totalAlertsCount > 0 ? 'has-alerts' : ''}" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount > 0 ? `<span class="notif-count-badge">${totalAlertsCount > 99 ? '99+' : totalAlertsCount}</span>` : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${pageView()}</section></main>`;
 }
 
 function roleLabel(role) {
@@ -553,6 +569,7 @@ function pageView() {
   if (state.page === 'pos') return posView();
   if (state.page === 'products') return productsView();
   if (state.page === 'inventory') return inventoryView();
+  if (state.page === 'stocktake' && state.data.capabilities.canAdjustInventory) return stocktakeView();
   if (state.page === 'sales') return salesView();
   if (state.page === 'shifts') return shiftsView();
   if (state.page === 'suppliers') return suppliersView();
@@ -1517,7 +1534,7 @@ function inventoryView() {
       </div>
     </div>`;
 
-  return `<div class="page-heading-row"><div><p class="page-lead">${isCashier ? 'متابعة أرصدة المخزون والمقاسات والأسعار المتاحة للبيع.' : 'متابعة وجرد أرصدة المخزون للموديلات والأصناف الحالية وتقييم رأس المال والأرباح المتوقعة.'}</p></div><div class="products-heading-actions">${data.capabilities.canManageStores ? '<button class="button button-secondary" id="new-store-btn">+ إضافة فرع</button>' : ''}${data.capabilities.canTransferInventory && data.stores.length > 1 ? '<button class="button button-secondary" id="transfer-stock-btn">تحويل مخزون بين الفروع</button>' : ''}${data.capabilities.canViewInventory && !isCashier ? '<button class="button button-secondary" id="record-damage-btn">تسجيل تالف / هالك</button><button class="button button-secondary" id="adjust-stock-btn">تسوية جرد فعلي</button>' : ''}<a class="button button-secondary" href="/api/reports/export.csv?type=inventory&storeId=${encodeURIComponent(data.selectedStoreId)}" download>تصدير CSV</a>${!isCashier ? `<button class="button button-primary" data-page="suppliers">فاتورة شراء من تاجر</button>` : ''}</div></div>
+  return `<div class="page-heading-row"><div><p class="page-lead">${isCashier ? 'متابعة أرصدة المخزون والمقاسات والأسعار المتاحة للبيع.' : 'متابعة وجرد أرصدة المخزون للموديلات والأصناف الحالية وتقييم رأس المال والأرباح المتوقعة.'}</p></div><div class="products-heading-actions">${data.capabilities.canManageStores ? '<button class="button button-secondary" id="new-store-btn">+ إضافة فرع</button>' : ''}${data.capabilities.canTransferInventory && data.stores.length > 1 ? '<button class="button button-secondary" id="transfer-stock-btn">تحويل مخزون بين الفروع</button>' : ''}${data.capabilities.canAdjustInventory ? `<button class="button button-secondary" id="record-damage-btn">تسجيل تالف / هالك</button><button class="button button-secondary" id="adjust-stock-btn">تسوية سريعة لصنف</button><button class="button button-primary" id="open-full-stocktake-btn" data-page="stocktake">${icon('scan', 16)} جرد شامل للمحل</button>` : ''}<a class="button button-secondary" href="/api/reports/export.csv?type=inventory&storeId=${encodeURIComponent(data.selectedStoreId)}" download>تصدير CSV</a>${!isCashier ? `<button class="button button-primary" data-page="suppliers">فاتورة شراء من تاجر</button>` : ''}</div></div>
   <div class="inventory-summary" style="grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 16px;">${summaryCardsHtml}
   </div>
   <section class="panel"><div class="panel-heading"><div><h3>أرصدة الموديلات والمقاسات</h3><p>اضغط على الموديل لعرض مصفوفة الألوان والمقاسات</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="ابحث عن الموديل أو الكود أو المقاس" value="${escapeHtml(state.query)}"></label></div>${items.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل</th><th>كود الموديل</th><th>الألوان والمقاسات</th><th style="text-align:center;">إجمالي الرصيد</th>${!isCashier ? '<th>سعر التكلفة (الفعلي)</th><th>سعر البيع</th><th>المكسب المتوقع</th>' : '<th>سعر البيع</th>'}<th>حالة المقاسات</th></tr></thead><tbody>${items.map((product) => `<tr><td><button type="button" class="product-name-action inventory-product-details" data-product-id="${product.id}"><span class="product-avatar ${product.imagePath ? 'has-image' : ''}">${product.imagePath ? renderProductThumb(product) : escapeHtml(product.name.slice(0, 1))}</span><span class="product-name-stack"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand || 'اضغط لعرض جدول المقاسات')}</small></span></button></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${product.matrix.isMatrix ? `<div class="model-sub-badges">${product.matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(product.matrix.colorSummaryLabel)}</span>` : ''}${product.matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(product.matrix.sizeRangeLabel)}</span>` : ''}</div>` : `<small>${product.variants.length} نسخة</small>`}</td><td style="text-align:center;"><strong>${product.quantity}</strong> قطعة</td>${!isCashier ? (() => {
@@ -5153,6 +5170,11 @@ function bindShell() {
       state.analyticsKey = null;
       state.salesHistory = null;
       state.salesHistoryTotal = 0;
+      state.stocktakeList = null;
+      state.stocktakeListStoreId = null;
+      state.stocktakeActive = null;
+      state.stocktakeLastScans = [];
+      state.stocktakeDirtyMap = {};
       await loadData(event.target.value);
       render();
     } catch (error) { toast(error.message, 'error'); }
@@ -5176,6 +5198,11 @@ function bindShell() {
     state.user = null;
     state.data = null;
     state.cart = [];
+    state.stocktakeActive = null;
+    state.stocktakeList = null;
+    state.stocktakeListStoreId = null;
+    state.stocktakeDirtyMap = {};
+    state.stocktakeLastScans = [];
     render();
   });
   const search = document.querySelector('#global-search');
@@ -5203,6 +5230,7 @@ function bindShell() {
   });
   if (state.page === 'products') bindProducts();
   if (state.page === 'inventory') bindInventory();
+  if (state.page === 'stocktake') bindStocktake();
   if (state.page === 'pos') bindPos();
   if (state.page === 'suppliers') bindSuppliers();
   if (state.page === 'sales') { bindReturns(); bindSalesHistory(); }
@@ -6730,6 +6758,1107 @@ async function doCheckout() {
     toast(error.message, 'error');
     render();
   }
+}
+
+let stocktakeFlushTimer = null;
+
+function playStocktakeBeep(ok = true) {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctxAudio = new AudioCtx();
+    const osc = ctxAudio.createOscillator();
+    const gain = ctxAudio.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(ok ? 920 : 250, ctxAudio.currentTime);
+    gain.gain.setValueAtTime(0.06, ctxAudio.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctxAudio.currentTime + (ok ? 0.08 : 0.16));
+    osc.connect(gain);
+    gain.connect(ctxAudio.destination);
+    osc.start();
+    osc.stop(ctxAudio.currentTime + (ok ? 0.08 : 0.16));
+    setTimeout(() => { try { void ctxAudio.close(); } catch {} }, 250);
+  } catch {}
+}
+
+function stocktakeScopeLabel(scope, categoryName) {
+  if (scope === 'FULL') return 'جرد شامل للمحل';
+  if (scope === 'CATEGORY') return categoryName ? `جرد تصنيف: ${categoryName}` : 'جرد تصنيف محدد';
+  return 'جرد انتقائي / سريع';
+}
+
+function stocktakeStatusMeta(status) {
+  if (status === 'COMMITTED') return { label: 'معتمد ومرحل', cls: 'status-complete' };
+  if (status === 'CANCELLED') return { label: 'ملغى', cls: 'status-low' };
+  return { label: 'مسودة قيد العدّ', cls: 'stocktake-status-draft' };
+}
+
+function signedMoneyText(value) {
+  if (!value) return '—';
+  const minor = BigInt(String(value.amount ?? '0'));
+  const formatted = money(value);
+  return minor > 0n ? `+${formatted}` : formatted;
+}
+
+function stocktakeLineMatchesFilter(line, session, tab, queryText, categoryId) {
+  if (categoryId && line.categoryId !== categoryId) return false;
+  if (tab === 'UNCOUNTED' && line.countedQuantity !== null) return false;
+  if (tab === 'VARIANCE' && (session.blindHidden || line.countedQuantity === null || line.varianceQty === 0)) return false;
+  if (tab === 'MATCHED' && (session.blindHidden || line.countedQuantity === null || line.varianceQty !== 0)) return false;
+  const q = String(queryText ?? '').trim().toLowerCase();
+  if (!q) return true;
+  const haystack = `${line.productName} ${line.variantLabel ?? ''} ${line.sku} ${line.barcode ?? ''} ${line.categoryName ?? ''}`.toLowerCase();
+  return haystack.includes(q);
+}
+
+function collectEligibleStocktakeVariants() {
+  const products = state.data?.products ?? [];
+  const options = [];
+  for (const product of products) {
+    if (product.itemKind === 'SERVICE' || product.isActive === false) continue;
+    for (const v of product.variants ?? []) {
+      if (v.isActive === false) continue;
+      const attrs = v.attributes ? Object.values(v.attributes).join(' / ') : '';
+      options.push({
+        variantId: v.id,
+        label: attrs ? `${product.name} (${attrs}) — ${v.sku}` : `${product.name} — ${v.sku}`,
+      });
+    }
+  }
+  return options;
+}
+
+function renderStocktakeRowVarianceHtml(line, session) {
+  if (session.blindHidden) {
+    return '<span class="stocktake-blind-tag">مخفي (جرد أعمى)</span>';
+  }
+  if (line.countedQuantity === null || line.varianceQty === null) {
+    return '<span class="stocktake-var-pill is-pending">بانتظار العدّ</span>';
+  }
+  if (line.varianceQty > 0) {
+    return `<span class="stocktake-var-pill is-surplus">+${line.varianceQty} زيادة</span>`;
+  }
+  if (line.varianceQty < 0) {
+    return `<span class="stocktake-var-pill is-shortage">${line.varianceQty} عجز</span>`;
+  }
+  return '<span class="stocktake-var-pill is-matched">متطابق (0)</span>';
+}
+
+function renderStocktakeFinancialCellHtml(line, session, decimals, currency) {
+  if (session.blindHidden) {
+    return `<small class="stocktake-muted">التكلفة: ${money(line.unitWac)}</small>`;
+  }
+  const showOverrideInput = session.status === 'DRAFT' && (line.needsSurplusCost || line.overrideUnitCost !== null) && line.varianceQty !== null && line.varianceQty > 0;
+  const costSummary = line.countedQuantity === null || line.varianceQty === null || line.varianceQty === 0
+    ? `<small class="stocktake-muted">متوسط التكلفة: ${money(line.unitWac)}</small>`
+    : `<strong class="${line.varianceQty > 0 ? 'stocktake-text-surplus' : 'stocktake-text-shortage'}">${signedMoneyText(line.varianceCost)}</strong><small class="stocktake-muted">بسعر البيع: ${signedMoneyText(line.varianceRetail)}</small>`;
+  if (!showOverrideInput) return `<div class="stocktake-fin-cell">${costSummary}</div>`;
+  const val = line.overrideUnitCost ? decimalPrice(line.overrideUnitCost) : '';
+  return `<div class="stocktake-fin-cell">${costSummary}<label class="stocktake-override-cost-wrap ${line.needsSurplusCost ? 'is-required' : ''}"><span>تكلفة وحدة للزيادة (${escapeHtml(currency)}):</span><input type="text" inputmode="decimal" class="stocktake-cost-input" data-line-id="${line.id}" value="${escapeHtml(val)}" placeholder="مثال: 50"></label></div>`;
+}
+
+function stocktakeView() {
+  const data = state.data;
+  if (!state.stocktakeActive) {
+    const isLoadingList = state.stocktakeListStoreId !== data.selectedStoreId;
+    const sessions = state.stocktakeList ?? [];
+    const openDrafts = sessions.filter((s) => s.status === 'DRAFT');
+    const categoriesOptions = (data.categories ?? []).map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+
+    const sessionsRows = sessions.map((s) => {
+      const meta = stocktakeStatusMeta(s.status);
+      const pct = s.totalLines > 0 ? Math.round((s.countedLines / s.totalLines) * 100) : 0;
+      const varianceLabel = s.blindHidden
+        ? '<span class="stocktake-muted">مخفي (أعمى)</span>'
+        : s.totalVarianceQty > 0
+          ? `<span class="stocktake-text-surplus">+${s.totalVarianceQty}</span>`
+          : s.totalVarianceQty < 0
+            ? `<span class="stocktake-text-shortage">${s.totalVarianceQty}</span>`
+            : '<span>0</span>';
+      const costImpactLabel = s.blindHidden ? '—' : signedMoneyText(s.netVarianceCost);
+      return `<tr>
+        <td><strong class="sku-code">${escapeHtml(s.sessionNumber)}</strong></td>
+        <td><strong>${escapeHtml(s.title)}</strong>${s.createdByName ? `<br><small class="stocktake-muted">أنشئ بواسطة: ${escapeHtml(s.createdByName)}</small>` : ''}</td>
+        <td><span class="model-chip">${escapeHtml(stocktakeScopeLabel(s.scope, s.categoryName))}</span>${s.blindMode ? ' <span class="stocktake-blind-chip">أعمى</span>' : ''}</td>
+        <td><div class="stocktake-mini-progress"><span>${s.countedLines} / ${s.totalLines} (${pct}%)</span><div class="stocktake-mini-track"><i style="width:${pct}%"></i></div></div></td>
+        <td style="text-align:center;">${varianceLabel}</td>
+        <td><strong>${costImpactLabel}</strong></td>
+        <td><span class="status-pill ${meta.cls}">${meta.label}</span></td>
+        <td>${escapeHtml(formatDateTime(s.committedAt || s.createdAt))}</td>
+        <td>
+          <div class="stocktake-row-actions">
+            <button type="button" class="button ${s.status === 'DRAFT' ? 'button-primary' : 'button-secondary'} button-sm stocktake-open-btn" data-session-id="${s.id}">${s.status === 'DRAFT' ? 'متابعة العدّ' : 'عرض التقرير'}</button>
+            <a class="button button-secondary button-sm" href="/api/stocktakes/${s.id}/export.csv" download>CSV</a>
+          </div>
+        </td>
+      </tr>`;
+    }).join('');
+
+    return `<div class="page-heading-row">
+      <div><p class="page-lead">نظام الجرد الشامل الاحترافي للمتاجر: مسح باركود متواصل، حفظ تلقائي كمسودة، جرد أعمى، ومطابقة محاسبية آمنة بضغطة زر.</p></div>
+    </div>
+    ${openDrafts.length ? `<div class="stocktake-draft-banner">
+      <div class="stocktake-draft-banner-copy">
+        <strong>لديك مسودة جرد مفتوحة الآن: ${escapeHtml(openDrafts[0].sessionNumber)} — ${escapeHtml(openDrafts[0].title)}</strong>
+        <span>تم عدّ ${openDrafts[0].countedLines} من أصل ${openDrafts[0].totalLines} صنف · آخر تحديث ${escapeHtml(formatDateTime(openDrafts[0].updatedAt))}</span>
+      </div>
+      <button type="button" class="button button-primary stocktake-open-btn" data-session-id="${openDrafts[0].id}">استكمال العدّ الآن</button>
+    </div>` : ''}
+    <section class="panel stocktake-create-panel">
+      <div class="panel-heading"><div><h3>بدء جلسة جرد جديدة</h3><p>اختر نطاق الجرد وابدأ بمسح الباركود أو الإدخال المباشر للكميات الفعلية.</p></div></div>
+      <form id="stocktake-create-form" class="stocktake-create-form">
+        <div class="stocktake-form-top">
+          <label>عنوان الجرد (اختياري)
+            <input name="title" maxlength="120" placeholder="مثال: جرد نهاية الشهر / جرد قسم التيشيرتات">
+          </label>
+          <label>ملاحظات الجرد (اختياري)
+            <input name="notes" maxlength="500" placeholder="اسم المراجع أو تعليمات الفريق">
+          </label>
+        </div>
+        <div class="stocktake-scope-grid">
+          <label class="stocktake-scope-card is-selected">
+            <input type="radio" name="scope" value="FULL" checked>
+            <strong>جرد شامل للمحل</strong>
+            <small>يجلب جميع المنتجات النشطة في الفرع للمطابقة الكاملة.</small>
+          </label>
+          <label class="stocktake-scope-card">
+            <input type="radio" name="scope" value="CATEGORY">
+            <strong>جرد تصنيف محدد</strong>
+            <small>جرد قسم معين فقط (دوري / أسبوعي) بدون تعطيل المحل.</small>
+          </label>
+          <label class="stocktake-scope-card">
+            <input type="radio" name="scope" value="PARTIAL">
+            <strong>جرد انتقائي / مسح حر</strong>
+            <small>ابدأ بقائمة فارغة وأضف الأصناف بمسح الباركود على الرف.</small>
+          </label>
+        </div>
+        <div id="stocktake-category-wrap" class="stocktake-category-wrap" hidden>
+          <label>اختر التصنيف المطلوب جرده
+            <select name="categoryId">
+              <option value="">— اختر التصنيف —</option>
+              ${categoriesOptions}
+            </select>
+          </label>
+        </div>
+        <div class="stocktake-toggles-row">
+          <label class="stocktake-checkbox-pill">
+            <input type="checkbox" name="blindMode">
+            <span><strong>وضع الجرد الأعمى (Blind Count)</strong><small>يُخفي رصيد النظام أثناء العدّ لمنع التخمين حتى لحظة المراجعة.</small></span>
+          </label>
+          <label class="stocktake-checkbox-pill" id="stocktake-zero-wrap">
+            <input type="checkbox" name="includeZeroStock" checked>
+            <span><strong>تضمين الأصناف رصيدها صفر</strong><small>يكشف أي قطع موجودة على الرف ورصيدها مسجل صفرًا.</small></span>
+          </label>
+        </div>
+        <div class="stocktake-form-actions">
+          <button type="submit" class="button button-primary">${icon('scan', 16)} بدء جلسة الجرد الآن</button>
+        </div>
+      </form>
+    </section>
+    <section class="panel">
+      <div class="panel-heading"><div><h3>سجل جلسات الجرد بالفرع</h3><p>يمكنك استكمال أي مسودة مفتوحة أو استعراض وتصدير تقارير الجرد المعتمدة.</p></div></div>
+      ${isLoadingList ? '<div class="empty-row">جاري تحميل سجل جلسات الجرد...</div>' : sessions.length ? `<div class="table-scroll"><table><thead><tr><th>الكود</th><th>العنوان</th><th>النطاق</th><th>التقدم</th><th style="text-align:center;">صافي الفرق</th><th>أثر التكلفة</th><th>الحالة</th><th>التاريخ</th><th>الإجراءات</th></tr></thead><tbody>${sessionsRows}</tbody></table></div>` : '<div class="empty-row">لا توجد جلسات جرد مسجلة لهذا الفرع بعد.</div>'}
+    </section>`;
+  }
+
+  const detail = state.stocktakeActive;
+  const session = detail.session;
+  const lines = detail.lines ?? [];
+  const isDraft = session.status === 'DRAFT';
+  const currency = session.currency || data.company.currency || 'EGP';
+  const decimals = currencyDecimals(currency);
+  const statusMeta = stocktakeStatusMeta(session.status);
+  const pct = session.totalLines > 0 ? Math.round((session.countedLines / session.totalLines) * 100) : 0;
+  const filteredLines = lines.filter((l) => stocktakeLineMatchesFilter(l, session, state.stocktakeTab, state.stocktakeQuery, state.stocktakeCategory));
+
+  const categoryMap = new Map();
+  for (const l of lines) {
+    if (l.categoryId && l.categoryName) categoryMap.set(l.categoryId, l.categoryName);
+  }
+  const catFilterOptions = [...categoryMap.entries()].map(([id, name]) => `<option value="${id}" ${state.stocktakeCategory === id ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('');
+
+  const addableVariants = isDraft ? collectEligibleStocktakeVariants() : [];
+
+  const dirtyCount = Object.keys(state.stocktakeDirtyMap ?? {}).length;
+  const saveBadge = state.stocktakeSaving
+    ? '<span class="stocktake-save-pill is-saving">جاري الحفظ...</span>'
+    : dirtyCount > 0
+      ? '<span class="stocktake-save-pill is-dirty">تعديلات بانتظار الحفظ</span>'
+      : state.stocktakeLastSavedAt
+        ? `<span class="stocktake-save-pill is-saved">محفوظ تلقائيًا</span>`
+        : '';
+
+  const rowsHtml = filteredLines.map((line) => {
+    const isLastScanned = detail.lastScannedLineId === line.id;
+    const expectedCell = session.blindHidden
+      ? '<span class="stocktake-blind-tag">مخفي</span>'
+      : `<div class="stocktake-expected-cell"><strong>${line.expectedQuantity}</strong>${line.stockMovedSinceSnapshot ? `<small class="stocktake-moved-tag" title="تغير الرصيد من ${line.snapshotExpectedQuantity} إلى ${line.liveQuantity} بسبب حركة بيع أو توريد">بدأت من ${line.snapshotExpectedQuantity} ↺ ${line.liveQuantity}</small>` : ''}</div>`;
+
+    const countControl = isDraft
+      ? `<div class="stocktake-count-controls">
+          <button type="button" class="stocktake-step-btn" data-step="-1" data-line-id="${line.id}" title="إنقاص 1">−</button>
+          <input type="number" min="0" step="1" class="stocktake-qty-input" data-line-id="${line.id}" value="${line.countedQuantity === null ? '' : line.countedQuantity}" placeholder="—" aria-label="الكمية الفعلية لـ ${escapeHtml(line.productName)}">
+          <button type="button" class="stocktake-step-btn" data-step="1" data-line-id="${line.id}" title="زيادة 1">+</button>
+          ${!session.blindHidden ? `<button type="button" class="stocktake-match-btn" data-line-id="${line.id}" title="اعتماد مطابق للنظام (${line.expectedQuantity})">مطابق</button>` : ''}
+          ${line.countedQuantity !== null ? `<button type="button" class="stocktake-clear-btn" data-line-id="${line.id}" title="إعادة لحالة غير معدود">×</button>` : ''}
+        </div>`
+      : `<strong>${line.countedQuantity === null ? 'لم يُعدّ' : line.countedQuantity}</strong>`;
+
+    const reasonCell = isDraft
+      ? `<input type="text" maxlength="240" class="stocktake-reason-input" data-line-id="${line.id}" value="${escapeHtml(line.reason ?? '')}" placeholder="سبب الفرق أو ملاحظة">`
+      : `<small>${escapeHtml(line.reason || '—')}</small>`;
+
+    return `<tr class="${isLastScanned ? 'is-last-scanned' : ''} ${line.needsSurplusCost ? 'is-needs-cost' : ''}" data-row-line-id="${line.id}">
+      <td>
+        <div class="stocktake-product-cell">
+          <strong>${escapeHtml(line.productName)}</strong>
+          ${line.variantLabel ? `<small class="stocktake-variant-sub">${escapeHtml(line.variantLabel)}</small>` : ''}
+          <div class="stocktake-code-row">
+            <span class="sku-code">${escapeHtml(line.sku)}</span>
+            ${line.barcode ? `<span class="stocktake-barcode-pill">${escapeHtml(line.barcode)}</span>` : ''}
+            ${line.scannedCount > 0 ? `<span class="stocktake-scanned-pill">مسح ×${line.scannedCount}</span>` : ''}
+          </div>
+        </div>
+      </td>
+      <td>${escapeHtml(line.categoryName || '—')}</td>
+      <td style="text-align:center;">${expectedCell}</td>
+      <td>${countControl}</td>
+      <td class="stocktake-var-cell" style="text-align:center;">${renderStocktakeRowVarianceHtml(line, session)}</td>
+      <td class="stocktake-fin-td">${renderStocktakeFinancialCellHtml(line, session, decimals, currency)}</td>
+      <td>${reasonCell}</td>
+    </tr>`;
+  }).join('');
+
+  return `<div class="stocktake-workspace-header">
+      <div class="stocktake-header-title">
+        <button type="button" class="button button-secondary button-sm" id="stocktake-back-btn">← سجل الجرد</button>
+        <div>
+          <div class="stocktake-title-line">
+            <span class="sku-code">${escapeHtml(session.sessionNumber)}</span>
+            <h3>${escapeHtml(session.title)}</h3>
+            <span class="status-pill ${statusMeta.cls}">${statusMeta.label}</span>
+            ${session.blindMode ? '<span class="stocktake-blind-chip">وضع الجرد الأعمى</span>' : ''}
+            ${saveBadge}
+          </div>
+          <small class="stocktake-muted">${escapeHtml(stocktakeScopeLabel(session.scope, session.categoryName))} · تاريخ البدء ${escapeHtml(formatDateTime(session.createdAt))}${session.committedAt ? ` · تاريخ الاعتماد ${escapeHtml(formatDateTime(session.committedAt))}` : ''}</small>
+        </div>
+      </div>
+      <div class="stocktake-header-actions">
+        ${isDraft ? `
+          <button type="button" class="button button-secondary button-sm" id="stocktake-toggle-blind-btn">${session.blindMode ? 'إيقاف الجرد الأعمى وإظهار المتوقع' : 'تفعيل الجرد الأعمى'}</button>
+          <button type="button" class="button button-secondary button-sm" id="stocktake-mark-exact-btn">مطابقة المتبقي للنظام</button>
+          <button type="button" class="button button-secondary button-sm" id="stocktake-save-draft-btn">حفظ المسودة</button>
+        ` : ''}
+        <button type="button" class="button button-secondary button-sm" id="stocktake-print-btn">طباعة التقرير</button>
+        <a class="button button-secondary button-sm" href="/api/stocktakes/${session.id}/export.csv" download>تصدير CSV</a>
+        ${isDraft ? `
+          <button type="button" class="button button-danger button-sm" id="stocktake-cancel-btn">إلغاء المسودة</button>
+          <button type="button" class="button button-primary" id="stocktake-commit-btn">مراجعة واعتماد الجرد النهائي</button>
+        ` : ''}
+      </div>
+    </div>
+
+    <div class="stocktake-kpi-grid" id="stocktake-kpis-bar">
+      <article class="kpi-card">
+        <div class="kpi-head"><span>تقدم الجرد الفعلي</span><strong>${pct}%</strong></div>
+        <div class="kpi-value" id="stk-kpi-progress">${session.countedLines} / ${session.totalLines}</div>
+        <div class="stocktake-progress-track"><i id="stk-progress-fill" style="width:${pct}%"></i></div>
+        <small class="kpi-note">المتبقي بدون عدّ: <strong id="stk-kpi-uncounted">${session.uncountedLines}</strong> صنف</small>
+      </article>
+      <article class="kpi-card">
+        <div class="kpi-head"><span>أصناف متطابقة تمامًا</span></div>
+        <div class="kpi-value" id="stk-kpi-matched">${session.blindHidden ? 'مخفي' : session.matchedLines}</div>
+        <small class="kpi-note">${session.blindHidden ? 'مخفي أثناء وضع الجرد الأعمى' : 'الفعلي مطابق للرصيد الدفتري 100%'}</small>
+      </article>
+      <article class="kpi-card">
+        <div class="kpi-head"><span>أصناف بها فروقات</span></div>
+        <div class="kpi-value" id="stk-kpi-discrepancy">${session.blindHidden ? 'مخفي' : session.discrepancyLines}</div>
+        <small class="kpi-note" id="stk-kpi-discrepancy-sub">${session.blindHidden ? 'تظهر عند المراجعة' : `زيادة: +${session.surplusQty ?? 0} قطعة · عجز: -${session.shortageQty ?? 0} قطعة`}</small>
+      </article>
+      <article class="kpi-card">
+        <div class="kpi-head"><span>صافي الأثر المالي (التكلفة)</span></div>
+        <div class="kpi-value" id="stk-kpi-netcost">${session.blindHidden ? 'عند المراجعة' : signedMoneyText(session.netVarianceCost)}</div>
+        <small class="kpi-note" id="stk-kpi-cost-sub">${session.blindHidden ? 'لحماية دقة العد الأعمى' : `أثر البيع: ${signedMoneyText(session.netVarianceRetail)}`}</small>
+      </article>
+    </div>
+
+    ${isDraft && session.movedLinesCount > 0 ? `<div class="stocktake-info-strip">
+      <strong>تنبيه حركة مخزون أثناء الجرد:</strong>
+      <span>تم تحديث الرصيد الحي لعدد <strong>${session.movedLinesCount}</strong> صنف نتيجة عمليات بيع أو توريد بعد فتح المسودة. تتم مطابقة الاعتماد تلقائيًا على الرصيد الحي الحالي لضمان سلامة المخزون.</span>
+    </div>` : ''}
+
+    ${isDraft ? `<section class="panel stocktake-scanner-panel">
+      <form id="stocktake-scan-form" class="stocktake-scanner-row">
+        <div class="stocktake-scan-field">
+          ${icon('scan', 19)}
+          <input id="stocktake-scan-input" autocomplete="off" placeholder="ضع المؤشر هنا وامسح الباركود بالجهاز أو اكتب كود SKU ثم Enter..." />
+        </div>
+        <div class="stocktake-step-selector" aria-label="كمية المسحة الواحدة">
+          <span>لكل مسحة:</span>
+          ${[1, 5, 12].map((n) => `<button type="button" class="stocktake-step-chip ${state.stocktakeScanStep === n ? 'is-active' : ''}" data-scan-step="${n}">+${n}</button>`).join('')}
+          <input type="number" id="stocktake-scan-step-input" min="1" max="9999" value="${state.stocktakeScanStep}" aria-label="كمية المسحة المخصصة" />
+        </div>
+        <button type="submit" class="button button-primary button-sm">تسجيل المسح</button>
+      </form>
+      <div class="stocktake-quickadd-row">
+        <label class="stocktake-quickadd-picker">
+          <span>إضافة صنف يدويًا لقائمة الجرد:</span>
+          <select id="stocktake-add-variant-select">
+            <option value="">— اختر صنفًا لإضافته —</option>
+            ${addableVariants.map((o) => `<option value="${o.variantId}">${escapeHtml(o.label)}</option>`).join('')}
+          </select>
+        </label>
+        <button type="button" class="button button-secondary button-sm" id="stocktake-add-variant-btn">+ إدراج الصنف</button>
+      </div>
+      ${state.stocktakeLastScans.length ? `<div class="stocktake-recent-scans">
+        <span class="stocktake-muted">آخر عمليات المسح:</span>
+        ${state.stocktakeLastScans.map((scan) => `<div class="stocktake-recent-pill">
+          <strong>${escapeHtml(scan.productName)}</strong>
+          <span>المعدود: <b>${scan.countedQuantity}</b></span>
+          <button type="button" data-quick-scan-id="${scan.lineId}" data-quick-delta="-1">−1</button>
+          <button type="button" data-quick-scan-id="${scan.lineId}" data-quick-delta="1">+1</button>
+        </div>`).join('')}
+      </div>` : ''}
+    </section>` : ''}
+
+    <section class="panel">
+      <div class="panel-heading stocktake-table-toolbar">
+        <div class="stocktake-filter-tabs">
+          <button type="button" class="att-tab-btn ${state.stocktakeTab === 'ALL' ? 'is-active' : ''}" data-stk-tab="ALL">الكل (${lines.length})</button>
+          <button type="button" class="att-tab-btn ${state.stocktakeTab === 'UNCOUNTED' ? 'is-active' : ''}" data-stk-tab="UNCOUNTED">لم يُعدّ بعد (${session.uncountedLines})</button>
+          <button type="button" class="att-tab-btn ${state.stocktakeTab === 'VARIANCE' ? 'is-active' : ''}" data-stk-tab="VARIANCE" ${session.blindHidden ? 'disabled title="مخفي في الجرد الأعمى"' : ''}>به فرق (${session.blindHidden ? '—' : session.discrepancyLines})</button>
+          <button type="button" class="att-tab-btn ${state.stocktakeTab === 'MATCHED' ? 'is-active' : ''}" data-stk-tab="MATCHED" ${session.blindHidden ? 'disabled title="مخفي في الجرد الأعمى"' : ''}>متطابق (${session.blindHidden ? '—' : session.matchedLines})</button>
+        </div>
+        <div class="stocktake-table-search-group">
+          <select id="stocktake-category-filter">
+            <option value="">كل التصنيفات</option>
+            ${catFilterOptions}
+          </select>
+          <label class="table-search">${icon('search', 17)}<input id="stocktake-line-search" placeholder="ابحث باسم الصنف أو SKU أو الباركود..." value="${escapeHtml(state.stocktakeQuery)}"></label>
+        </div>
+      </div>
+      ${filteredLines.length ? `<div class="table-scroll">
+        <table class="stocktake-lines-table">
+          <thead>
+            <tr>
+              <th>الصنف والباركود</th>
+              <th>التصنيف</th>
+              <th style="text-align:center;">المتوقع (النظام)</th>
+              <th>العدّ الفعلي</th>
+              <th style="text-align:center;">الفرق</th>
+              <th>الأثر المالي</th>
+              <th>ملاحظة / السبب</th>
+            </tr>
+          </thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>` : '<div class="empty-row">لا توجد أصناف مطابقة للفلتر الحالي داخل جلسة الجرد.</div>'}
+    </section>`;
+}
+
+async function loadStocktakeSessions() {
+  const storeId = state.data?.selectedStoreId;
+  if (!storeId) return;
+  try {
+    const result = await api(`/api/stocktakes?storeId=${encodeURIComponent(storeId)}`);
+    state.stocktakeList = result.sessions ?? [];
+    state.stocktakeListStoreId = storeId;
+    if (state.page === 'stocktake' && !state.stocktakeActive) render();
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function flushStocktakeDirtyLines(sessionId, { silent = true, rerender = false } = {}) {
+  if (stocktakeFlushTimer) {
+    clearTimeout(stocktakeFlushTimer);
+    stocktakeFlushTimer = null;
+  }
+  const dirtyEntries = Object.entries(state.stocktakeDirtyMap ?? {});
+  if (!dirtyEntries.length || !sessionId) return;
+  const payloadLines = dirtyEntries.map(([lineId, patch]) => ({ lineId, ...patch }));
+  state.stocktakeDirtyMap = {};
+  state.stocktakeSaving = true;
+  const savePillWrap = document.querySelector('.stocktake-save-pill');
+  if (savePillWrap) { savePillWrap.className = 'stocktake-save-pill is-saving'; savePillWrap.textContent = 'جاري الحفظ...'; }
+  try {
+    const detail = await api(`/api/stocktakes/${sessionId}/lines`, {
+      method: 'PATCH',
+      skipConfirm: true,
+      body: JSON.stringify({ lines: payloadLines }),
+    });
+    state.stocktakeSaving = false;
+    state.stocktakeLastSavedAt = new Date().toISOString();
+    state.stocktakeActive = detail;
+    state.stocktakeListStoreId = null;
+    if (rerender) render();
+    else syncStocktakeDomSummaryAndSavedPill();
+  } catch (error) {
+    state.stocktakeSaving = false;
+    for (const item of payloadLines) {
+      const { lineId, ...rest } = item;
+      state.stocktakeDirtyMap[lineId] = { ...rest, ...(state.stocktakeDirtyMap[lineId] ?? {}) };
+    }
+    toast(error.message, 'error');
+  }
+}
+
+function syncStocktakeDomSummaryAndSavedPill() {
+  const detail = state.stocktakeActive;
+  if (!detail) return;
+  const session = detail.session;
+  const lines = detail.lines ?? [];
+  const counted = lines.filter((l) => l.countedQuantity !== null).length;
+  const uncounted = Math.max(0, lines.length - counted);
+  const pct = lines.length > 0 ? Math.round((counted / lines.length) * 100) : 0;
+
+  let matched = 0;
+  let discrepancy = 0;
+  let surplusQty = 0;
+  let shortageQty = 0;
+  const currency = session.currency || state.data.company.currency || 'EGP';
+  const decimals = currencyDecimals(currency);
+  let surplusCostMinor = 0n;
+  let shortageCostMinor = 0n;
+  let netRetailMinor = 0n;
+
+  for (const l of lines) {
+    if (l.countedQuantity === null) continue;
+    if (session.blindHidden) continue;
+    const expected = Number(l.expectedQuantity ?? 0);
+    const diff = l.countedQuantity - expected;
+    l.varianceQty = diff;
+    const wac = BigInt(l.overrideUnitCost?.amount ?? l.unitWac?.amount ?? '0');
+    const shortWac = BigInt(l.unitWac?.amount ?? '0');
+    const unitRetail = BigInt(l.retailPrice?.amount ?? '0');
+    const varCost = diff > 0 ? BigInt(diff) * wac : BigInt(diff) * shortWac;
+    const varRetail = BigInt(diff) * unitRetail;
+    l.varianceCost = { amount: varCost.toString(), currency, decimals };
+    l.varianceRetail = { amount: varRetail.toString(), currency, decimals };
+    l.needsSurplusCost = session.status === 'DRAFT' && diff > 0 && BigInt(l.unitWac?.amount ?? '0') <= 0n && !l.overrideUnitCost;
+    if (diff === 0) matched += 1;
+    else {
+      discrepancy += 1;
+      if (diff > 0) { surplusQty += diff; surplusCostMinor += varCost; }
+      else { shortageQty += -diff; shortageCostMinor += -varCost; }
+      netRetailMinor += varRetail;
+    }
+  }
+
+  const netCostMinor = surplusCostMinor - shortageCostMinor;
+  session.countedLines = counted;
+  session.uncountedLines = uncounted;
+  if (!session.blindHidden) {
+    session.matchedLines = matched;
+    session.discrepancyLines = discrepancy;
+    session.surplusQty = surplusQty;
+    session.shortageQty = shortageQty;
+    session.netVarianceCost = { amount: netCostMinor.toString(), currency, decimals };
+    session.netVarianceRetail = { amount: netRetailMinor.toString(), currency, decimals };
+  }
+
+  const progEl = document.querySelector('#stk-kpi-progress');
+  const fillEl = document.querySelector('#stk-progress-fill');
+  const uncountedEl = document.querySelector('#stk-kpi-uncounted');
+  const matchedEl = document.querySelector('#stk-kpi-matched');
+  const discEl = document.querySelector('#stk-kpi-discrepancy');
+  const discSubEl = document.querySelector('#stk-kpi-discrepancy-sub');
+  const netCostEl = document.querySelector('#stk-kpi-netcost');
+  const costSubEl = document.querySelector('#stk-kpi-cost-sub');
+  if (progEl) progEl.textContent = `${counted} / ${lines.length}`;
+  if (fillEl) fillEl.style.width = `${pct}%`;
+  if (uncountedEl) uncountedEl.textContent = String(uncounted);
+  if (matchedEl) matchedEl.textContent = session.blindHidden ? 'مخفي' : String(matched);
+  if (discEl) discEl.textContent = session.blindHidden ? 'مخفي' : String(discrepancy);
+  if (discSubEl && !session.blindHidden) discSubEl.textContent = `زيادة: +${surplusQty} قطعة · عجز: -${shortageQty} قطعة`;
+  if (netCostEl) netCostEl.textContent = session.blindHidden ? 'عند المراجعة' : signedMoneyText(session.netVarianceCost);
+  if (costSubEl && !session.blindHidden) costSubEl.textContent = `أثر البيع: ${signedMoneyText(session.netVarianceRetail)}`;
+
+  const tabAll = document.querySelector('[data-stk-tab="ALL"]');
+  const tabUncounted = document.querySelector('[data-stk-tab="UNCOUNTED"]');
+  const tabVar = document.querySelector('[data-stk-tab="VARIANCE"]');
+  const tabMatch = document.querySelector('[data-stk-tab="MATCHED"]');
+  if (tabAll) tabAll.textContent = `الكل (${lines.length})`;
+  if (tabUncounted) tabUncounted.textContent = `لم يُعدّ بعد (${uncounted})`;
+  if (tabVar) tabVar.textContent = `به فرق (${session.blindHidden ? '—' : discrepancy})`;
+  if (tabMatch) tabMatch.textContent = `متطابق (${session.blindHidden ? '—' : matched})`;
+
+  const savePill = document.querySelector('.stocktake-save-pill');
+  if (savePill) {
+    const dirtyCount = Object.keys(state.stocktakeDirtyMap ?? {}).length;
+    if (dirtyCount > 0) {
+      savePill.className = 'stocktake-save-pill is-dirty';
+      savePill.textContent = 'تعديلات بانتظار الحفظ';
+    } else {
+      savePill.className = 'stocktake-save-pill is-saved';
+      savePill.textContent = 'محفوظ تلقائيًا';
+    }
+  }
+}
+
+async function performStocktakeBarcodeScan(sessionId, scanCode, delta) {
+  const code = String(scanCode ?? '').trim();
+  if (!code) return;
+  await flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false });
+  try {
+    const detail = await api(`/api/stocktakes/${sessionId}/lines`, {
+      method: 'PATCH',
+      skipConfirm: true,
+      body: JSON.stringify({ scanCode: code, delta }),
+    });
+    state.stocktakeActive = detail;
+    state.stocktakeListStoreId = null;
+    if (detail.lastScannedLineId) {
+      const scannedLine = (detail.lines ?? []).find((l) => l.id === detail.lastScannedLineId);
+      if (scannedLine) {
+        const nextList = (state.stocktakeLastScans ?? []).filter((s) => s.lineId !== scannedLine.id);
+        nextList.unshift({
+          lineId: scannedLine.id,
+          productName: scannedLine.variantLabel ? `${scannedLine.productName} (${scannedLine.variantLabel})` : scannedLine.productName,
+          countedQuantity: scannedLine.countedQuantity,
+        });
+        state.stocktakeLastScans = nextList.slice(0, 6);
+      }
+    }
+    playStocktakeBeep(true);
+    render();
+    const scanInput = document.querySelector('#stocktake-scan-input');
+    if (scanInput) {
+      scanInput.value = '';
+      scanInput.focus();
+    }
+  } catch (error) {
+    playStocktakeBeep(false);
+    toast(error.message, 'error');
+    const scanInput = document.querySelector('#stocktake-scan-input');
+    if (scanInput) { scanInput.focus(); scanInput.select(); }
+  }
+}
+
+async function showStocktakeCommitModal(sessionId) {
+  await flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false });
+  let reviewDetail;
+  try {
+    reviewDetail = await api(`/api/stocktakes/${sessionId}?review=1`);
+  } catch (error) {
+    toast(error.message, 'error');
+    return;
+  }
+  const s = reviewDetail.session;
+  if (s.missingCostCount > 0) {
+    const names = (reviewDetail.lines ?? []).filter((l) => l.needsSurplusCost).slice(0, 5).map((l) => l.productName).join('، ');
+    toast(`حدّد تكلفة الوحدة للأصناف التي بها زيادة وتكلفتها صفر قبل الاعتماد: ${names}`, 'error');
+    if (s.blindMode) {
+      state.stocktakeActive = reviewDetail;
+      render();
+    }
+    return;
+  }
+  const root = getModalRoot();
+  const canSkipUncounted = s.countedLines > 0;
+  const defaultStrategy = canSkipUncounted ? 'SKIP_UNCOUNTED' : 'ZERO_UNCOUNTED';
+  root.innerHTML = `<div class="modal-backdrop">
+    <section class="modal-card stocktake-commit-modal" role="dialog" aria-modal="true">
+      <div class="modal-heading">
+        <div>
+          <h3>مراجعة واعتماد الجرد النهائي (${escapeHtml(s.sessionNumber)})</h3>
+          <p>${escapeHtml(s.title)}</p>
+        </div>
+        <button type="button" class="modal-close" data-close-modal aria-label="إغلاق">×</button>
+      </div>
+      <div class="stocktake-review-summary">
+        <div class="stocktake-review-box"><span>الأصناف المعدودة</span><strong>${s.countedLines} من ${s.totalLines}</strong></div>
+        <div class="stocktake-review-box"><span>الأصناف المتطابقة</span><strong>${s.matchedLines}</strong></div>
+        <div class="stocktake-review-box is-surplus"><span>إجمالي الزيادة</span><strong>+${s.surplusQty ?? 0} قطعة (${money(s.totalSurplusCost)})</strong></div>
+        <div class="stocktake-review-box is-shortage"><span>إجمالي العجز</span><strong>-${s.shortageQty ?? 0} قطعة (${money(s.totalShortageCost)})</strong></div>
+        <div class="stocktake-review-box is-net"><span>صافي أثر التكلفة</span><strong>${signedMoneyText(s.netVarianceCost)}</strong></div>
+        <div class="stocktake-review-box"><span>صافي أثر البيع</span><strong>${signedMoneyText(s.netVarianceRetail)}</strong></div>
+      </div>
+      ${s.movedLinesCount > 0 ? `<div class="stocktake-info-strip"><strong>ملاحظة:</strong> عدد ${s.movedLinesCount} صنف تحرك رصيده أثناء فترة الجرد، وتم احتساب الفروقات أعلاه بناءً على الرصيد الحي الآن.</div>` : ''}
+      <form id="stocktake-commit-form" class="stocktake-commit-form">
+        ${s.uncountedLines > 0 ? `<div class="stocktake-strategy-group">
+          <strong>يوجد ${s.uncountedLines} صنف لم يُعدّ بعد — كيف تتعامل معها عند الاعتماد؟</strong>
+          <label class="stocktake-strategy-option ${!canSkipUncounted ? 'is-disabled' : ''}">
+            <input type="radio" name="uncountedStrategy" value="SKIP_UNCOUNTED" ${defaultStrategy === 'SKIP_UNCOUNTED' ? 'checked' : ''} ${!canSkipUncounted ? 'disabled' : ''}>
+            <span><strong>تخطي الأصناف غير المعدودة (الأكثر أمانًا)</strong><small>تبقى أرصدتها الحالية كما هي في المخزون دون تعديل.</small></span>
+          </label>
+          <label class="stocktake-strategy-option">
+            <input type="radio" name="uncountedStrategy" value="ZERO_UNCOUNTED" ${defaultStrategy === 'ZERO_UNCOUNTED' ? 'checked' : ''}>
+            <span><strong>اعتبار الأصناف غير المعدودة صفرًا على الرف</strong><small>يُصفّر النظام رصيد ${s.uncountedLines} صنف باعتبارها غير موجودة فعليًا.</small></span>
+          </label>
+        </div>` : `<input type="hidden" name="uncountedStrategy" value="SKIP_UNCOUNTED">`}
+        <label>ملاحظة الاعتماد النهائي (اختياري)
+          <input name="notes" maxlength="500" value="${escapeHtml(s.notes ?? '')}" placeholder="اعتماد مدير المتجر بعد المراجعة">
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="button button-secondary" data-close-modal>تراجع لمزيد من المراجعة</button>
+          <button type="submit" class="button button-primary">تأكيد الاعتماد وترحيل المخزون والقيود</button>
+        </div>
+      </form>
+    </section>
+  </div>`;
+  root.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
+  root.querySelector('#stocktake-commit-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const submitBtn = form.querySelector('button[type="submit"]');
+    submitBtn.disabled = true;
+    const fd = new FormData(form);
+    try {
+      const committed = await api(`/api/stocktakes/${sessionId}/commit`, {
+        method: 'POST',
+        skipConfirm: true,
+        body: JSON.stringify({
+          idempotencyKey: crypto.randomUUID(),
+          uncountedStrategy: String(fd.get('uncountedStrategy') || 'SKIP_UNCOUNTED'),
+          notes: String(fd.get('notes') || '').trim() || undefined,
+        }),
+      });
+      root.innerHTML = '';
+      state.stocktakeActive = committed;
+      state.stocktakeListStoreId = null;
+      state.report = null;
+      state.reportKey = null;
+      state.productStats = null;
+      state.analyticsKey = null;
+      await loadData(state.data.selectedStoreId);
+      render();
+      toast(`تم اعتماد وترحيل الجرد ${committed.session.sessionNumber} وتحديث أرصدة المخزون والقيود بنجاح`);
+    } catch (error) {
+      toast(error.message, 'error');
+      submitBtn.disabled = false;
+    }
+  });
+}
+
+function showStocktakePrintModal(detail) {
+  const s = detail.session;
+  const lines = detail.lines ?? [];
+  const root = getModalRoot();
+  const store = (state.data.stores ?? []).find((st) => st.id === s.storeId);
+  const hideExpected = s.blindHidden;
+  root.innerHTML = `<div class="modal-backdrop">
+    <section class="modal-card invoice-detail-card stocktake-print-card" role="dialog" aria-modal="true">
+      <div class="modal-heading">
+        <div>
+          <h3>${escapeHtml(s.status === 'DRAFT' ? 'كشف جرد مخزني للمطابقة' : 'تقرير نتيجة الجرد الشامل النهائي')}</h3>
+          <p>${escapeHtml(s.sessionNumber)} — ${escapeHtml(s.title)}</p>
+        </div>
+        <button type="button" class="modal-close" data-close-modal aria-label="إغلاق">×</button>
+      </div>
+      <div class="stocktake-print-sheet">
+        <div class="stocktake-print-header">
+          <div>
+            <h2>${escapeHtml(state.data.company.name)} ${store ? `— ${escapeHtml(store.name)}` : ''}</h2>
+            <p><strong>رقم الجرد:</strong> ${escapeHtml(s.sessionNumber)} · <strong>النطاق:</strong> ${escapeHtml(stocktakeScopeLabel(s.scope, s.categoryName))} · <strong>الحالة:</strong> ${escapeHtml(stocktakeStatusMeta(s.status).label)}</p>
+            <p><strong>تاريخ البدء:</strong> ${escapeHtml(formatDateTime(s.createdAt))}${s.committedAt ? ` · <strong>تاريخ الاعتماد:</strong> ${escapeHtml(formatDateTime(s.committedAt))}` : ''}</p>
+          </div>
+        </div>
+        ${!hideExpected ? `<div class="invoice-detail-totals">
+          <div><span>الأصناف المعدودة</span><strong>${s.countedLines} / ${s.totalLines}</strong></div>
+          <div><span>الزيادة بالتكلفة</span><strong>+${s.surplusQty ?? 0} (${money(s.totalSurplusCost)})</strong></div>
+          <div><span>العجز بالتكلفة</span><strong>-${s.shortageQty ?? 0} (${money(s.totalShortageCost)})</strong></div>
+          <div><span>صافي أثر التكلفة</span><strong>${signedMoneyText(s.netVarianceCost)}</strong></div>
+        </div>` : ''}
+        <div class="table-scroll" style="margin-top:16px;">
+          <table class="stocktake-print-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>الصنف</th>
+                <th>الكود / الباركود</th>
+                ${!hideExpected ? '<th>المتوقع</th>' : ''}
+                <th>العد الفعلي</th>
+                ${!hideExpected ? '<th>الفرق</th><th>أثر التكلفة</th>' : ''}
+                <th>ملاحظات</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${lines.map((line, i) => `<tr>
+                <td>${i + 1}</td>
+                <td><strong>${escapeHtml(line.productName)}</strong>${line.variantLabel ? `<br><small>${escapeHtml(line.variantLabel)}</small>` : ''}</td>
+                <td>${escapeHtml(line.sku)}${line.barcode ? `<br><small>${escapeHtml(line.barcode)}</small>` : ''}</td>
+                ${!hideExpected ? `<td>${line.expectedQuantity}</td>` : ''}
+                <td>${line.countedQuantity === null ? '______' : line.countedQuantity}</td>
+                ${!hideExpected ? `<td>${line.varianceQty === null ? '—' : line.varianceQty > 0 ? `+${line.varianceQty}` : line.varianceQty}</td><td>${line.varianceQty === null ? '—' : signedMoneyText(line.varianceCost)}</td>` : ''}
+                <td>${escapeHtml(line.reason || '')}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+        <div class="stocktake-print-signatures">
+          <div><span>توقيع القائم بالجرد</span><div class="sig-line"></div></div>
+          <div><span>توقيع المراجع / أمين المخزن</span><div class="sig-line"></div></div>
+          <div><span>اعتماد الإدارة</span><div class="sig-line"></div></div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="button button-secondary" data-close-modal>إغلاق</button>
+        <button type="button" class="button button-primary" id="stocktake-confirm-print-btn">طباعة الآن</button>
+      </div>
+    </section>
+  </div>`;
+  root.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
+  root.querySelector('#stocktake-confirm-print-btn')?.addEventListener('click', () => window.print());
+}
+
+function bindStocktake() {
+  if (!state.stocktakeActive) {
+    if (state.stocktakeListStoreId !== state.data.selectedStoreId) {
+      void loadStocktakeSessions();
+    }
+    const createForm = document.querySelector('#stocktake-create-form');
+    const scopeRadios = createForm?.querySelectorAll('input[name="scope"]');
+    const catWrap = document.querySelector('#stocktake-category-wrap');
+    const zeroWrap = document.querySelector('#stocktake-zero-wrap');
+    const syncScopeUi = () => {
+      const checked = createForm?.querySelector('input[name="scope"]:checked')?.value || 'FULL';
+      createForm?.querySelectorAll('.stocktake-scope-card').forEach((card) => {
+        const input = card.querySelector('input[type="radio"]');
+        card.classList.toggle('is-selected', Boolean(input?.checked));
+      });
+      if (catWrap) catWrap.hidden = checked !== 'CATEGORY';
+      if (zeroWrap) zeroWrap.style.display = checked === 'PARTIAL' ? 'none' : '';
+    };
+    scopeRadios?.forEach((r) => r.addEventListener('change', syncScopeUi));
+    syncScopeUi();
+
+    createForm?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (state.stocktakeCreating) return;
+      const fd = new FormData(createForm);
+      const scope = String(fd.get('scope') || 'FULL');
+      const categoryId = String(fd.get('categoryId') || '').trim() || undefined;
+      if (scope === 'CATEGORY' && !categoryId) {
+        toast('اختر التصنيف المطلوب جرده أولاً', 'error');
+        return;
+      }
+      const btn = createForm.querySelector('button[type="submit"]');
+      btn.disabled = true;
+      state.stocktakeCreating = true;
+      try {
+        const detail = await api('/api/stocktakes', {
+          method: 'POST',
+          body: JSON.stringify({
+            storeId: state.data.selectedStoreId,
+            title: String(fd.get('title') || '').trim() || undefined,
+            notes: String(fd.get('notes') || '').trim() || undefined,
+            scope,
+            categoryId: scope === 'CATEGORY' ? categoryId : null,
+            blindMode: fd.get('blindMode') === 'on',
+            includeZeroStock: fd.get('includeZeroStock') === 'on',
+          }),
+        });
+        state.stocktakeCreating = false;
+        state.stocktakeActive = detail;
+        state.stocktakeListStoreId = null;
+        state.stocktakeTab = 'ALL';
+        state.stocktakeQuery = '';
+        state.stocktakeCategory = '';
+        state.stocktakeLastScans = [];
+        state.stocktakeDirtyMap = {};
+        state.stocktakeLastSavedAt = null;
+        render();
+        toast(`تم إنشاء جلسة الجرد ${detail.session.sessionNumber} بنجاح`);
+        document.querySelector('#stocktake-scan-input')?.focus();
+      } catch (error) {
+        state.stocktakeCreating = false;
+        btn.disabled = false;
+        toast(error.message, 'error');
+      }
+    });
+
+    document.querySelectorAll('.stocktake-open-btn').forEach((btn) => btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        const detail = await api(`/api/stocktakes/${btn.dataset.sessionId}`);
+        state.stocktakeActive = detail;
+        state.stocktakeTab = 'ALL';
+        state.stocktakeQuery = '';
+        state.stocktakeCategory = '';
+        state.stocktakeLastScans = [];
+        state.stocktakeDirtyMap = {};
+        state.stocktakeLastSavedAt = null;
+        render();
+        if (detail.session.status === 'DRAFT') document.querySelector('#stocktake-scan-input')?.focus();
+      } catch (error) {
+        btn.disabled = false;
+        toast(error.message, 'error');
+      }
+    }));
+    return;
+  }
+
+  const detail = state.stocktakeActive;
+  const session = detail.session;
+  const sessionId = session.id;
+  const isDraft = session.status === 'DRAFT';
+  const currency = session.currency || state.data.company.currency || 'EGP';
+  const decimals = currencyDecimals(currency);
+
+  document.querySelector('#stocktake-back-btn')?.addEventListener('click', async () => {
+    await flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false });
+    state.stocktakeActive = null;
+    state.stocktakeLastScans = [];
+    state.stocktakeDirtyMap = {};
+    state.stocktakeListStoreId = null;
+    render();
+  });
+
+  document.querySelectorAll('[data-stk-tab]').forEach((btn) => btn.addEventListener('click', () => {
+    if (btn.disabled) return;
+    state.stocktakeTab = btn.dataset.stkTab;
+    render();
+  }));
+
+  document.querySelector('#stocktake-category-filter')?.addEventListener('change', (e) => {
+    state.stocktakeCategory = e.target.value;
+    render();
+  });
+
+  const searchInput = document.querySelector('#stocktake-line-search');
+  searchInput?.addEventListener('input', (event) => {
+    state.stocktakeQuery = event.target.value;
+    const cursor = event.target.selectionStart;
+    render();
+    const next = document.querySelector('#stocktake-line-search');
+    next?.focus();
+    next?.setSelectionRange(cursor, cursor);
+  });
+
+  document.querySelector('#stocktake-print-btn')?.addEventListener('click', async () => {
+    await flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false });
+    showStocktakePrintModal(state.stocktakeActive);
+  });
+
+  if (!isDraft) return;
+
+  document.querySelectorAll('[data-scan-step]').forEach((btn) => btn.addEventListener('click', () => {
+    state.stocktakeScanStep = Math.max(1, Number(btn.dataset.scanStep) || 1);
+    render();
+    document.querySelector('#stocktake-scan-input')?.focus();
+  }));
+
+  document.querySelector('#stocktake-scan-step-input')?.addEventListener('change', (e) => {
+    state.stocktakeScanStep = Math.max(1, Math.min(9999, Math.trunc(Number(e.target.value) || 1)));
+    render();
+    document.querySelector('#stocktake-scan-input')?.focus();
+  });
+
+  document.querySelector('#stocktake-scan-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const scanInput = document.querySelector('#stocktake-scan-input');
+    const code = scanInput?.value?.trim();
+    if (!code) return;
+    await performStocktakeBarcodeScan(sessionId, code, state.stocktakeScanStep || 1);
+  });
+
+  document.querySelector('#stocktake-add-variant-btn')?.addEventListener('click', async () => {
+    const sel = document.querySelector('#stocktake-add-variant-select');
+    const variantId = sel?.value;
+    if (!variantId) { toast('اختر الصنف أولاً لإدراجه في الجرد', 'error'); return; }
+    await flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false });
+    try {
+      const updated = await api(`/api/stocktakes/${sessionId}/lines`, {
+        method: 'PATCH',
+        skipConfirm: true,
+        body: JSON.stringify({ addVariantId: variantId }),
+      });
+      state.stocktakeActive = updated;
+      state.stocktakeListStoreId = null;
+      render();
+      toast('تم إدراج الصنف في كشف الجرد');
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  });
+
+  document.querySelectorAll('[data-quick-scan-id]').forEach((btn) => btn.addEventListener('click', async () => {
+    const lineId = btn.dataset.quickScanId;
+    const delta = Number(btn.dataset.quickDelta || 1);
+    const line = (state.stocktakeActive.lines ?? []).find((l) => l.id === lineId);
+    if (!line) return;
+    const nextQty = Math.max(0, Number(line.countedQuantity ?? 0) + delta);
+    await flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false });
+    try {
+      const updated = await api(`/api/stocktakes/${sessionId}/lines`, {
+        method: 'PATCH',
+        skipConfirm: true,
+        body: JSON.stringify({ lines: [{ lineId, countedQuantity: nextQty }] }),
+      });
+      state.stocktakeActive = updated;
+      const hit = state.stocktakeLastScans.find((s) => s.lineId === lineId);
+      if (hit) hit.countedQuantity = nextQty;
+      render();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  }));
+
+  const queueLinePatch = (lineId, patch) => {
+    state.stocktakeDirtyMap[lineId] = { ...(state.stocktakeDirtyMap[lineId] ?? {}), ...patch };
+    syncStocktakeDomSummaryAndSavedPill();
+    const row = document.querySelector(`tr[data-row-line-id="${lineId}"]`);
+    const line = (state.stocktakeActive.lines ?? []).find((l) => l.id === lineId);
+    if (row && line) {
+      row.classList.toggle('is-needs-cost', Boolean(line.needsSurplusCost));
+      const varTd = row.querySelector('.stocktake-var-cell');
+      if (varTd) varTd.innerHTML = renderStocktakeRowVarianceHtml(line, state.stocktakeActive.session);
+      const activeEl = document.activeElement;
+      const wasEditingCost = activeEl?.classList?.contains('stocktake-cost-input') && activeEl?.dataset?.lineId === lineId;
+      if (!wasEditingCost) {
+        const finTd = row.querySelector('.stocktake-fin-td');
+        if (finTd) {
+          finTd.innerHTML = renderStocktakeFinancialCellHtml(line, state.stocktakeActive.session, decimals, currency);
+          bindCostInput(finTd.querySelector('.stocktake-cost-input'));
+        }
+      }
+    }
+    if (stocktakeFlushTimer) clearTimeout(stocktakeFlushTimer);
+    stocktakeFlushTimer = setTimeout(() => { void flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false }); }, 450);
+  };
+
+  const bindCostInput = (input) => {
+    if (!input) return;
+    input.addEventListener('input', () => {
+      const lineId = input.dataset.lineId;
+      const line = (state.stocktakeActive.lines ?? []).find((l) => l.id === lineId);
+      if (!line) return;
+      const raw = input.value.trim();
+      if (!raw) {
+        line.overrideUnitCost = null;
+        queueLinePatch(lineId, { overrideUnitCost: null });
+        return;
+      }
+      try {
+        const minorStr = toMinor(raw, decimals);
+        line.overrideUnitCost = { amount: minorStr, currency, decimals };
+        queueLinePatch(lineId, { overrideUnitCost: minorStr });
+      } catch {}
+    });
+  };
+
+  document.querySelectorAll('.stocktake-cost-input').forEach(bindCostInput);
+
+  document.querySelectorAll('.stocktake-qty-input').forEach((input) => input.addEventListener('input', () => {
+    const lineId = input.dataset.lineId;
+    const line = (state.stocktakeActive.lines ?? []).find((l) => l.id === lineId);
+    if (!line) return;
+    const raw = input.value.trim();
+    const qty = raw === '' ? null : Math.max(0, Math.trunc(Number(raw) || 0));
+    line.countedQuantity = qty;
+    queueLinePatch(lineId, { countedQuantity: qty });
+  }));
+
+  document.querySelectorAll('.stocktake-reason-input').forEach((input) => input.addEventListener('input', () => {
+    const lineId = input.dataset.lineId;
+    const line = (state.stocktakeActive.lines ?? []).find((l) => l.id === lineId);
+    if (!line) return;
+    line.reason = input.value;
+    queueLinePatch(lineId, { reason: input.value.trim() || null });
+  }));
+
+  const applyImmediateLineUpdate = async (lineId, countedQuantity) => {
+    await flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false });
+    try {
+      const updated = await api(`/api/stocktakes/${sessionId}/lines`, {
+        method: 'PATCH',
+        skipConfirm: true,
+        body: JSON.stringify({ lines: [{ lineId, countedQuantity }] }),
+      });
+      state.stocktakeActive = updated;
+      state.stocktakeListStoreId = null;
+      render();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  };
+
+  document.querySelectorAll('.stocktake-step-btn').forEach((btn) => btn.addEventListener('click', () => {
+    const lineId = btn.dataset.lineId;
+    const step = Number(btn.dataset.step || 1);
+    const line = (state.stocktakeActive.lines ?? []).find((l) => l.id === lineId);
+    if (!line) return;
+    const nextQty = Math.max(0, Number(line.countedQuantity ?? 0) + step);
+    void applyImmediateLineUpdate(lineId, nextQty);
+  }));
+
+  document.querySelectorAll('.stocktake-match-btn').forEach((btn) => btn.addEventListener('click', () => {
+    const lineId = btn.dataset.lineId;
+    const line = (state.stocktakeActive.lines ?? []).find((l) => l.id === lineId);
+    if (!line || line.expectedQuantity === null) return;
+    void applyImmediateLineUpdate(lineId, line.expectedQuantity);
+  }));
+
+  document.querySelectorAll('.stocktake-clear-btn').forEach((btn) => btn.addEventListener('click', () => {
+    void applyImmediateLineUpdate(btn.dataset.lineId, null);
+  }));
+
+  document.querySelector('#stocktake-save-draft-btn')?.addEventListener('click', async () => {
+    await flushStocktakeDirtyLines(sessionId, { silent: false, rerender: true });
+    toast('تم حفظ مسودة الجرد في قاعدة البيانات');
+  });
+
+  document.querySelector('#stocktake-toggle-blind-btn')?.addEventListener('click', async () => {
+    await flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false });
+    try {
+      const updated = await api(`/api/stocktakes/${sessionId}/settings`, {
+        method: 'PATCH',
+        skipConfirm: true,
+        body: JSON.stringify({ blindMode: !session.blindMode }),
+      });
+      state.stocktakeActive = updated;
+      state.stocktakeListStoreId = null;
+      if (updated.session.blindHidden && (state.stocktakeTab === 'VARIANCE' || state.stocktakeTab === 'MATCHED')) state.stocktakeTab = 'ALL';
+      render();
+      toast(updated.session.blindMode ? 'تم تفعيل وضع الجرد الأعمى' : 'تم إظهار الرصيد المتوقع والفروقات للمراجعة');
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  });
+
+  document.querySelector('#stocktake-mark-exact-btn')?.addEventListener('click', async () => {
+    await flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false });
+    const accepted = await showConfirmModal({
+      title: 'مطابقة الأصناف غير المعدودة',
+      message: `هل تريد تسجيل جميع الأصناف المتبقية بدون عدّ (${session.uncountedLines} صنف) مطابقة لرصيد النظام الحالي؟`,
+      confirmText: 'نعم، طابق المتبقي',
+      cancelText: 'إلغاء',
+    });
+    if (!accepted) return;
+    try {
+      const updated = await api(`/api/stocktakes/${sessionId}/lines`, {
+        method: 'PATCH',
+        skipConfirm: true,
+        body: JSON.stringify({ action: 'MARK_REMAINING_EXACT' }),
+      });
+      state.stocktakeActive = updated;
+      state.stocktakeListStoreId = null;
+      render();
+      toast('تمت مطابقة جميع الأصناف غير المعدودة للنظام');
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  });
+
+  document.querySelector('#stocktake-cancel-btn')?.addEventListener('click', async () => {
+    await flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false });
+    try {
+      await api(`/api/stocktakes/${sessionId}/cancel`, { method: 'POST', body: '{}' });
+      state.stocktakeActive = null;
+      state.stocktakeLastScans = [];
+      state.stocktakeDirtyMap = {};
+      state.stocktakeListStoreId = null;
+      render();
+      toast('تم إلغاء مسودة الجرد دون أي تغيير على المخزون');
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  });
+
+  document.querySelector('#stocktake-commit-btn')?.addEventListener('click', () => {
+    void showStocktakeCommitModal(sessionId);
+  });
 }
 
 start();

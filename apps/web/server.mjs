@@ -233,6 +233,15 @@ function generateNextReturnNumber(tenantId) {
   }
   return `RET-${seq}`;
 }
+function generateNextStocktakeNumber(tenantId) {
+  const rawDb = database.getRawDatabase();
+  const countRow = rawDb.prepare('SELECT COUNT(*) as cnt FROM stocktake_sessions WHERE tenant_id = ?').get(tenantId);
+  let seq = Number(countRow?.cnt ?? 0) + 1001;
+  while (rawDb.prepare('SELECT 1 FROM stocktake_sessions WHERE tenant_id = ? AND session_number = ?').get(tenantId, `STK-${seq}`)) {
+    seq += 1;
+  }
+  return `STK-${seq}`;
+}
 if (restoredAfterCrash) {
   await db.updateTable('sessions').set({ is_revoked: 1 }).execute();
   console.warn('A database restore was recovered; all prior login sessions were revoked.');
@@ -313,6 +322,37 @@ const MonthlyActualSchema = z.object({ year: z.number().int().min(2000).max(9999
 const MonthlyPaymentSchema = z.object({ idempotencyKey: z.string().uuid(), amount: z.string().regex(/^[1-9]\d{0,14}$/), paymentMethod: z.enum(['CASH_DRAWER', 'CASH_SAFE', 'BANK_TRANSFER']), referenceNumber: z.string().max(80).trim().optional() });
 const SupplierReturnSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), items: z.array(z.object({ purchaseItemId: z.string().min(1).max(80), quantity: z.string().regex(/^[1-9]\d{0,8}$/) })).min(1).max(100) });
 const BackupSchema = z.object({ passphrase: z.string().min(12).max(256) });
+const CreateStocktakeSchema = z.object({
+  storeId: z.string().uuid(),
+  title: z.string().min(2).max(120).trim().optional(),
+  scope: z.enum(['FULL', 'CATEGORY', 'PARTIAL']).default('FULL'),
+  categoryId: z.string().uuid().optional().nullable(),
+  blindMode: z.boolean().default(false),
+  includeZeroStock: z.boolean().default(true),
+  notes: z.string().max(500).trim().optional(),
+});
+const UpdateStocktakeSettingsSchema = z.object({
+  title: z.string().min(2).max(120).trim().optional(),
+  notes: z.string().max(500).trim().optional().nullable(),
+  blindMode: z.boolean().optional(),
+});
+const PatchStocktakeLinesSchema = z.object({
+  action: z.enum(['MARK_REMAINING_EXACT']).optional(),
+  scanCode: z.string().min(1).max(120).trim().optional(),
+  delta: z.number().int().min(-10000).max(10000).optional(),
+  addVariantId: z.string().uuid().optional(),
+  lines: z.array(z.object({
+    lineId: z.string().uuid(),
+    countedQuantity: z.number().int().min(0).max(100000000).nullable().optional(),
+    overrideUnitCost: z.union([z.string().regex(/^\d{1,15}$/), z.number().int().min(0).max(999999999999999)]).nullable().optional(),
+    reason: z.string().max(240).trim().nullable().optional(),
+  })).max(500).optional(),
+});
+const CommitStocktakeSchema = z.object({
+  idempotencyKey: z.string().uuid(),
+  uncountedStrategy: z.enum(['SKIP_UNCOUNTED', 'ZERO_UNCOUNTED']).default('SKIP_UNCOUNTED'),
+  notes: z.string().max(500).trim().optional().nullable(),
+});
 const BackupSettingsSchema = z.object({ mirrorPath: z.string().max(500).trim().default(''), autoMirror: z.boolean().default(true) });
 const DailyRestoreSchema = z.object({ filename: z.string().regex(/^retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite$/) });
 const PasswordChangeSchema = z.object({ currentPassword: z.string().min(1).max(128), newPassword: z.string().min(12).max(128) });
@@ -590,6 +630,285 @@ function saleJson(sale) {
       netRevenue: moneyJson(item.netRevenue),
     })),
     payments: sale.payments.map((payment) => ({ method: payment.method, amount: moneyJson(payment.amount) })),
+  };
+}
+
+function assertStoreScope(ctx, storeId) {
+  if (ctx.storeId && ctx.storeId !== storeId) {
+    throw Object.assign(new Error('غير مصرح بالوصول إلى هذا الفرع'), { status: 403 });
+  }
+}
+
+function signedMoneyJson(minorValue, currency) {
+  const currencyCode = typeof currency === 'string' ? currency : (currency?.code ?? 'EGP');
+  const minor = typeof minorValue === 'bigint' ? minorValue : BigInt(Math.trunc(Number(minorValue ?? 0)));
+  const meta = Money.zero(currencyCode).toJSON();
+  return { amount: minor.toString(), currency: currencyCode, decimals: meta.decimals };
+}
+
+function parseVariantLabelFromJson(attributesJson) {
+  try {
+    const parsed = JSON.parse(attributesJson || '{}');
+    if (!parsed || typeof parsed !== 'object') return '';
+    return Object.entries(parsed).map(([k, v]) => `${k}: ${v}`).join(' · ');
+  } catch {
+    return '';
+  }
+}
+
+async function syncStocktakeDraftTotals(conn, sessionId, tenantId, storeId) {
+  const rows = await conn
+    .selectFrom('stocktake_lines as l')
+    .leftJoin('inventory_items as ii', (join) =>
+      join
+        .onRef('ii.variant_id', '=', 'l.variant_id')
+        .onRef('ii.tenant_id', '=', 'l.tenant_id')
+        .onRef('ii.store_id', '=', 'l.store_id'),
+    )
+    .select([
+      'l.counted_quantity',
+      'l.expected_quantity',
+      'l.unit_wac',
+      'l.retail_price',
+      'l.override_unit_cost',
+      'ii.quantity_on_hand as live_quantity',
+      'ii.wac_cost as live_wac_cost',
+    ])
+    .where('l.session_id', '=', sessionId)
+    .where('l.tenant_id', '=', tenantId)
+    .where('l.store_id', '=', storeId)
+    .execute();
+
+  let countedLines = 0;
+  let totalVarianceQty = 0;
+  let totalSurplusCost = 0n;
+  let totalShortageCost = 0n;
+  let netVarianceRetail = 0n;
+
+  for (const row of rows) {
+    if (row.counted_quantity === null || row.counted_quantity === undefined) continue;
+    countedLines += 1;
+    const counted = Number(row.counted_quantity);
+    const liveQty = Number(row.live_quantity ?? 0);
+    const diff = counted - liveQty;
+    totalVarianceQty += diff;
+    const liveWac = BigInt(row.live_wac_cost ?? row.unit_wac ?? 0);
+    const surplusCost = row.override_unit_cost !== null && row.override_unit_cost !== undefined ? BigInt(row.override_unit_cost) : liveWac;
+    if (diff > 0) totalSurplusCost += BigInt(diff) * surplusCost;
+    else if (diff < 0) totalShortageCost += BigInt(-diff) * liveWac;
+    netVarianceRetail += BigInt(diff) * BigInt(row.retail_price ?? 0);
+  }
+
+  const netVarianceCost = totalSurplusCost - totalShortageCost;
+  await conn
+    .updateTable('stocktake_sessions')
+    .set({
+      total_lines: rows.length,
+      counted_lines: countedLines,
+      total_variance_qty: totalVarianceQty,
+      total_surplus_cost: Number(totalSurplusCost),
+      total_shortage_cost: Number(totalShortageCost),
+      net_variance_cost: Number(netVarianceCost),
+      net_variance_retail: Number(netVarianceRetail),
+      updated_at: new Date().toISOString(),
+    })
+    .where('id', '=', sessionId)
+    .where('tenant_id', '=', tenantId)
+    .where('status', '=', 'DRAFT')
+    .execute();
+}
+
+function serializeStocktakeSessionSummary(session) {
+  const currency = session.currency || 'EGP';
+  const isDraft = session.status === 'DRAFT';
+  const blindHidden = isDraft && Number(session.blind_mode) === 1;
+  return {
+    id: session.id,
+    storeId: session.store_id,
+    sessionNumber: session.session_number,
+    title: session.title,
+    scope: session.scope,
+    categoryId: session.category_id ?? null,
+    categoryName: session.category_name ?? null,
+    blindMode: Number(session.blind_mode) === 1,
+    blindHidden,
+    includeZeroStock: Number(session.include_zero_stock) === 1,
+    status: session.status,
+    uncountedStrategy: session.uncounted_strategy ?? null,
+    currency,
+    notes: session.notes ?? '',
+    totalLines: Number(session.total_lines ?? 0),
+    countedLines: Number(session.counted_lines ?? 0),
+    uncountedLines: Math.max(0, Number(session.total_lines ?? 0) - Number(session.counted_lines ?? 0)),
+    totalVarianceQty: blindHidden ? null : Number(session.total_variance_qty ?? 0),
+    totalSurplusCost: blindHidden ? null : signedMoneyJson(session.total_surplus_cost ?? 0, currency),
+    totalShortageCost: blindHidden ? null : signedMoneyJson(session.total_shortage_cost ?? 0, currency),
+    netVarianceCost: blindHidden ? null : signedMoneyJson(session.net_variance_cost ?? 0, currency),
+    netVarianceRetail: blindHidden ? null : signedMoneyJson(session.net_variance_retail ?? 0, currency),
+    journalEntryId: session.journal_entry_id ?? null,
+    createdByUserId: session.created_by_user_id,
+    createdByName: session.created_by_name ?? null,
+    committedByUserId: session.committed_by_user_id ?? null,
+    committedByName: session.committed_by_name ?? null,
+    createdAt: session.created_at,
+    updatedAt: session.updated_at,
+    committedAt: session.committed_at ?? null,
+    cancelledAt: session.cancelled_at ?? null,
+  };
+}
+
+function loadStocktakeSessionDetail(ctx, sessionId, { includeBlindReview = false, lastScannedLineId = null } = {}) {
+  const rawDb = database.getRawDatabase();
+  const session = rawDb.prepare(`
+    SELECT s.*, c.name AS category_name, u1.full_name AS created_by_name, u2.full_name AS committed_by_name
+    FROM stocktake_sessions s
+    LEFT JOIN categories c ON c.id = s.category_id AND c.tenant_id = s.tenant_id
+    LEFT JOIN users u1 ON u1.id = s.created_by_user_id AND u1.tenant_id = s.tenant_id
+    LEFT JOIN users u2 ON u2.id = s.committed_by_user_id AND u2.tenant_id = s.tenant_id
+    WHERE s.id = ? AND s.tenant_id = ?
+  `).get(sessionId, ctx.tenantId);
+
+  if (!session) throw Object.assign(new Error('جلسة الجرد غير موجودة'), { status: 404 });
+  assertStoreScope(ctx, session.store_id);
+
+  const lineRows = rawDb.prepare(`
+    SELECT l.*, ii.quantity_on_hand AS live_quantity, ii.wac_cost AS live_wac_cost, pv.attributes_json, p.image_path AS image_path
+    FROM stocktake_lines l
+    LEFT JOIN inventory_items ii ON ii.tenant_id = l.tenant_id AND ii.store_id = l.store_id AND ii.variant_id = l.variant_id
+    LEFT JOIN product_variants pv ON pv.id = l.variant_id AND pv.tenant_id = l.tenant_id
+    LEFT JOIN products p ON p.id = l.product_id AND p.tenant_id = l.tenant_id
+    WHERE l.session_id = ? AND l.tenant_id = ?
+    ORDER BY l.product_name ASC, l.sku ASC, l.created_at ASC
+  `).all(session.id, ctx.tenantId);
+
+  const currency = session.currency || 'EGP';
+  const isCommitted = session.status === 'COMMITTED';
+  const isDraft = session.status === 'DRAFT';
+  const hideBlind = isDraft && Number(session.blind_mode) === 1 && !includeBlindReview;
+
+  let totalLines = lineRows.length;
+  let countedLines = 0;
+  let matchedLines = 0;
+  let discrepancyLines = 0;
+  let surplusLines = 0;
+  let shortageLines = 0;
+  let surplusQty = 0;
+  let shortageQty = 0;
+  let totalVarianceQty = 0;
+  let totalSurplusCostMinor = 0n;
+  let totalShortageCostMinor = 0n;
+  let netVarianceRetailMinor = 0n;
+  let movedLinesCount = 0;
+  let missingCostCount = 0;
+
+  const lines = lineRows.map((line) => {
+    const liveQty = Number(line.live_quantity ?? 0);
+    const snapshotExpectedQty = Number(line.expected_quantity ?? 0);
+    const effectiveExpectedQty = isCommitted ? Number(line.committed_expected_quantity ?? snapshotExpectedQty) : liveQty;
+    const stockMovedSinceSnapshot = isDraft && liveQty !== snapshotExpectedQty;
+    if (stockMovedSinceSnapshot) movedLinesCount += 1;
+
+    const countedQty = line.counted_quantity === null || line.counted_quantity === undefined ? null : Number(line.counted_quantity);
+    if (countedQty !== null) countedLines += 1;
+
+    const liveWacMinor = BigInt(line.live_wac_cost ?? line.unit_wac ?? 0);
+    const overrideCostMinor = line.override_unit_cost === null || line.override_unit_cost === undefined ? null : BigInt(line.override_unit_cost);
+    const committedCostMinor = line.committed_unit_cost === null || line.committed_unit_cost === undefined ? null : BigInt(line.committed_unit_cost);
+    const effectiveSurplusWacMinor = overrideCostMinor !== null ? overrideCostMinor : liveWacMinor;
+
+    let varianceQty = null;
+    let varianceCostMinor = 0n;
+    let varianceRetailMinor = 0n;
+
+    if (isCommitted) {
+      varianceQty = line.committed_variance_qty === null || line.committed_variance_qty === undefined ? 0 : Number(line.committed_variance_qty);
+      varianceCostMinor = BigInt(line.committed_variance_cost ?? 0);
+      varianceRetailMinor = BigInt(varianceQty) * BigInt(line.retail_price ?? 0);
+    } else if (countedQty !== null) {
+      varianceQty = countedQty - effectiveExpectedQty;
+      const costUnit = varianceQty > 0 ? effectiveSurplusWacMinor : liveWacMinor;
+      varianceCostMinor = BigInt(varianceQty) * costUnit;
+      varianceRetailMinor = BigInt(varianceQty) * BigInt(line.retail_price ?? 0);
+    }
+
+    if (varianceQty !== null) {
+      if (varianceQty === 0) {
+        matchedLines += 1;
+      } else {
+        discrepancyLines += 1;
+        totalVarianceQty += varianceQty;
+        if (varianceQty > 0) {
+          surplusLines += 1;
+          surplusQty += varianceQty;
+          totalSurplusCostMinor += varianceCostMinor;
+        } else {
+          shortageLines += 1;
+          shortageQty += -varianceQty;
+          totalShortageCostMinor += -varianceCostMinor;
+        }
+        netVarianceRetailMinor += varianceRetailMinor;
+      }
+    }
+
+    const needsSurplusCost = isDraft && countedQty !== null && (countedQty - effectiveExpectedQty) > 0 && overrideCostMinor === null && liveWacMinor <= 0n;
+    if (needsSurplusCost) missingCostCount += 1;
+
+    const unitCostDisplay = isCommitted && committedCostMinor !== null ? committedCostMinor : (varianceQty !== null && varianceQty > 0 ? effectiveSurplusWacMinor : liveWacMinor);
+
+    return {
+      id: line.id,
+      variantId: line.variant_id,
+      productId: line.product_id,
+      productName: line.product_name,
+      variantLabel: parseVariantLabelFromJson(line.attributes_json),
+      sku: line.sku,
+      barcode: line.barcode ?? null,
+      imageUrl: line.image_path ?? null,
+      categoryId: line.category_id ?? null,
+      categoryName: line.category_name ?? null,
+      expectedQuantity: hideBlind ? null : effectiveExpectedQty,
+      snapshotExpectedQuantity: hideBlind ? null : snapshotExpectedQty,
+      liveQuantity: hideBlind ? null : liveQty,
+      stockMovedSinceSnapshot: hideBlind ? false : stockMovedSinceSnapshot,
+      countedQuantity: countedQty,
+      varianceQty: hideBlind ? null : varianceQty,
+      unitWac: signedMoneyJson(unitCostDisplay, currency),
+      retailPrice: signedMoneyJson(line.retail_price ?? 0, currency),
+      overrideUnitCost: overrideCostMinor !== null ? signedMoneyJson(overrideCostMinor, currency) : null,
+      needsSurplusCost,
+      varianceCost: hideBlind ? null : signedMoneyJson(varianceCostMinor, currency),
+      varianceRetail: hideBlind ? null : signedMoneyJson(varianceRetailMinor, currency),
+      scannedCount: Number(line.scanned_count ?? 0),
+      reason: line.reason ?? '',
+      lastCountedAt: line.last_counted_at ?? null,
+    };
+  });
+
+  const netVarianceCostMinor = totalSurplusCostMinor - totalShortageCostMinor;
+  const baseSummary = serializeStocktakeSessionSummary(session);
+  return {
+    session: {
+      ...baseSummary,
+      blindHidden: hideBlind,
+      totalLines,
+      countedLines,
+      uncountedLines: totalLines - countedLines,
+      matchedLines: hideBlind ? null : matchedLines,
+      discrepancyLines: hideBlind ? null : discrepancyLines,
+      surplusLines: hideBlind ? null : surplusLines,
+      shortageLines: hideBlind ? null : shortageLines,
+      surplusQty: hideBlind ? null : surplusQty,
+      shortageQty: hideBlind ? null : shortageQty,
+      totalVarianceQty: hideBlind ? null : totalVarianceQty,
+      totalSurplusCost: hideBlind ? null : signedMoneyJson(totalSurplusCostMinor, currency),
+      totalShortageCost: hideBlind ? null : signedMoneyJson(totalShortageCostMinor, currency),
+      netVarianceCost: hideBlind ? null : signedMoneyJson(netVarianceCostMinor, currency),
+      netVarianceRetail: hideBlind ? null : signedMoneyJson(netVarianceRetailMinor, currency),
+      movedLinesCount: hideBlind ? 0 : movedLinesCount,
+      missingCostCount,
+    },
+    lines,
+    lastScannedLineId,
   };
 }
 
@@ -1992,6 +2311,7 @@ async function currentData(ctx, url) {
       canViewSales,
       canViewInventory: ctx.hasPermission(Permissions.INVENTORY_VIEW),
       canTransferInventory: ctx.hasPermission(Permissions.INVENTORY_TRANSFER),
+      canAdjustInventory: ctx.hasPermission(Permissions.INVENTORY_ADJUST),
       canManageCatalog,
       canManageStores: ctx.hasPermission(Permissions.STORES_MANAGE),
       canCloseShift,
@@ -2622,7 +2942,7 @@ async function handleApi(req, res, url) {
     if (!openShift) return json(res, 200, { currentShift: null });
 
     const tenant = await tenantRepo.findById(ctx.tenantId);
-    const currency = tenant?.currency ?? 'EGP';
+    const currency = typeof tenant?.currency === 'string' ? tenant.currency : (tenant?.currency?.code ?? 'EGP');
     const storeId = openShift.store_id;
 
     const salesDuringShift = rawDb.prepare(`
@@ -2825,7 +3145,7 @@ async function handleApi(req, res, url) {
       throw Object.assign(new Error('الفرع غير متاح'), { status: 403 });
     }
     const tenant = await tenantRepo.findById(ctx.tenantId);
-    const currency = tenant?.currency ?? 'EGP';
+    const currency = typeof tenant?.currency === 'string' ? tenant.currency : (tenant?.currency?.code ?? 'EGP');
     const rawDb = database.getRawDatabase();
 
     const from = url.searchParams.get('from') || '';
@@ -2930,7 +3250,7 @@ async function handleApi(req, res, url) {
     const shift = rawDb.prepare("SELECT * FROM cashier_shifts WHERE id = ? AND tenant_id = ?").get(shiftId, ctx.tenantId);
     if (!shift) throw Object.assign(new Error('الشيفت غير موجود'), { status: 404 });
     const tenant = await tenantRepo.findById(ctx.tenantId);
-    const currency = tenant?.currency ?? 'EGP';
+    const currency = typeof tenant?.currency === 'string' ? tenant.currency : (tenant?.currency?.code ?? 'EGP');
     const endTime = shift.ended_at || new Date().toISOString();
 
     const salesRows = rawDb.prepare(`
@@ -3589,6 +3909,871 @@ async function handleApi(req, res, url) {
     await recordAudit(ctx, { storeId: body.storeId, action: 'SALE_COMPLETED', entityType: 'SALE', entityId: sale.id, summary: `إتمام عملية بيع (${sale.saleNumber})`, metadata: { saleNumber: sale.saleNumber, total: sale.total.amount.toString(), paymentMethod: body.payment.method } });
     const cashierUser = await userRepo.findById(ctx, ctx.userId);
     return json(res, 201, { ...saleJson(sale), cashierName: cashierUser?.fullName ?? cashierUser?.username ?? 'كاشير' });
+  }
+
+  if (method === 'GET' && path === '/api/stocktakes') {
+    ctx.assertPermission(Permissions.INVENTORY_ADJUST);
+    const storesList = await storeRepo.listByTenant(ctx);
+    const storeId = ctx.storeId ?? url.searchParams.get('storeId') ?? storesList[0]?.id;
+    if (!storeId) throw Object.assign(new Error('المتجر غير محدد'), { status: 400 });
+    assertStoreScope(ctx, storeId);
+    const rawDb = database.getRawDatabase();
+    const rows = rawDb.prepare(`
+      SELECT s.*, c.name AS category_name, u1.full_name AS created_by_name, u2.full_name AS committed_by_name
+      FROM stocktake_sessions s
+      LEFT JOIN categories c ON c.id = s.category_id AND c.tenant_id = s.tenant_id
+      LEFT JOIN users u1 ON u1.id = s.created_by_user_id AND u1.tenant_id = s.tenant_id
+      LEFT JOIN users u2 ON u2.id = s.committed_by_user_id AND u2.tenant_id = s.tenant_id
+      WHERE s.tenant_id = ? AND s.store_id = ?
+      ORDER BY CASE WHEN s.status = 'DRAFT' THEN 0 ELSE 1 END, s.created_at DESC
+      LIMIT 100
+    `).all(ctx.tenantId, storeId);
+    return json(res, 200, { sessions: rows.map(serializeStocktakeSessionSummary) });
+  }
+
+  if (method === 'POST' && path === '/api/stocktakes') {
+    ctx.assertPermission(Permissions.INVENTORY_ADJUST);
+    const body = validate(CreateStocktakeSchema, await readJson(req));
+    assertStoreScope(ctx, body.storeId);
+    const store = await storeRepo.findById(ctx, body.storeId);
+    if (!store) throw Object.assign(new Error('الفرع غير موجود'), { status: 404 });
+    const tenant = await tenantRepo.findById(ctx.tenantId);
+    const currency = typeof tenant?.currency === 'string' ? tenant.currency : (tenant?.currency?.code ?? 'EGP');
+
+    let categoryName = null;
+    if (body.scope === 'CATEGORY') {
+      if (!body.categoryId) throw Object.assign(new Error('اختر التصنيف المطلوب جرده'), { status: 400 });
+      const category = await categoryRepo.findById(ctx, body.categoryId);
+      if (!category) throw Object.assign(new Error('التصنيف المحدد غير موجود'), { status: 404 });
+      categoryName = category.name;
+    }
+
+    const sessionNumber = generateNextStocktakeNumber(ctx.tenantId);
+    const sessionId = randomUUID();
+    const nowIso = new Date().toISOString();
+    const todayLabel = nowIso.slice(0, 10);
+    const defaultTitle = body.scope === 'FULL'
+      ? `جرد شامل للمحل — ${todayLabel}`
+      : body.scope === 'CATEGORY'
+        ? `جرد تصنيف ${categoryName ?? ''} — ${todayLabel}`
+        : `جرد انتقائي سريع — ${todayLabel}`;
+    const title = body.title?.trim() || defaultTitle;
+
+    await db.transaction().execute(async (trx) => {
+      let eligibleVariants = [];
+      if (body.scope !== 'PARTIAL') {
+        let query = trx
+          .selectFrom('product_variants as pv')
+          .innerJoin('products as p', (join) =>
+            join.onRef('p.id', '=', 'pv.product_id').onRef('p.tenant_id', '=', 'pv.tenant_id'),
+          )
+          .leftJoin('categories as c', (join) =>
+            join.onRef('c.id', '=', 'p.category_id').onRef('c.tenant_id', '=', 'p.tenant_id'),
+          )
+          .select([
+            'pv.id as variant_id',
+            'pv.product_id',
+            'pv.sku',
+            'pv.barcode',
+            'pv.retail_price',
+            'p.name as product_name',
+            'p.category_id',
+            'c.name as category_name',
+          ])
+          .where('pv.tenant_id', '=', ctx.tenantId)
+          .where('pv.is_active', '=', 1)
+          .where('p.is_active', '=', 1)
+          .where('p.item_kind', '=', 'PRODUCT');
+
+        if (body.scope === 'CATEGORY' && body.categoryId) {
+          query = query.where('p.category_id', '=', body.categoryId);
+        }
+
+        const invRows = await trx
+          .selectFrom('inventory_items')
+          .select(['variant_id', 'quantity_on_hand', 'wac_cost'])
+          .where('tenant_id', '=', ctx.tenantId)
+          .where('store_id', '=', body.storeId)
+          .execute();
+        const invByVariant = new Map(invRows.map((item) => [item.variant_id, item]));
+
+        const rawRows = (await query.orderBy('p.name', 'asc').orderBy('pv.sku', 'asc').execute()).map((row) => {
+          const inv = invByVariant.get(row.variant_id);
+          return {
+            ...row,
+            quantity_on_hand: inv?.quantity_on_hand ?? 0,
+            wac_cost: inv?.wac_cost ?? 0,
+          };
+        });
+        eligibleVariants = body.includeZeroStock
+          ? rawRows
+          : rawRows.filter((r) => Number(r.quantity_on_hand ?? 0) > 0);
+      }
+
+      await trx
+        .insertInto('stocktake_sessions')
+        .values({
+          id: sessionId,
+          tenant_id: ctx.tenantId,
+          store_id: body.storeId,
+          session_number: sessionNumber,
+          title,
+          scope: body.scope,
+          category_id: body.scope === 'CATEGORY' ? (body.categoryId ?? null) : null,
+          blind_mode: body.blindMode ? 1 : 0,
+          include_zero_stock: body.includeZeroStock ? 1 : 0,
+          status: 'DRAFT',
+          idempotency_key: null,
+          uncounted_strategy: null,
+          currency,
+          notes: body.notes?.trim() || null,
+          total_lines: eligibleVariants.length,
+          counted_lines: 0,
+          total_variance_qty: 0,
+          total_surplus_cost: 0,
+          total_shortage_cost: 0,
+          net_variance_cost: 0,
+          net_variance_retail: 0,
+          journal_entry_id: null,
+          created_by_user_id: ctx.userId,
+          committed_by_user_id: null,
+          created_at: nowIso,
+          updated_at: nowIso,
+          committed_at: null,
+          cancelled_at: null,
+        })
+        .execute();
+
+      for (const variant of eligibleVariants) {
+        await trx
+          .insertInto('stocktake_lines')
+          .values({
+            id: randomUUID(),
+            session_id: sessionId,
+            tenant_id: ctx.tenantId,
+            store_id: body.storeId,
+            variant_id: variant.variant_id,
+            product_id: variant.product_id,
+            product_name: variant.product_name,
+            sku: variant.sku,
+            barcode: variant.barcode ?? null,
+            category_id: variant.category_id ?? null,
+            category_name: variant.category_name ?? null,
+            expected_quantity: Math.max(0, Number(variant.quantity_on_hand ?? 0)),
+            counted_quantity: null,
+            unit_wac: Math.max(0, Number(variant.wac_cost ?? 0)),
+            retail_price: Math.max(0, Number(variant.retail_price ?? 0)),
+            override_unit_cost: null,
+            scanned_count: 0,
+            reason: null,
+            committed_expected_quantity: null,
+            committed_variance_qty: null,
+            committed_variance_cost: null,
+            committed_unit_cost: null,
+            last_counted_at: null,
+            created_at: nowIso,
+            updated_at: nowIso,
+          })
+          .execute();
+      }
+    });
+
+    await recordAudit(ctx, {
+      storeId: body.storeId,
+      action: 'STOCKTAKE_CREATED',
+      entityType: 'STOCKTAKE_SESSION',
+      entityId: sessionId,
+      summary: `بدء مسودة جرد ${sessionNumber} (${title})`,
+      metadata: { sessionNumber, scope: body.scope, blindMode: body.blindMode, includeZeroStock: body.includeZeroStock },
+    });
+
+    return json(res, 201, loadStocktakeSessionDetail(ctx, sessionId));
+  }
+
+  const stocktakeExportMatch = method === 'GET' ? path.match(/^\/api\/stocktakes\/([0-9a-f-]+)\/export\.csv$/i) : null;
+  if (stocktakeExportMatch) {
+    ctx.assertPermission(Permissions.INVENTORY_ADJUST);
+    const detail = loadStocktakeSessionDetail(ctx, stocktakeExportMatch[1], { includeBlindReview: true });
+    const formatDecimalSigned = (moneyObj) => {
+      if (!moneyObj) return '0';
+      const decimals = Number(moneyObj.decimals ?? 2);
+      const minor = BigInt(String(moneyObj.amount ?? '0'));
+      const sign = minor < 0n ? '-' : '';
+      const abs = minor < 0n ? -minor : minor;
+      if (decimals === 0) return `${sign}${abs.toString()}`;
+      const digits = abs.toString().padStart(decimals + 1, '0');
+      return `${sign}${digits.slice(0, -decimals)}.${digits.slice(-decimals)}`;
+    };
+    const rows = [[
+      'كود الجرد',
+      'المنتج',
+      'النسخة',
+      'SKU',
+      'الباركود',
+      'التصنيف',
+      'الرصيد المتوقع',
+      'العد الفعلي',
+      'الفرق',
+      'متوسط التكلفة',
+      'أثر التكلفة',
+      'سعر البيع',
+      'أثر البيع',
+      'مرات المسح',
+      'ملاحظة',
+    ]];
+    for (const line of detail.lines) {
+      rows.push([
+        detail.session.sessionNumber,
+        line.productName,
+        line.variantLabel || '',
+        line.sku,
+        line.barcode || '',
+        line.categoryName || '',
+        String(line.expectedQuantity ?? ''),
+        line.countedQuantity === null ? 'لم يُعدّ' : String(line.countedQuantity),
+        line.varianceQty === null ? '' : String(line.varianceQty),
+        formatDecimalSigned(line.unitWac),
+        line.varianceQty === null ? '' : formatDecimalSigned(line.varianceCost),
+        formatDecimalSigned(line.retailPrice),
+        line.varianceQty === null ? '' : formatDecimalSigned(line.varianceRetail),
+        String(line.scannedCount ?? 0),
+        line.reason || '',
+      ]);
+    }
+    const csvContent = '\uFEFF' + rows.map((r) => r.map(escapeCsvCell).join(',')).join('\r\n');
+    res.writeHead(200, {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="stocktake-${detail.session.sessionNumber}.csv"`,
+      'Cache-Control': 'no-store',
+      ...securityHeaders(),
+    });
+    res.end(csvContent);
+    return;
+  }
+
+  const stocktakeDetailMatch = method === 'GET' ? path.match(/^\/api\/stocktakes\/([0-9a-f-]+)$/i) : null;
+  if (stocktakeDetailMatch) {
+    ctx.assertPermission(Permissions.INVENTORY_ADJUST);
+    const includeBlindReview = url.searchParams.get('review') === '1';
+    return json(res, 200, loadStocktakeSessionDetail(ctx, stocktakeDetailMatch[1], { includeBlindReview }));
+  }
+
+  const stocktakeSettingsMatch = method === 'PATCH' ? path.match(/^\/api\/stocktakes\/([0-9a-f-]+)\/settings$/i) : null;
+  if (stocktakeSettingsMatch) {
+    ctx.assertPermission(Permissions.INVENTORY_ADJUST);
+    const sessionId = stocktakeSettingsMatch[1];
+    const body = validate(UpdateStocktakeSettingsSchema, await readJson(req));
+    const existing = await db
+      .selectFrom('stocktake_sessions')
+      .selectAll()
+      .where('id', '=', sessionId)
+      .where('tenant_id', '=', ctx.tenantId)
+      .executeTakeFirst();
+    if (!existing) throw Object.assign(new Error('جلسة الجرد غير موجودة'), { status: 404 });
+    assertStoreScope(ctx, existing.store_id);
+    if (existing.status !== 'DRAFT') throw Object.assign(new Error('لا يمكن تعديل إعدادات جرد تم اعتماده أو إلغاؤه'), { status: 409 });
+
+    const updates = { updated_at: new Date().toISOString() };
+    if (body.title !== undefined) updates.title = body.title;
+    if (body.notes !== undefined) updates.notes = body.notes?.trim() || null;
+    if (body.blindMode !== undefined) updates.blind_mode = body.blindMode ? 1 : 0;
+
+    await db
+      .updateTable('stocktake_sessions')
+      .set(updates)
+      .where('id', '=', sessionId)
+      .where('tenant_id', '=', ctx.tenantId)
+      .where('status', '=', 'DRAFT')
+      .execute();
+
+    return json(res, 200, loadStocktakeSessionDetail(ctx, sessionId));
+  }
+
+  const stocktakeLinesMatch = method === 'PATCH' ? path.match(/^\/api\/stocktakes\/([0-9a-f-]+)\/lines$/i) : null;
+  if (stocktakeLinesMatch) {
+    ctx.assertPermission(Permissions.INVENTORY_ADJUST);
+    const sessionId = stocktakeLinesMatch[1];
+    const body = validate(PatchStocktakeLinesSchema, await readJson(req));
+    const existing = await db
+      .selectFrom('stocktake_sessions')
+      .selectAll()
+      .where('id', '=', sessionId)
+      .where('tenant_id', '=', ctx.tenantId)
+      .executeTakeFirst();
+    if (!existing) throw Object.assign(new Error('جلسة الجرد غير موجودة'), { status: 404 });
+    assertStoreScope(ctx, existing.store_id);
+    if (existing.status !== 'DRAFT') throw Object.assign(new Error('لا يمكن تعديل مسودة جرد تم اعتمادها أو إلغاؤها'), { status: 409 });
+
+    const nowIso = new Date().toISOString();
+    let lastScannedLineId = null;
+
+    await db.transaction().execute(async (trx) => {
+      if (body.action === 'MARK_REMAINING_EXACT') {
+        const uncountedRows = await trx
+          .selectFrom('stocktake_lines as l')
+          .leftJoin('inventory_items as ii', (join) =>
+            join
+              .onRef('ii.variant_id', '=', 'l.variant_id')
+              .onRef('ii.tenant_id', '=', 'l.tenant_id')
+              .onRef('ii.store_id', '=', 'l.store_id'),
+          )
+          .select(['l.id', 'l.expected_quantity', 'ii.quantity_on_hand as live_quantity'])
+          .where('l.session_id', '=', sessionId)
+          .where('l.tenant_id', '=', ctx.tenantId)
+          .where('l.counted_quantity', 'is', null)
+          .execute();
+        for (const row of uncountedRows) {
+          const exactQty = Math.max(0, Number(row.live_quantity ?? row.expected_quantity ?? 0));
+          await trx
+            .updateTable('stocktake_lines')
+            .set({ counted_quantity: exactQty, last_counted_at: nowIso, updated_at: nowIso })
+            .where('id', '=', row.id)
+            .where('session_id', '=', sessionId)
+            .execute();
+        }
+      }
+
+      if (body.scanCode) {
+        const codeLower = body.scanCode.trim().toLowerCase();
+        const step = body.delta ?? 1;
+        const sessionMatches = await trx
+          .selectFrom('stocktake_lines')
+          .selectAll()
+          .where('session_id', '=', sessionId)
+          .where('tenant_id', '=', ctx.tenantId)
+          .execute();
+        const existingMatches = sessionMatches.filter(
+          (l) => (l.barcode && l.barcode.toLowerCase() === codeLower) || l.sku.toLowerCase() === codeLower,
+        );
+
+        if (existingMatches.length === 1) {
+          const line = existingMatches[0];
+          const nextCount = Math.max(0, Number(line.counted_quantity ?? 0) + step);
+          await trx
+            .updateTable('stocktake_lines')
+            .set({
+              counted_quantity: nextCount,
+              scanned_count: Number(line.scanned_count ?? 0) + 1,
+              last_counted_at: nowIso,
+              updated_at: nowIso,
+            })
+            .where('id', '=', line.id)
+            .execute();
+          lastScannedLineId = line.id;
+        } else if (existingMatches.length > 1) {
+          throw Object.assign(new Error('الباركود مطابق لأكثر من سطر في الجرد؛ اختر الصنف مباشرة'), { status: 409 });
+        } else {
+          const catalogVariants = await trx
+            .selectFrom('product_variants as pv')
+            .innerJoin('products as p', (join) =>
+              join.onRef('p.id', '=', 'pv.product_id').onRef('p.tenant_id', '=', 'pv.tenant_id'),
+            )
+            .leftJoin('categories as c', (join) =>
+              join.onRef('c.id', '=', 'p.category_id').onRef('c.tenant_id', '=', 'p.tenant_id'),
+            )
+            .select([
+              'pv.id as variant_id',
+              'pv.product_id',
+              'pv.sku as variant_sku',
+              'pv.barcode as variant_barcode',
+              'pv.retail_price',
+              'p.name as product_name',
+              'p.sku as product_sku',
+              'p.barcode as product_barcode',
+              'p.category_id',
+              'c.name as category_name',
+            ])
+            .where('pv.tenant_id', '=', ctx.tenantId)
+            .where('pv.is_active', '=', 1)
+            .where('p.is_active', '=', 1)
+            .where('p.item_kind', '=', 'PRODUCT')
+            .execute();
+
+          const exactVariantMatches = catalogVariants.filter(
+            (v) => (v.variant_barcode && v.variant_barcode.toLowerCase() === codeLower) || v.variant_sku.toLowerCase() === codeLower,
+          );
+          const candidateList = exactVariantMatches.length > 0
+            ? exactVariantMatches
+            : catalogVariants.filter(
+              (v) => (v.product_barcode && v.product_barcode.toLowerCase() === codeLower) || v.product_sku.toLowerCase() === codeLower,
+            );
+
+          if (candidateList.length === 0) {
+            throw Object.assign(new Error(`لم يتم العثور على منتج بالباركود أو الكود: ${body.scanCode}`), { status: 404 });
+          }
+          if (candidateList.length > 1) {
+            throw Object.assign(new Error('الكود مطابق لأكثر من نسخة للمنتج؛ امسح باركود النسخة المحددة'), { status: 409 });
+          }
+
+          const picked = candidateList[0];
+          const pickedInv = await trx
+            .selectFrom('inventory_items')
+            .select(['quantity_on_hand', 'wac_cost'])
+            .where('tenant_id', '=', ctx.tenantId)
+            .where('store_id', '=', existing.store_id)
+            .where('variant_id', '=', picked.variant_id)
+            .executeTakeFirst();
+          const existingLineByVariant = sessionMatches.find((l) => l.variant_id === picked.variant_id);
+          if (existingLineByVariant) {
+            const nextCount = Math.max(0, Number(existingLineByVariant.counted_quantity ?? 0) + step);
+            await trx
+              .updateTable('stocktake_lines')
+              .set({
+                counted_quantity: nextCount,
+                scanned_count: Number(existingLineByVariant.scanned_count ?? 0) + 1,
+                last_counted_at: nowIso,
+                updated_at: nowIso,
+              })
+              .where('id', '=', existingLineByVariant.id)
+              .execute();
+            lastScannedLineId = existingLineByVariant.id;
+          } else {
+            const newLineId = randomUUID();
+            await trx
+              .insertInto('stocktake_lines')
+              .values({
+                id: newLineId,
+                session_id: sessionId,
+                tenant_id: ctx.tenantId,
+                store_id: existing.store_id,
+                variant_id: picked.variant_id,
+                product_id: picked.product_id,
+                product_name: picked.product_name,
+                sku: picked.variant_sku,
+                barcode: picked.variant_barcode ?? null,
+                category_id: picked.category_id ?? null,
+                category_name: picked.category_name ?? null,
+                expected_quantity: Math.max(0, Number(pickedInv?.quantity_on_hand ?? 0)),
+                counted_quantity: Math.max(0, step),
+                unit_wac: Math.max(0, Number(pickedInv?.wac_cost ?? 0)),
+                retail_price: Math.max(0, Number(picked.retail_price ?? 0)),
+                override_unit_cost: null,
+                scanned_count: 1,
+                reason: null,
+                committed_expected_quantity: null,
+                committed_variance_qty: null,
+                committed_variance_cost: null,
+                committed_unit_cost: null,
+                last_counted_at: nowIso,
+                created_at: nowIso,
+                updated_at: nowIso,
+              })
+              .execute();
+            lastScannedLineId = newLineId;
+          }
+        }
+      }
+
+      if (body.addVariantId) {
+        const alreadyInSession = await trx
+          .selectFrom('stocktake_lines')
+          .select('id')
+          .where('session_id', '=', sessionId)
+          .where('variant_id', '=', body.addVariantId)
+          .executeTakeFirst();
+        if (alreadyInSession) {
+          lastScannedLineId = alreadyInSession.id;
+        } else {
+          const v = await trx
+            .selectFrom('product_variants as pv')
+            .innerJoin('products as p', (join) =>
+              join.onRef('p.id', '=', 'pv.product_id').onRef('p.tenant_id', '=', 'pv.tenant_id'),
+            )
+            .leftJoin('categories as c', (join) =>
+              join.onRef('c.id', '=', 'p.category_id').onRef('c.tenant_id', '=', 'p.tenant_id'),
+            )
+            .select([
+              'pv.id as variant_id',
+              'pv.product_id',
+              'pv.sku',
+              'pv.barcode',
+              'pv.retail_price',
+              'p.name as product_name',
+              'p.category_id',
+              'c.name as category_name',
+            ])
+            .where('pv.id', '=', body.addVariantId)
+            .where('pv.tenant_id', '=', ctx.tenantId)
+            .where('pv.is_active', '=', 1)
+            .where('p.is_active', '=', 1)
+            .where('p.item_kind', '=', 'PRODUCT')
+            .executeTakeFirst();
+          if (!v) throw Object.assign(new Error('الصنف المحدد غير متاح للجرد'), { status: 404 });
+          const vInv = await trx
+            .selectFrom('inventory_items')
+            .select(['quantity_on_hand', 'wac_cost'])
+            .where('tenant_id', '=', ctx.tenantId)
+            .where('store_id', '=', existing.store_id)
+            .where('variant_id', '=', v.variant_id)
+            .executeTakeFirst();
+          const newLineId = randomUUID();
+          await trx
+            .insertInto('stocktake_lines')
+            .values({
+              id: newLineId,
+              session_id: sessionId,
+              tenant_id: ctx.tenantId,
+              store_id: existing.store_id,
+              variant_id: v.variant_id,
+              product_id: v.product_id,
+              product_name: v.product_name,
+              sku: v.sku,
+              barcode: v.barcode ?? null,
+              category_id: v.category_id ?? null,
+              category_name: v.category_name ?? null,
+              expected_quantity: Math.max(0, Number(vInv?.quantity_on_hand ?? 0)),
+              counted_quantity: null,
+              unit_wac: Math.max(0, Number(vInv?.wac_cost ?? 0)),
+              retail_price: Math.max(0, Number(v.retail_price ?? 0)),
+              override_unit_cost: null,
+              scanned_count: 0,
+              reason: null,
+              committed_expected_quantity: null,
+              committed_variance_qty: null,
+              committed_variance_cost: null,
+              committed_unit_cost: null,
+              last_counted_at: null,
+              created_at: nowIso,
+              updated_at: nowIso,
+            })
+            .execute();
+          lastScannedLineId = newLineId;
+        }
+      }
+
+      if (body.lines && body.lines.length > 0) {
+        for (const patch of body.lines) {
+          const lineSet = { updated_at: nowIso };
+          if (patch.countedQuantity !== undefined) {
+            lineSet.counted_quantity = patch.countedQuantity === null ? null : Math.max(0, patch.countedQuantity);
+            if (patch.countedQuantity !== null) lineSet.last_counted_at = nowIso;
+          }
+          if (patch.overrideUnitCost !== undefined) {
+            lineSet.override_unit_cost = patch.overrideUnitCost === null ? null : Math.max(0, Math.trunc(Number(patch.overrideUnitCost)));
+          }
+          if (patch.reason !== undefined) {
+            lineSet.reason = patch.reason?.trim() || null;
+          }
+          await trx
+            .updateTable('stocktake_lines')
+            .set(lineSet)
+            .where('id', '=', patch.lineId)
+            .where('session_id', '=', sessionId)
+            .where('tenant_id', '=', ctx.tenantId)
+            .execute();
+        }
+      }
+
+      await syncStocktakeDraftTotals(trx, sessionId, ctx.tenantId, existing.store_id);
+    });
+
+    return json(res, 200, loadStocktakeSessionDetail(ctx, sessionId, { lastScannedLineId }));
+  }
+
+  const stocktakeCommitMatch = method === 'POST' ? path.match(/^\/api\/stocktakes\/([0-9a-f-]+)\/commit$/i) : null;
+  if (stocktakeCommitMatch) {
+    ctx.assertPermission(Permissions.INVENTORY_ADJUST);
+    const sessionId = stocktakeCommitMatch[1];
+    const body = validate(CommitStocktakeSchema, await readJson(req));
+
+    let auditMeta = null;
+    await db.transaction().execute(async (trx) => {
+      const idempotentExisting = await trx
+        .selectFrom('stocktake_sessions')
+        .selectAll()
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('idempotency_key', '=', body.idempotencyKey)
+        .executeTakeFirst();
+      if (idempotentExisting) {
+        assertStoreScope(ctx, idempotentExisting.store_id);
+        if (idempotentExisting.id === sessionId && idempotentExisting.status === 'COMMITTED') {
+          return;
+        }
+        throw Object.assign(new Error('مفتاح التكرار مستخدم في عملية جرد أخرى'), { status: 409 });
+      }
+
+      const session = await trx
+        .selectFrom('stocktake_sessions')
+        .selectAll()
+        .where('id', '=', sessionId)
+        .where('tenant_id', '=', ctx.tenantId)
+        .executeTakeFirst();
+      if (!session) throw Object.assign(new Error('جلسة الجرد غير موجودة'), { status: 404 });
+      assertStoreScope(ctx, session.store_id);
+      if (session.status !== 'DRAFT') throw Object.assign(new Error('لا يمكن اعتماد جلسة جرد مغلقة أو ملغاة بالفعل'), { status: 409 });
+
+      const lineRows = await trx
+        .selectFrom('stocktake_lines as l')
+        .leftJoin('inventory_items as ii', (join) =>
+          join
+            .onRef('ii.variant_id', '=', 'l.variant_id')
+            .onRef('ii.tenant_id', '=', 'l.tenant_id')
+            .onRef('ii.store_id', '=', 'l.store_id'),
+        )
+        .select([
+          'l.id',
+          'l.variant_id',
+          'l.product_name',
+          'l.sku',
+          'l.expected_quantity',
+          'l.counted_quantity',
+          'l.unit_wac',
+          'l.retail_price',
+          'l.override_unit_cost',
+          'l.last_counted_at',
+          'ii.quantity_on_hand as live_quantity',
+          'ii.wac_cost as live_wac_cost',
+        ])
+        .where('l.session_id', '=', sessionId)
+        .where('l.tenant_id', '=', ctx.tenantId)
+        .execute();
+
+      if (lineRows.length === 0) {
+        throw Object.assign(new Error('جلسة الجرد فارغة؛ أضف صنفًا واحدًا على الأقل قبل الاعتماد'), { status: 400 });
+      }
+
+      const countedCountExisting = lineRows.filter((l) => l.counted_quantity !== null && l.counted_quantity !== undefined).length;
+      if (body.uncountedStrategy === 'SKIP_UNCOUNTED' && countedCountExisting === 0) {
+        throw Object.assign(new Error('لم يتم عدّ أي صنف بعد. قم بعدّ صنف واحد على الأقل أو اختر اعتبار غير المعدود صفراً'), { status: 400 });
+      }
+
+      const nowDate = new Date();
+      const nowIso = nowDate.toISOString();
+      const currency = session.currency || 'EGP';
+      const missingCostNames = [];
+      const prepared = [];
+
+      for (const line of lineRows) {
+        const liveQty = Math.max(0, Number(line.live_quantity ?? 0));
+        const liveWacMinor = BigInt(line.live_wac_cost ?? line.unit_wac ?? 0);
+        const overrideCostMinor = line.override_unit_cost !== null && line.override_unit_cost !== undefined ? BigInt(line.override_unit_cost) : null;
+        const rawCounted = line.counted_quantity !== null && line.counted_quantity !== undefined
+          ? Number(line.counted_quantity)
+          : body.uncountedStrategy === 'ZERO_UNCOUNTED'
+            ? 0
+            : null;
+
+        if (rawCounted === null) {
+          prepared.push({ line, skipped: true, liveQty, counted: null, delta: 0, unitCostMinor: liveWacMinor });
+          continue;
+        }
+
+        const delta = rawCounted - liveQty;
+        if (delta > 0 && overrideCostMinor === null && liveWacMinor <= 0n) {
+          missingCostNames.push(`${line.product_name} (${line.sku})`);
+        }
+        const unitCostMinor = delta > 0 ? (overrideCostMinor !== null ? overrideCostMinor : liveWacMinor) : liveWacMinor;
+        prepared.push({ line, skipped: false, liveQty, counted: rawCounted, delta, unitCostMinor });
+      }
+
+      if (missingCostNames.length > 0) {
+        throw Object.assign(
+          new Error(`يجب تحديد تكلفة الوحدة للأصناف التي بها زيادة وتكلفتها المسجلة صفر: ${missingCostNames.slice(0, 5).join('، ')}`),
+          { status: 400 },
+        );
+      }
+
+      let surplusCostTotal = 0n;
+      let shortageCostTotal = 0n;
+      let totalVarianceQty = 0;
+      let netVarianceRetail = 0n;
+      let countedLines = 0;
+      let adjustedLines = 0;
+
+      for (const entry of prepared) {
+        const { line, skipped, liveQty, counted, delta, unitCostMinor } = entry;
+        if (skipped) {
+          await trx
+            .updateTable('stocktake_lines')
+            .set({
+              committed_expected_quantity: liveQty,
+              committed_variance_qty: 0,
+              committed_variance_cost: 0,
+              committed_unit_cost: Number(unitCostMinor),
+              updated_at: nowIso,
+            })
+            .where('id', '=', line.id)
+            .where('session_id', '=', sessionId)
+            .execute();
+          continue;
+        }
+
+        countedLines += 1;
+        totalVarianceQty += delta;
+        netVarianceRetail += BigInt(delta) * BigInt(line.retail_price ?? 0);
+
+        let lineCostVariance = 0n;
+        if (delta !== 0) {
+          adjustedLines += 1;
+          const movement = await applyStockMovementInTransaction(trx, ctx, {
+            id: randomUUID(),
+            storeId: session.store_id,
+            variantId: line.variant_id,
+            currency,
+            movementType: 'INVENTORY_ADJUSTMENT',
+            quantityDelta: BigInt(delta),
+            ...(delta > 0 ? { unitCost: Money.fromMinor(unitCostMinor, currency) } : {}),
+            sourceType: 'ADJUSTMENT',
+            sourceId: session.id,
+            allowNegativeStock: false,
+          });
+          const absDelta = BigInt(delta > 0 ? delta : -delta);
+          const movementTotalCost = movement.unitCost.amount * absDelta;
+          if (delta > 0) {
+            lineCostVariance = movementTotalCost;
+            surplusCostTotal += movementTotalCost;
+          } else {
+            lineCostVariance = -movementTotalCost;
+            shortageCostTotal += movementTotalCost;
+          }
+        }
+
+        await trx
+          .updateTable('stocktake_lines')
+          .set({
+            counted_quantity: counted,
+            last_counted_at: line.last_counted_at ?? nowIso,
+            committed_expected_quantity: liveQty,
+            committed_variance_qty: delta,
+            committed_variance_cost: Number(lineCostVariance),
+            committed_unit_cost: Number(unitCostMinor),
+            updated_at: nowIso,
+          })
+          .where('id', '=', line.id)
+          .where('session_id', '=', sessionId)
+          .execute();
+      }
+
+      let journalEntryId = null;
+      if (surplusCostTotal > 0n || shortageCostTotal > 0n) {
+        const journalLines = [];
+        if (surplusCostTotal > 0n) {
+          journalLines.push({ accountCode: '1300', side: 'DEBIT', amount: surplusCostTotal, memo: `زيادة مخزون جرد ${session.session_number}` });
+          journalLines.push({ accountCode: '5090', side: 'CREDIT', amount: surplusCostTotal, memo: `إثبات زيادة جرد ${session.session_number}` });
+        }
+        if (shortageCostTotal > 0n) {
+          journalLines.push({ accountCode: '5090', side: 'DEBIT', amount: shortageCostTotal, memo: `عجز مخزون جرد ${session.session_number}` });
+          journalLines.push({ accountCode: '1300', side: 'CREDIT', amount: shortageCostTotal, memo: `خصم عجز جرد ${session.session_number}` });
+        }
+        const journalKey = `stocktake-commit-${session.id}`;
+        try {
+          await postJournalEntry(trx, ctx, {
+            storeId: session.store_id,
+            currency,
+            date: nowDate,
+            sourceType: 'ADJUSTMENT',
+            sourceId: session.id,
+            idempotencyKey: journalKey,
+            description: `تسوية الجرد الشامل ${session.session_number} — ${session.title}`,
+            lines: journalLines,
+          });
+        } catch (err) {
+          if (/closed|مغلق|مقفل|period/i.test(String(err?.message ?? ''))) {
+            throw Object.assign(new Error('لا يمكن اعتماد الجرد لأن الفترة المحاسبية لهذا التاريخ مغلقة'), { status: 409 });
+          }
+          throw err;
+        }
+        const journalRow = await trx
+          .selectFrom('journal_entries')
+          .select('id')
+          .where('tenant_id', '=', ctx.tenantId)
+          .where('idempotency_key', '=', journalKey)
+          .executeTakeFirst();
+        journalEntryId = journalRow?.id ?? null;
+      }
+
+      const netVarianceCost = surplusCostTotal - shortageCostTotal;
+      const updateResult = await trx
+        .updateTable('stocktake_sessions')
+        .set({
+          status: 'COMMITTED',
+          idempotency_key: body.idempotencyKey,
+          uncounted_strategy: body.uncountedStrategy,
+          notes: body.notes !== undefined ? (body.notes?.trim() || null) : session.notes,
+          total_lines: lineRows.length,
+          counted_lines: countedLines,
+          total_variance_qty: totalVarianceQty,
+          total_surplus_cost: Number(surplusCostTotal),
+          total_shortage_cost: Number(shortageCostTotal),
+          net_variance_cost: Number(netVarianceCost),
+          net_variance_retail: Number(netVarianceRetail),
+          journal_entry_id: journalEntryId,
+          committed_by_user_id: ctx.userId,
+          committed_at: nowIso,
+          updated_at: nowIso,
+        })
+        .where('id', '=', session.id)
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('status', '=', 'DRAFT')
+        .executeTakeFirst();
+
+      if (updateResult.numUpdatedRows !== 1n) {
+        throw Object.assign(new Error('تعذر اعتماد الجرد: تم تغييره في طلب متزامن آخر'), { status: 409 });
+      }
+
+      auditMeta = {
+        storeId: session.store_id,
+        sessionNumber: session.session_number,
+        title: session.title,
+        countedLines,
+        adjustedLines,
+        totalVarianceQty,
+        surplusCostTotal: surplusCostTotal.toString(),
+        shortageCostTotal: shortageCostTotal.toString(),
+        journalEntryId,
+      };
+    });
+
+    if (auditMeta) {
+      await recordAudit(ctx, {
+        storeId: auditMeta.storeId,
+        action: 'STOCKTAKE_COMMITTED',
+        entityType: 'STOCKTAKE_SESSION',
+        entityId: sessionId,
+        summary: `اعتماد وترحيل الجرد ${auditMeta.sessionNumber} (${auditMeta.countedLines} صنف معدود، ${auditMeta.adjustedLines} تعديل رصيد)`,
+        metadata: auditMeta,
+      });
+    }
+
+    return json(res, 200, loadStocktakeSessionDetail(ctx, sessionId, { includeBlindReview: true }));
+  }
+
+  const stocktakeCancelMatch = method === 'POST' ? path.match(/^\/api\/stocktakes\/([0-9a-f-]+)\/cancel$/i) : null;
+  if (stocktakeCancelMatch) {
+    ctx.assertPermission(Permissions.INVENTORY_ADJUST);
+    const sessionId = stocktakeCancelMatch[1];
+    const existing = await db
+      .selectFrom('stocktake_sessions')
+      .selectAll()
+      .where('id', '=', sessionId)
+      .where('tenant_id', '=', ctx.tenantId)
+      .executeTakeFirst();
+    if (!existing) throw Object.assign(new Error('جلسة الجرد غير موجودة'), { status: 404 });
+    assertStoreScope(ctx, existing.store_id);
+    if (existing.status !== 'DRAFT') throw Object.assign(new Error('لا يمكن إلغاء جرد تم اعتماده أو إلغاؤه مسبقاً'), { status: 409 });
+
+    const nowIso = new Date().toISOString();
+    const resCancel = await db
+      .updateTable('stocktake_sessions')
+      .set({ status: 'CANCELLED', cancelled_at: nowIso, updated_at: nowIso })
+      .where('id', '=', sessionId)
+      .where('tenant_id', '=', ctx.tenantId)
+      .where('status', '=', 'DRAFT')
+      .executeTakeFirst();
+    if (resCancel.numUpdatedRows !== 1n) {
+      throw Object.assign(new Error('تعذر إلغاء مسودة الجرد'), { status: 409 });
+    }
+
+    await recordAudit(ctx, {
+      storeId: existing.store_id,
+      action: 'STOCKTAKE_CANCELLED',
+      entityType: 'STOCKTAKE_SESSION',
+      entityId: sessionId,
+      summary: `إلغاء مسودة الجرد ${existing.session_number} (${existing.title})`,
+      metadata: { sessionNumber: existing.session_number },
+    });
+
+    return json(res, 200, loadStocktakeSessionDetail(ctx, sessionId));
   }
 
   throw Object.assign(new Error('المسار غير موجود'), { status: 404 });

@@ -22,6 +22,7 @@ import * as productVariantsMetadata from './migrations/017_product_variants_meta
 import * as auditLogs from './migrations/018_audit_logs.js';
 import * as enterpriseAccountingAndIndexes from './migrations/019_enterprise_accounting_and_indexes.js';
 import * as attendanceSchedule from './migrations/020_attendance_schedule.js';
+import * as stocktakeSessions from './migrations/021_stocktake_sessions.js';
 
 const MIGRATION_REGISTRY: Record<string, Migration> = {
   '001_initial_foundation': {
@@ -103,6 +104,10 @@ const MIGRATION_REGISTRY: Record<string, Migration> = {
   '020_attendance_schedule': {
     up: attendanceSchedule.up,
     down: attendanceSchedule.down,
+  },
+  '021_stocktake_sessions': {
+    up: stocktakeSessions.up,
+    down: stocktakeSessions.down,
   },
 };
 

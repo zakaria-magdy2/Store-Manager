@@ -412,4 +412,149 @@ describe('SQLite Database & Migration Engine', () => {
       }).execute(),
     ).rejects.toThrow('TenantIsolationViolation');
   });
+
+  it('enforces stocktake session tenant isolation and post-commit immutability', async () => {
+    await new DatabaseMigrator(dbManager.getDb()).migrateToLatest();
+    const db = dbManager.getDb();
+
+    await db.insertInto('tenants').values([
+      { id: 'tenant-stk-a', name: 'A', code: 'STK_A', currency: 'EGP' },
+      { id: 'tenant-stk-b', name: 'B', code: 'STK_B', currency: 'EGP' },
+    ]).execute();
+    await db.insertInto('stores').values([
+      { id: 'store-stk-a', tenant_id: 'tenant-stk-a', name: 'A', code: 'STK_S1' },
+      { id: 'store-stk-b', tenant_id: 'tenant-stk-b', name: 'B', code: 'STK_S2' },
+    ]).execute();
+    await db.insertInto('users').values({
+      id: 'user-stk-a', tenant_id: 'tenant-stk-a', store_id: 'store-stk-a',
+      username: 'stk_owner', password_hash: 'hash', full_name: 'Owner', role: 'OWNER',
+    }).execute();
+    await db.insertInto('categories').values({
+      id: 'cat-stk-a', tenant_id: 'tenant-stk-a', parent_id: null, name: 'Cat', code: 'CAT',
+    }).execute();
+    await db.insertInto('products').values({
+      id: 'prod-stk-a', tenant_id: 'tenant-stk-a', name: 'Item', sku: 'SKU-1',
+      barcode: null, category_id: 'cat-stk-a', has_variants: 0,
+    }).execute();
+    await db.insertInto('product_variants').values({
+      id: 'var-stk-a', tenant_id: 'tenant-stk-a', product_id: 'prod-stk-a',
+      sku: 'SKU-1', barcode: '6220001', attributes_json: '{}', retail_price: 5000n,
+      currency: 'EGP', reorder_point: 0n,
+    }).execute();
+
+    const nowIso = new Date().toISOString();
+    await expect(
+      db.insertInto('stocktake_sessions').values({
+        id: 'stk-cross-tenant',
+        tenant_id: 'tenant-stk-a',
+        store_id: 'store-stk-b',
+        session_number: 'STK-999',
+        title: 'Cross Tenant',
+        scope: 'FULL',
+        category_id: null,
+        blind_mode: 0,
+        include_zero_stock: 1,
+        status: 'DRAFT',
+        idempotency_key: null,
+        uncounted_strategy: null,
+        currency: 'EGP',
+        notes: null,
+        total_lines: 0,
+        counted_lines: 0,
+        total_variance_qty: 0,
+        total_surplus_cost: 0,
+        total_shortage_cost: 0,
+        net_variance_cost: 0,
+        net_variance_retail: 0,
+        journal_entry_id: null,
+        created_by_user_id: 'user-stk-a',
+        committed_by_user_id: null,
+        created_at: nowIso,
+        updated_at: nowIso,
+        committed_at: null,
+        cancelled_at: null,
+      }).execute(),
+    ).rejects.toThrow('TenantIsolationViolation');
+
+    await db.insertInto('stocktake_sessions').values({
+      id: 'stk-session-1',
+      tenant_id: 'tenant-stk-a',
+      store_id: 'store-stk-a',
+      session_number: 'STK-1001',
+      title: 'Full Count',
+      scope: 'FULL',
+      category_id: null,
+      blind_mode: 0,
+      include_zero_stock: 1,
+      status: 'DRAFT',
+      idempotency_key: null,
+      uncounted_strategy: null,
+      currency: 'EGP',
+      notes: null,
+      total_lines: 1,
+      counted_lines: 0,
+      total_variance_qty: 0,
+      total_surplus_cost: 0,
+      total_shortage_cost: 0,
+      net_variance_cost: 0,
+      net_variance_retail: 0,
+      journal_entry_id: null,
+      created_by_user_id: 'user-stk-a',
+      committed_by_user_id: null,
+      created_at: nowIso,
+      updated_at: nowIso,
+      committed_at: null,
+      cancelled_at: null,
+    }).execute();
+
+    await db.insertInto('stocktake_lines').values({
+      id: 'stk-line-1',
+      session_id: 'stk-session-1',
+      tenant_id: 'tenant-stk-a',
+      store_id: 'store-stk-a',
+      variant_id: 'var-stk-a',
+      product_id: 'prod-stk-a',
+      product_name: 'Item',
+      sku: 'SKU-1',
+      barcode: '6220001',
+      category_id: 'cat-stk-a',
+      category_name: 'Cat',
+      expected_quantity: 10,
+      counted_quantity: null,
+      unit_wac: 3000,
+      retail_price: 5000,
+      override_unit_cost: null,
+      scanned_count: 0,
+      reason: null,
+      committed_expected_quantity: null,
+      committed_variance_qty: null,
+      committed_variance_cost: null,
+      committed_unit_cost: null,
+      last_counted_at: null,
+      created_at: nowIso,
+      updated_at: nowIso,
+    }).execute();
+
+    await db.updateTable('stocktake_lines')
+      .set({ counted_quantity: 9, updated_at: nowIso })
+      .where('id', '=', 'stk-line-1')
+      .execute();
+
+    await db.updateTable('stocktake_sessions')
+      .set({ status: 'COMMITTED', committed_by_user_id: 'user-stk-a', committed_at: nowIso, updated_at: nowIso })
+      .where('id', '=', 'stk-session-1')
+      .execute();
+
+    await expect(
+      db.updateTable('stocktake_sessions').set({ title: 'Edited' }).where('id', '=', 'stk-session-1').execute(),
+    ).rejects.toThrow('immutable');
+
+    await expect(
+      db.updateTable('stocktake_lines').set({ counted_quantity: 10 }).where('id', '=', 'stk-line-1').execute(),
+    ).rejects.toThrow('finalization');
+
+    await expect(
+      db.deleteFrom('stocktake_sessions').where('id', '=', 'stk-session-1').execute(),
+    ).rejects.toThrow('cannot be deleted');
+  });
 });
