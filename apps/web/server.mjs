@@ -341,6 +341,7 @@ const PatchStocktakeLinesSchema = z.object({
   scanCode: z.string().min(1).max(120).trim().optional(),
   delta: z.number().int().min(-10000).max(10000).optional(),
   addVariantId: z.string().uuid().optional(),
+  addDelta: z.number().int().min(0).max(10000).optional(),
   lines: z.array(z.object({
     lineId: z.string().uuid(),
     countedQuantity: z.number().int().min(0).max(100000000).nullable().optional(),
@@ -4367,11 +4368,23 @@ async function handleApi(req, res, url) {
       if (body.addVariantId) {
         const alreadyInSession = await trx
           .selectFrom('stocktake_lines')
-          .select('id')
+          .select(['id', 'counted_quantity'])
           .where('session_id', '=', sessionId)
           .where('variant_id', '=', body.addVariantId)
           .executeTakeFirst();
         if (alreadyInSession) {
+          if (body.addDelta !== undefined && body.addDelta > 0) {
+            const nextCount = Math.max(0, Number(alreadyInSession.counted_quantity ?? 0) + body.addDelta);
+            await trx
+              .updateTable('stocktake_lines')
+              .set({
+                counted_quantity: nextCount,
+                last_counted_at: nowIso,
+                updated_at: nowIso,
+              })
+              .where('id', '=', alreadyInSession.id)
+              .execute();
+          }
           lastScannedLineId = alreadyInSession.id;
         } else {
           const v = await trx
@@ -4422,7 +4435,7 @@ async function handleApi(req, res, url) {
               category_id: v.category_id ?? null,
               category_name: v.category_name ?? null,
               expected_quantity: Math.max(0, Number(vInv?.quantity_on_hand ?? 0)),
-              counted_quantity: null,
+              counted_quantity: body.addDelta !== undefined ? Math.max(0, body.addDelta) : null,
               unit_wac: Math.max(0, Number(vInv?.wac_cost ?? 0)),
               retail_price: Math.max(0, Number(v.retail_price ?? 0)),
               override_unit_cost: null,
@@ -4432,7 +4445,7 @@ async function handleApi(req, res, url) {
               committed_variance_qty: null,
               committed_variance_cost: null,
               committed_unit_cost: null,
-              last_counted_at: null,
+              last_counted_at: body.addDelta !== undefined && body.addDelta > 0 ? nowIso : null,
               created_at: nowIso,
               updated_at: nowIso,
             })

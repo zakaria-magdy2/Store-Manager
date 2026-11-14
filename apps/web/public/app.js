@@ -34,6 +34,11 @@ const state = {
   stocktakeQuery: '',
   stocktakeCategory: '',
   stocktakeScanStep: 1,
+  stocktakeNoScanner: localStorage.getItem('retailos_stocktake_no_scanner') !== '0',
+  stocktakeViewMode: localStorage.getItem('retailos_stocktake_view_mode') === 'cards' ? 'cards' : 'table',
+  stocktakeSmartQuery: '',
+  stocktakeSmartHighlight: 0,
+  stocktakeSmartOpen: false,
   stocktakeLastScans: [],
   stocktakeDirtyMap: {},
   stocktakeSaving: false,
@@ -3881,7 +3886,7 @@ function posView() {
   for (const prod of state.data.products ?? []) {
     for (const v of prod.variants ?? []) productByVariantId.set(v.id, prod);
   }
-  return `<div class="pos-layout"><section class="pos-catalog">${shiftBanner}<div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>${mustStartShift ? 'ابدأ الشيفت أولاً لإتاحة اختيار المنتجات وإتمام البيع.' : 'ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.'}</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="${mustStartShift ? 'ابدأ الشيفت أولاً لتفعيل نقطة البيع...' : 'ابحث باسم الموديل أو كود الموديل أو الباركود'}" value="${escapeHtml(state.query)}" ${mustStartShift ? 'disabled' : 'autofocus'}><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="">كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}">${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products" style="${mustStartShift ? 'opacity:0.55;' : ''}">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const allSamePrice = new Set(product.variants.map((variant) => variant.price.amount)).size === 1; const price = allSamePrice ? money(product.variants[0].price) : 'أسعار متعددة'; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${(mustStartShift || (product.itemKind === 'PRODUCT' && stock <= 0n)) ? 'disabled' : ''}><span class="pos-product-art ${product.imagePath ? 'has-image' : `art-${index % 6}`}">${product.imagePath ? renderProductThumb(product, '', 'pos-product-thumb') : icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${price}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${mustStartShift ? `<div class="cart-empty"><span class="cart-empty-icon cart-empty-icon-shift">${icon('clock', 23)}</span><strong>يجب بدء الشيفت أولاً</strong><p>لا يمكن إجراء أي عملية بيع قبل تسجيل بدء الشيفت واستلام الدرج.</p><button type="button" id="cart-start-shift-btn" class="button button-sm shift-start-cta" style="margin-top:12px;">${icon('play', 15)}<span>بدء الشيفت الآن</span></button></div>` : state.cart.length ? state.cart.map((item) => { const matchedProd = productByVariantId.get(item.variantId); return `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art ${matchedProd?.imagePath ? 'has-image' : ''}">${matchedProd?.imagePath ? renderProductThumb(matchedProd, icon('box', 16), 'cart-line-thumb') : icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button data-qty="${item.variantId}" data-delta="-1">−</button><span>${item.quantity}</span><button data-qty="${item.variantId}" data-delta="1">+</button></div><strong>${money({ ...item.price, amount: (BigInt(item.price.amount) * BigInt(item.quantity)).toString() })}</strong></div></div>`; }).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة أو امسح الباركود عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong>${state.cart.reduce((sum, item) => sum + item.quantity, 0)}</strong></div><div><span>الخصم</span><strong>${money({ ...total, amount: '0' })}</strong></div><div class="cart-grand-total"><span>الإجمالي المستحق</span><strong>${money(total)}</strong></div></div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}" ${mustStartShift ? 'disabled' : ''}><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button ${mustStartShift ? 'checkout-button-locked' : ''}" ${(!mustStartShift && state.cart.length && !state.isSaving) ? '' : 'disabled'}><span>${mustStartShift ? 'ابدأ الشيفت أولاً' : 'إتمام البيع'}</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
+  return `<div class="pos-layout"><section class="pos-catalog">${shiftBanner}<div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>${mustStartShift ? 'ابدأ الشيفت أولاً لإتاحة اختيار المنتجات وإتمام البيع.' : 'ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.'}</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="${mustStartShift ? 'ابدأ الشيفت أولاً لتفعيل نقطة البيع...' : 'ابحث باسم الموديل أو كود الموديل أو الباركود'}" value="${escapeHtml(state.query)}" ${mustStartShift ? 'disabled' : 'autofocus'}><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="">كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}">${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products" style="${mustStartShift ? 'opacity:0.55;' : ''}">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const allSamePrice = new Set(product.variants.map((variant) => variant.price.amount)).size === 1; const price = allSamePrice ? money(product.variants[0].price) : 'أسعار متعددة'; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${(mustStartShift || (product.itemKind === 'PRODUCT' && stock <= 0n)) ? 'disabled' : ''}><span class="pos-product-art ${product.imagePath ? 'has-image' : `art-${index % 6}`}">${product.imagePath ? renderProductThumb(product, '', 'pos-product-thumb') : icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${price}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${mustStartShift ? `<div class="cart-empty"><span class="cart-empty-icon cart-empty-icon-shift">${icon('clock', 23)}</span><strong>يجب بدء الشيفت أولاً</strong><p>لا يمكن إجراء أي عملية بيع قبل تسجيل بدء الشيفت واستلام الدرج.</p><button type="button" id="cart-start-shift-btn" class="button button-sm shift-start-cta" style="margin-top:12px;">${icon('play', 15)}<span>بدء الشيفت الآن</span></button></div>` : state.cart.length ? state.cart.map((item) => { const matchedProd = productByVariantId.get(item.variantId); return `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art ${matchedProd?.imagePath ? 'has-image' : ''}">${matchedProd?.imagePath ? renderProductThumb(matchedProd, icon('box', 16), 'cart-line-thumb') : icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button data-qty="${item.variantId}" data-delta="-1">−</button><span>${item.quantity}</span><button data-qty="${item.variantId}" data-delta="1">+</button></div><strong>${money({ ...item.price, amount: (BigInt(item.price.amount) * BigInt(item.quantity)).toString() })}</strong></div></div>`; }).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة بالبحث أو اللمس (أو بالباركود إن وجد) عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong>${state.cart.reduce((sum, item) => sum + item.quantity, 0)}</strong></div><div><span>الخصم</span><strong>${money({ ...total, amount: '0' })}</strong></div><div class="cart-grand-total"><span>الإجمالي المستحق</span><strong>${money(total)}</strong></div></div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}" ${mustStartShift ? 'disabled' : ''}><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button ${mustStartShift ? 'checkout-button-locked' : ''}" ${(!mustStartShift && state.cart.length && !state.isSaving) ? '' : 'disabled'}><span>${mustStartShift ? 'ابدأ الشيفت أولاً' : 'إتمام البيع'}</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
 }
 
 function supplierModal(html, formId, endpoint, convert = (data) => data, successMessage = 'تم حفظ الحركة في سجل التاجر') {
@@ -5170,11 +5175,7 @@ function bindShell() {
       state.analyticsKey = null;
       state.salesHistory = null;
       state.salesHistoryTotal = 0;
-      state.stocktakeList = null;
-      state.stocktakeListStoreId = null;
-      state.stocktakeActive = null;
-      state.stocktakeLastScans = [];
-      state.stocktakeDirtyMap = {};
+      resetStocktakeUiState();
       await loadData(event.target.value);
       render();
     } catch (error) { toast(error.message, 'error'); }
@@ -5198,11 +5199,7 @@ function bindShell() {
     state.user = null;
     state.data = null;
     state.cart = [];
-    state.stocktakeActive = null;
-    state.stocktakeList = null;
-    state.stocktakeListStoreId = null;
-    state.stocktakeDirtyMap = {};
-    state.stocktakeLastScans = [];
+    resetStocktakeUiState();
     render();
   });
   const search = document.querySelector('#global-search');
@@ -6857,6 +6854,197 @@ function renderStocktakeFinancialCellHtml(line, session, decimals, currency) {
   return `<div class="stocktake-fin-cell">${costSummary}<label class="stocktake-override-cost-wrap ${line.needsSurplusCost ? 'is-required' : ''}"><span>تكلفة وحدة للزيادة (${escapeHtml(currency)}):</span><input type="text" inputmode="decimal" class="stocktake-cost-input" data-line-id="${line.id}" value="${escapeHtml(val)}" placeholder="مثال: 50"></label></div>`;
 }
 
+function resetStocktakeUiState({ keepList = false, keepActive = false } = {}) {
+  if (!keepList) {
+    state.stocktakeList = null;
+    state.stocktakeListStoreId = null;
+  }
+  if (!keepActive) state.stocktakeActive = null;
+  state.stocktakeTab = 'ALL';
+  state.stocktakeQuery = '';
+  state.stocktakeCategory = '';
+  state.stocktakeSmartQuery = '';
+  state.stocktakeSmartHighlight = 0;
+  state.stocktakeSmartOpen = false;
+  state.stocktakeLastScans = [];
+  state.stocktakeDirtyMap = {};
+  state.stocktakeLastSavedAt = null;
+}
+
+function recordStocktakeLastScan(line) {
+  if (!line) return;
+  const nextList = (state.stocktakeLastScans ?? []).filter((s) => s.lineId !== line.id);
+  nextList.unshift({
+    lineId: line.id,
+    productName: line.variantLabel ? `${line.productName} (${line.variantLabel})` : line.productName,
+    countedQuantity: line.countedQuantity,
+  });
+  state.stocktakeLastScans = nextList.slice(0, 6);
+}
+
+function buildStocktakeProductMap() {
+  const map = new Map();
+  for (const product of state.data?.products ?? []) map.set(product.id, product);
+  return map;
+}
+
+function findStocktakeSmartMatches(queryText, detail) {
+  const q = String(queryText ?? '').trim().toLowerCase();
+  const lines = detail?.lines ?? [];
+  const lineByVariantId = new Map(lines.map((l) => [l.variantId, l]));
+  const productById = buildStocktakeProductMap();
+  const categoryNameById = new Map((state.data?.categories ?? []).map((c) => [c.id, c.name]));
+
+  const lineMatches = [];
+  for (const l of lines) {
+    const haystack = `${l.productName} ${l.variantLabel ?? ''} ${l.sku} ${l.barcode ?? ''} ${l.categoryName ?? ''}`.toLowerCase();
+    if (!q || haystack.includes(q)) {
+      const exactCode = Boolean(q) && ((l.barcode && l.barcode.toLowerCase() === q) || l.sku.toLowerCase() === q);
+      lineMatches.push({
+        kind: 'line',
+        score: exactCode ? 3 : 2,
+        lineId: l.id,
+        variantId: l.variantId,
+        productId: l.productId,
+        productName: l.productName,
+        variantLabel: l.variantLabel || '',
+        categoryName: l.categoryName || '',
+        sku: l.sku,
+        barcode: l.barcode || '',
+        expectedQuantity: l.expectedQuantity,
+        countedQuantity: l.countedQuantity,
+        imageProduct: productById.get(l.productId) ?? null,
+      });
+    }
+  }
+
+  const catalogMatches = [];
+  for (const product of state.data?.products ?? []) {
+    if (product.itemKind === 'SERVICE' || product.isActive === false) continue;
+    const catName = categoryNameById.get(product.categoryId) ?? '';
+    for (const v of product.variants ?? []) {
+      if (v.isActive === false || lineByVariantId.has(v.id)) continue;
+      const variantLabel = v.attributes ? Object.values(v.attributes).join(' / ') : '';
+      const haystack = `${product.name} ${product.brand ?? ''} ${variantLabel} ${product.sku} ${v.sku} ${v.barcode ?? ''} ${catName}`.toLowerCase();
+      if (!q || haystack.includes(q)) {
+        const exactCode = Boolean(q) && ((v.barcode && v.barcode.toLowerCase() === q) || v.sku.toLowerCase() === q || product.sku.toLowerCase() === q);
+        catalogMatches.push({
+          kind: 'catalog',
+          score: exactCode ? 3 : 1,
+          lineId: null,
+          variantId: v.id,
+          productId: product.id,
+          productName: product.name,
+          variantLabel,
+          categoryName: catName,
+          sku: v.sku,
+          barcode: v.barcode || '',
+          expectedQuantity: Number(v.quantity ?? 0),
+          countedQuantity: null,
+          imageProduct: product,
+        });
+      }
+    }
+  }
+
+  const combined = [...lineMatches, ...catalogMatches];
+  combined.sort((a, b) => (b.score - a.score) || (a.kind === b.kind ? 0 : a.kind === 'line' ? -1 : 1));
+  return combined.slice(0, 12);
+}
+
+function renderStocktakeSmartDropdownHtml(queryText, detail) {
+  if (!state.stocktakeSmartOpen) return '';
+  const hasQuery = String(queryText ?? '').trim().length > 0;
+  if (!hasQuery && !state.stocktakeNoScanner) return '';
+  const matches = findStocktakeSmartMatches(queryText, detail);
+  const step = Math.max(1, Number(state.stocktakeScanStep) || 1);
+  if (!matches.length) {
+    return `<div class="stocktake-smart-empty">لا يوجد صنف مطابق لـ "<strong>${escapeHtml(queryText.trim())}</strong>" — جرب كلمة أخرى من اسم المنتج أو اللون أو المقاس.</div>`;
+  }
+  const safeHighlight = Math.max(0, Math.min(state.stocktakeSmartHighlight ?? 0, matches.length - 1));
+  return `<div class="stocktake-smart-list" role="listbox">
+    <div class="stocktake-smart-head">
+      <span>${hasQuery ? `نتائج مطابقة (${matches.length})` : `اختيار سريع بدون اسكانر (${matches.length})`}</span>
+      <small>اضغط Enter أو اختر الصنف للعدّ مباشرة</small>
+    </div>
+    ${matches.map((m, idx) => {
+      const thumb = m.imageProduct?.imagePath
+        ? renderProductThumb(m.imageProduct, escapeHtml(m.productName.slice(0, 1)))
+        : escapeHtml(m.productName.slice(0, 1));
+      const actionHtml = m.kind === 'line'
+        ? `<span class="stocktake-smart-qty-pill">المعدود: <b>${m.countedQuantity === null ? '—' : m.countedQuantity}</b></span>
+           <button type="button" class="stocktake-smart-act-btn" data-smart-adjust="${m.lineId}" data-delta="-1" title="إنقاص 1">−1</button>
+           <button type="button" class="stocktake-smart-act-btn is-primary" data-smart-adjust="${m.lineId}" data-delta="1" title="زيادة 1">+1</button>
+           ${step > 1 ? `<button type="button" class="stocktake-smart-act-btn is-step" data-smart-adjust="${m.lineId}" data-delta="${step}">+${step}</button>` : ''}
+           <button type="button" class="stocktake-smart-act-btn" data-smart-focus="${m.lineId}" title="الانتقال لإدخال رقم مخصص">كتابة</button>`
+        : `<span class="stocktake-smart-catalog-tag">غير مدرج</span>
+           <button type="button" class="stocktake-smart-act-btn is-primary" data-smart-add="${m.variantId}" data-delta="${step}">+ إدراج وعدّ (+${step})</button>
+           <button type="button" class="stocktake-smart-act-btn" data-smart-add="${m.variantId}" data-delta="-1" title="إدراج فقط">+ إدراج</button>`;
+      return `<div class="stocktake-smart-item ${idx === safeHighlight ? 'is-highlighted' : ''}" data-smart-idx="${idx}" role="option">
+        <span class="product-avatar ${m.imageProduct?.imagePath ? 'has-image' : ''}">${thumb}</span>
+        <div class="stocktake-smart-info">
+          <strong>${escapeHtml(m.productName)}${m.variantLabel ? ` <small class="stocktake-variant-sub">(${escapeHtml(m.variantLabel)})</small>` : ''}</strong>
+          <small><span class="sku-code">${escapeHtml(m.sku)}</span>${m.categoryName ? ` · ${escapeHtml(m.categoryName)}` : ''}${!detail.session.blindHidden ? ` · المتوقع: ${m.expectedQuantity}` : ''}</small>
+        </div>
+        <div class="stocktake-smart-actions">${actionHtml}</div>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
+function renderStocktakeCardsHtml(filteredLines, detail, productById, decimals, currency) {
+  const session = detail.session;
+  const isDraft = session.status === 'DRAFT';
+  return `<div class="stocktake-cards-grid">
+    ${filteredLines.map((line) => {
+      const prod = productById.get(line.productId);
+      const thumb = prod?.imagePath
+        ? renderProductThumb(prod, escapeHtml(line.productName.slice(0, 1)))
+        : escapeHtml(line.productName.slice(0, 1));
+      const isLastScanned = detail.lastScannedLineId === line.id;
+      const expectedText = session.blindHidden
+        ? 'مخفي (أعمى)'
+        : `${line.expectedQuantity} قطعة`;
+      const controlsHtml = isDraft
+        ? `<div class="stocktake-item-card-controls">
+            <button type="button" class="stocktake-step-btn stocktake-card-step" data-step="-1" data-line-id="${line.id}" title="إنقاص 1">−1</button>
+            <input type="number" min="0" step="1" class="stocktake-qty-input stocktake-card-qty" data-line-id="${line.id}" value="${line.countedQuantity === null ? '' : line.countedQuantity}" placeholder="0" aria-label="الكمية الفعلية لـ ${escapeHtml(line.productName)}">
+            <button type="button" class="stocktake-step-btn stocktake-card-step" data-step="1" data-line-id="${line.id}" title="زيادة 1">+1</button>
+            <button type="button" class="stocktake-step-btn stocktake-card-step" data-step="5" data-line-id="${line.id}" title="زيادة 5">+5</button>
+            ${!session.blindHidden ? `<button type="button" class="stocktake-match-btn" data-line-id="${line.id}" title="مطابقة للنظام (${line.expectedQuantity})">مطابق (${line.expectedQuantity})</button>` : ''}
+            ${line.countedQuantity !== null ? `<button type="button" class="stocktake-clear-btn" data-line-id="${line.id}" title="إعادة لحالة غير معدود">×</button>` : ''}
+          </div>`
+        : `<div class="stocktake-card-readonly-qty">العدّ الفعلي: <strong>${line.countedQuantity === null ? 'لم يُعدّ' : line.countedQuantity}</strong></div>`;
+
+      return `<article class="stocktake-item-card ${isLastScanned ? 'is-last-scanned' : ''} ${line.needsSurplusCost ? 'is-needs-cost' : ''}" data-row-line-id="${line.id}">
+        <div class="stocktake-item-card-head">
+          <div class="stocktake-item-card-title">
+            <span class="product-avatar ${prod?.imagePath ? 'has-image' : ''}">${thumb}</span>
+            <div>
+              <strong>${escapeHtml(line.productName)}</strong>
+              ${line.variantLabel ? `<small class="stocktake-variant-sub">${escapeHtml(line.variantLabel)}</small>` : ''}
+              <div class="stocktake-code-row">
+                <span class="sku-code">${escapeHtml(line.sku)}</span>
+                ${line.categoryName ? `<span class="stocktake-barcode-pill">${escapeHtml(line.categoryName)}</span>` : ''}
+                ${line.scannedCount > 0 ? `<span class="stocktake-scanned-pill">مسح ×${line.scannedCount}</span>` : ''}
+              </div>
+            </div>
+          </div>
+          <div class="stocktake-var-cell">${renderStocktakeRowVarianceHtml(line, session)}</div>
+        </div>
+        <div class="stocktake-item-card-meta">
+          <span>المتوقع بالنظام: <strong>${expectedText}</strong></span>
+          <div class="stocktake-fin-td">${renderStocktakeFinancialCellHtml(line, session, decimals, currency)}</div>
+        </div>
+        ${controlsHtml}
+        ${isDraft ? `<div class="stocktake-item-card-foot">
+          <input type="text" maxlength="240" class="stocktake-reason-input" data-line-id="${line.id}" value="${escapeHtml(line.reason ?? '')}" placeholder="سبب الفرق أو ملاحظة (اختياري)">
+        </div>` : line.reason ? `<small class="stocktake-muted">${escapeHtml(line.reason)}</small>` : ''}
+      </article>`;
+    }).join('')}
+  </div>`;
+}
+
 function stocktakeView() {
   const data = state.data;
   if (!state.stocktakeActive) {
@@ -6895,7 +7083,7 @@ function stocktakeView() {
     }).join('');
 
     return `<div class="page-heading-row">
-      <div><p class="page-lead">نظام الجرد الشامل الاحترافي للمتاجر: مسح باركود متواصل، حفظ تلقائي كمسودة، جرد أعمى، ومطابقة محاسبية آمنة بضغطة زر.</p></div>
+      <div><p class="page-lead">نظام الجرد الشامل الاحترافي للمتاجر: يعمل بالبحث والعدّ اليدوي بدون اسكانر أو بمسح الباركود المتواصل، مع حفظ تلقائي وجرد أعمى ومطابقة محاسبية آمنة.</p></div>
     </div>
     ${openDrafts.length ? `<div class="stocktake-draft-banner">
       <div class="stocktake-draft-banner-copy">
@@ -6928,8 +7116,8 @@ function stocktakeView() {
           </label>
           <label class="stocktake-scope-card">
             <input type="radio" name="scope" value="PARTIAL">
-            <strong>جرد انتقائي / مسح حر</strong>
-            <small>ابدأ بقائمة فارغة وأضف الأصناف بمسح الباركود على الرف.</small>
+            <strong>جرد انتقائي / أصناف محددة</strong>
+            <small>ابدأ بقائمة فارغة وأضف الأصناف بالبحث بالاسم أو مسح الباركود لعدّها فقط.</small>
           </label>
         </div>
         <div id="stocktake-category-wrap" class="stocktake-category-wrap" hidden>
@@ -6978,6 +7166,7 @@ function stocktakeView() {
   const catFilterOptions = [...categoryMap.entries()].map(([id, name]) => `<option value="${id}" ${state.stocktakeCategory === id ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('');
 
   const addableVariants = isDraft ? collectEligibleStocktakeVariants() : [];
+  const productById = buildStocktakeProductMap();
 
   const dirtyCount = Object.keys(state.stocktakeDirtyMap ?? {}).length;
   const saveBadge = state.stocktakeSaving
@@ -7049,7 +7238,7 @@ function stocktakeView() {
           <button type="button" class="button button-secondary button-sm" id="stocktake-mark-exact-btn">مطابقة المتبقي للنظام</button>
           <button type="button" class="button button-secondary button-sm" id="stocktake-save-draft-btn">حفظ المسودة</button>
         ` : ''}
-        <button type="button" class="button button-secondary button-sm" id="stocktake-print-btn">طباعة التقرير</button>
+        <button type="button" class="button button-secondary button-sm" id="stocktake-print-btn">${isDraft ? 'طباعة كشف للعدّ' : 'طباعة التقرير'}</button>
         <a class="button button-secondary button-sm" href="/api/stocktakes/${session.id}/export.csv" download>تصدير CSV</a>
         ${isDraft ? `
           <button type="button" class="button button-danger button-sm" id="stocktake-cancel-btn">إلغاء المسودة</button>
@@ -7088,30 +7277,40 @@ function stocktakeView() {
     </div>` : ''}
 
     ${isDraft ? `<section class="panel stocktake-scanner-panel">
+      <div class="stocktake-mode-bar">
+        <div class="stocktake-mode-switch" role="group" aria-label="طريقة الجرد">
+          <button type="button" class="stocktake-mode-btn ${state.stocktakeNoScanner ? 'is-active' : ''}" data-stk-input-mode="manual">بدون اسكانر (بحث بالاسم وعدّ سريع)</button>
+          <button type="button" class="stocktake-mode-btn ${!state.stocktakeNoScanner ? 'is-active' : ''}" data-stk-input-mode="scanner">باستخدام جهاز اسكانر باركود</button>
+        </div>
+        <span class="stocktake-mode-tip">${state.stocktakeNoScanner ? 'اكتب جزءاً من اسم المنتج أو اللون أو المقاس أو الكود، واضغط +1 / +5 أو Enter للعدّ مباشرة.' : 'ثبّت المؤشر في الخانة وابدأ بمسح الباركود متواصلاً أو اكتب الكود واضغط Enter.'}</span>
+      </div>
       <form id="stocktake-scan-form" class="stocktake-scanner-row">
-        <div class="stocktake-scan-field">
-          ${icon('scan', 19)}
-          <input id="stocktake-scan-input" autocomplete="off" placeholder="ضع المؤشر هنا وامسح الباركود بالجهاز أو اكتب كود SKU ثم Enter..." />
+        <div class="stocktake-scan-wrap">
+          <div class="stocktake-scan-field">
+            ${icon(state.stocktakeNoScanner ? 'search' : 'scan', 19)}
+            <input id="stocktake-scan-input" autocomplete="off" value="${escapeHtml(state.stocktakeSmartQuery ?? '')}" placeholder="${state.stocktakeNoScanner ? 'ابحث باسم المنتج أو اللون أو المقاس أو الكود للعدّ السريع بدون اسكانر...' : 'ضع المؤشر هنا وامسح الباركود بالجهاز أو اكتب كود SKU ثم Enter...'}" />
+          </div>
+          <div id="stocktake-smart-results" class="stocktake-smart-results" ${(state.stocktakeSmartOpen && (state.stocktakeNoScanner || String(state.stocktakeSmartQuery ?? '').trim())) ? '' : 'hidden'}>${renderStocktakeSmartDropdownHtml(state.stocktakeSmartQuery, detail)}</div>
         </div>
-        <div class="stocktake-step-selector" aria-label="كمية المسحة الواحدة">
-          <span>لكل مسحة:</span>
+        <div class="stocktake-step-selector" aria-label="كمية العدّ بالضغطة">
+          <span>لكل ضغطة:</span>
           ${[1, 5, 12].map((n) => `<button type="button" class="stocktake-step-chip ${state.stocktakeScanStep === n ? 'is-active' : ''}" data-scan-step="${n}">+${n}</button>`).join('')}
-          <input type="number" id="stocktake-scan-step-input" min="1" max="9999" value="${state.stocktakeScanStep}" aria-label="كمية المسحة المخصصة" />
+          <input type="number" id="stocktake-scan-step-input" min="1" max="9999" value="${state.stocktakeScanStep}" aria-label="كمية العد المخصصة" />
         </div>
-        <button type="submit" class="button button-primary button-sm">تسجيل المسح</button>
+        <button type="submit" class="button button-primary button-sm">${state.stocktakeNoScanner ? `عدّ المختار (+${state.stocktakeScanStep || 1})` : 'تسجيل المسح'}</button>
       </form>
       <div class="stocktake-quickadd-row">
         <label class="stocktake-quickadd-picker">
-          <span>إضافة صنف يدويًا لقائمة الجرد:</span>
+          <span>إدراج صنف من القائمة:</span>
           <select id="stocktake-add-variant-select">
-            <option value="">— اختر صنفًا لإضافته —</option>
+            <option value="">— اختر صنفًا لإدراجه —</option>
             ${addableVariants.map((o) => `<option value="${o.variantId}">${escapeHtml(o.label)}</option>`).join('')}
           </select>
         </label>
         <button type="button" class="button button-secondary button-sm" id="stocktake-add-variant-btn">+ إدراج الصنف</button>
       </div>
       ${state.stocktakeLastScans.length ? `<div class="stocktake-recent-scans">
-        <span class="stocktake-muted">آخر عمليات المسح:</span>
+        <span class="stocktake-muted">${state.stocktakeNoScanner ? 'آخر الأصناف المعدودة:' : 'آخر عمليات المسح:'}</span>
         ${state.stocktakeLastScans.map((scan) => `<div class="stocktake-recent-pill">
           <strong>${escapeHtml(scan.productName)}</strong>
           <span>المعدود: <b>${scan.countedQuantity}</b></span>
@@ -7130,6 +7329,10 @@ function stocktakeView() {
           <button type="button" class="att-tab-btn ${state.stocktakeTab === 'MATCHED' ? 'is-active' : ''}" data-stk-tab="MATCHED" ${session.blindHidden ? 'disabled title="مخفي في الجرد الأعمى"' : ''}>متطابق (${session.blindHidden ? '—' : session.matchedLines})</button>
         </div>
         <div class="stocktake-table-search-group">
+          <div class="stocktake-view-switch" role="group" aria-label="طريقة عرض الأصناف">
+            <button type="button" class="stocktake-view-btn ${state.stocktakeViewMode === 'table' ? 'is-active' : ''}" data-stk-view="table">جدول تفصيلي</button>
+            <button type="button" class="stocktake-view-btn ${state.stocktakeViewMode === 'cards' ? 'is-active' : ''}" data-stk-view="cards">بطاقات سريعة</button>
+          </div>
           <select id="stocktake-category-filter">
             <option value="">كل التصنيفات</option>
             ${catFilterOptions}
@@ -7137,11 +7340,13 @@ function stocktakeView() {
           <label class="table-search">${icon('search', 17)}<input id="stocktake-line-search" placeholder="ابحث باسم الصنف أو SKU أو الباركود..." value="${escapeHtml(state.stocktakeQuery)}"></label>
         </div>
       </div>
-      ${filteredLines.length ? `<div class="table-scroll">
+      ${filteredLines.length ? (state.stocktakeViewMode === 'cards'
+        ? renderStocktakeCardsHtml(filteredLines, detail, productById, decimals, currency)
+        : `<div class="table-scroll">
         <table class="stocktake-lines-table">
           <thead>
             <tr>
-              <th>الصنف والباركود</th>
+              <th>الصنف والكود</th>
               <th>التصنيف</th>
               <th style="text-align:center;">المتوقع (النظام)</th>
               <th>العدّ الفعلي</th>
@@ -7152,7 +7357,7 @@ function stocktakeView() {
           </thead>
           <tbody>${rowsHtml}</tbody>
         </table>
-      </div>` : '<div class="empty-row">لا توجد أصناف مطابقة للفلتر الحالي داخل جلسة الجرد.</div>'}
+      </div>`) : '<div class="empty-row">لا توجد أصناف مطابقة للفلتر الحالي داخل جلسة الجرد.</div>'}
     </section>`;
 }
 
@@ -7296,6 +7501,66 @@ function syncStocktakeDomSummaryAndSavedPill() {
   }
 }
 
+async function applyStocktakeDeltaUpdate(sessionId, lineId, delta, { clearSmart = false, refocusScan = false, recordScan = true } = {}) {
+  const line = (state.stocktakeActive?.lines ?? []).find((l) => l.id === lineId);
+  if (!line) return;
+  const nextQty = Math.max(0, Number(line.countedQuantity ?? 0) + delta);
+  await flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false });
+  try {
+    const updated = await api(`/api/stocktakes/${sessionId}/lines`, {
+      method: 'PATCH',
+      skipConfirm: true,
+      body: JSON.stringify({ lines: [{ lineId, countedQuantity: nextQty }] }),
+    });
+    updated.lastScannedLineId = lineId;
+    state.stocktakeActive = updated;
+    state.stocktakeListStoreId = null;
+    if (recordScan) {
+      const updatedLine = (updated.lines ?? []).find((l) => l.id === lineId);
+      recordStocktakeLastScan(updatedLine);
+    }
+    if (clearSmart) {
+      state.stocktakeSmartQuery = '';
+      state.stocktakeSmartHighlight = 0;
+      state.stocktakeSmartOpen = false;
+    }
+    render();
+    if (refocusScan) document.querySelector('#stocktake-scan-input')?.focus();
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function applyStocktakeCatalogPick(sessionId, variantId, addDelta, { clearSmart = true, refocusScan = true } = {}) {
+  await flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false });
+  try {
+    const payload = addDelta !== undefined && addDelta >= 0
+      ? { addVariantId: variantId, addDelta }
+      : { addVariantId: variantId };
+    const updated = await api(`/api/stocktakes/${sessionId}/lines`, {
+      method: 'PATCH',
+      skipConfirm: true,
+      body: JSON.stringify(payload),
+    });
+    state.stocktakeActive = updated;
+    state.stocktakeListStoreId = null;
+    if (updated.lastScannedLineId && addDelta !== undefined && addDelta > 0) {
+      const addedLine = (updated.lines ?? []).find((l) => l.id === updated.lastScannedLineId);
+      recordStocktakeLastScan(addedLine);
+    }
+    if (clearSmart) {
+      state.stocktakeSmartQuery = '';
+      state.stocktakeSmartHighlight = 0;
+      state.stocktakeSmartOpen = false;
+    }
+    render();
+    if (addDelta === undefined) toast('تم إدراج الصنف في كشف الجرد');
+    if (refocusScan) document.querySelector('#stocktake-scan-input')?.focus();
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
 async function performStocktakeBarcodeScan(sessionId, scanCode, delta) {
   const code = String(scanCode ?? '').trim();
   if (!code) return;
@@ -7308,19 +7573,14 @@ async function performStocktakeBarcodeScan(sessionId, scanCode, delta) {
     });
     state.stocktakeActive = detail;
     state.stocktakeListStoreId = null;
+    state.stocktakeSmartQuery = '';
+    state.stocktakeSmartHighlight = 0;
+    state.stocktakeSmartOpen = false;
     if (detail.lastScannedLineId) {
       const scannedLine = (detail.lines ?? []).find((l) => l.id === detail.lastScannedLineId);
-      if (scannedLine) {
-        const nextList = (state.stocktakeLastScans ?? []).filter((s) => s.lineId !== scannedLine.id);
-        nextList.unshift({
-          lineId: scannedLine.id,
-          productName: scannedLine.variantLabel ? `${scannedLine.productName} (${scannedLine.variantLabel})` : scannedLine.productName,
-          countedQuantity: scannedLine.countedQuantity,
-        });
-        state.stocktakeLastScans = nextList.slice(0, 6);
-      }
+      recordStocktakeLastScan(scannedLine);
     }
-    playStocktakeBeep(true);
+    if (!state.stocktakeNoScanner) playStocktakeBeep(true);
     render();
     const scanInput = document.querySelector('#stocktake-scan-input');
     if (scanInput) {
@@ -7328,7 +7588,7 @@ async function performStocktakeBarcodeScan(sessionId, scanCode, delta) {
       scanInput.focus();
     }
   } catch (error) {
-    playStocktakeBeep(false);
+    if (!state.stocktakeNoScanner) playStocktakeBeep(false);
     toast(error.message, 'error');
     const scanInput = document.querySelector('#stocktake-scan-input');
     if (scanInput) { scanInput.focus(); scanInput.select(); }
@@ -7550,17 +7810,11 @@ function bindStocktake() {
           }),
         });
         state.stocktakeCreating = false;
+        resetStocktakeUiState({ keepActive: true });
         state.stocktakeActive = detail;
-        state.stocktakeListStoreId = null;
-        state.stocktakeTab = 'ALL';
-        state.stocktakeQuery = '';
-        state.stocktakeCategory = '';
-        state.stocktakeLastScans = [];
-        state.stocktakeDirtyMap = {};
-        state.stocktakeLastSavedAt = null;
         render();
         toast(`تم إنشاء جلسة الجرد ${detail.session.sessionNumber} بنجاح`);
-        document.querySelector('#stocktake-scan-input')?.focus();
+        document.querySelector(state.stocktakeNoScanner ? '#stocktake-scan-input' : '#stocktake-scan-input')?.focus();
       } catch (error) {
         state.stocktakeCreating = false;
         btn.disabled = false;
@@ -7572,13 +7826,8 @@ function bindStocktake() {
       btn.disabled = true;
       try {
         const detail = await api(`/api/stocktakes/${btn.dataset.sessionId}`);
+        resetStocktakeUiState({ keepList: true, keepActive: true });
         state.stocktakeActive = detail;
-        state.stocktakeTab = 'ALL';
-        state.stocktakeQuery = '';
-        state.stocktakeCategory = '';
-        state.stocktakeLastScans = [];
-        state.stocktakeDirtyMap = {};
-        state.stocktakeLastSavedAt = null;
         render();
         if (detail.session.status === 'DRAFT') document.querySelector('#stocktake-scan-input')?.focus();
       } catch (error) {
@@ -7598,16 +7847,20 @@ function bindStocktake() {
 
   document.querySelector('#stocktake-back-btn')?.addEventListener('click', async () => {
     await flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false });
-    state.stocktakeActive = null;
-    state.stocktakeLastScans = [];
-    state.stocktakeDirtyMap = {};
-    state.stocktakeListStoreId = null;
+    resetStocktakeUiState();
     render();
   });
 
   document.querySelectorAll('[data-stk-tab]').forEach((btn) => btn.addEventListener('click', () => {
     if (btn.disabled) return;
     state.stocktakeTab = btn.dataset.stkTab;
+    render();
+  }));
+
+  document.querySelectorAll('[data-stk-view]').forEach((btn) => btn.addEventListener('click', () => {
+    const nextMode = btn.dataset.stkView === 'cards' ? 'cards' : 'table';
+    state.stocktakeViewMode = nextMode;
+    localStorage.setItem('retailos_stocktake_view_mode', nextMode);
     render();
   }));
 
@@ -7633,6 +7886,15 @@ function bindStocktake() {
 
   if (!isDraft) return;
 
+  document.querySelectorAll('[data-stk-input-mode]').forEach((btn) => btn.addEventListener('click', () => {
+    const isManual = btn.dataset.stkInputMode === 'manual';
+    state.stocktakeNoScanner = isManual;
+    state.stocktakeSmartOpen = false;
+    localStorage.setItem('retailos_stocktake_no_scanner', isManual ? '1' : '0');
+    render();
+    document.querySelector('#stocktake-scan-input')?.focus();
+  }));
+
   document.querySelectorAll('[data-scan-step]').forEach((btn) => btn.addEventListener('click', () => {
     state.stocktakeScanStep = Math.max(1, Number(btn.dataset.scanStep) || 1);
     render();
@@ -7645,60 +7907,146 @@ function bindStocktake() {
     document.querySelector('#stocktake-scan-input')?.focus();
   });
 
+  const smartScanInput = document.querySelector('#stocktake-scan-input');
+  const smartResultsBox = document.querySelector('#stocktake-smart-results');
+  const refreshSmartDropdown = () => {
+    if (!smartResultsBox) return;
+    const hasQuery = String(state.stocktakeSmartQuery ?? '').trim().length > 0;
+    const shouldShow = state.stocktakeSmartOpen && (state.stocktakeNoScanner || hasQuery);
+    smartResultsBox.hidden = !shouldShow;
+    smartResultsBox.innerHTML = shouldShow ? renderStocktakeSmartDropdownHtml(state.stocktakeSmartQuery, state.stocktakeActive) : '';
+  };
+
+  smartScanInput?.addEventListener('focus', () => {
+    state.stocktakeSmartQuery = smartScanInput.value;
+    state.stocktakeSmartOpen = state.stocktakeNoScanner || smartScanInput.value.trim().length > 0;
+    refreshSmartDropdown();
+  });
+
+  smartScanInput?.addEventListener('input', () => {
+    state.stocktakeSmartQuery = smartScanInput.value;
+    state.stocktakeSmartHighlight = 0;
+    state.stocktakeSmartOpen = state.stocktakeNoScanner || smartScanInput.value.trim().length > 0;
+    refreshSmartDropdown();
+  });
+
+  smartScanInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      state.stocktakeSmartOpen = false;
+      refreshSmartDropdown();
+      return;
+    }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    const matches = findStocktakeSmartMatches(smartScanInput.value, state.stocktakeActive);
+    if (!matches.length) return;
+    e.preventDefault();
+    state.stocktakeSmartOpen = true;
+    const deltaIdx = e.key === 'ArrowDown' ? 1 : -1;
+    state.stocktakeSmartHighlight = (state.stocktakeSmartHighlight + deltaIdx + matches.length) % matches.length;
+    refreshSmartDropdown();
+  });
+
+  smartScanInput?.addEventListener('blur', () => {
+    setTimeout(() => {
+      if (document.activeElement?.closest?.('.stocktake-scan-wrap')) return;
+      state.stocktakeSmartOpen = false;
+      refreshSmartDropdown();
+    }, 150);
+  });
+
+  smartResultsBox?.addEventListener('mousedown', (e) => {
+    if (e.target.closest('button')) e.preventDefault();
+  });
+
+  smartResultsBox?.addEventListener('click', (e) => {
+    const adjustBtn = e.target.closest('[data-smart-adjust]');
+    if (adjustBtn) {
+      const lineId = adjustBtn.dataset.smartAdjust;
+      const delta = Number(adjustBtn.dataset.delta || 1);
+      void applyStocktakeDeltaUpdate(sessionId, lineId, delta, { clearSmart: false, refocusScan: true });
+      return;
+    }
+    const addBtn = e.target.closest('[data-smart-add]');
+    if (addBtn) {
+      const variantId = addBtn.dataset.smartAdd;
+      const deltaNum = Number(addBtn.dataset.delta);
+      const addDelta = deltaNum >= 0 ? deltaNum : undefined;
+      void applyStocktakeCatalogPick(sessionId, variantId, addDelta, { clearSmart: false, refocusScan: true });
+      return;
+    }
+    const focusBtn = e.target.closest('[data-smart-focus]');
+    if (focusBtn) {
+      const lineId = focusBtn.dataset.smartFocus;
+      state.stocktakeSmartOpen = false;
+      state.stocktakeSmartQuery = '';
+      if (state.stocktakeTab !== 'ALL' || state.stocktakeCategory || state.stocktakeQuery) {
+        state.stocktakeTab = 'ALL';
+        state.stocktakeCategory = '';
+        state.stocktakeQuery = '';
+        render();
+      } else {
+        refreshSmartDropdown();
+      }
+      const targetRow = document.querySelector(`[data-row-line-id="${lineId}"]`);
+      targetRow?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const qtyInput = targetRow?.querySelector('.stocktake-qty-input');
+      qtyInput?.focus();
+      qtyInput?.select();
+    }
+  });
+
   document.querySelector('#stocktake-scan-form')?.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const scanInput = document.querySelector('#stocktake-scan-input');
-    const code = scanInput?.value?.trim();
+    const code = smartScanInput?.value?.trim();
     if (!code) return;
-    await performStocktakeBarcodeScan(sessionId, code, state.stocktakeScanStep || 1);
+    const lower = code.toLowerCase();
+    const lines = state.stocktakeActive?.lines ?? [];
+    const exactInLines = lines.some((l) => (l.barcode && l.barcode.toLowerCase() === lower) || l.sku.toLowerCase() === lower);
+    const exactInCatalog = (state.data?.products ?? []).some((p) => (
+      p.isActive !== false && p.itemKind !== 'SERVICE' && (
+        (p.barcode && p.barcode.toLowerCase() === lower)
+        || p.sku.toLowerCase() === lower
+        || (p.variants ?? []).some((v) => v.isActive !== false && ((v.barcode && v.barcode.toLowerCase() === lower) || v.sku.toLowerCase() === lower))
+      )
+    ));
+    const step = state.stocktakeScanStep || 1;
+    if (exactInLines || exactInCatalog) {
+      await performStocktakeBarcodeScan(sessionId, code, step);
+      return;
+    }
+    const smartMatches = findStocktakeSmartMatches(code, state.stocktakeActive);
+    if (!smartMatches.length) {
+      if (!state.stocktakeNoScanner) playStocktakeBeep(false);
+      toast(`لم يتم العثور على منتج مطابق لـ "${code}"`, 'error');
+      smartScanInput?.focus();
+      smartScanInput?.select();
+      return;
+    }
+    const picked = smartMatches[Math.min(state.stocktakeSmartHighlight ?? 0, smartMatches.length - 1)] || smartMatches[0];
+    if (picked.kind === 'line') {
+      await applyStocktakeDeltaUpdate(sessionId, picked.lineId, step, { clearSmart: true, refocusScan: true });
+    } else {
+      await applyStocktakeCatalogPick(sessionId, picked.variantId, step, { clearSmart: true, refocusScan: true });
+    }
   });
 
   document.querySelector('#stocktake-add-variant-btn')?.addEventListener('click', async () => {
     const sel = document.querySelector('#stocktake-add-variant-select');
     const variantId = sel?.value;
     if (!variantId) { toast('اختر الصنف أولاً لإدراجه في الجرد', 'error'); return; }
-    await flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false });
-    try {
-      const updated = await api(`/api/stocktakes/${sessionId}/lines`, {
-        method: 'PATCH',
-        skipConfirm: true,
-        body: JSON.stringify({ addVariantId: variantId }),
-      });
-      state.stocktakeActive = updated;
-      state.stocktakeListStoreId = null;
-      render();
-      toast('تم إدراج الصنف في كشف الجرد');
-    } catch (error) {
-      toast(error.message, 'error');
-    }
+    await applyStocktakeCatalogPick(sessionId, variantId, undefined, { clearSmart: false, refocusScan: false });
   });
 
-  document.querySelectorAll('[data-quick-scan-id]').forEach((btn) => btn.addEventListener('click', async () => {
+  document.querySelectorAll('[data-quick-scan-id]').forEach((btn) => btn.addEventListener('click', () => {
     const lineId = btn.dataset.quickScanId;
     const delta = Number(btn.dataset.quickDelta || 1);
-    const line = (state.stocktakeActive.lines ?? []).find((l) => l.id === lineId);
-    if (!line) return;
-    const nextQty = Math.max(0, Number(line.countedQuantity ?? 0) + delta);
-    await flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false });
-    try {
-      const updated = await api(`/api/stocktakes/${sessionId}/lines`, {
-        method: 'PATCH',
-        skipConfirm: true,
-        body: JSON.stringify({ lines: [{ lineId, countedQuantity: nextQty }] }),
-      });
-      state.stocktakeActive = updated;
-      const hit = state.stocktakeLastScans.find((s) => s.lineId === lineId);
-      if (hit) hit.countedQuantity = nextQty;
-      render();
-    } catch (error) {
-      toast(error.message, 'error');
-    }
+    void applyStocktakeDeltaUpdate(sessionId, lineId, delta, { clearSmart: false, refocusScan: false });
   }));
 
   const queueLinePatch = (lineId, patch) => {
     state.stocktakeDirtyMap[lineId] = { ...(state.stocktakeDirtyMap[lineId] ?? {}), ...patch };
     syncStocktakeDomSummaryAndSavedPill();
-    const row = document.querySelector(`tr[data-row-line-id="${lineId}"]`);
+    const row = document.querySelector(`[data-row-line-id="${lineId}"]`);
     const line = (state.stocktakeActive.lines ?? []).find((l) => l.id === lineId);
     if (row && line) {
       row.classList.toggle('is-needs-cost', Boolean(line.needsSurplusCost));
@@ -7740,15 +8088,29 @@ function bindStocktake() {
 
   document.querySelectorAll('.stocktake-cost-input').forEach(bindCostInput);
 
-  document.querySelectorAll('.stocktake-qty-input').forEach((input) => input.addEventListener('input', () => {
-    const lineId = input.dataset.lineId;
-    const line = (state.stocktakeActive.lines ?? []).find((l) => l.id === lineId);
-    if (!line) return;
-    const raw = input.value.trim();
-    const qty = raw === '' ? null : Math.max(0, Math.trunc(Number(raw) || 0));
-    line.countedQuantity = qty;
-    queueLinePatch(lineId, { countedQuantity: qty });
-  }));
+  document.querySelectorAll('.stocktake-qty-input').forEach((input) => {
+    input.addEventListener('input', () => {
+      const lineId = input.dataset.lineId;
+      const line = (state.stocktakeActive.lines ?? []).find((l) => l.id === lineId);
+      if (!line) return;
+      const raw = input.value.trim();
+      const qty = raw === '' ? null : Math.max(0, Math.trunc(Number(raw) || 0));
+      line.countedQuantity = qty;
+      queueLinePatch(lineId, { countedQuantity: qty });
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const allInputs = [...document.querySelectorAll('.stocktake-qty-input')];
+      const idx = allInputs.indexOf(input);
+      if (idx === -1) return;
+      const target = allInputs[e.shiftKey ? idx - 1 : idx + 1];
+      if (target) {
+        target.focus();
+        target.select();
+      }
+    });
+  });
 
   document.querySelectorAll('.stocktake-reason-input').forEach((input) => input.addEventListener('input', () => {
     const lineId = input.dataset.lineId;
@@ -7845,10 +8207,7 @@ function bindStocktake() {
     await flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false });
     try {
       await api(`/api/stocktakes/${sessionId}/cancel`, { method: 'POST', body: '{}' });
-      state.stocktakeActive = null;
-      state.stocktakeLastScans = [];
-      state.stocktakeDirtyMap = {};
-      state.stocktakeListStoreId = null;
+      resetStocktakeUiState();
       render();
       toast('تم إلغاء مسودة الجرد دون أي تغيير على المخزون');
     } catch (error) {

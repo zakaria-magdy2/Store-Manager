@@ -1098,6 +1098,23 @@ test('executes full professional stocktake lifecycle with permissions, blind cou
     assert.equal(partialScan.response.status, 200);
     assert.equal(partialScan.payload.lines.length, 1);
     assert.equal(partialScan.payload.lines[0].countedQuantity, 3);
+    // No-scanner catalog pick with atomic initial count + increment
+    const manualPick = await stkReq(`/api/stocktakes/${partialDraft.payload.session.id}/lines`, {
+      method: 'PATCH',
+      cookieStr: ownerCookie,
+      body: { addVariantId: varBId, addDelta: 4 },
+    });
+    assert.equal(manualPick.response.status, 200);
+    assert.equal(manualPick.payload.lines.length, 2);
+    const lineBManual = manualPick.payload.lines.find((l) => l.variantId === varBId);
+    assert.equal(lineBManual.countedQuantity, 4);
+    const manualPickBump = await stkReq(`/api/stocktakes/${partialDraft.payload.session.id}/lines`, {
+      method: 'PATCH',
+      cookieStr: ownerCookie,
+      body: { addVariantId: varBId, addDelta: 2 },
+    });
+    assert.equal(manualPickBump.response.status, 200);
+    assert.equal(manualPickBump.payload.lines.find((l) => l.variantId === varBId).countedQuantity, 6);
     const cancelled = await stkReq(`/api/stocktakes/${partialDraft.payload.session.id}/cancel`, {
       method: 'POST',
       cookieStr: ownerCookie,
