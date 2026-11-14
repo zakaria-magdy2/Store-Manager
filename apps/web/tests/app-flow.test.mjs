@@ -945,7 +945,25 @@ test('executes full professional stocktake lifecycle with permissions, blind cou
     });
     assert.equal(purchaseRes.response.status, 201, JSON.stringify(purchaseRes.payload));
 
-    // Create FULL blind stocktake
+    // Default FULL stocktake (omitting includeZeroStock) must include only available stock (>0) and exclude zero-stock prodZ
+    const defaultOnlyInStock = await stkReq('/api/stocktakes', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { storeId, scope: 'FULL' },
+    });
+    assert.equal(defaultOnlyInStock.response.status, 201, JSON.stringify(defaultOnlyInStock.payload));
+    assert.equal(defaultOnlyInStock.payload.session.includeZeroStock, false);
+    assert.equal(defaultOnlyInStock.payload.lines.length, 2);
+    assert.ok(defaultOnlyInStock.payload.lines.some((l) => l.variantId === varAId));
+    assert.ok(defaultOnlyInStock.payload.lines.some((l) => l.variantId === varBId));
+    assert.equal(defaultOnlyInStock.payload.lines.some((l) => l.variantId === varZId), false);
+    await stkReq(`/api/stocktakes/${defaultOnlyInStock.payload.session.id}/cancel`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {},
+    });
+
+    // Create FULL blind stocktake (with explicit includeZeroStock: true)
     const createdDraft = await stkReq('/api/stocktakes', {
       method: 'POST',
       cookieStr: ownerCookie,

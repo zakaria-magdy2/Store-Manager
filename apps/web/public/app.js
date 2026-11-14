@@ -6808,13 +6808,16 @@ function stocktakeLineMatchesFilter(line, session, tab, queryText, categoryId) {
   return haystack.includes(q);
 }
 
-function collectEligibleStocktakeVariants() {
+function collectEligibleStocktakeVariants(detail) {
   const products = state.data?.products ?? [];
+  const allowZero = Boolean(detail?.session?.includeZeroStock);
+  const existingIds = new Set((detail?.lines ?? []).map((l) => l.variantId));
   const options = [];
   for (const product of products) {
     if (product.itemKind === 'SERVICE' || product.isActive === false) continue;
     for (const v of product.variants ?? []) {
-      if (v.isActive === false) continue;
+      if (v.isActive === false || existingIds.has(v.id)) continue;
+      if (!allowZero && Number(v.quantity ?? 0) <= 0) continue;
       const attrs = v.attributes ? Object.values(v.attributes).join(' / ') : '';
       options.push({
         variantId: v.id,
@@ -6919,6 +6922,7 @@ function findStocktakeSmartMatches(queryText, detail) {
   }
 
   const catalogMatches = [];
+  const allowZeroCatalog = Boolean(detail?.session?.includeZeroStock);
   for (const product of state.data?.products ?? []) {
     if (product.itemKind === 'SERVICE' || product.isActive === false) continue;
     const catName = categoryNameById.get(product.categoryId) ?? '';
@@ -6928,6 +6932,7 @@ function findStocktakeSmartMatches(queryText, detail) {
       const haystack = `${product.name} ${product.brand ?? ''} ${variantLabel} ${product.sku} ${v.sku} ${v.barcode ?? ''} ${catName}`.toLowerCase();
       if (!q || haystack.includes(q)) {
         const exactCode = Boolean(q) && ((v.barcode && v.barcode.toLowerCase() === q) || v.sku.toLowerCase() === q || product.sku.toLowerCase() === q);
+        if (!allowZeroCatalog && !exactCode && Number(v.quantity ?? 0) <= 0) continue;
         catalogMatches.push({
           kind: 'catalog',
           score: exactCode ? 3 : 1,
@@ -7106,8 +7111,8 @@ function stocktakeView() {
         <div class="stocktake-scope-grid">
           <label class="stocktake-scope-card is-selected">
             <input type="radio" name="scope" value="FULL" checked>
-            <strong>جرد شامل للمحل</strong>
-            <small>يجلب جميع المنتجات النشطة في الفرع للمطابقة الكاملة.</small>
+            <strong>جرد شامل للموجود بالمحل</strong>
+            <small>يجلب الأصناف المتوفرة برصيد أكبر من صفر فقط (ويستبعد الأصناف المنتهية صفر).</small>
           </label>
           <label class="stocktake-scope-card">
             <input type="radio" name="scope" value="CATEGORY">
@@ -7134,8 +7139,8 @@ function stocktakeView() {
             <span><strong>وضع الجرد الأعمى (Blind Count)</strong><small>يُخفي رصيد النظام أثناء العدّ لمنع التخمين حتى لحظة المراجعة.</small></span>
           </label>
           <label class="stocktake-checkbox-pill" id="stocktake-zero-wrap">
-            <input type="checkbox" name="includeZeroStock" checked>
-            <span><strong>تضمين الأصناف رصيدها صفر</strong><small>يكشف أي قطع موجودة على الرف ورصيدها مسجل صفرًا.</small></span>
+            <input type="checkbox" name="includeZeroStock">
+            <span><strong>تضمين الأصناف المنتهية (رصيدها صفر)</strong><small>اختياري: فعّله فقط إذا أردت إظهار أصناف رصيدها صفر على النظام.</small></span>
           </label>
         </div>
         <div class="stocktake-form-actions">
@@ -7165,7 +7170,7 @@ function stocktakeView() {
   }
   const catFilterOptions = [...categoryMap.entries()].map(([id, name]) => `<option value="${id}" ${state.stocktakeCategory === id ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('');
 
-  const addableVariants = isDraft ? collectEligibleStocktakeVariants() : [];
+  const addableVariants = isDraft ? collectEligibleStocktakeVariants(detail) : [];
   const productById = buildStocktakeProductMap();
 
   const dirtyCount = Object.keys(state.stocktakeDirtyMap ?? {}).length;

@@ -328,7 +328,7 @@ const CreateStocktakeSchema = z.object({
   scope: z.enum(['FULL', 'CATEGORY', 'PARTIAL']).default('FULL'),
   categoryId: z.string().uuid().optional().nullable(),
   blindMode: z.boolean().default(false),
-  includeZeroStock: z.boolean().default(true),
+  includeZeroStock: z.boolean().default(false),
   notes: z.string().max(500).trim().optional(),
 });
 const UpdateStocktakeSettingsSchema = z.object({
@@ -4009,6 +4009,12 @@ async function handleApi(req, res, url) {
         eligibleVariants = body.includeZeroStock
           ? rawRows
           : rawRows.filter((r) => Number(r.quantity_on_hand ?? 0) > 0);
+        if (!body.includeZeroStock && eligibleVariants.length === 0) {
+          throw Object.assign(
+            new Error('لا توجد أصناف برصيد متاح (أكبر من صفر) في هذا النطاق حالياً. يمكنك تفعيل خيار «تضمين الأصناف المنتهية (رصيدها صفر)» إذا أردت الجرد من الصفر.'),
+            { status: 400 },
+          );
+        }
       }
 
       await trx
