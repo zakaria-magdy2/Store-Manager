@@ -653,6 +653,118 @@ function saleJson(sale) {
   };
 }
 
+function loadSaleReturnsAndCogs(rawDb, tenantId, storeId, saleIds) {
+  const map = new Map();
+  if (!saleIds || !saleIds.length) return map;
+  const uniqueIds = [...new Set(saleIds)];
+  const placeholders = uniqueIds.map(() => '?').join(',');
+  const saleItemRows = rawDb.prepare(`
+    SELECT id, sale_id, item_type, quantity, cost_of_goods_sold
+    FROM sale_items
+    WHERE tenant_id = ? AND store_id = ? AND sale_id IN (${placeholders})
+  `).all(tenantId, storeId, ...uniqueIds);
+  const returnHeaderRows = rawDb.prepare(`
+    SELECT original_sale_id, COALESCE(SUM(refund_amount), 0) AS refund_total
+    FROM customer_returns
+    WHERE tenant_id = ? AND store_id = ? AND original_sale_id IN (${placeholders})
+    GROUP BY original_sale_id
+  `).all(tenantId, storeId, ...uniqueIds);
+  const returnItemRows = rawDb.prepare(`
+    SELECT cr.original_sale_id, cri.original_sale_item_id,
+      COALESCE(SUM(cri.quantity), 0) AS returned_qty,
+      COALESCE(SUM(cri.refund_amount), 0) AS returned_refund,
+      COALESCE(SUM(cri.cost_amount), 0) AS returned_cost
+    FROM customer_return_items cri
+    INNER JOIN customer_returns cr ON cr.id = cri.return_id AND cr.tenant_id = cri.tenant_id
+    WHERE cri.tenant_id = ? AND cr.store_id = ? AND cr.original_sale_id IN (${placeholders})
+    GROUP BY cr.original_sale_id, cri.original_sale_item_id
+  `).all(tenantId, storeId, ...uniqueIds);
+
+  for (const id of uniqueIds) {
+    map.set(id, {
+      soldQty: 0n,
+      grossCogs: 0n,
+      returnedAmount: 0n,
+      returnedQty: 0n,
+      returnedCost: 0n,
+      itemMap: new Map(),
+      returnedByItemId: new Map(),
+    });
+  }
+  for (const row of saleItemRows) {
+    const entry = map.get(row.sale_id);
+    if (!entry) continue;
+    const qty = BigInt(row.quantity ?? 0);
+    entry.soldQty += qty;
+    entry.grossCogs += BigInt(row.cost_of_goods_sold ?? 0);
+    entry.itemMap.set(row.id, { cogs: BigInt(row.cost_of_goods_sold ?? 0), qty });
+  }
+  for (const row of returnHeaderRows) {
+    const entry = map.get(row.original_sale_id);
+    if (entry) entry.returnedAmount += BigInt(row.refund_total ?? 0);
+  }
+  for (const row of returnItemRows) {
+    const entry = map.get(row.original_sale_id);
+    if (!entry) continue;
+    const rQty = BigInt(row.returned_qty ?? 0);
+    const rRefund = BigInt(row.returned_refund ?? 0);
+    const rCost = BigInt(row.returned_cost ?? 0);
+    entry.returnedQty += rQty;
+    entry.returnedCost += rCost;
+    entry.returnedByItemId.set(row.original_sale_item_id, { qty: rQty, refund: rRefund, cost: rCost });
+  }
+  return map;
+}
+
+function enrichSerializedSale(sale, metricsMap, currency, canViewCogs) {
+  const m = metricsMap.get(sale.id) ?? {
+    soldQty: sale.items.reduce((s, i) => s + BigInt(i.quantity ?? 0), 0n),
+    grossCogs: 0n,
+    returnedAmount: 0n,
+    returnedQty: 0n,
+    returnedCost: 0n,
+    itemMap: new Map(),
+    returnedByItemId: new Map(),
+  };
+  const grossTotal = BigInt(sale.total.amount);
+  const netTotal = grossTotal > m.returnedAmount ? grossTotal - m.returnedAmount : 0n;
+  const netCogs = m.grossCogs - m.returnedCost;
+  const grossProfit = netTotal - netCogs;
+  const netQty = m.soldQty > m.returnedQty ? m.soldQty - m.returnedQty : 0n;
+  const returnStatus = (m.returnedAmount === 0n && m.returnedQty === 0n)
+    ? 'NONE'
+    : (netQty <= 0n || netTotal <= 0n ? 'FULL' : 'PARTIAL');
+  const toMoney = (minor) => moneyJson(Money.fromMinor(minor, currency));
+  return {
+    ...sale,
+    originalTotal: sale.total,
+    returnedAmount: toMoney(m.returnedAmount),
+    netTotal: toMoney(netTotal),
+    soldQuantity: m.soldQty.toString(),
+    returnedQuantity: m.returnedQty.toString(),
+    netQuantity: netQty.toString(),
+    returnStatus,
+    cogs: canViewCogs ? toMoney(netCogs) : null,
+    grossProfit: canViewCogs ? toMoney(grossProfit) : null,
+    items: sale.items.map((item) => {
+      const ret = m.returnedByItemId.get(item.id) ?? { qty: 0n, refund: 0n, cost: 0n };
+      const origItemCogs = m.itemMap.get(item.id)?.cogs ?? 0n;
+      const itemQty = BigInt(item.quantity ?? 0);
+      const returnableQty = item.type === 'SALE' ? (itemQty > ret.qty ? itemQty - ret.qty : 0n) : 0n;
+      const netItemRevenue = BigInt(item.netRevenue.amount) - ret.refund;
+      const netItemCogs = origItemCogs - ret.cost;
+      return {
+        ...item,
+        returnedQuantity: ret.qty.toString(),
+        returnableQuantity: returnableQty.toString(),
+        netQuantity: (itemQty > ret.qty ? itemQty - ret.qty : 0n).toString(),
+        netRevenueAfterReturn: toMoney(netItemRevenue > 0n ? netItemRevenue : 0n),
+        ...(canViewCogs ? { cogs: toMoney(netItemCogs), profit: toMoney(netItemRevenue - netItemCogs) } : {}),
+      };
+    }),
+  };
+}
+
 function assertStoreScope(ctx, storeId) {
   if (ctx.storeId && ctx.storeId !== storeId) {
     throw Object.assign(new Error('غير مصرح بالوصول إلى هذا الفرع'), { status: 403 });
@@ -1037,10 +1149,114 @@ async function profitLossReport(ctx, url) {
     .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId)
     .where((eb) => eb.or([eb('year', '<', to.getUTCFullYear()), eb.and([eb('year', '=', to.getUTCFullYear()), eb('month', '<=', to.getUTCMonth() + 1)])])).execute();
   const pendingDue = unpaid.reduce((sum, item) => sum + BigInt(item.amount) - BigInt(item.paidAmount), 0n);
+
+  const fromStr = url.searchParams.get('from');
+  const toStr = url.searchParams.get('to');
+  const rawDb = database.getRawDatabase();
+  const userRowsPl = rawDb.prepare('SELECT id, full_name, username FROM users WHERE tenant_id = ?').all(ctx.tenantId);
+  const userMapPl = new Map(userRowsPl.map((u) => [u.id, u.full_name || u.username]));
+
+  const supInitRows = rawDb.prepare(`
+    SELECT p.id, p.invoice_number, COALESCE(p.purchased_at, p.created_at) AS paid_at,
+      p.initial_paid_amount AS amount, p.notes, p.created_by_user_id,
+      s.id AS supplier_id, s.name AS supplier_name
+    FROM supplier_purchases p
+    INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
+    WHERE p.tenant_id = ? AND p.store_id = ? AND p.initial_paid_amount > 0
+      AND substr(COALESCE(p.purchased_at, p.created_at), 1, 10) >= ?
+      AND substr(COALESCE(p.purchased_at, p.created_at), 1, 10) <= ?
+    ORDER BY COALESCE(p.purchased_at, p.created_at) DESC
+  `).all(ctx.tenantId, storeId, fromStr, toStr);
+
+  const supPayRows = rawDb.prepare(`
+    SELECT sp.id, sp.purchase_id, p.invoice_number, COALESCE(sp.paid_at, sp.created_at) AS paid_at,
+      sp.amount, sp.payment_method, sp.reference_number, sp.created_by_user_id,
+      s.id AS supplier_id, s.name AS supplier_name
+    FROM supplier_payments sp
+    INNER JOIN supplier_purchases p ON p.id = sp.purchase_id AND p.tenant_id = sp.tenant_id
+    INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
+    WHERE sp.tenant_id = ? AND p.store_id = ?
+      AND substr(COALESCE(sp.paid_at, sp.created_at), 1, 10) >= ?
+      AND substr(COALESCE(sp.paid_at, sp.created_at), 1, 10) <= ?
+    ORDER BY COALESCE(sp.paid_at, sp.created_at) DESC
+  `).all(ctx.tenantId, storeId, fromStr, toStr);
+
+  const supRetCreditRow = rawDb.prepare(`
+    SELECT COALESCE(SUM(credit_amount), 0) AS total_credit
+    FROM supplier_returns
+    WHERE tenant_id = ? AND store_id = ?
+      AND substr(created_at, 1, 10) >= ? AND substr(created_at, 1, 10) <= ?
+  `).get(ctx.tenantId, storeId, fromStr, toStr);
+
   const money = (amount) => moneyJson(Money.fromMinor(amount, tenant.currency));
-  return { storeId, from: url.searchParams.get('from'), to: url.searchParams.get('to'), currency: tenant.currency, missingMonthlyActuals,
+
+  let supplierInitialPaid = 0n;
+  let supplierInstallmentPaid = 0n;
+  const supplierPaymentItems = [];
+
+  for (const row of supInitRows) {
+    const amt = BigInt(row.amount ?? 0);
+    supplierInitialPaid += amt;
+    supplierPaymentItems.push({
+      id: `${row.id}-init`,
+      purchaseId: row.id,
+      supplierId: row.supplier_id,
+      supplierName: row.supplier_name,
+      invoiceNumber: row.invoice_number || row.id.slice(0, 8),
+      type: 'INITIAL',
+      paymentMethod: 'CASH',
+      referenceNumber: null,
+      paidAt: row.paid_at,
+      actorName: userMapPl.get(row.created_by_user_id) || 'المسؤول',
+      amount: money(amt),
+    });
+  }
+  for (const row of supPayRows) {
+    const amt = BigInt(row.amount ?? 0);
+    supplierInstallmentPaid += amt;
+    supplierPaymentItems.push({
+      id: row.id,
+      purchaseId: row.purchase_id,
+      supplierId: row.supplier_id,
+      supplierName: row.supplier_name,
+      invoiceNumber: row.invoice_number || row.purchase_id.slice(0, 8),
+      type: 'INSTALLMENT',
+      paymentMethod: row.payment_method || 'CASH',
+      referenceNumber: row.reference_number || null,
+      paidAt: row.paid_at,
+      actorName: userMapPl.get(row.created_by_user_id) || 'المسؤول',
+      amount: money(amt),
+    });
+  }
+  supplierPaymentItems.sort((a, b) => String(b.paidAt).localeCompare(String(a.paidAt)));
+
+  const totalSupplierPaid = supplierInitialPaid + supplierInstallmentPaid;
+  const supplierReturnsCreditTotal = BigInt(supRetCreditRow?.total_credit ?? 0);
+  const netCollections = cashSales + electronicSales;
+  const totalCashOutflows = directCashOutflow + monthlyCashOutflow + totalSupplierPaid;
+  const netCashRemaining = netCollections - totalCashOutflows;
+
+  return { storeId, from: fromStr, to: toStr, currency: tenant.currency, missingMonthlyActuals,
     profitLoss: { grossSales: money(grossSales), discounts: money(discounts), returns: money(refunds), netSales: money(netSales), cogs: money(cogs), grossProfit: money(grossProfit), directExpenses: money(directExpenseTotal), monthlyExpenses: money(monthlyExpenseTotal), operatingProfit: money(operatingProfit) },
-    cashFlow: { cashSales: money(cashSales), electronicSales: money(electronicSales), directExpenseOutflow: money(directCashOutflow), monthlyObligationOutflow: money(monthlyCashOutflow), pendingUnpaidObligations: money(pendingDue) } };
+    cashFlow: { cashSales: money(cashSales), electronicSales: money(electronicSales), directExpenseOutflow: money(directCashOutflow), monthlyObligationOutflow: money(monthlyCashOutflow), pendingUnpaidObligations: money(pendingDue) },
+    supplierPayments: {
+      initialPaid: money(supplierInitialPaid),
+      installmentPaid: money(supplierInstallmentPaid),
+      totalPaid: money(totalSupplierPaid),
+      supplierReturnsCredit: money(supplierReturnsCreditTotal),
+      count: supplierPaymentItems.length,
+      items: supplierPaymentItems,
+    },
+    cashPosition: {
+      totalCollections: money(netCollections),
+      cashCollections: money(cashSales),
+      electronicCollections: money(electronicSales),
+      directExpenses: money(directCashOutflow),
+      monthlyExpenses: money(monthlyCashOutflow),
+      supplierPayments: money(totalSupplierPaid),
+      totalOutflows: money(totalCashOutflows),
+      netCashRemaining: money(netCashRemaining),
+    } };
 }
 
 let activeBackupPromise = null;
@@ -1852,12 +2068,31 @@ async function growthForecastReport(ctx, url) {
     WHERE s.tenant_id = ? AND s.store_id = ? AND s.status = 'COMPLETED' AND substr(s.created_at, 1, 7) = ?
   `).get(ctx.tenantId, storeId, prevPrefix);
 
-  const curRevenue = BigInt(curSalesRow?.revenue ?? 0);
-  const curProfit = BigInt(curSalesRow?.profit ?? 0);
+  const returnsMonthsRows = rawDb.prepare(`
+    SELECT substr(cr.created_at, 1, 7) AS yearMonth,
+      COALESCE(SUM(cr.refund_amount), 0) AS refunds,
+      COALESCE(SUM((SELECT SUM(cri.cost_amount) FROM customer_return_items cri WHERE cri.tenant_id = cr.tenant_id AND cri.return_id = cr.id)), 0) AS returnedCost
+    FROM customer_returns cr
+    WHERE cr.tenant_id = ? AND cr.store_id = ?
+    GROUP BY substr(cr.created_at, 1, 7)
+  `).all(ctx.tenantId, storeId);
+  const returnsByYm = new Map();
+  for (const r of returnsMonthsRows) {
+    if (!r.yearMonth) continue;
+    returnsByYm.set(r.yearMonth, {
+      refunds: BigInt(r.refunds ?? 0),
+      returnedCost: BigInt(r.returnedCost ?? 0),
+    });
+  }
+  const curRet = returnsByYm.get(curPrefix) ?? { refunds: 0n, returnedCost: 0n };
+  const prevRet = returnsByYm.get(prevPrefix) ?? { refunds: 0n, returnedCost: 0n };
+
+  const curRevenue = BigInt(curSalesRow?.revenue ?? 0) - curRet.refunds;
+  const curProfit = BigInt(curSalesRow?.profit ?? 0) - curRet.refunds + curRet.returnedCost;
   const curCount = Number(curSalesRow?.salesCount ?? 0);
 
-  const prevRevenue = BigInt(prevSalesRow?.revenue ?? 0);
-  const prevProfit = BigInt(prevSalesRow?.profit ?? 0);
+  const prevRevenue = BigInt(prevSalesRow?.revenue ?? 0) - prevRet.refunds;
+  const prevProfit = BigInt(prevSalesRow?.profit ?? 0) - prevRet.refunds + prevRet.returnedCost;
   const prevCount = Number(prevSalesRow?.salesCount ?? 0);
 
   const daysElapsed = isRealCurrentMonth ? Math.max(1, currentDay) : daysInCurrentMonth;
@@ -1914,13 +2149,31 @@ async function growthForecastReport(ctx, url) {
   for (const row of salesMonthsRows) {
     if (!row.yearMonth) continue;
     const [yStr, mStr] = row.yearMonth.split('-');
+    const ret = returnsByYm.get(row.yearMonth) ?? { refunds: 0n, returnedCost: 0n };
+    const netRev = BigInt(row.revenue || 0) - ret.refunds;
+    const netProf = BigInt(row.profit || 0) - ret.refunds + ret.returnedCost;
     monthMap.set(row.yearMonth, {
       yearMonth: row.yearMonth,
       year: Number(yStr),
       month: Number(mStr),
       salesCount: Number(row.salesCount || 0),
-      revenue: String(row.revenue || 0),
-      profit: String(row.profit || 0),
+      revenue: netRev.toString(),
+      profit: netProf.toString(),
+    });
+  }
+  for (const [ym, ret] of returnsByYm.entries()) {
+    if (salesMonthsRows.some((r) => r.yearMonth === ym)) continue;
+    const [yStr, mStr] = ym.split('-');
+    const existing = monthMap.get(ym);
+    const baseRev = existing ? BigInt(existing.revenue || 0) : 0n;
+    const baseProf = existing ? BigInt(existing.profit || 0) : 0n;
+    monthMap.set(ym, {
+      yearMonth: ym,
+      year: existing ? existing.year : Number(yStr),
+      month: existing ? existing.month : Number(mStr),
+      salesCount: existing ? existing.salesCount : 0,
+      revenue: (baseRev - ret.refunds).toString(),
+      profit: (baseProf - ret.refunds + ret.returnedCost).toString(),
     });
   }
 
@@ -2122,21 +2375,19 @@ async function currentData(ctx, url) {
   }).filter(Boolean);
   const canViewSales = ctx.hasPermission(Permissions.REPORTS_DAILY_VIEW) || ctx.roleId === 'CASHIER';
   const canViewAccounting = ctx.hasPermission(Permissions.REPORTS_FINANCIAL_VIEW);
+  const canViewCogs = ctx.hasPermission(Permissions.REPORTS_COGS_VIEW);
   const allTenantUsers = await db.selectFrom('users')
     .select(['id', 'username', 'full_name as fullName', 'role'])
     .where('tenant_id', '=', ctx.tenantId)
     .execute();
   const userMap = new Map(allTenantUsers.map((u) => [u.id, u.fullName || u.username]));
-  const sales = canViewSales ? (await saleRepo.listByStore(ctx, storeId, 100)).map((s) => ({
-    ...saleJson(s),
+  const rawSalesList = canViewSales ? await saleRepo.listByStore(ctx, storeId, 100) : [];
+  const rawDbData = database.getRawDatabase();
+  const dataSaleMetrics = canViewSales ? loadSaleReturnsAndCogs(rawDbData, ctx.tenantId, storeId, rawSalesList.map((s) => s.id)) : new Map();
+  const sales = canViewSales ? rawSalesList.map((s) => ({
+    ...enrichSerializedSale(saleJson(s), dataSaleMetrics, tenant.currency, canViewCogs),
     cashierName: userMap.get(s.cashierUserId) || 'كاشير',
   })) : [];
-  const returnedLines = canViewSales ? await db.selectFrom('customer_return_items').innerJoin('customer_returns', 'customer_returns.id', 'customer_return_items.return_id')
-    .select(['customer_return_items.original_sale_item_id as itemId', 'customer_return_items.quantity as quantity'])
-    .where('customer_return_items.tenant_id', '=', ctx.tenantId).where('customer_returns.store_id', '=', storeId).execute() : [];
-  const returnedQuantityByItem = new Map();
-  for (const line of returnedLines) returnedQuantityByItem.set(line.itemId, (returnedQuantityByItem.get(line.itemId) ?? 0n) + BigInt(line.quantity));
-  for (const sale of sales) sale.items = sale.items.map((item) => ({ ...item, returnableQuantity: item.type === 'SALE' ? (BigInt(item.quantity) - (returnedQuantityByItem.get(item.id) ?? 0n)).toString() : '0' }));
   const customerReturnRows = canViewSales ? await db.selectFrom('customer_returns').innerJoin('sales', 'sales.id', 'customer_returns.original_sale_id')
     .select(['customer_returns.id as id', 'customer_returns.return_number as returnNumber', 'customer_returns.created_at as createdAt', 'customer_returns.refund_amount as refundAmount', 'customer_returns.currency as currency', 'customer_returns.payment_method as paymentMethod', 'sales.sale_number as saleNumber'])
     .where('customer_returns.tenant_id', '=', ctx.tenantId).where('customer_returns.store_id', '=', storeId)
@@ -2227,8 +2478,19 @@ async function currentData(ctx, url) {
         payments: payments.map((item) => ({ id: item.id, amount: moneyJson(Money.fromMinor(BigInt(item.amount), item.currency)), method: item.payment_method, referenceNumber: item.reference_number, paidAt: item.expense_date })) } : null };
   });
   const today = new Date().toISOString().slice(0, 10);
-  const todaysSales = sales.filter((sale) => sale.createdAt.slice(0, 10) === today);
-  const revenueMinor = todaysSales.reduce((sum, sale) => sum + BigInt(sale.total.amount), 0n).toString();
+  const todaySalesRow = canViewSales ? rawDbData.prepare(`
+    SELECT COUNT(id) AS cnt,
+      COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = sales.tenant_id AND si.sale_id = sales.id)), 0) AS gross
+    FROM sales
+    WHERE tenant_id = ? AND store_id = ? AND status = 'COMPLETED' AND substr(created_at, 1, 10) = ?
+  `).get(ctx.tenantId, storeId, today) : { cnt: 0, gross: 0 };
+  const todayReturnsRow = canViewSales ? rawDbData.prepare(`
+    SELECT COALESCE(SUM(refund_amount), 0) AS refunds
+    FROM customer_returns
+    WHERE tenant_id = ? AND store_id = ? AND substr(created_at, 1, 10) = ?
+  `).get(ctx.tenantId, storeId, today) : { refunds: 0 };
+  const todaySalesCount = Number(todaySalesRow?.cnt ?? 0);
+  const revenueMinor = (BigInt(todaySalesRow?.gross ?? 0) - BigInt(todayReturnsRow?.refunds ?? 0)).toString();
   const canManageUsers = ctx.hasPermission(Permissions.USERS_MANAGE);
   const managedUsers = canManageUsers ? await userRepo.listByTenant(ctx) : [];
   const canCloseShift = ctx.hasPermission(Permissions.POS_DRAWER_OPEN);
@@ -2321,6 +2583,7 @@ async function currentData(ctx, url) {
     expenses: expenseRows.map((expense) => ({ ...expense, amount: moneyJson(Money.fromMinor(BigInt(expense.amount), expense.currency)) })),
     capabilities: {
       canViewAccounting,
+      canViewCogs,
       canViewExpenses,
       canCreateExpenses: ctx.hasPermission(Permissions.EXPENSES_DIRECT_CREATE),
       canConfirmMonthlyExpenses: ctx.hasPermission(Permissions.EXPENSES_MONTHLY_CONFIRM) || ctx.roleId === 'OWNER' || ctx.roleId === 'STORE_MANAGER',
@@ -2348,7 +2611,7 @@ async function currentData(ctx, url) {
     monthlyPeriod: { year: monthlyYear, month: monthlyMonth },
     availableMonthlyPeriods: availableMonthsRows,
     summary: {
-      todaySalesCount: canViewSales ? todaysSales.length : null,
+      todaySalesCount: canViewSales ? todaySalesCount : null,
       todayRevenue: canViewSales ? moneyJson(Money.fromMinor(BigInt(revenueMinor), tenant.currency)) : null,
       productCount: products.length,
       lowStockCount: lowStock.length,
@@ -2404,26 +2667,129 @@ async function handleApi(req, res, url) {
       args.push(search, search, search, search);
     }
     const rawDatabase = database.getRawDatabase();
+    const tenant = await tenantRepo.findById(ctx.tenantId);
+    const currency = typeof tenant?.currency === 'string' ? tenant.currency : (tenant?.currency?.code ?? 'EGP');
+    const canViewCogs = ctx.hasPermission(Permissions.REPORTS_COGS_VIEW);
+    const canViewAccounting = ctx.hasPermission(Permissions.REPORTS_FINANCIAL_VIEW);
     const where = conditions.join(' AND ');
     const count = rawDatabase.prepare(`SELECT COUNT(*) AS total FROM sales WHERE ${where}`).get(...args);
     const matches = rawDatabase.prepare(`SELECT id FROM sales WHERE ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
     const sales = (await Promise.all(matches.map((row) => saleRepo.findById(ctx, row.id)))).filter(Boolean);
     const total = Number(count?.total ?? 0);
     const ids = sales.map((sale) => sale.id);
-    const returnedLines = ids.length ? await db.selectFrom('customer_return_items').innerJoin('customer_returns', 'customer_returns.id', 'customer_return_items.return_id').innerJoin('sale_items', 'sale_items.id', 'customer_return_items.original_sale_item_id')
-      .select(['customer_return_items.original_sale_item_id as itemId', 'customer_return_items.quantity as quantity'])
-      .where('customer_return_items.tenant_id', '=', ctx.tenantId).where('customer_returns.store_id', '=', storeId).where('sale_items.sale_id', 'in', ids).execute() : [];
-    const returned = new Map();
-    for (const line of returnedLines) returned.set(line.itemId, (returned.get(line.itemId) ?? 0n) + BigInt(line.quantity));
+    const saleMetricsMap = loadSaleReturnsAndCogs(rawDatabase, ctx.tenantId, storeId, ids);
     const cashierIds = [...new Set(sales.map((s) => s.cashierUserId))];
     const cashierRows = cashierIds.length ? await db.selectFrom('users').select(['id', 'full_name as fullName', 'username']).where('tenant_id', '=', ctx.tenantId).where('id', 'in', cashierIds).execute() : [];
     const cashierNameMap = new Map(cashierRows.map((u) => [u.id, u.fullName || u.username]));
-    const rows = sales.map(saleJson).map((sale) => ({
-      ...sale,
+    const rows = sales.map((sale) => ({
+      ...enrichSerializedSale(saleJson(sale), saleMetricsMap, currency, canViewCogs),
       cashierName: cashierNameMap.get(sale.cashierUserId) || 'كاشير',
-      items: sale.items.map((item) => ({ ...item, returnableQuantity: item.type === 'SALE' ? (BigInt(item.quantity) - (returned.get(item.id) ?? 0n)).toString() : '0' })),
     }));
-    return json(res, 200, { payload: { sales: rows, total, offset, limit } });
+
+    const aggSales = rawDatabase.prepare(`
+      SELECT
+        COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = sales.tenant_id AND si.sale_id = sales.id)), 0) AS gross_sales,
+        COALESCE(SUM((SELECT SUM(si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = sales.tenant_id AND si.sale_id = sales.id)), 0) AS gross_cogs
+      FROM sales
+      WHERE ${where}
+    `).get(...args);
+
+    let summaryReturns = 0n;
+    let summaryReturnedCost = 0n;
+    let summaryVariance = 0n;
+    if (search) {
+      const retAgg = rawDatabase.prepare(`
+        SELECT COALESCE(SUM(cr.refund_amount), 0) AS refunds,
+          COALESCE(SUM((SELECT SUM(cri.cost_amount) FROM customer_return_items cri WHERE cri.tenant_id = cr.tenant_id AND cri.return_id = cr.id)), 0) AS ret_cost
+        FROM customer_returns cr
+        WHERE cr.tenant_id = ? AND cr.store_id = ? AND cr.original_sale_id IN (SELECT id FROM sales WHERE ${where})
+      `).get(ctx.tenantId, storeId, ...args);
+      summaryReturns = BigInt(retAgg?.refunds ?? 0);
+      summaryReturnedCost = BigInt(retAgg?.ret_cost ?? 0);
+    } else {
+      const retConds = ['cr.tenant_id = ?', 'cr.store_id = ?'];
+      const retArgs = [ctx.tenantId, storeId];
+      if (from && to) {
+        retConds.push('substr(cr.created_at, 1, 10) >= ?', 'substr(cr.created_at, 1, 10) <= ?');
+        retArgs.push(from, to);
+      }
+      const retAgg = rawDatabase.prepare(`
+        SELECT COALESCE(SUM(cr.refund_amount), 0) AS refunds,
+          COALESCE(SUM((SELECT SUM(cri.cost_amount) FROM customer_return_items cri WHERE cri.tenant_id = cr.tenant_id AND cri.return_id = cr.id)), 0) AS ret_cost
+        FROM customer_returns cr
+        WHERE ${retConds.join(' AND ')}
+      `).get(...retArgs);
+      summaryReturns = BigInt(retAgg?.refunds ?? 0);
+      summaryReturnedCost = BigInt(retAgg?.ret_cost ?? 0);
+
+      const varConds = ["je.tenant_id = ?", "je.store_id = ?", "je.source_type = 'SUPPLIER_RETURN'", "a.account_code = '5090'"];
+      const varArgs = [ctx.tenantId, storeId];
+      if (from && to) {
+        varConds.push('je.entry_date >= ?', 'je.entry_date <= ?');
+        varArgs.push(from, to);
+      }
+      const varRows = rawDatabase.prepare(`
+        SELECT jl.entry_type AS side, jl.amount
+        FROM journal_entries je
+        INNER JOIN journal_lines jl ON jl.journal_entry_id = je.id
+        INNER JOIN accounts a ON a.id = jl.account_id
+        WHERE ${varConds.join(' AND ')}
+      `).all(...varArgs);
+      summaryVariance = varRows.reduce((s, r) => s + (r.side === 'DEBIT' ? BigInt(r.amount) : -BigInt(r.amount)), 0n);
+    }
+
+    const grossSalesMinor = BigInt(aggSales?.gross_sales ?? 0);
+    const netSalesMinor = grossSalesMinor - summaryReturns;
+    const cogsMinor = BigInt(aggSales?.gross_cogs ?? 0) + summaryVariance - summaryReturnedCost;
+    const grossProfitMinor = netSalesMinor - cogsMinor;
+
+    let directExpMinor = 0n;
+    let monthlyExpMinor = 0n;
+    if (!search && canViewAccounting) {
+      const expConds = ['tenant_id = ?', 'store_id = ?'];
+      const expArgs = [ctx.tenantId, storeId];
+      if (from && to) {
+        expConds.push('expense_date >= ?', 'expense_date <= ?');
+        expArgs.push(from, to);
+      }
+      const expRows = rawDatabase.prepare(`
+        SELECT expense_type, COALESCE(SUM(amount), 0) AS total
+        FROM operating_expense_records
+        WHERE ${expConds.join(' AND ')}
+        GROUP BY expense_type
+      `).all(...expArgs);
+      for (const er of expRows) {
+        if (er.expense_type === 'DIRECT_DAILY') directExpMinor = BigInt(er.total ?? 0);
+        else if (er.expense_type === 'MONTHLY_RECURRING_PAYMENT') monthlyExpMinor = BigInt(er.total ?? 0);
+      }
+    }
+    const totalExpensesMinor = directExpMinor + monthlyExpMinor;
+    const operatingProfitMinor = grossProfitMinor - totalExpensesMinor;
+    const toMoneySummary = (minor) => moneyJson(Money.fromMinor(minor, currency));
+
+    return json(res, 200, {
+      payload: {
+        sales: rows,
+        total,
+        offset,
+        limit,
+        summary: {
+          invoiceCount: total,
+          grossSales: toMoneySummary(grossSalesMinor),
+          returnsTotal: toMoneySummary(summaryReturns),
+          netSales: toMoneySummary(netSalesMinor),
+          cogs: canViewCogs ? toMoneySummary(cogsMinor) : null,
+          grossProfit: canViewCogs ? toMoneySummary(grossProfitMinor) : null,
+          directExpenses: (!search && canViewAccounting) ? toMoneySummary(directExpMinor) : null,
+          monthlyExpenses: (!search && canViewAccounting) ? toMoneySummary(monthlyExpMinor) : null,
+          totalExpenses: (!search && canViewAccounting) ? toMoneySummary(totalExpensesMinor) : null,
+          operatingProfit: (!search && canViewAccounting) ? toMoneySummary(operatingProfitMinor) : null,
+          hasSearch: Boolean(search),
+          from: from || null,
+          to: to || null,
+        },
+      },
+    });
   }
 
   const saleDetailMatch = method === 'GET' ? path.match(/^\/api\/sales\/([0-9a-f-]+)$/i) : null;
@@ -2432,13 +2798,14 @@ async function handleApi(req, res, url) {
     if (!ctx.hasPermission(Permissions.REPORTS_DAILY_VIEW) && ctx.roleId !== 'CASHIER') throw Object.assign(new Error('غير مصرح بعرض تفاصيل الفاتورة'), { status: 403 });
     const sale = await saleRepo.findById(ctx, saleDetailMatch[1]);
     if (!sale) throw Object.assign(new Error('الفاتورة غير موجودة'), { status: 404 });
+    const tenant = await tenantRepo.findById(ctx.tenantId);
+    const currency = typeof tenant?.currency === 'string' ? tenant.currency : (tenant?.currency?.code ?? 'EGP');
+    const canViewCogs = ctx.hasPermission(Permissions.REPORTS_COGS_VIEW);
     const cashier = await userRepo.findById(ctx, sale.cashierUserId);
     const returned = await db.selectFrom('customer_returns').select(['id', 'return_number as returnNumber', 'refund_amount as refundAmount', 'currency', 'payment_method as paymentMethod', 'created_at as createdAt']).where('tenant_id', '=', ctx.tenantId).where('store_id', '=', sale.storeId).where('original_sale_id', '=', sale.id).orderBy('created_at', 'asc').execute();
-    const returnedItems = await db.selectFrom('customer_return_items').innerJoin('customer_returns', 'customer_returns.id', 'customer_return_items.return_id').select(['customer_return_items.original_sale_item_id as itemId', 'customer_return_items.quantity as quantity']).where('customer_return_items.tenant_id', '=', ctx.tenantId).where('customer_returns.store_id', '=', sale.storeId).where('customer_returns.original_sale_id', '=', sale.id).execute();
-    const returnedMap = new Map();
-    for (const r of returnedItems) returnedMap.set(r.itemId, (returnedMap.get(r.itemId) ?? 0n) + BigInt(r.quantity));
-    const saleData = saleJson(sale);
-    saleData.items = saleData.items.map((item) => ({ ...item, returnableQuantity: item.type === 'SALE' ? (BigInt(item.quantity) - (returnedMap.get(item.id) ?? 0n)).toString() : '0' }));
+    const rawDbDetail = database.getRawDatabase();
+    const detailMetrics = loadSaleReturnsAndCogs(rawDbDetail, ctx.tenantId, sale.storeId, [sale.id]);
+    const saleData = enrichSerializedSale(saleJson(sale), detailMetrics, currency, canViewCogs);
     return json(res, 200, { payload: { ...saleData, cashierName: cashier?.fullName ?? 'غير معروف', returns: returned.map((item) => ({ ...item, refundAmount: moneyJson(Money.fromMinor(BigInt(item.refundAmount), item.currency)) })) } });
   }
 
@@ -2460,6 +2827,10 @@ async function handleApi(req, res, url) {
       encodeText: (text) => new TextEncoder().encode(text),
     });
     const escPosBytes = printer.format(sale);
+    const currency = typeof tenant?.currency === 'string' ? tenant.currency : (tenant?.currency?.code ?? 'EGP');
+    const rawDbReceipt = database.getRawDatabase();
+    const receiptMetrics = loadSaleReturnsAndCogs(rawDbReceipt, ctx.tenantId, sale.storeId, [sale.id]);
+    const enrichedReceiptSale = enrichSerializedSale(saleJson(sale), receiptMetrics, currency, false);
     return json(res, 200, {
       receipt: {
         companyName: tenant?.name ?? 'متجري',
@@ -2470,14 +2841,19 @@ async function handleApi(req, res, url) {
         customerName: sale.customerName ?? null,
         width: widthParam,
         paperWidth: widthParam,
-        items: sale.items.map((item) => ({
-          productName: item.productName,
+        items: enrichedReceiptSale.items.map((item) => ({
+          productName: item.name,
           sku: item.sku,
-          quantity: item.quantity.toString(),
-          unitPrice: moneyJson(item.unitPrice),
-          lineTotal: moneyJson(item.netRevenue),
+          quantity: item.quantity,
+          returnedQuantity: item.returnedQuantity,
+          netQuantity: item.netQuantity,
+          unitPrice: item.unitPrice,
+          lineTotal: item.netRevenue,
         })),
         total: moneyJson(sale.total),
+        returnedAmount: enrichedReceiptSale.returnedAmount,
+        netTotal: enrichedReceiptSale.netTotal,
+        returnStatus: enrichedReceiptSale.returnStatus,
         paidTotal: moneyJson(sale.paidTotal),
         changeGiven: moneyJson(sale.changeGiven),
         payments: sale.payments.map((p) => ({ method: p.method, amount: moneyJson(p.amount) })),
@@ -2978,17 +3354,32 @@ async function handleApi(req, res, url) {
     const returnsDuringShift = rawDb.prepare(`
       SELECT cr.id, cr.refund_amount, cr.payment_method
       FROM customer_returns cr
-      WHERE cr.tenant_id = ? AND cr.store_id = ? AND cr.created_by_user_id = ? AND cr.created_at >= ?
-    `).all(ctx.tenantId, storeId, ctx.userId, openShift.started_at);
+      WHERE cr.tenant_id = ? AND cr.store_id = ? AND cr.created_at >= ?
+        AND (cr.created_by_user_id = ? OR cr.original_sale_id IN (
+          SELECT s.id FROM sales s
+          WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED' AND s.created_at >= ?
+        ))
+    `).all(ctx.tenantId, storeId, openShift.started_at, ctx.userId, ctx.tenantId, storeId, ctx.userId, openShift.started_at);
 
-    let totalSalesMinor = 0n;
+    const linkedReturnsRow = rawDb.prepare(`
+      SELECT COALESCE(SUM(cr.refund_amount), 0) AS returned_total
+      FROM customer_returns cr
+      WHERE cr.tenant_id = ? AND cr.store_id = ? AND cr.original_sale_id IN (
+        SELECT s.id FROM sales s
+        WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED' AND s.created_at >= ?
+      )
+    `).get(ctx.tenantId, storeId, ctx.tenantId, storeId, ctx.userId, openShift.started_at);
+
+    let grossSalesMinor = 0n;
     let cashSalesMinor = 0n;
     let electronicSalesMinor = 0n;
     for (const s of salesDuringShift) {
-      totalSalesMinor += BigInt(s.total_amount ?? 0);
+      grossSalesMinor += BigInt(s.total_amount ?? 0);
       cashSalesMinor += BigInt(s.cash_paid ?? 0) - BigInt(s.change_given ?? 0);
       electronicSalesMinor += BigInt(s.electronic_paid ?? 0);
     }
+    const returnsLinkedMinor = BigInt(linkedReturnsRow?.returned_total ?? 0);
+    const totalSalesMinor = grossSalesMinor > returnsLinkedMinor ? grossSalesMinor - returnsLinkedMinor : 0n;
 
     let cashReturnsMinor = 0n;
     for (const r of returnsDuringShift) {
@@ -3008,6 +3399,8 @@ async function handleApi(req, res, url) {
         cashSales: cashSalesMinor.toString(),
         electronicSales: electronicSalesMinor.toString(),
         cashReturns: cashReturnsMinor.toString(),
+        returnsTotal: returnsLinkedMinor.toString(),
+        grossSales: grossSalesMinor.toString(),
         salesCount: salesDuringShift.length,
         totalSales: totalSalesMinor.toString(),
         expectedCash: expectedCashMinor.toString(),
@@ -3095,9 +3488,14 @@ async function handleApi(req, res, url) {
     const returnsDuringShift = rawDb.prepare(`
       SELECT cr.id, cr.refund_amount, cr.payment_method
       FROM customer_returns cr
-      WHERE cr.tenant_id = ? AND cr.store_id = ? AND cr.created_by_user_id = ?
+      WHERE cr.tenant_id = ? AND cr.store_id = ?
         AND cr.created_at >= ? AND cr.created_at <= ?
-    `).all(ctx.tenantId, shift.store_id, shift.user_id, shift.started_at, nowIso);
+        AND (cr.created_by_user_id = ? OR cr.original_sale_id IN (
+          SELECT s.id FROM sales s
+          WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
+            AND s.created_at >= ? AND s.created_at <= ?
+        ))
+    `).all(ctx.tenantId, shift.store_id, shift.started_at, nowIso, shift.user_id, ctx.tenantId, shift.store_id, shift.user_id, shift.started_at, nowIso);
 
     let cashSalesMinor = 0n;
     for (const s of salesDuringShift) {
@@ -3196,6 +3594,7 @@ async function handleApi(req, res, url) {
     const shifts = [];
     let grandSalesMinor = 0n;
     let grandProfitMinor = 0n;
+    let grandReturnsMinor = 0n;
     let grandVarianceMinor = 0n;
 
     for (const row of shiftRows) {
@@ -3203,17 +3602,54 @@ async function handleApi(req, res, url) {
       const salesQuery = rawDb.prepare(`
         SELECT COUNT(s.id) as salesCount,
           COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) AS totalRevenue,
-          COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) AS grossProfit
+          COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) AS grossProfit,
+          COALESCE(SUM((SELECT SUM(sp.amount) FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id AND sp.method = 'CASH')), 0) AS cashPaid,
+          COALESCE(SUM(s.change_given), 0) AS changeGiven
         FROM sales s
         WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
           AND s.created_at >= ? AND s.created_at <= ?
       `).get(ctx.tenantId, row.store_id, row.user_id, row.started_at, endTime);
 
-      const salesRev = BigInt(salesQuery?.totalRevenue ?? 0);
-      const salesProfit = BigInt(salesQuery?.grossProfit ?? 0);
+      const shiftReturnsQuery = rawDb.prepare(`
+        SELECT COALESCE(SUM(cr.refund_amount), 0) AS returnedAmount,
+          COALESCE(SUM(CASE WHEN cr.payment_method = 'CASH' AND cr.created_at >= ? AND cr.created_at <= ? THEN cr.refund_amount ELSE 0 END), 0) AS cashReturnsInShift,
+          COALESCE(SUM((SELECT SUM(cri.cost_amount) FROM customer_return_items cri WHERE cri.tenant_id = cr.tenant_id AND cri.return_id = cr.id)), 0) AS returnedCost
+        FROM customer_returns cr
+        WHERE cr.tenant_id = ? AND cr.store_id = ? AND cr.original_sale_id IN (
+          SELECT s.id FROM sales s
+          WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
+            AND s.created_at >= ? AND s.created_at <= ?
+        )
+      `).get(row.started_at, endTime, ctx.tenantId, row.store_id, ctx.tenantId, row.store_id, row.user_id, row.started_at, endTime);
+
+      const grossRev = BigInt(salesQuery?.totalRevenue ?? 0);
+      const grossProf = BigInt(salesQuery?.grossProfit ?? 0);
+      const returnedAmt = BigInt(shiftReturnsQuery?.returnedAmount ?? 0);
+      const returnedCost = BigInt(shiftReturnsQuery?.returnedCost ?? 0);
+      const salesRev = grossRev > returnedAmt ? grossRev - returnedAmt : 0n;
+      const salesProfit = grossProf - returnedAmt + returnedCost;
       const salesCount = Number(salesQuery?.salesCount ?? 0);
 
+      let expectedCashMinor = BigInt(row.expected_cash ?? 0);
+      if (row.status === 'OPEN') {
+        const cashSalesMinor = BigInt(salesQuery?.cashPaid ?? 0) - BigInt(salesQuery?.changeGiven ?? 0);
+        const cashReturnsDuringOpenRow = rawDb.prepare(`
+          SELECT COALESCE(SUM(cr.refund_amount), 0) AS total
+          FROM customer_returns cr
+          WHERE cr.tenant_id = ? AND cr.store_id = ? AND cr.payment_method = 'CASH'
+            AND cr.created_at >= ? AND cr.created_at <= ?
+            AND (cr.created_by_user_id = ? OR cr.original_sale_id IN (
+              SELECT s.id FROM sales s
+              WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
+                AND s.created_at >= ? AND s.created_at <= ?
+            ))
+        `).get(ctx.tenantId, row.store_id, row.started_at, endTime, row.user_id, ctx.tenantId, row.store_id, row.user_id, row.started_at, endTime);
+        const cashReturnsMinor = BigInt(cashReturnsDuringOpenRow?.total ?? 0);
+        expectedCashMinor = BigInt(row.opening_cash ?? 0) + cashSalesMinor - cashReturnsMinor;
+      }
+
       grandSalesMinor += salesRev;
+      grandReturnsMinor += returnedAmt;
       if (!isCashier) grandProfitMinor += salesProfit;
       grandVarianceMinor += BigInt(row.variance ?? 0);
 
@@ -3236,11 +3672,13 @@ async function handleApi(req, res, url) {
         duration: durationStr,
         status: row.status,
         openingCash: String(row.opening_cash ?? 0),
-        expectedCash: String(row.expected_cash ?? 0),
+        expectedCash: expectedCashMinor.toString(),
         actualCash: String(row.actual_cash ?? 0),
         variance: String(row.variance ?? 0),
         handoverCash: String(row.handover_cash ?? 0),
         salesCount,
+        grossSales: grossRev.toString(),
+        returnedTotal: returnedAmt.toString(),
         salesRevenue: salesRev.toString(),
         grossProfit: isCashier ? null : salesProfit.toString(),
         notes: row.notes ?? '',
@@ -3253,6 +3691,7 @@ async function handleApi(req, res, url) {
       summary: {
         totalShifts: shifts.length,
         totalSales: grandSalesMinor.toString(),
+        totalReturns: grandReturnsMinor.toString(),
         totalProfit: isCashier ? null : grandProfitMinor.toString(),
         totalVariance: grandVarianceMinor.toString(),
       }
@@ -3277,8 +3716,12 @@ async function handleApi(req, res, url) {
       SELECT s.id, s.sale_number, s.created_at, s.customer_name, s.status, s.change_given,
         COALESCE((SELECT sp.method FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id LIMIT 1), 'CASH') as payment_method,
         COALESCE((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS total_amount,
-        COALESCE((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS gross_profit,
-        (SELECT COUNT(si.id) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id) as items_count
+        COALESCE((SELECT SUM(si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS total_cogs,
+        COALESCE((SELECT SUM(si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS sold_qty,
+        (SELECT COUNT(si.id) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id) as items_count,
+        COALESCE((SELECT SUM(cr.refund_amount) FROM customer_returns cr WHERE cr.tenant_id = s.tenant_id AND cr.store_id = s.store_id AND cr.original_sale_id = s.id), 0) AS returned_amount,
+        COALESCE((SELECT SUM(cri.cost_amount) FROM customer_return_items cri INNER JOIN customer_returns cr ON cr.id = cri.return_id AND cr.tenant_id = cri.tenant_id WHERE cr.tenant_id = s.tenant_id AND cr.store_id = s.store_id AND cr.original_sale_id = s.id), 0) AS returned_cost,
+        COALESCE((SELECT SUM(cri.quantity) FROM customer_return_items cri INNER JOIN customer_returns cr ON cr.id = cri.return_id AND cr.tenant_id = cri.tenant_id WHERE cr.tenant_id = s.tenant_id AND cr.store_id = s.store_id AND cr.original_sale_id = s.id), 0) AS returned_qty
       FROM sales s
       WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
         AND s.created_at >= ? AND s.created_at <= ?
@@ -3288,16 +3731,34 @@ async function handleApi(req, res, url) {
     return json(res, 200, {
       currency,
       shift: { id: shift.id, shiftNumber: shift.shift_number, startedAt: shift.started_at, endedAt: shift.ended_at },
-      sales: salesRows.map((s) => ({
-        id: s.id,
-        saleNumber: s.sale_number,
-        createdAt: s.created_at,
-        customerName: s.customer_name || 'عميل نقدي',
-        paymentMethod: s.payment_method,
-        itemsCount: s.items_count,
-        total: s.total_amount.toString(),
-        grossProfit: isCashier ? null : s.gross_profit.toString(),
-      }))
+      sales: salesRows.map((s) => {
+        const origTotal = BigInt(s.total_amount ?? 0);
+        const retAmt = BigInt(s.returned_amount ?? 0);
+        const netTotal = origTotal > retAmt ? origTotal - retAmt : 0n;
+        const origCogs = BigInt(s.total_cogs ?? 0);
+        const retCost = BigInt(s.returned_cost ?? 0);
+        const netProfit = netTotal - (origCogs - retCost);
+        const soldQty = BigInt(s.sold_qty ?? 0);
+        const retQty = BigInt(s.returned_qty ?? 0);
+        const netQty = soldQty > retQty ? soldQty - retQty : 0n;
+        const returnStatus = (retAmt === 0n && retQty === 0n) ? 'NONE' : (netQty <= 0n || netTotal <= 0n ? 'FULL' : 'PARTIAL');
+        return {
+          id: s.id,
+          saleNumber: s.sale_number,
+          createdAt: s.created_at,
+          customerName: s.customer_name || 'عميل نقدي',
+          paymentMethod: s.payment_method,
+          itemsCount: s.items_count,
+          soldQty: soldQty.toString(),
+          returnedQty: retQty.toString(),
+          netQty: netQty.toString(),
+          originalTotal: origTotal.toString(),
+          returnedAmount: retAmt.toString(),
+          total: netTotal.toString(),
+          returnStatus,
+          grossProfit: isCashier ? null : netProfit.toString(),
+        };
+      })
     });
   }
 

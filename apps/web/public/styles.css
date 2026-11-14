@@ -1544,7 +1544,7 @@ details[open] > summary .disclosure-chevron svg {
 
 .compact-kpi-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:11px;margin-bottom:14px}
 .compact-kpi-card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px;box-shadow:var(--shadow);display:grid;gap:5px}
-.compact-kpi-top{display:flex;align-items:center;justify-content:space-between;gap:6px;color:var(--muted);font-size:11.5px;font-weight:700}
+.compact-kpi-top{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;color:var(--muted);font-size:11.5px;font-weight:700}
 .compact-kpi-value{font-size:19px;font-weight:800;letter-spacing:-.02em;color:var(--ink);line-height:1.2}
 .compact-kpi-card small{color:var(--muted);font-size:11px;line-height:1.35}
 .compact-kpi-positive{border-color:rgba(13,122,107,.35);background:linear-gradient(180deg,rgba(13,122,107,.05),var(--surface))}
@@ -1686,7 +1686,7 @@ html[data-theme="dark"] .stock-matrix-cell.cell-low{color:#fcd34d}
 
 /* Clean Invoice Modal, Card Spacing & Attendance Styles */
 .modal-card.invoice-detail-card {
-  width: min(840px, calc(100vw - 36px)) !important;
+  width: min(1020px, calc(100vw - 36px)) !important;
   max-width: calc(100vw - 36px) !important;
   border-radius: 16px !important;
   box-shadow: 0 28px 70px rgba(15, 23, 42, 0.35) !important;
@@ -3085,17 +3085,18 @@ table tbody tr:hover td,
   border-spacing: 0;
 }
 .sales-table-scroll-container thead th {
-  padding: 14px 18px;
-  font-size: 12px;
+  padding: 10px 7px;
+  font-size: 11px;
   font-weight: 800;
   color: var(--muted);
   border-bottom: 2px solid var(--line);
   white-space: nowrap;
 }
 .sales-table-scroll-container tbody td {
-  padding: 13px 18px;
+  padding: 9px 7px;
   vertical-align: middle;
   border-bottom: 1px solid var(--line);
+  font-size: 12px;
 }
 .invoice-id-btn {
   display: inline-flex;
@@ -5897,6 +5898,117 @@ html .button-shift-start:hover {
     grid-template-columns: 1fr;
   }
 }
+
+/* Sales Pricing Summary Strip, Return Badges & 5-Card P&L Grid */
+.compact-kpi-grid-5 {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+@media (max-width: 1260px) {
+  .compact-kpi-grid-5 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 760px) {
+  .compact-kpi-grid-5 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 520px) {
+  .compact-kpi-grid-5 {
+    grid-template-columns: 1fr;
+  }
+}
+.sales-pricing-summary-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+}
+.sales-pricing-item {
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+.sales-pricing-item small {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 700;
+}
+.sales-pricing-item strong {
+  font-size: 14.5px;
+  font-weight: 800;
+  color: var(--ink);
+}
+.sales-pricing-item.sales-pricing-profit {
+  background: color-mix(in srgb, var(--green-soft) 65%, var(--surface));
+  border-color: rgba(22, 163, 74, 0.28);
+}
+.sales-pricing-item.sales-pricing-profit strong {
+  color: var(--green, #15803d);
+}
+.sales-pricing-item.sales-pricing-loss {
+  background: color-mix(in srgb, var(--rose-soft) 65%, var(--surface));
+  border-color: rgba(190, 18, 60, 0.28);
+}
+.sales-pricing-item.sales-pricing-loss strong {
+  color: var(--rose, #be123c);
+}
+.sale-net-stack {
+  display: grid;
+  gap: 2px;
+}
+.sale-return-sub {
+  font-size: 11px;
+  color: var(--rose, #be123c);
+  font-weight: 700;
+}
+.line-through-muted {
+  text-decoration: line-through;
+  color: var(--muted);
+  font-weight: 600;
+}
+.status-partial {
+  background: var(--amber-soft);
+  color: var(--amber);
+  border: 1px solid rgba(203, 138, 26, 0.35);
+}
+:root[data-theme="dark"] .sales-pricing-item {
+  background: #0f1622;
+  border-color: #273449;
+}
+:root[data-theme="dark"] .sales-pricing-item.sales-pricing-profit {
+  background: rgba(22, 163, 74, 0.14);
+  border-color: rgba(34, 197, 94, 0.35);
+}
+:root[data-theme="dark"] .sales-pricing-item.sales-pricing-profit strong {
+  color: #4ade80;
+}
+:root[data-theme="dark"] .sales-pricing-item.sales-pricing-loss {
+  background: rgba(225, 29, 72, 0.14);
+  border-color: rgba(244, 63, 94, 0.35);
+}
+:root[data-theme="dark"] .status-partial {
+  background: rgba(245, 158, 11, 0.16);
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.35);
+}
+.table-total,
+.compact-kpi-value,
+.sales-pricing-item strong {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+#shift-sales-content .table-scroll table {
+  min-width: 0;
+}
+#shift-sales-content .invoice-table th,
+#shift-sales-content .invoice-table td {
+  padding: 9px 10px;
+  font-size: 12px;
+}
+
 
 
 

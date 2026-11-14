@@ -1467,3 +1467,243 @@ test('supports unpriced product catalog creation, supplier purchase wholesale+re
     await rm(purDataDir, { recursive: true, force: true }).catch(() => {});
   }
 });
+
+test('updates all financial views (sales summary, shifts, shift sales, dashboard, growth forecast) after customer returns and exposes itemized supplier payments in profit-loss report', async () => {
+  const finDataDir = await mkdtemp(join(appDir, '.test-fin-returns-'));
+  const finPort = await reservePort();
+  const finUrl = `http://127.0.0.1:${finPort}`;
+  let finLog = '';
+  const finServer = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+    cwd: workspace,
+    env: {
+      ...process.env,
+      PORT: String(finPort),
+      RETAILOS_DATA_DIR: finDataDir,
+      RETAILOS_COMPANY_NAME: 'متجر الحسابات المتكاملة',
+      RETAILOS_COMPANY_CODE: 'FIN_TEST',
+      RETAILOS_CURRENCY: 'EGP',
+      RETAILOS_STORE_NAME: 'الفرع الرئيسي',
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  finServer.stderr.on('data', (chunk) => { finLog += chunk.toString(); });
+
+  const finReq = async (path, { method = 'GET', body, cookieStr } = {}) => {
+    const headers = { Origin: finUrl };
+    if (body) headers['Content-Type'] = 'application/json';
+    if (cookieStr) headers.Cookie = cookieStr;
+    const response = await fetch(`${finUrl}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const payload = await response.json();
+    return { response, payload };
+  };
+
+  try {
+    let finReady = false;
+    for (let i = 0; i < 240; i += 1) {
+      if (finServer.exitCode !== null) throw new Error(`finServer exited early (${finServer.exitCode}): ${finLog}`);
+      try {
+        const res = await fetch(`${finUrl}/api/bootstrap`);
+        if (res.ok) { finReady = true; break; }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 125));
+    }
+    assert.ok(finReady, `finServer did not become ready: ${finLog}`);
+
+    assert.equal((await finReq('/api/setup', {
+      method: 'POST',
+      body: { ownerUsername: 'fin_owner', ownerName: 'مالك المتجر', password: 'Finance-Owner-2026' },
+    })).response.status, 201, finLog);
+
+    const loginOwner = await finReq('/api/login', {
+      method: 'POST',
+      body: { username: 'fin_owner', password: 'Finance-Owner-2026' },
+    });
+    assert.equal(loginOwner.response.status, 200);
+    const ownerCookie = loginOwner.response.headers.get('set-cookie').split(';')[0];
+
+    const initialData = await finReq('/api/data', { cookieStr: ownerCookie });
+    const storeId = initialData.payload.selectedStoreId;
+
+    const supplier = await finReq('/api/suppliers', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { name: 'شركة النور للتوريد' },
+    });
+    assert.equal(supplier.response.status, 201);
+
+    const product = await finReq('/api/products', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { name: 'معطف جلد فاخر', sku: 'COAT-01', variants: [{ sku: 'COAT-01-L', retailPrice: '50000', reorderPoint: '2' }] },
+    });
+    assert.equal(product.response.status, 201);
+    const catAfterProd = await finReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie });
+    const variantId = catAfterProd.payload.products.find((p) => p.id === product.payload.id).variants[0].id;
+
+    // Purchase 50 units at 200.00 EGP = 10,000.00 EGP (1000000 minor), initial paid 0, then pay 5,000.00 EGP (500000 minor)
+    const purchase = await finReq('/api/purchases', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        storeId,
+        supplierId: supplier.payload.id,
+        idempotencyKey: crypto.randomUUID(),
+        invoiceNumber: 'INV-FIN-5000',
+        totalAmount: '1000000',
+        paidAmount: '0',
+        paymentMethod: 'CASH',
+        items: [{ variantId, quantity: '50', unitCost: '20000', retailPrice: '50000' }],
+      },
+    });
+    assert.equal(purchase.response.status, 201, JSON.stringify(purchase.payload));
+
+    const pay5000 = await finReq(`/api/purchases/${purchase.payload.id}/payments`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: crypto.randomUUID(),
+        amount: '500000',
+        paymentMethod: 'CASH',
+        referenceNumber: 'PAY-5000',
+      },
+    });
+    assert.equal(pay5000.response.status, 201, JSON.stringify(pay5000.payload));
+
+    // Open a shift with 100.00 EGP opening cash, sell 2 coats @ 500.00 EGP = 1,000.00 EGP (100000 minor)
+    const shiftStart = await finReq('/api/shifts/start', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { storeId, openingCash: '10000' },
+    });
+    assert.equal(shiftStart.response.status, 201);
+    const shiftId = shiftStart.payload.shift.id;
+
+    const saleRes = await finReq('/api/checkout', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        storeId,
+        idempotencyKey: crypto.randomUUID(),
+        items: [{ variantId, quantity: '2' }],
+        payment: { method: 'CASH', amount: '100000' },
+      },
+    });
+    assert.equal(saleRes.response.status, 201, JSON.stringify(saleRes.payload));
+    const saleId = saleRes.payload.id;
+    const saleItemId = saleRes.payload.items[0].id;
+
+    // Pre-return assertions
+    const today = new Date().toISOString().slice(0, 10);
+    const preSales = await finReq(`/api/sales?storeId=${storeId}`, { cookieStr: ownerCookie });
+    assert.equal(preSales.payload.payload.summary.netSales.amount, '100000');
+    assert.equal(preSales.payload.payload.summary.cogs.amount, '40000');
+    assert.equal(preSales.payload.payload.summary.grossProfit.amount, '60000');
+
+    // Partial customer return: 1 unit (500.00 EGP = 50000 minor) while shift is OPEN
+    const partialReturn = await finReq(`/api/sales/${saleId}/returns`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: crypto.randomUUID(),
+        storeId,
+        paymentMethod: 'CASH',
+        items: [{ originalSaleItemId: saleItemId, quantity: '1' }],
+      },
+    });
+    assert.equal(partialReturn.response.status, 201, JSON.stringify(partialReturn.payload));
+    assert.equal(partialReturn.payload.refundAmount, '50000');
+
+    // Verify ALL endpoints updated consistently after partial return
+    const postData = await finReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie });
+    const stockQty = postData.payload.products.find((p) => p.id === product.payload.id).variants[0].quantity;
+    assert.equal(stockQty, '49');
+    assert.equal(postData.payload.summary.todayRevenue.amount, '50000');
+    assert.equal(postData.payload.sales[0].netTotal.amount, '50000');
+    assert.equal(postData.payload.sales[0].returnedAmount.amount, '50000');
+    assert.equal(postData.payload.sales[0].returnStatus, 'PARTIAL');
+    assert.equal(postData.payload.sales[0].cogs.amount, '20000');
+    assert.equal(postData.payload.sales[0].grossProfit.amount, '30000');
+
+    const postSales = await finReq(`/api/sales?storeId=${storeId}&from=${today}&to=${today}`, { cookieStr: ownerCookie });
+    assert.equal(postSales.payload.payload.summary.grossSales.amount, '100000');
+    assert.equal(postSales.payload.payload.summary.returnsTotal.amount, '50000');
+    assert.equal(postSales.payload.payload.summary.netSales.amount, '50000');
+    assert.equal(postSales.payload.payload.summary.cogs.amount, '20000');
+    assert.equal(postSales.payload.payload.summary.grossProfit.amount, '30000');
+    assert.equal(postSales.payload.payload.sales[0].netTotal.amount, '50000');
+    assert.equal(postSales.payload.payload.sales[0].returnStatus, 'PARTIAL');
+
+    const currentShift = await finReq('/api/shifts/current', { cookieStr: ownerCookie });
+    assert.equal(currentShift.payload.currentShift.totalSales, '50000');
+    assert.equal(currentShift.payload.currentShift.returnsTotal, '50000');
+    assert.equal(currentShift.payload.currentShift.expectedCash, '60000');
+
+    const shiftsList = await finReq(`/api/shifts?storeId=${storeId}`, { cookieStr: ownerCookie });
+    assert.equal(shiftsList.payload.shifts[0].salesRevenue, '50000');
+    assert.equal(shiftsList.payload.shifts[0].grossProfit, '30000');
+    assert.equal(shiftsList.payload.shifts[0].returnedTotal, '50000');
+    assert.equal(shiftsList.payload.shifts[0].expectedCash, '60000');
+    assert.equal(shiftsList.payload.summary.totalSales, '50000');
+    assert.equal(shiftsList.payload.summary.totalProfit, '30000');
+
+    const shiftSales = await finReq(`/api/shifts/${shiftId}/sales`, { cookieStr: ownerCookie });
+    assert.equal(shiftSales.payload.sales[0].total, '50000');
+    assert.equal(shiftSales.payload.sales[0].originalTotal, '100000');
+    assert.equal(shiftSales.payload.sales[0].returnedAmount, '50000');
+    assert.equal(shiftSales.payload.sales[0].grossProfit, '30000');
+    assert.equal(shiftSales.payload.sales[0].returnStatus, 'PARTIAL');
+
+    const forecast = await finReq(`/api/reports/growth-forecast?storeId=${storeId}`, { cookieStr: ownerCookie });
+    assert.equal(forecast.payload.currentMonth.revenue, '50000');
+    assert.equal(forecast.payload.currentMonth.profit, '30000');
+
+    const pl = await finReq(`/api/reports/profit-loss?storeId=${storeId}&from=${today}&to=${today}`, { cookieStr: ownerCookie });
+    assert.equal(pl.payload.profitLoss.netSales.amount, '50000');
+    assert.equal(pl.payload.profitLoss.cogs.amount, '20000');
+    assert.equal(pl.payload.profitLoss.grossProfit.amount, '30000');
+    assert.equal(pl.payload.supplierPayments.totalPaid.amount, '500000');
+    assert.equal(pl.payload.supplierPayments.items.length, 1);
+    assert.equal(pl.payload.supplierPayments.items[0].supplierName, 'شركة النور للتوريد');
+    assert.equal(pl.payload.supplierPayments.items[0].amount.amount, '500000');
+    assert.equal(pl.payload.cashPosition.netCashRemaining.amount, '-450000');
+
+    // Close shift & return remaining 1 unit AFTER closing, confirming shift sales/profit become 0 & FULL return
+    const shiftEnd = await finReq('/api/shifts/end', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { shiftId, actualCash: '60000', handoverCash: '60000' },
+    });
+    assert.equal(shiftEnd.response.status, 200);
+
+    const fullReturn = await finReq(`/api/sales/${saleId}/returns`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: crypto.randomUUID(),
+        storeId,
+        paymentMethod: 'CASH',
+        items: [{ originalSaleItemId: saleItemId, quantity: '1' }],
+      },
+    });
+    assert.equal(fullReturn.response.status, 201);
+
+    const finalShifts = await finReq(`/api/shifts?storeId=${storeId}`, { cookieStr: ownerCookie });
+    assert.equal(finalShifts.payload.shifts[0].salesRevenue, '0');
+    assert.equal(finalShifts.payload.shifts[0].grossProfit, '0');
+    assert.equal(finalShifts.payload.shifts[0].returnedTotal, '100000');
+
+    const finalShiftSales = await finReq(`/api/shifts/${shiftId}/sales`, { cookieStr: ownerCookie });
+    assert.equal(finalShiftSales.payload.sales[0].total, '0');
+    assert.equal(finalShiftSales.payload.sales[0].returnStatus, 'FULL');
+
+    const finalData = await finReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie });
+    assert.equal(finalData.payload.products.find((p) => p.id === product.payload.id).variants[0].quantity, '50');
+    assert.equal(finalData.payload.summary.todayRevenue.amount, '0');
+  } finally {
+    if (finServer.exitCode === null) {
+      finServer.kill('SIGTERM');
+      await Promise.race([once(finServer, 'exit'), new Promise((resolve) => setTimeout(resolve, 3000))]);
+    }
+    await rm(finDataDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
