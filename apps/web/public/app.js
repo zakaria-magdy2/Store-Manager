@@ -96,47 +96,58 @@ function setTheme(theme) {
 
 setTheme(getTheme());
 
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('تعذر قراءة ملف الصورة المحدد'));
+    reader.readAsDataURL(file);
+  });
+}
+
 async function compressProductImageFile(file) {
-  if (!file || !String(file.type || '').startsWith('image/')) {
+  const mime = String(file?.type || '').toLowerCase();
+  const hasImageExt = /\.(png|jpe?g|jfif|webp|gif|bmp|avif)$/i.test(String(file?.name || ''));
+  if (!file || (!mime.startsWith('image/') && !hasImageExt)) {
     throw new Error('يرجى اختيار ملف صورة صالح (PNG أو JPG أو WebP)');
   }
   if (file.size > 10 * 1024 * 1024) {
     throw new Error('حجم الصورة كبير جدًا (الحد الأقصى 10 ميجابايت قبل الضغط)');
   }
-  const objectUrl = URL.createObjectURL(file);
-  try {
-    const img = await new Promise((resolve, reject) => {
-      const image = new Image();
-      image.onload = () => resolve(image);
-      image.onerror = () => reject(new Error('تعذر قراءة ملف الصورة المحدد'));
-      image.src = objectUrl;
-    });
-    const maxDim = 320;
+  const sourceUrl = await readFileAsDataUrl(file);
+  const img = await new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('تعذر قراءة ملف الصورة المحدد'));
+    image.src = sourceUrl;
+  });
+
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('تعذر معالجة الصورة في المتصفح');
+
+  const maxLimit = 220_000;
+  let dataUrl = '';
+  for (const maxDim of [320, 256, 192]) {
     const scale = Math.min(1, maxDim / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
     const width = Math.max(1, Math.round((img.naturalWidth || 1) * scale));
     const height = Math.max(1, Math.round((img.naturalHeight || 1) * scale));
-    const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('تعذر معالجة الصورة في المتصفح');
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, width, height);
     ctx.drawImage(img, 0, 0, width, height);
-    let dataUrl = canvas.toDataURL('image/webp', 0.82);
-    if (!dataUrl.startsWith('data:image/webp')) {
-      dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+    for (const [format, quality] of [['image/webp', 0.82], ['image/jpeg', 0.82], ['image/jpeg', 0.65], ['image/jpeg', 0.45]]) {
+      const candidate = canvas.toDataURL(format, quality);
+      if (!candidate.startsWith(`data:${format}`)) continue;
+      dataUrl = candidate;
+      if (candidate.length <= maxLimit) return candidate;
     }
-    if (dataUrl.length > 230_000) {
-      dataUrl = canvas.toDataURL('image/jpeg', 0.65);
-    }
-    if (dataUrl.length > 240_000) {
-      throw new Error('حجم الصورة بعد الضغط لا يزال كبيرًا، جرب صورة أصغر');
-    }
-    return dataUrl;
-  } finally {
-    URL.revokeObjectURL(objectUrl);
   }
+  if (!dataUrl || dataUrl.length > 240_000) {
+    throw new Error('حجم الصورة بعد الضغط لا يزال كبيرًا، جرب صورة أصغر');
+  }
+  return dataUrl;
 }
 
 function renderProductThumb(product, fallbackHtml = '', className = 'product-avatar-img') {
@@ -266,11 +277,19 @@ async function api(path, options = {}) {
     const operation = mutationLabel(path, method);
     await requireMutationConfirmation(operation);
   }
-  const response = await fetch(path, {
-    credentials: 'same-origin',
-    ...options,
-    headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers },
-  });
+  let response;
+  try {
+    response = await fetch(path, {
+      credentials: 'same-origin',
+      ...options,
+      headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers },
+    });
+  } catch (networkError) {
+    if (networkError instanceof TypeError) {
+      throw new Error('تعذر الاتصال بالخادم المحلي — تأكد من تشغيل البرنامج وحاول مرة أخرى');
+    }
+    throw networkError;
+  }
   const result = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 401 && state.user) {
@@ -5977,32 +5996,57 @@ function showProductEditModal(product) {
   modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="product-edit-title" style="margin:20px auto;max-width:calc(100vw - 32px);"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">الكتالوج الموحد — توسيع وتعديل الموديل</span><h2 id="product-edit-title">تعديل الموديل: ${escapeHtml(product.name)} (${escapeHtml(product.sku)})</h2></div><button type="button" class="modal-close" data-close-modal>×</button></div><form id="product-edit-form" class="form-stack modal-form"><div class="form-grid"><label>اسم الموديل / المنتج<input name="name" required minlength="2" maxlength="120" value="${escapeHtml(product.name)}"></label><label>كود الموديل الأساسي<input name="sku" required maxlength="64" value="${escapeHtml(product.sku)}"></label></div><div class="form-grid"><label>الفئة<select name="categoryId"><option value="">بدون فئة</option>${categoryChoices}</select></label><label>الماركة / المصنع<input name="brand" maxlength="100" value="${escapeHtml(product.brand ?? '')}"></label></div><div class="form-grid" style="background:var(--surface-soft);padding:14px;border-radius:12px;border:1px solid var(--line);margin:4px 0;"><label style="font-weight:750;">سعر البيع الجديد للموديل (${currency})<input name="baseRetailPrice" id="edit-modal-base-price" inputmode="decimal" value="${escapeHtml(defaultPrice)}" placeholder="مثال: 350.00" style="font-weight:800;font-size:15px;color:var(--purple);"><small style="color:var(--muted);font-size:11px;">تحديث وتعديل سعر البيع وتطبيقه على كافة المقاسات والألوان</small></label><div style="display:flex;align-items:flex-end;"><button type="button" class="button button-secondary" id="apply-price-to-all-variants" style="height:42px;width:100%;font-weight:750;">تطبيق هذا السعر على كل المقاسات</button></div></div><label>وصف الموديل<input name="description" maxlength="2000" value="${escapeHtml(product.description ?? '')}"></label>${renderProductImagePicker(product.imagePath ?? '')}
   ${initialOptions.length ? `<div class="variant-options-section"><div><strong>إضافة ألوان أو مقاسات جديدة لهذا الموديل:</strong></div><div class="model-presets-bar"><span class="preset-label">+ لون جديد:</span>${quickColors.map((c) => `<button type="button" class="color-quick-chip" data-edit-add-color="${c}">+ ${c}</button>`).join('')}</div><div class="model-presets-bar"><span class="preset-label">+ مقاسات سريعة:</span>${quickSizes.map((s) => `<button type="button" class="date-preset-chip" data-edit-add-sizes="${s}">+ (${s})</button>`).join('')}</div><div id="edit-option-rows" class="form-stack">${initialOptions.map((opt) => `<div class="variant-option-row" data-edit-option-key="${escapeHtml(opt.key)}"><input data-edit-option-name value="${escapeHtml(opt.name)}" readonly><input data-edit-option-values value="${escapeHtml(opt.values.join(', '))}" placeholder="القيم مفصولة بفواصل"></div>`).join('')}</div></div>` : ''}
   <div class="matrix-quick-toolbar"><span>الفروع الحالية والجديدة التابعة للموديل (<strong>${activeExisting.length}</strong> فرع مسجل)</span><div class="matrix-quick-actions"><button type="button" class="date-preset-chip" id="edit-generate-barcodes">توليد باركود تلقائي للفروع بدون باركود</button><button type="button" class="date-preset-chip" id="edit-open-print-labels">طباعة استيكرات الباركود</button></div></div>
-  <div class="table-scroll"><table class="variant-matrix-table zebra-table"><thead><tr><th>متاحة</th><th>اللون والمقاس الفرعي</th><th>كود الفرع (SKU)</th><th>الباركود</th><th>السعر (${currency})</th><th>حد الطلب</th></tr></thead><tbody id="edit-existing-tbody">${activeExisting.map((variant) => `<tr data-variant-id="${variant.id}" data-variant-attrs="${escapeHtml(JSON.stringify(variant.attributes ?? {}))}"><td><input data-edit-active type="checkbox" checked aria-label="إبقاء التركيبة متاحة"></td><td><strong>${escapeHtml(formatVariantAttributes(product, variant.attributes, product.name))}</strong></td><td><input data-edit-sku maxlength="64" required value="${escapeHtml(variant.sku)}"></td><td><input data-edit-barcode maxlength="64" value="${escapeHtml(variant.barcode ?? '')}" placeholder="باركود العلبة"></td><td><input data-edit-price inputmode="decimal" required value="${escapeHtml(decimalPrice(variant.price))}"></td><td><input data-edit-reorder type="number" min="0" step="1" required value="${escapeHtml(variant.reorderPoint)}"></td></tr>`).join('')}</tbody><tbody id="edit-generated-tbody"></tbody></table></div><div id="new-variant-rows" class="form-stack"></div>${product.options?.length ? '<button type="button" class="button button-secondary button-sm" id="add-edit-variant">+ إضافة فرع مفرد يدويًا</button>' : ''}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">حفظ التعديلات والفروع الجديدة</button></div></form></section></div>`;
+  <div class="table-scroll"><table class="variant-matrix-table zebra-table"><thead><tr><th>متاحة</th><th>اللون والمقاس الفرعي</th><th>كود الفرع (SKU)</th><th>الباركود</th><th>السعر (${currency})</th><th>حد الطلب</th></tr></thead><tbody id="edit-existing-tbody">${activeExisting.map((variant) => `<tr data-variant-id="${variant.id}" data-variant-qty="${escapeHtml(variant.quantity ?? '0')}" data-variant-attrs="${escapeHtml(JSON.stringify(variant.attributes ?? {}))}"><td><input data-edit-active type="checkbox" checked aria-label="إبقاء التركيبة متاحة"></td><td><strong>${escapeHtml(formatVariantAttributes(product, variant.attributes, product.name))}</strong></td><td><input data-edit-sku maxlength="64" required value="${escapeHtml(variant.sku)}"></td><td><input data-edit-barcode maxlength="64" value="${escapeHtml(variant.barcode ?? '')}" placeholder="باركود العلبة"></td><td><input data-edit-price inputmode="decimal" required value="${escapeHtml(decimalPrice(variant.price))}"></td><td><input data-edit-reorder type="number" min="0" step="1" required value="${escapeHtml(variant.reorderPoint)}"></td></tr>`).join('')}</tbody><tbody id="edit-generated-tbody"></tbody></table></div><div id="new-variant-rows" class="form-stack"></div>${product.options?.length ? '<button type="button" class="button button-secondary button-sm" id="add-edit-variant">+ إضافة فرع مفرد يدويًا</button>' : ''}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">حفظ التعديلات والفروع الجديدة</button></div></form></section></div>`;
   modal.querySelectorAll('[data-close-modal]').forEach((button) => button.addEventListener('click', () => { modal.innerHTML = ''; }));
-  modal.querySelector('#apply-price-to-all-variants')?.addEventListener('click', () => {
-    const val = modal.querySelector('#edit-modal-base-price')?.value.trim();
-    if (!val) { toast('أدخل السعر الجديد أولاً', 'error'); return; }
-    modal.querySelectorAll('[data-edit-price], [data-new-combo-price], [data-new-price]').forEach((input) => {
-      input.value = val;
-    });
-    toast(`تم تطبيق السعر (${val} ${currency}) على كافة المقاسات`);
-  });
   const generatedTbody = modal.querySelector('#edit-generated-tbody');
+  const existingTbody = modal.querySelector('#edit-existing-tbody');
   const editOptionRows = modal.querySelector('#edit-option-rows');
+
+  const readEditedOptions = () => (editOptionRows ? [...editOptionRows.querySelectorAll('[data-edit-option-key]')].map((row) => {
+    const key = row.dataset.editOptionKey;
+    const name = row.querySelector('[data-edit-option-name]').value.trim();
+    const values = [];
+    for (const v of row.querySelector('[data-edit-option-values]').value.split(/[,،]/).map((item) => item.trim()).filter(Boolean)) {
+      if (!values.includes(v)) values.push(v);
+    }
+    return { key, name, values };
+  }) : []);
+
+  const comboKeyFor = (attrs, options) => JSON.stringify(Object.fromEntries(options.map((o) => [o.key, (attrs ?? {})[o.key]])));
+  const inactiveByCombo = new Map();
+  for (const variant of product.variants) {
+    if (!variant.isActive && initialOptions.length) {
+      inactiveByCombo.set(comboKeyFor(variant.attributes, initialOptions), variant);
+    }
+  }
+
+  existingTbody?.querySelectorAll('[data-edit-active]').forEach((cb) => cb.addEventListener('change', () => {
+    const tr = cb.closest('tr');
+    if (tr) delete tr.dataset.autoUncheckedByOption;
+  }));
 
   const syncExpandedVariants = () => {
     if (!editOptionRows) return;
     const baseSku = modal.querySelector('[name="sku"]').value.trim() || product.sku;
-    const updatedOptions = [...editOptionRows.querySelectorAll('[data-edit-option-key]')].map((row) => {
-      const key = row.dataset.editOptionKey;
-      const name = row.querySelector('[data-edit-option-name]').value.trim();
-      const origValues = product.options?.find((o) => o.key === key)?.values ?? [];
-      const typedValues = row.querySelector('[data-edit-option-values]').value.split(/[,،]/).map((v) => v.trim()).filter(Boolean);
-      const merged = [...origValues];
-      for (const v of typedValues) if (!merged.includes(v)) merged.push(v);
-      return { key, name, values: merged };
+    const updatedOptions = readEditedOptions();
+    const typedSetByKey = new Map(updatedOptions.map((o) => [o.key, new Set(o.values)]));
+
+    existingTbody?.querySelectorAll('[data-variant-id]').forEach((tr) => {
+      const attrs = JSON.parse(tr.dataset.variantAttrs || '{}');
+      const qty = BigInt(tr.dataset.variantQty || '0');
+      const cb = tr.querySelector('[data-edit-active]');
+      if (!cb) return;
+      const matchesTyped = updatedOptions.every((o) => typedSetByKey.get(o.key)?.has(String(attrs[o.key] ?? '')));
+      if (!matchesTyped && cb.checked && qty === 0n) {
+        cb.checked = false;
+        tr.dataset.autoUncheckedByOption = '1';
+      } else if (matchesTyped && !cb.checked && tr.dataset.autoUncheckedByOption === '1') {
+        cb.checked = true;
+        delete tr.dataset.autoUncheckedByOption;
+      }
     });
-    const existingKeys = new Set(product.variants.map((v) => JSON.stringify(Object.fromEntries(updatedOptions.map((o) => [o.key, (v.attributes ?? {})[o.key]])))));
+
+    const existingKeys = new Set(activeExisting.map((v) => comboKeyFor(v.attributes, updatedOptions)));
     const usedSkus = new Set([...modal.querySelectorAll('[data-edit-sku]')].map((el) => el.value.trim().toLowerCase()));
     const usedBarcodes = new Set([...modal.querySelectorAll('[data-edit-barcode]')].map((el) => el.value.trim()).filter(Boolean));
     const savedNew = new Map([...generatedTbody.querySelectorAll('[data-new-combo-key]')].map((tr) => [tr.dataset.newComboKey, {
@@ -6018,20 +6062,24 @@ function showProductEditModal(product) {
       const opt = updatedOptions[pos];
       for (const val of opt.values) expand(pos + 1, { ...attrs, [opt.key]: val });
     };
-    if (updatedOptions.length) expand(0, {});
+    if (updatedOptions.length && updatedOptions.every((o) => o.values.length > 0)) expand(0, {});
     const newCombos = combos.filter((attrs) => !existingKeys.has(JSON.stringify(attrs)));
     generatedTbody.innerHTML = newCombos.map((attrs, idx) => {
       const comboKey = JSON.stringify(attrs);
       const prev = savedNew.get(comboKey);
+      const archived = inactiveByCombo.get(comboKey);
       const label = Object.entries(attrs).map(([k, val]) => `${updatedOptions.find((o) => o.key === k)?.name ?? k}: ${val}`).join(' · ');
-      const sku = prev?.sku || buildSemanticVariantSku(baseSku, attrs, activeExisting.length + idx, usedSkus);
+      const sku = prev?.sku || archived?.sku || buildSemanticVariantSku(baseSku, attrs, activeExisting.length + idx, usedSkus);
       usedSkus.add(sku.toLowerCase());
-      const barcode = prev?.barcode ?? generateEan13Barcode(sku, activeExisting.length + idx + 1, usedBarcodes);
-      return `<tr class="new-expanded-variant-row" data-new-combo-key="${escapeHtml(comboKey)}"><td><input data-new-combo-enabled type="checkbox" ${prev?.enabled === false ? '' : 'checked'}></td><td><span class="kpi-tag kpi-tag-teal">جديد</span> <strong>${escapeHtml(label)}</strong></td><td><input data-new-combo-sku maxlength="64" required value="${escapeHtml(sku)}"></td><td><input data-new-combo-barcode maxlength="64" value="${escapeHtml(barcode)}"></td><td><input data-new-combo-price inputmode="decimal" required value="${escapeHtml(prev?.price ?? defaultPrice)}"></td><td><input data-new-combo-reorder type="number" min="0" step="1" required value="${escapeHtml(prev?.reorder ?? defaultReorder)}"></td></tr>`;
+      const barcode = prev?.barcode ?? archived?.barcode ?? generateEan13Barcode(sku, activeExisting.length + idx + 1, usedBarcodes);
+      const priceVal = prev?.price ?? (archived ? decimalPrice(archived.price) : defaultPrice);
+      const reorderVal = prev?.reorder ?? archived?.reorderPoint ?? defaultReorder;
+      return `<tr class="new-expanded-variant-row" data-new-combo-key="${escapeHtml(comboKey)}" ${archived ? `data-reactivate-id="${escapeHtml(archived.id)}"` : ''}><td><input data-new-combo-enabled type="checkbox" ${prev?.enabled === false ? '' : 'checked'}></td><td><span class="kpi-tag kpi-tag-teal">${archived ? 'إعادة تفعيل' : 'جديد'}</span> <strong>${escapeHtml(label)}</strong></td><td><input data-new-combo-sku maxlength="64" required value="${escapeHtml(sku)}"></td><td><input data-new-combo-barcode maxlength="64" value="${escapeHtml(barcode)}"></td><td><input data-new-combo-price inputmode="decimal" required value="${escapeHtml(priceVal)}"></td><td><input data-new-combo-reorder type="number" min="0" step="1" required value="${escapeHtml(reorderVal)}"></td></tr>`;
     }).join('');
   };
 
   editOptionRows?.addEventListener('input', syncExpandedVariants);
+  editOptionRows?.addEventListener('change', syncExpandedVariants);
   modal.querySelectorAll('[data-edit-add-color]').forEach((btn) => btn.addEventListener('click', () => {
     if (!editOptionRows) return;
     const color = btn.dataset.editAddColor;
@@ -6089,17 +6137,26 @@ function showProductEditModal(product) {
       ev.target.dataset.priceEdited = '1';
     }
   });
-  basePriceInput?.addEventListener('input', () => {
-    const val = basePriceInput.value.trim();
+  const syncBasePriceInputs = () => {
+    const val = basePriceInput?.value.trim();
     if (!val || Number.isNaN(Number(val)) || Number(val) < 0) return;
     modal.querySelectorAll('[data-edit-price], [data-new-combo-price], [data-new-price]').forEach((input) => {
       if (input.dataset.priceEdited !== '1') input.value = val;
     });
-  });
+  };
+  basePriceInput?.addEventListener('input', syncBasePriceInputs);
+  basePriceInput?.addEventListener('change', syncBasePriceInputs);
   modal.querySelector('#apply-price-to-all-variants')?.addEventListener('click', () => {
+    const val = basePriceInput?.value.trim();
+    if (!val || Number.isNaN(Number(val)) || Number(val) < 0) {
+      toast('أدخل سعرًا صحيحًا أولاً', 'error');
+      return;
+    }
     modal.querySelectorAll('[data-edit-price], [data-new-combo-price], [data-new-price]').forEach((input) => {
       delete input.dataset.priceEdited;
+      input.value = val;
     });
+    toast(`تم تطبيق السعر (${val} ${currency}) على كافة المقاسات`);
   });
   editFormEl.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -6108,15 +6165,6 @@ function showProductEditModal(product) {
     submit.disabled = true;
     try {
       const data = new FormData(form);
-      const updatedOptions = editOptionRows ? [...editOptionRows.querySelectorAll('[data-edit-option-key]')].map((row) => {
-        const key = row.dataset.editOptionKey;
-        const name = row.querySelector('[data-edit-option-name]').value.trim();
-        const origValues = product.options?.find((o) => o.key === key)?.values ?? [];
-        const typedValues = row.querySelector('[data-edit-option-values]').value.split(/[,،]/).map((v) => v.trim()).filter(Boolean);
-        const merged = [...origValues];
-        for (const v of typedValues) if (!merged.includes(v)) merged.push(v);
-        return { key, name, values: merged };
-      }) : (product.options ?? []);
       const variants = [...form.querySelectorAll('[data-variant-id]')].filter((row) => row.querySelector('[data-edit-active]').checked).map((row) => ({
         id: row.dataset.variantId,
         sku: row.querySelector('[data-edit-sku]').value.trim(),
@@ -6128,6 +6176,7 @@ function showProductEditModal(product) {
       for (const row of generatedTbody?.querySelectorAll('[data-new-combo-key]') ?? []) {
         if (!row.querySelector('[data-new-combo-enabled]')?.checked) continue;
         variants.push({
+          ...(row.dataset.reactivateId ? { id: row.dataset.reactivateId } : {}),
           sku: row.querySelector('[data-new-combo-sku]').value.trim(),
           barcode: row.querySelector('[data-new-combo-barcode]')?.value.trim() || null,
           attributes: JSON.parse(row.dataset.newComboKey),
@@ -6136,14 +6185,19 @@ function showProductEditModal(product) {
         });
       }
       for (const row of newVariantRows?.querySelectorAll('.edit-new-variant') ?? []) variants.push({ sku: row.querySelector('[data-new-sku]').value.trim(), attributes: Object.fromEntries([...row.querySelectorAll('[data-new-attribute]')].map((select) => [select.dataset.newAttribute, select.value])), retailPrice: toMinor(row.querySelector('[data-new-price]').value, currencyDecimals(currency)), reorderPoint: row.querySelector('[data-new-reorder]').value });
+      const updatedOptions = editOptionRows ? readEditedOptions().map((opt) => {
+        if (!opt.values.length) throw new Error(`يرجى كتابة قيمة واحدة على الأقل في "${opt.name}"`);
+        for (const variant of variants) {
+          const val = String((variant.attributes ?? {})[opt.key] ?? '').trim();
+          if (val && !opt.values.includes(val)) opt.values.push(val);
+        }
+        return opt;
+      }) : (product.options ?? []);
       await api(`/api/products/${encodeURIComponent(product.id)}`, { method: 'PATCH', body: JSON.stringify({ name: data.get('name'), sku: data.get('sku'), categoryId: data.get('categoryId') || null, description: data.get('description') || null, brand: data.get('brand') || null, imagePath: data.get('imagePath') || null, options: updatedOptions, variants }) });
       state.report = null;
       state.reportKey = null;
       state.productStats = null;
       state.supplierStats = null;
-      state.analyticsKey = null;
-      state.salesHistory = null;
-      state.productStats = null;
       state.analyticsKey = null;
       state.salesHistory = null;
       await loadData(state.data.selectedStoreId);
@@ -6637,6 +6691,9 @@ function showInventoryProductDetails(product) {
       state.salesHistory = null;
       await loadData(state.data.selectedStoreId);
       render();
+      const refreshedProduct = state.data.products.find((item) => item.id === product.id);
+      if (refreshedProduct) showInventoryProductDetails(refreshedProduct);
+      else modal.innerHTML = '';
       toast('تم إخفاء التركيبة من قوائم البيع مع الاحتفاظ بسجلها والفواتير القديمة');
     } catch (error) { toast(error.message, 'error'); button.disabled = false; }
   }));

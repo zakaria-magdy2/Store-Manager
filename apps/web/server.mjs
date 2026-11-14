@@ -550,7 +550,7 @@ function securityHeaders() {
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
     'Cross-Origin-Opener-Policy': 'same-origin',
     'Cross-Origin-Resource-Policy': 'same-origin',
-    'Content-Security-Policy': "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    'Content-Security-Policy': "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
   };
 }
 
@@ -559,12 +559,31 @@ function readCookie(req, name) {
   return cookie ? decodeURIComponent(cookie.slice(name.length + 1)) : undefined;
 }
 
-async function readJson(req) {
-  let raw = '';
+const MAX_JSON_BODY_BYTES = 2 * 1024 * 1024;
+const MAX_DRAIN_OVERSIZED_BYTES = 32 * 1024 * 1024;
+
+async function readJson(req, maxBytes = MAX_JSON_BODY_BYTES) {
+  const chunks = [];
+  let totalBytes = 0;
+  let exceeded = false;
   for await (const chunk of req) {
-    raw += chunk.toString();
-    if (raw.length > 512 * 1024) throw Object.assign(new Error('Request is too large'), { status: 413 });
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buf.length;
+    if (totalBytes > maxBytes) {
+      exceeded = true;
+      // Stop reading unbounded payloads above drain cap; below cap, finish draining so keep-alive browsers receive JSON 413 instead of TCP reset ("Failed to fetch").
+      if (totalBytes > MAX_DRAIN_OVERSIZED_BYTES) {
+        req.destroy();
+        break;
+      }
+      continue;
+    }
+    chunks.push(buf);
   }
+  if (exceeded) {
+    throw Object.assign(new Error('حجم البيانات المرسلة كبير جدًا، يرجى تقليل حجم الصورة والمحاولة مرة أخرى'), { status: 413 });
+  }
+  const raw = chunks.length ? Buffer.concat(chunks).toString('utf8') : '';
   try {
     return raw ? JSON.parse(raw) : {};
   } catch {
@@ -3482,12 +3501,14 @@ async function handleApi(req, res, url) {
       await trx.updateTable('products').set({ name: body.name, sku: body.sku.toUpperCase(), category_id: body.categoryId, description: body.description ?? null, brand: body.brand ?? null, image_path: body.imagePath ?? null, options_json: JSON.stringify(body.options), has_variants: body.options.length ? 1 : 0 }).where('tenant_id', '=', ctx.tenantId).where('id', '=', productId).execute();
       for (const variant of body.variants) {
         const existing = variant.id ? currentById.get(variant.id) : null;
-        const values = { sku: variant.sku.toUpperCase(), barcode: variant.barcode?.trim() || (existing?.barcode ?? null), attributes_json: JSON.stringify(variant.attributes ?? {}), retail_price: BigInt(variant.retailPrice), currency: tenant.currency, reorder_point: BigInt(variant.reorderPoint), is_active: 1 };
+        const nextBarcode = variant.barcode === undefined ? (existing?.barcode ?? null) : (variant.barcode?.trim() || null);
+        const values = { sku: variant.sku.toUpperCase(), barcode: nextBarcode, attributes_json: JSON.stringify(variant.attributes ?? {}), retail_price: BigInt(variant.retailPrice), currency: tenant.currency, reorder_point: BigInt(variant.reorderPoint), is_active: 1 };
         if (variant.id) await trx.updateTable('product_variants').set(values).where('tenant_id', '=', ctx.tenantId).where('product_id', '=', productId).where('id', '=', variant.id).execute();
         else await trx.insertInto('product_variants').values({ id: randomUUID(), tenant_id: ctx.tenantId, product_id: productId, ...values }).execute();
       }
       for (const variant of omittedVariants) await trx.updateTable('product_variants').set({ is_active: 0 }).where('tenant_id', '=', ctx.tenantId).where('product_id', '=', productId).where('id', '=', variant.id).execute();
     });
+    await recordAudit(ctx, { action: 'PRODUCT_UPDATED', entityType: 'PRODUCT', entityId: productId, summary: `تحديث بيانات الموديل (${body.name} - ${body.sku.toUpperCase()})`, metadata: { sku: body.sku.toUpperCase(), variantCount: body.variants.length, hasImage: Boolean(body.imagePath) } });
     return json(res, 200, { id: productId, updated: true });
   }
   if (productMutation && method === 'DELETE') {

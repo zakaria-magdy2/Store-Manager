@@ -211,6 +211,88 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.equal(reloadedEditedProduct.description, 'Updated model description');
   assert.equal(reloadedEditedProduct.imagePath, sampleImageDataUrl);
   assert.ok(reloadedEditedProduct.variants.every((v) => v.price.amount === '9200' && v.reorderPoint === '5'));
+
+  // Verify clearing a barcode to null, removing an unused option/variant, and reactivating it persist via PATCH
+  const deactivatedVariant = reloadedEditedProduct.variants.find((v) => v.sku === 'SHIRT-TEST-NVY-L');
+  assert.ok(deactivatedVariant);
+  const clearAndArchiveRes = await request(`/api/products/${sizedProduct.payload.id}`, {
+    method: 'PATCH',
+    body: {
+      name: 'Shirt Updated',
+      sku: 'SHIRT-TEST-V2',
+      categoryId: null,
+      brand: 'BrandUpdated',
+      description: 'Updated model description',
+      imagePath: sampleImageDataUrl,
+      options: [
+        { key: 'size', name: 'المقاس', values: ['S', 'M'] },
+        { key: 'color', name: 'اللون', values: ['Black', 'White'] },
+      ],
+      variants: reloadedEditedProduct.variants
+        .filter((v) => v.id !== deactivatedVariant.id)
+        .map((v) => ({
+          id: v.id,
+          sku: v.sku,
+          barcode: null,
+          attributes: v.attributes,
+          retailPrice: '9200',
+          reorderPoint: '5',
+        })),
+    },
+  });
+  assert.equal(clearAndArchiveRes.response.status, 200, JSON.stringify(clearAndArchiveRes.payload));
+  data = await request('/api/data');
+  const afterArchiveProduct = data.payload.products.find((item) => item.id === sizedProduct.payload.id);
+  assert.equal(afterArchiveProduct.options[0].values.includes('L'), false);
+  assert.equal(afterArchiveProduct.variants.find((v) => v.id === deactivatedVariant.id)?.isActive, false);
+
+  const reactivateRes = await request(`/api/products/${sizedProduct.payload.id}`, {
+    method: 'PATCH',
+    body: {
+      name: 'Shirt Updated',
+      sku: 'SHIRT-TEST-V2',
+      categoryId: null,
+      brand: 'BrandUpdated',
+      description: 'Updated model description',
+      imagePath: sampleImageDataUrl,
+      options: [
+        { key: 'size', name: 'المقاس', values: ['S', 'M', 'L'] },
+        { key: 'color', name: 'اللون', values: ['Black', 'White', 'Navy'] },
+      ],
+      variants: [
+        ...afterArchiveProduct.variants.filter((v) => v.isActive).map((v) => ({
+          id: v.id,
+          sku: v.sku,
+          barcode: v.barcode,
+          attributes: v.attributes,
+          retailPrice: '9200',
+          reorderPoint: '5',
+        })),
+        {
+          id: deactivatedVariant.id,
+          sku: deactivatedVariant.sku,
+          barcode: null,
+          attributes: deactivatedVariant.attributes,
+          retailPrice: '9200',
+          reorderPoint: '5',
+        },
+      ],
+    },
+  });
+  assert.equal(reactivateRes.response.status, 200, JSON.stringify(reactivateRes.payload));
+  data = await request('/api/data');
+  const afterReactivateProduct = data.payload.products.find((item) => item.id === sizedProduct.payload.id);
+  const reactivatedTarget = afterReactivateProduct.variants.find((v) => v.id === deactivatedVariant.id);
+  assert.equal(reactivatedTarget?.isActive, true);
+  assert.equal(reactivatedTarget?.barcode, null);
+
+  // Oversized JSON payload returns clean 413 JSON response without dropping connection
+  const oversizedRes = await request(`/api/products/${sizedProduct.payload.id}`, {
+    method: 'PATCH',
+    body: { name: 'Oversized', description: 'X'.repeat(2_200_000) },
+  });
+  assert.equal(oversizedRes.response.status, 413);
+  assert.ok(oversizedRes.payload?.error);
   assert.equal(data.payload.products.find((item) => item.id === createdService.payload.id).itemKind, 'PRODUCT');
   const variant = product.variants[0];
   const storeId = data.payload.selectedStoreId;
