@@ -300,7 +300,7 @@ const navItems = [
   { id: 'top-products', label: 'التقارير والإحصائيات', icon: 'chart' },
   { id: 'stocktake', label: 'الجرد الشامل', icon: 'scan' },
 ];
-const extraPageTitles = { backups: 'النسخ الاحتياطي اليومي والاستعادة', 'audit-logs': 'سجل المراجعة والأمان', 'monthly-expenses': 'الالتزامات الشهرية', 'financial-map': 'المسار المالي وتدفق الأرباح', shifts: 'سجل الشيفتات ومتابعة الحضور', users: 'المستخدمون وسجل الحضور' };
+const extraPageTitles = { backups: 'النسخ الاحتياطي اليومي والاستعادة', 'audit-logs': 'سجل المراجعة والأمان', 'monthly-expenses': 'الالتزامات الشهرية', 'financial-map': 'المسار المالي وحركة النقدية', shifts: 'سجل الشيفتات ومتابعة الحضور', users: 'المستخدمون وسجل الحضور' };
 
 function icon(name, size = 20) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] ?? ''}</svg>`;
@@ -2993,13 +2993,6 @@ function profitLossView() {
     const netProfitAmt = BigInt(report.profitLoss.operatingProfit.amount);
     const isProfit = netProfitAmt >= 0n;
     const sp = report.supplierPayments ?? { totalPaid: { amount: '0', currency, decimals }, initialPaid: { amount: '0', currency, decimals }, installmentPaid: { amount: '0', currency, decimals }, supplierReturnsCredit: { amount: '0', currency, decimals }, count: 0, items: [] };
-    const cp = report.cashPosition ?? {
-      totalCollections: { amount: '0', currency, decimals },
-      supplierPayments: sp.totalPaid,
-      totalOutflows: { amount: totalExpAmt.toString(), currency, decimals },
-      netCashRemaining: { amount: '0', currency, decimals },
-    };
-    const netCashPositive = BigInt(cp.netCashRemaining?.amount ?? '0') >= 0n;
     const supplierPayItems = sp.items ?? [];
 
     contentHtml = `
@@ -3032,7 +3025,7 @@ function profitLossView() {
       </div>
 
       <section class="panel compact-panel" style="margin-top:14px;">
-        <div class="panel-heading"><div><h3>ملخص الأرباح والخسائر وحركة الحسابات الشاملة</h3><p>بيان الأرباح المحاسبية للبضاعة المباعة بجانب إجمالي الأموال المدفوعة للتجار والمصروفات والسيولة النقدية</p></div></div>
+        <div class="panel-heading"><div><h3>ملخص الأرباح والخسائر</h3><p>حساب صافي الربح أو الخسارة: إجمالي المبيعات − تكلفة البضاعة المباعة = مجمل الربح − المصروفات = الصافي</p></div></div>
         <div class="table-scroll">
           <table class="compact-table">
             <thead>
@@ -3064,23 +3057,6 @@ function profitLossView() {
                 <td style="text-align:left;" class="table-total"><strong style="font-size:17px;color:${isProfit ? 'var(--green, #15803d)' : 'var(--rose, #be123c)'};">${money(report.profitLoss.operatingProfit)}</strong></td>
                 <td><span class="status-pill ${isProfit ? 'status-complete' : 'status-low'}">${isProfit ? 'أرباح' : 'خسائر'}</span></td>
               </tr>
-              <tr>
-                <td><strong>حركة السيولة: إجمالي المدفوع للتجار والموردين في الفترة</strong><br><small>مبالغ مسددة نقدياً/بنكياً للتجار مقابل بضاعة جديدة أو سداد فواتير سابقة</small></td>
-                <td style="text-align:left;" class="table-total" style="color:var(--rose, #be123c);">${money(sp.totalPaid)}</td>
-                <td><span class="status-pill status-low">مدفوع للتجار (-)</span></td>
-              </tr>
-              ${BigInt(sp.supplierReturnsCredit?.amount ?? '0') > 0n ? `
-                <tr>
-                  <td><strong>إشعار دائن: مرتجعات بضاعة للتجار والموردين</strong><br><small>تخفيض من مديونية الموردين في الفترة</small></td>
-                  <td style="text-align:left;" class="table-total">${money(sp.supplierReturnsCredit)}</td>
-                  <td><span class="status-pill status-complete">استرداد من مورد (+)</span></td>
-                </tr>
-              ` : ''}
-              <tr style="border-top:2px solid var(--line);background:color-mix(in srgb,${netCashPositive ? 'var(--green-soft)' : 'var(--rose-soft)'} 45%,var(--panel));">
-                <td><strong style="font-size:14.5px;">صافي الحساب النقدي المتبقي (التحصيل − المصروفات − مدفوعات التجار)</strong><br><small>المحصل ${money(cp.totalCollections)} − المصروفات ${money({ amount: totalExpAmt.toString(), currency, decimals })} − التجار ${money(sp.totalPaid)}</small></td>
-                <td style="text-align:left;" class="table-total"><strong style="font-size:16.5px;color:${netCashPositive ? 'var(--green, #15803d)' : 'var(--rose, #be123c)'};">${money(cp.netCashRemaining)}</strong></td>
-                <td><span class="status-pill ${netCashPositive ? 'status-complete' : 'status-low'}">${netCashPositive ? 'فائض سيولة' : 'صافي مدفوعات خارج'}</span></td>
-              </tr>
             </tbody>
           </table>
         </div>
@@ -3090,9 +3066,12 @@ function profitLossView() {
         <div class="panel-heading">
           <div>
             <h3>تفاصيل المبالغ المدفوعة للتجار والموردين (${report.from} ← ${report.to})</h3>
-            <p>كل دفعة مسددة لأي تاجر سواء مقدم فاتورة شراء جديدة أو سداد دفعة من الحساب المستحق</p>
+            <p>كل دفعة مسددة لأي تاجر سواء مقدم فاتورة شراء جديدة أو سداد دفعة من الحساب المستحق (منفصلة عن صافي ربح المبيعات)</p>
           </div>
-          <span class="status-pill ${supplierPayItems.length ? 'status-low' : 'status-complete'}">الإجمالي المدفوع: ${money(sp.totalPaid)}</span>
+          <div class="panel-actions" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            ${BigInt(sp.supplierReturnsCredit?.amount ?? '0') > 0n ? `<span class="status-pill status-complete">مرتجع للتجار: ${money(sp.supplierReturnsCredit)}</span>` : ''}
+            <span class="status-pill ${supplierPayItems.length ? 'status-low' : 'status-complete'}">الإجمالي المدفوع: ${money(sp.totalPaid)}</span>
+          </div>
         </div>
         ${supplierPayItems.length ? `
           <div class="table-scroll">
@@ -3753,7 +3732,7 @@ function financialMapView() {
   return `
     <div class="page-heading-row">
       <div>
-        <p class="page-lead">المسار المالي: تتبع تدفق الأرباح خطوة بخطوة بالترتيب الزمني من أول عملية وصولاً للمكسب الحالي.</p>
+        <p class="page-lead">المسار المالي: تتبع حركة الفلوس الداخلة والخارجة خطوة بخطوة (المبيعات − سداد الموردين − المصروفات) وصولاً للرصيد المتبقي.</p>
       </div>
       <div>
         <button type="button" class="button button-secondary" data-page="reports">عرض تقرير الأرباح والخسائر ←</button>
@@ -3786,16 +3765,16 @@ function financialMapView() {
       </div>
     </section>
 
-    <div class="fm-card-grid" style="grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 16px;">
+    <div class="fm-card-grid" style="grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px;">
       <div class="fm-kpi-card">
         <small>صافي المبيعات المحصلة (+)</small>
         <strong style="color:var(--green, #15803d);font-size:18px;">+${format(summary.netSales ?? summary.totalSales)}</strong>
-        <small style="color:var(--muted);">${BigInt(summary.totalRefunds ?? '0') > 0n ? `قبل المرتجع: ${format(summary.totalSales)} · مرتجع: -${format(summary.totalRefunds)}` : `مجمل ربح البضاعة: ${format(summary.totalGrossProfit)}`}</small>
+        <small style="color:var(--muted);">${BigInt(summary.totalRefunds ?? '0') > 0n ? `قبل المرتجع: ${format(summary.totalSales)} · مرتجع: -${format(summary.totalRefunds)}` : 'إجمالي الفلوس الداخلة من فواتير البيع'}</small>
       </div>
       <div class="fm-kpi-card">
         <small>سداد دفعات الموردين (-)</small>
         <strong style="color:var(--rose, #be123c);font-size:18px;">-${format(summary.totalSupplierPaid)}</strong>
-        <small style="color:var(--muted);">حركة نقدية لتسوية المديونية</small>
+        <small style="color:var(--muted);">مبالغ مسددة للتجار والموردين</small>
       </div>
       <div class="fm-kpi-card">
         <small>المصروفات المسددة (-)</small>
@@ -3803,24 +3782,13 @@ function financialMapView() {
         <small style="color:var(--muted);">إيجار ومصروفات تشغيلية مؤكدة</small>
       </div>
       ${(() => {
-        const opMinor = BigInt(summary.operatingProfit ?? '0');
-        const isOpProfit = opMinor >= 0n;
-        return `
-          <div class="fm-kpi-card" style="border-right:3px solid ${isOpProfit ? 'var(--green, #15803d)' : 'var(--rose,var(--rose, #be123c))'};${!isOpProfit ? 'background:rgba(190,18,60,0.03);' : ''}">
-            <small style="color:${isOpProfit ? 'var(--green, #15803d)' : 'var(--rose,var(--rose, #be123c))'};font-weight:750;">${isOpProfit ? 'صافي الأرباح التشغيلية (+)' : 'النتيجة التشغيلية (عجز / خسائر -)'}</small>
-            <strong style="color:${isOpProfit ? 'var(--green, #15803d)' : 'var(--rose,var(--rose, #be123c))'};font-size:19px;">${isOpProfit ? '+' : ''}${format(summary.operatingProfit)}</strong>
-            <small style="color:var(--muted);">${isOpProfit ? 'أرباح محققة من النشاط التجاري' : 'عجز نتيجة زيادة المصروفات عن أرباح المبيعات'}</small>
-          </div>
-        `;
-      })()}
-      ${(() => {
         const cashMinor = BigInt(summary.netCashFlow ?? summary.realizedCashProfit ?? '0');
         const isCashPositive = cashMinor >= 0n;
         return `
-          <div class="fm-kpi-card" style="border-right:3px solid ${isCashPositive ? 'var(--blue, #2563eb)' : 'var(--rose,var(--rose, #be123c))'};">
-            <small style="color:${isCashPositive ? 'var(--blue, #2563eb)' : 'var(--rose,var(--rose, #be123c))'};font-weight:750;">صافي السيولة النقدية (الكاش)</small>
+          <div class="fm-kpi-card" style="border-right:3px solid ${isCashPositive ? 'var(--blue, #2563eb)' : 'var(--rose, #be123c)'};">
+            <small style="color:${isCashPositive ? 'var(--blue, #2563eb)' : 'var(--rose, #be123c)'};font-weight:750;">الرصيد المتبقي بعد الحركات (=)</small>
             <strong style="color:${isCashPositive ? 'var(--green, #15803d)' : 'var(--rose, #be123c)'};font-size:19px;">${isCashPositive ? '+' : ''}${format(summary.netCashFlow ?? summary.realizedCashProfit)}</strong>
-            <small style="color:var(--muted);">صافي المبيعات - المدفوع للتجار والمصاريف</small>
+            <small style="color:var(--muted);">صافي المبيعات − سداد الموردين − المصروفات</small>
           </div>
         `;
       })()}
@@ -3830,7 +3798,7 @@ function financialMapView() {
       <div class="panel-heading">
         <div>
           <h3 style="font-size:16px;font-weight:800;color:var(--ink);">المسار المالي خطوة بخطوة (كيف وصلت لهذا الرقم)</h3>
-          <p>تسلسل الحركات المالية بالترتيب الزمني (من البداية حتى الآن) مع إظهار رصيدك في كل خطوة وصولاً للمبلغ الحالي (${timeline.length} حركة مسجلة)</p>
+          <p>تسلسل الحركات المالية بالترتيب الزمني (من البداية حتى الآن) مع إظهار رصيدك في كل خطوة وصولاً للرصيد المتبقي (${timeline.length} حركة مسجلة)</p>
         </div>
       </div>
 
