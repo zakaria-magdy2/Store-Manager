@@ -1667,6 +1667,16 @@ test('updates all financial views (sales summary, shifts, shift sales, dashboard
     assert.equal(pl.payload.supplierPayments.items[0].amount.amount, '500000');
     assert.equal(pl.payload.cashPosition.netCashRemaining.amount, '-450000');
 
+    const finMapPartial = await finReq(`/api/reports/financial-map?storeId=${storeId}&from=${today}&to=${today}&tzOffset=0`, { cookieStr: ownerCookie });
+    assert.equal(finMapPartial.response.status, 200);
+    assert.equal(finMapPartial.payload.summary.totalSupplierPaid, '500000');
+    assert.equal(finMapPartial.payload.summary.netSales, '50000');
+    assert.equal(finMapPartial.payload.summary.operatingProfit, pl.payload.profitLoss.operatingProfit.amount);
+    const supPaymentEvent = finMapPartial.payload.timeline.find((e) => e.type === 'SUPPLIER_PAYMENT');
+    assert.ok(supPaymentEvent, 'Expected supplier payment event in financial map timeline');
+    assert.ok(supPaymentEvent.title.includes('سددت') && supPaymentEvent.title.includes('5000.00'), supPaymentEvent.title);
+    assert.ok(supPaymentEvent.details.includes('سددت') && supPaymentEvent.details.includes('شركة النور للتوريد'), supPaymentEvent.details);
+
     // Close shift & return remaining 1 unit AFTER closing, confirming shift sales/profit become 0 & FULL return
     const shiftEnd = await finReq('/api/shifts/end', {
       method: 'POST',
@@ -1687,7 +1697,7 @@ test('updates all financial views (sales summary, shifts, shift sales, dashboard
     });
     assert.equal(fullReturn.response.status, 201);
 
-    const finalShifts = await finReq(`/api/shifts?storeId=${storeId}`, { cookieStr: ownerCookie });
+    const finalShifts = await finReq(`/api/shifts?storeId=${storeId}&from=${today}&to=${today}&tzOffset=0`, { cookieStr: ownerCookie });
     assert.equal(finalShifts.payload.shifts[0].salesRevenue, '0');
     assert.equal(finalShifts.payload.shifts[0].grossProfit, '0');
     assert.equal(finalShifts.payload.shifts[0].returnedTotal, '100000');
@@ -1695,6 +1705,11 @@ test('updates all financial views (sales summary, shifts, shift sales, dashboard
     const finalShiftSales = await finReq(`/api/shifts/${shiftId}/sales`, { cookieStr: ownerCookie });
     assert.equal(finalShiftSales.payload.sales[0].total, '0');
     assert.equal(finalShiftSales.payload.sales[0].returnStatus, 'FULL');
+
+    const finalFinMap = await finReq(`/api/reports/financial-map?storeId=${storeId}&from=${today}&to=${today}&tzOffset=0`, { cookieStr: ownerCookie });
+    assert.equal(finalFinMap.payload.summary.netSales, '0');
+    assert.equal(finalFinMap.payload.summary.operatingProfit, '0');
+    assert.equal(finalFinMap.payload.summary.netCashFlow, '-500000');
 
     const finalData = await finReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie });
     assert.equal(finalData.payload.products.find((p) => p.id === product.payload.id).variants[0].quantity, '50');

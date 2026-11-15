@@ -61,7 +61,7 @@ export class SqliteRecurringExpenseRepository {
     });
   }
 
-  public async pay(ctx: ExecutionContext, input: { id: string; idempotencyKey: string; actualId: string; amount: bigint; paymentMethod: MonthlyPaymentMethod; referenceNumber?: string; paidAt: Date }): Promise<{ id: string; remaining: bigint }> {
+  public async pay(ctx: ExecutionContext, input: { id: string; idempotencyKey: string; actualId: string; amount: bigint; paymentMethod: MonthlyPaymentMethod; referenceNumber?: string; paidAt: Date; expenseDate?: string | undefined }): Promise<{ id: string; remaining: bigint }> {
     if (input.amount <= 0n || input.amount > 999_999_999_999_999n) throw badRequest('مبلغ السداد غير صالح');
     return this.db.transaction().execute(async (trx) => {
       const replay = await trx.selectFrom('operating_expense_records').selectAll().where('tenant_id', '=', ctx.tenantId).where('idempotency_key', '=', input.idempotencyKey).executeTakeFirst();
@@ -81,7 +81,8 @@ export class SqliteRecurringExpenseRepository {
         { accountCode: sourceAccount, side: 'CREDIT', amount: input.amount, memo: 'سداد نقدي أو بنكي' },
       ] });
       const journal = await trx.selectFrom('journal_entries').select('id').where('tenant_id', '=', ctx.tenantId).where('idempotency_key', '=', journalKey).executeTakeFirstOrThrow();
-      await trx.insertInto('operating_expense_records').values({ id: input.id, tenant_id: ctx.tenantId, store_id: actual.store_id, category_id: obligation.category_id, expense_type: 'MONTHLY_RECURRING_PAYMENT', monthly_actual_id: actual.id, expense_date: input.paidAt.toISOString().slice(0, 10), amount: input.amount, currency: actual.currency, payment_method: input.paymentMethod, source_account_code: sourceAccount, notes: null, reference_number: input.referenceNumber ?? null, attachment_path: null, journal_entry_id: journal.id, created_by_user_id: ctx.userId, idempotency_key: input.idempotencyKey }).execute();
+      const resolvedExpenseDate = input.expenseDate && /^\d{4}-\d{2}-\d{2}$/.test(input.expenseDate) ? input.expenseDate : input.paidAt.toISOString().slice(0, 10);
+      await trx.insertInto('operating_expense_records').values({ id: input.id, tenant_id: ctx.tenantId, store_id: actual.store_id, category_id: obligation.category_id, expense_type: 'MONTHLY_RECURRING_PAYMENT', monthly_actual_id: actual.id, expense_date: resolvedExpenseDate, amount: input.amount, currency: actual.currency, payment_method: input.paymentMethod, source_account_code: sourceAccount, notes: null, reference_number: input.referenceNumber ?? null, attachment_path: null, journal_entry_id: journal.id, created_by_user_id: ctx.userId, idempotency_key: input.idempotencyKey }).execute();
       const paidAmount = BigInt(actual.paid_amount) + input.amount;
       const status = paidAmount === BigInt(actual.amount) ? 'PAID' : 'PARTIALLY_PAID';
       await trx.updateTable('monthly_expense_actuals').set({ paid_amount: paidAmount, status }).where('id', '=', actual.id).where('tenant_id', '=', ctx.tenantId).execute();

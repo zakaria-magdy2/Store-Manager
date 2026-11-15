@@ -640,4 +640,43 @@ describe('Financial & Accounting SQLite Integration Tests (Phase 5)', () => {
       db.deleteFrom('journal_entries').where('id', '=', journalEntry.id).execute(),
     ).rejects.toThrow(/journal_entries is append-only/);
   });
+
+  it('allows recording supplier purchases in subsequent months after an expense created a monthly period in the same year', async () => {
+    const db = dbManager.getDb();
+    const expenseRepo = new SqliteExpenseRepository(db);
+    const purchasingRepo = new SqlitePurchasingRepository(db);
+
+    await expenseRepo.record(ctx, {
+      id: 'exp-2027-jan',
+      idempotencyKey: 'idem-exp-2027-jan',
+      storeId: 'store-fin-1',
+      categoryCode: 'UTILITIES',
+      amount: 10000n,
+      currency: 'EGP',
+      paymentMethod: 'CASH_DRAWER',
+      expenseDate: '2027-01-10',
+    });
+
+    await purchasingRepo.recordPurchase(ctx, {
+      id: 'pur-2027-feb',
+      idempotencyKey: 'idem-pur-2027-feb',
+      supplierId: 'sup-1',
+      storeId: 'store-fin-1',
+      totalAmount: egp(40000n),
+      initialPayment: egp(40000n),
+      paymentMethod: 'CASH',
+      purchasedAt: new Date('2027-02-05T10:00:00.000Z'),
+      lines: [{ variantId: 'var-1', quantity: 2n, unitCost: egp(20000n) }],
+    });
+
+    const febPeriod = await db
+      .selectFrom('accounting_periods')
+      .selectAll()
+      .where('tenant_id', '=', 'tenant-fin-1')
+      .where('name', '=', '2027-02')
+      .executeTakeFirstOrThrow();
+
+    expect(febPeriod.start_date).toBe('2027-02-01');
+    expect(febPeriod.end_date).toBe('2027-02-28');
+  });
 });

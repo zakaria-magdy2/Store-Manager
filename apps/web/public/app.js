@@ -21,17 +21,21 @@ const state = {
   salesHistorySearch: '',
   salesFrom: null,
   salesTo: null,
+  salesPreset: 'today',
   salesSummary: null,
   salesSummaryKey: null,
   shiftsData: null,
-  shiftPreset: null,
-  shiftFrom: '',
-  shiftTo: '',
+  shiftPreset: 'today',
+  shiftFrom: null,
+  shiftTo: null,
+  supplierDatePreset: 'today',
+  supplierFrom: null,
+  supplierTo: null,
   auditLogs: null, auditChainVerification: null, auditLogsKey: null, plSection: 'overview', analyticsSection: 'all', dailyBackups: null, dailyBackupsKey: null,
   expenseSection: 'monthly',
   financialMap: null,
   financialMapKey: null,
-  financialMapRange: 'all',
+  financialMapRange: 'today',
   growthForecast: null,
   growthForecastKey: null,
   stocktakeList: null,
@@ -52,6 +56,33 @@ const state = {
   stocktakeLastSavedAt: null,
   stocktakeCreating: false,
 };
+
+function localDateIso(date = new Date()) {
+  const d = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function ensureSalesDefaultFilter() {
+  if (state.salesFrom === null || state.salesFrom === undefined || state.salesTo === null || state.salesTo === undefined) {
+    const today = localDateIso();
+    state.salesPreset = 'today';
+    state.salesFrom = today;
+    state.salesTo = today;
+  }
+}
+
+function ensureShiftDefaultFilter() {
+  if (state.shiftFrom === null || state.shiftFrom === undefined || state.shiftTo === null || state.shiftTo === undefined) {
+    const today = localDateIso();
+    state.shiftPreset = 'today';
+    state.shiftFrom = today;
+    state.shiftTo = today;
+  }
+}
 
 function getModalRoot() {
   let root = document.querySelector('#modal-root');
@@ -1674,19 +1705,25 @@ function currentSalesFilterKey() {
 }
 
 function salesView() {
+  ensureSalesDefaultFilter();
   const allReturns = state.data.customerReturns ?? [];
-  const sales = state.salesHistory ?? state.data.sales ?? [];
-  const totalCount = state.salesHistoryTotal ?? state.data.sales?.length ?? sales.length;
   const from = state.salesFrom ?? '';
   const to = state.salesTo ?? '';
   const preset = syncPresetWithDates(state.salesPreset, from, to, ['all', 'today', 'week', 'month'], 'rolling7', 'all');
+  const fallbackSales = (state.data.sales ?? []).filter((sale) => {
+    if (!from || !to) return true;
+    const itemDay = sale.createdAt ? localDateIso(new Date(sale.createdAt)) : '';
+    return Boolean(itemDay && itemDay >= from && itemDay <= to);
+  });
+  const sales = state.salesHistory ?? fallbackSales;
+  const totalCount = state.salesHistoryTotal ?? sales.length;
   const searchQuery = (state.salesHistorySearch ?? '').trim().toLowerCase();
   const hasReturnFilter = Boolean((from && to) || searchQuery);
   const matchingSaleNumbers = new Set(sales.map((sale) => String(sale.saleNumber ?? '').toLowerCase()).filter(Boolean));
   const returns = hasReturnFilter
     ? allReturns.filter((item) => {
         if (from && to) {
-          const itemDay = String(item.createdAt ?? '').slice(0, 10);
+          const itemDay = item.createdAt ? localDateIso(new Date(item.createdAt)) : '';
           if (!itemDay || itemDay < from || itemDay > to) return false;
         }
         if (searchQuery) {
@@ -1705,87 +1742,63 @@ function salesView() {
   const isCashier = state.data.user.role === 'CASHIER' || Boolean(state.data.capabilities.cashierMode);
   const canViewCogs = Boolean(state.data.capabilities.canViewCogs);
   const sum = state.salesSummary;
-  const periodLabel = preset === 'today' ? 'اليوم' : preset === 'week' ? 'هذا الأسبوع' : preset === 'month' ? 'هذا الشهر' : (from && to ? `${from} ← ${to}` : 'كل الفترات');
   const isNetProfit = sum?.operatingProfit ? BigInt(sum.operatingProfit.amount) >= 0n : (sum?.grossProfit ? BigInt(sum.grossProfit.amount) >= 0n : true);
+  const hasReturnsAmt = sum?.returnsTotal && BigInt(sum.returnsTotal.amount ?? '0') > 0n;
   const summaryHtml = sum ? (!isCashier && canViewCogs ? `
-    <div class="compact-kpi-grid" style="margin-bottom:14px;">
-      <article class="compact-kpi-card">
-        <div class="compact-kpi-top"><span>إجمالي المبيعات (الصافي)</span><span class="kpi-tag kpi-tag-indigo">${escapeHtml(periodLabel)}</span></div>
-        <strong class="compact-kpi-value">${money(sum.netSales)}</strong>
-        <small>قبل المرتجع: ${money(sum.grossSales)} · المرتجعات: ${money(sum.returnsTotal)}</small>
-      </article>
-      <article class="compact-kpi-card">
-        <div class="compact-kpi-top"><span>تكلفة البضاعة (السعر الأصلي)</span><span class="kpi-tag kpi-tag-amber">سعر الشراء</span></div>
-        <strong class="compact-kpi-value">${sum.cogs ? money(sum.cogs) : '—'}</strong>
-        <small>التكلفة الأصلية للبضاعة المباعة بعد خصم المرتجع</small>
-      </article>
-      <article class="compact-kpi-card">
-        <div class="compact-kpi-top"><span>إجمالي المصروفات</span><span class="kpi-tag kpi-tag-amber">مصروفات المتجر</span></div>
-        <strong class="compact-kpi-value">${sum.totalExpenses ? money(sum.totalExpenses) : '—'}</strong>
-        <small>${sum.hasSearch ? 'تُحسب المصروفات على فلتر الفترة الكاملة بدون بحث نصي' : `يومية: ${money(sum.directExpenses)} · شهرية: ${money(sum.monthlyExpenses)}`}</small>
-      </article>
-      <article class="compact-kpi-card ${isNetProfit ? 'compact-kpi-positive' : 'compact-kpi-negative'}" style="border-width:2px;">
-        <div class="compact-kpi-top"><span>${sum.operatingProfit ? (isNetProfit ? 'الأرباح المحققة' : 'الخسائر') : 'المكسب من البضاعة'}</span><span class="kpi-tag ${isNetProfit ? 'kpi-tag-green' : 'kpi-tag-red'}">${isNetProfit ? 'مكسب ✓' : 'عجز !'}</span></div>
-        <strong class="compact-kpi-value" style="font-size:21px;color:${isNetProfit ? 'var(--green, #15803d)' : 'var(--rose, #be123c)'};">${sum.operatingProfit ? money(sum.operatingProfit) : (sum.grossProfit ? money(sum.grossProfit) : '—')}</strong>
-        <small>مكسب البضاعة قبل المصروفات: ${sum.grossProfit ? money(sum.grossProfit) : '—'}</small>
-      </article>
-    </div>
-
     <section class="panel compact-panel" style="margin-bottom:14px;">
       <div class="panel-heading">
         <div>
-          <h3>ملخص البضاعة المباعة والأرباح (${escapeHtml(periodLabel)})</h3>
-          <p>مقارنة سعر البيع بالسعر الأصلي للبضاعة والمرتجعات والمكسب قبل عرض الفواتير</p>
+          <h3>ملخص البضاعة المباعة والأرباح</h3>
+          <p>ملخص المبيعات بعد المرتجعات وتكلفة البضاعة والمصروفات وصافي الأرباح</p>
         </div>
         <span class="status-pill status-complete">${sum.invoiceCount ?? totalCount} فاتورة</span>
       </div>
       <div class="sales-pricing-summary-strip">
         <div class="sales-pricing-item">
-          <small>سعر بيع البضاعة (الإجمالي)</small>
-          <strong>${money(sum.grossSales)}</strong>
-        </div>
-        <div class="sales-pricing-item">
-          <small>المرتجعات المخصومة</small>
-          <strong style="color:var(--rose, #be123c);">- ${money(sum.returnsTotal)}</strong>
-        </div>
-        <div class="sales-pricing-item">
-          <small>صافي المبيعات بعد المرتجع</small>
+          <small>إجمالي المبيعات</small>
           <strong>${money(sum.netSales)}</strong>
+          ${hasReturnsAmt ? `<small style="color:var(--muted);display:block;font-size:11px;margin-top:3px;">قبل المرتجع: ${money(sum.grossSales)} · المرتجع: -${money(sum.returnsTotal)}</small>` : ''}
         </div>
         <div class="sales-pricing-item">
-          <small>السعر الأصلي للبضاعة (التكلفة)</small>
+          <small>تكلفة البضاعة</small>
           <strong>${sum.cogs ? money(sum.cogs) : '—'}</strong>
         </div>
-        <div class="sales-pricing-item sales-pricing-profit">
-          <small>المكسب من البضاعة</small>
-          <strong>${sum.grossProfit ? money(sum.grossProfit) : '—'}</strong>
+        <div class="sales-pricing-item">
+          <small>المصروفات</small>
+          <strong>${sum.totalExpenses ? money(sum.totalExpenses) : '—'}</strong>
+          ${sum.hasSearch ? '<small style="color:var(--muted);display:block;font-size:11px;margin-top:3px;">على كامل الفترة المحددة</small>' : ''}
         </div>
-        ${sum.operatingProfit ? `
-          <div class="sales-pricing-item ${isNetProfit ? 'sales-pricing-profit' : 'sales-pricing-loss'}">
-            <small>الأرباح المحققة بعد المصروفات</small>
-            <strong>${money(sum.operatingProfit)}</strong>
-          </div>
-        ` : ''}
+        <div class="sales-pricing-item ${isNetProfit ? 'sales-pricing-profit' : 'sales-pricing-loss'}">
+          <small>الأرباح</small>
+          <strong>${sum.operatingProfit ? money(sum.operatingProfit) : (sum.grossProfit ? money(sum.grossProfit) : '—')}</strong>
+          ${sum.grossProfit ? `<small style="color:var(--muted);display:block;font-size:11px;margin-top:3px;">ربح البضاعة: ${money(sum.grossProfit)}</small>` : ''}
+        </div>
       </div>
     </section>
   ` : `
-    <div class="compact-kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));margin-bottom:14px;">
-      <article class="compact-kpi-card">
-        <div class="compact-kpi-top"><span>صافي المبيعات</span><span class="kpi-tag kpi-tag-indigo">${escapeHtml(periodLabel)}</span></div>
-        <strong class="compact-kpi-value">${money(sum.netSales)}</strong>
-        <small>قبل المرتجع: ${money(sum.grossSales)}</small>
-      </article>
-      <article class="compact-kpi-card">
-        <div class="compact-kpi-top"><span>إجمالي المرتجعات</span><span class="kpi-tag kpi-tag-red">استرجاع</span></div>
-        <strong class="compact-kpi-value" style="color:var(--rose, #be123c);">${money(sum.returnsTotal)}</strong>
-        <small>مخصومة تلقائيًا من إجمالي الفترة</small>
-      </article>
-      <article class="compact-kpi-card">
-        <div class="compact-kpi-top"><span>عدد الفواتير</span><span class="kpi-tag kpi-tag-green">مكتملة</span></div>
-        <strong class="compact-kpi-value">${sum.invoiceCount ?? totalCount}</strong>
-        <small>فواتير الفترة المحددة</small>
-      </article>
-    </div>
+    <section class="panel compact-panel" style="margin-bottom:14px;">
+      <div class="panel-heading">
+        <div>
+          <h3>ملخص مبيعات الفترة</h3>
+        </div>
+        <span class="status-pill status-complete">${sum.invoiceCount ?? totalCount} فاتورة</span>
+      </div>
+      <div class="sales-pricing-summary-strip">
+        <div class="sales-pricing-item">
+          <small>صافي المبيعات</small>
+          <strong>${money(sum.netSales)}</strong>
+          ${hasReturnsAmt ? `<small style="color:var(--muted);display:block;font-size:11px;margin-top:3px;">قبل المرتجع: ${money(sum.grossSales)}</small>` : ''}
+        </div>
+        <div class="sales-pricing-item">
+          <small>إجمالي المرتجعات</small>
+          <strong style="color:var(--rose, #be123c);">- ${money(sum.returnsTotal)}</strong>
+        </div>
+        <div class="sales-pricing-item">
+          <small>عدد الفواتير</small>
+          <strong>${sum.invoiceCount ?? totalCount}</strong>
+        </div>
+      </div>
+    </section>
   `) : '';
 
   return `
@@ -1891,12 +1904,14 @@ function salesView() {
 }
 
 async function loadShifts() {
+  ensureShiftDefaultFilter();
   const storeId = state.data?.selectedStoreId;
   const params = new URLSearchParams();
   if (storeId) params.set('storeId', storeId);
   if (state.shiftFrom) params.set('from', state.shiftFrom);
   if (state.shiftTo) params.set('to', state.shiftTo);
   if (state.shiftUser) params.set('userId', state.shiftUser);
+  params.set('tzOffset', String(new Date().getTimezoneOffset()));
   const q = params.toString() ? `?${params.toString()}` : '';
   try {
     state.shiftsData = await api(`/api/shifts${q}`);
@@ -1909,6 +1924,7 @@ async function loadShifts() {
 }
 
 function shiftsView() {
+  ensureShiftDefaultFilter();
   const currency = state.data.company.currency;
   const decimals = currencyDecimals(currency);
   const format = (v) => money({ amount: v, currency, decimals });
@@ -2229,6 +2245,7 @@ function showStartShiftModal() {
       });
       root.innerHTML = '';
       toast(`تم بدء الشيفت #${res.shift.shiftNumber} بنجاح وتسجيل الحضور`);
+      invalidateFinancialCaches();
       await loadData(state.data.selectedStoreId);
       render();
     } catch (err) {
@@ -2379,6 +2396,7 @@ async function showEndShiftModal() {
           });
           root.innerHTML = '';
           toast(`تم إنهاء الشيفت #${res.shift.shiftNumber} بنجاح وتسليم الدرج`);
+          invalidateFinancialCaches();
           await loadData(state.data.selectedStoreId);
           render();
         } catch (err) {
@@ -2463,6 +2481,7 @@ async function showEndShiftModal() {
         });
         root.innerHTML = '';
         toast(`تم إنهاء الشيفت #${res.shift.shiftNumber} وتقفيل الدرج بنجاح`);
+        invalidateFinancialCaches();
         await loadData(state.data.selectedStoreId);
         render();
       } catch (err) {
@@ -2673,14 +2692,19 @@ function showPurchaseModelVariantsModal(modelGroup, purchase, supplier) {
 function suppliersView() {
   const suppliers = state.data.suppliers;
   const currency = state.data.company.currency;
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateIso();
+  if (state.supplierFrom === null || state.supplierFrom === undefined || state.supplierTo === null || state.supplierTo === undefined) {
+    state.supplierDatePreset = state.supplierDatePreset || 'today';
+    state.supplierFrom = today;
+    state.supplierTo = today;
+  }
   const from = state.supplierFrom ?? '';
   const to = state.supplierTo ?? '';
   const preset = syncPresetWithDates(state.supplierDatePreset, from, to, ['all', 'today', 'week', 'month'], 'weekSunday', 'all');
 
   const filterPurchase = (p) => {
     if (!from && !to) return true;
-    const day = p.purchasedAt.slice(0, 10);
+    const day = p.purchasedAt ? localDateIso(new Date(p.purchasedAt)) : '';
     if (from && day < from) return false;
     if (to && day > to) return false;
     return true;
@@ -2951,7 +2975,7 @@ function profitLossView() {
     state.page = 'financial-map';
     render();
   });
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateIso();
   const from = state.reportFrom ?? today, to = state.reportTo ?? today;
   const activePlRange = syncPresetWithDates(state.plRange, from, to, ['today', '7d', '30d', 'month', 'year'], null, 'today');
   const report = state.report;
@@ -3152,8 +3176,8 @@ function profitLossView() {
 function topProductsView() {
   const stats = state.productStats;
   const vendors = state.supplierStats;
-  const today = new Date().toISOString().slice(0, 10);
-  const from = state.analyticsFrom ?? (() => { const date = new Date(); date.setUTCDate(date.getUTCDate() - 29); return date.toISOString().slice(0, 10); })();
+  const today = localDateIso();
+  const from = state.analyticsFrom ?? (() => { const date = new Date(); date.setDate(date.getDate() - 29); return localDateIso(date); })();
   const to = state.analyticsTo ?? today;
   const activeAnalyticsRange = syncPresetWithDates(state.analyticsRange, from, to, ['7d', '30d', 'month', 'year'], null, '30d');
   const section = state.analyticsSection ?? 'all';
@@ -3685,20 +3709,11 @@ async function loadGrowthForecast(year = null, month = null) {
   }
 }
 
-async function loadFinancialMap(preset = state.financialMapRange || 'all') {
+async function loadFinancialMap(preset = state.financialMapRange || 'today') {
   const storeId = state.data?.selectedStoreId;
-  const today = new Date().toISOString().slice(0, 10);
-  let from = '', to = '';
+  const { from, to } = computeHistoryPresetRange(preset, 'rolling7');
 
-  if (preset === 'today') {
-    from = today; to = today;
-  } else if (preset === 'week') {
-    const d = new Date(); d.setUTCDate(d.getUTCDate() - 7); from = d.toISOString().slice(0, 10); to = today;
-  } else if (preset === 'month') {
-    const d = new Date(); d.setUTCDate(1); from = d.toISOString().slice(0, 10); to = today;
-  }
-
-  const query = new URLSearchParams({ storeId });
+  const query = new URLSearchParams({ storeId, tzOffset: String(new Date().getTimezoneOffset()) });
   if (from) query.set('from', from);
   if (to) query.set('to', to);
 
@@ -3773,9 +3788,9 @@ function financialMapView() {
 
     <div class="fm-card-grid" style="grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 16px;">
       <div class="fm-kpi-card">
-        <small>المبيعات المحصلة (+)</small>
-        <strong style="color:var(--green, #15803d);font-size:18px;">+${format(summary.totalSales)}</strong>
-        <small style="color:var(--muted);">مجمل ربح البضاعة: ${format(summary.totalGrossProfit)}</small>
+        <small>صافي المبيعات المحصلة (+)</small>
+        <strong style="color:var(--green, #15803d);font-size:18px;">+${format(summary.netSales ?? summary.totalSales)}</strong>
+        <small style="color:var(--muted);">${BigInt(summary.totalRefunds ?? '0') > 0n ? `قبل المرتجع: ${format(summary.totalSales)} · مرتجع: -${format(summary.totalRefunds)}` : `مجمل ربح البضاعة: ${format(summary.totalGrossProfit)}`}</small>
       </div>
       <div class="fm-kpi-card">
         <small>سداد دفعات الموردين (-)</small>
@@ -3805,21 +3820,10 @@ function financialMapView() {
           <div class="fm-kpi-card" style="border-right:3px solid ${isCashPositive ? 'var(--blue, #2563eb)' : 'var(--rose,var(--rose, #be123c))'};">
             <small style="color:${isCashPositive ? 'var(--blue, #2563eb)' : 'var(--rose,var(--rose, #be123c))'};font-weight:750;">صافي السيولة النقدية (الكاش)</small>
             <strong style="color:${isCashPositive ? 'var(--green, #15803d)' : 'var(--rose, #be123c)'};font-size:19px;">${isCashPositive ? '+' : ''}${format(summary.netCashFlow ?? summary.realizedCashProfit)}</strong>
-            <small style="color:var(--muted);">المحصل كاش - المدفوع للتجار والمصاريف</small>
+            <small style="color:var(--muted);">صافي المبيعات - المدفوع للتجار والمصاريف</small>
           </div>
         `;
       })()}
-    </div>
-
-    <div class="pro-info-banner" style="background:var(--surface-soft);border:1px solid var(--line);border-radius:12px;padding:14px 18px;margin-bottom:18px;">
-      <strong style="color:var(--ink);font-size:13.5px;display:block;margin-bottom:5px;">
-        بيان توضيحي لنتيجة النشاط والفرق بين الأرباح والخسائر وحركة السيولة:
-      </strong>
-      <p style="font-size:12px;color:var(--ink-soft);margin:0;line-height:1.7;">
-        • <strong>لماذا يوجد عجز تشغيلي (${format(summary.operatingProfit)})؟</strong><br>
-        مجمل ربح البضاعة التي تم بيعها فعلياً بلغ <strong>${format(summary.totalGrossProfit)}</strong>، بينما المصروفات والالتزامات المسددة بلغت <strong>${format(summary.totalExpensesPaid)}</strong> (تشمل إيجار 4,000 ج.م ومصروفات تشغيل وكهرباء). بما أن المصروفات في هذه الفترة أعلى من أرباح البضاعة المباعة، فالنتيجة هي <strong>عجز / خسارة بقيمة ${format(summary.operatingProfit)}</strong> وتتحول تلقائياً إلى ربح مع بيع المزيد من البضاعة لتغطية المصروفات.<br>
-        • <strong>صافي حركة السيولة (${format(summary.netCashFlow ?? summary.realizedCashProfit)}):</strong> يمثل حركة النقدية الفعلية داخل الدرج والخزينة (المقبوض من العملاء مخصوماً منه المسدد للتجار والمصروفات).
-      </p>
     </div>
 
     <section class="panel compact-panel">
@@ -4259,7 +4263,7 @@ function bindFinancialMap() {
       return;
     }
     const storeId = state.data?.selectedStoreId;
-    const query = new URLSearchParams({ storeId, from, to });
+    const query = new URLSearchParams({ storeId, from, to, tzOffset: String(new Date().getTimezoneOffset()) });
     state.financialMapRange = syncPresetWithDates(null, from, to, ['all', 'today', 'week', 'month'], 'rolling7', 'all');
     state.financialMapKey = `${storeId}:${from}:${to}`;
     void api(`/api/reports/financial-map?${query.toString()}`).then((res) => {
@@ -4280,7 +4284,7 @@ function bindExpenses() {
 
   const openExpenseModal = () => {
     const decimals = currencyDecimals(state.data.company.currency);
-    const date = new Date().toISOString().slice(0, 10);
+    const date = localDateIso();
     supplierModal(`<label>تصنيف المصروف<select name="categoryCode"><option value="UTILITIES">مرافق وفواتير (كهرباء/ماء/إنترنت)</option><option value="RENT">إيجار المحل</option><option value="TRANSPORT">نقل ومواصلات</option><option value="MAINTENANCE">صيانة</option><option value="SUPPLIES">مستلزمات تشغيل</option><option value="OTHER">مصروفات أخرى</option></select></label><div class="form-grid"><label>المبلغ (${state.data.company.currency})<input name="amount" inputmode="decimal" required autofocus></label><label>تاريخ المصروف<input name="expenseDate" type="date" value="${date}" required></label></div><label>طريقة الدفع<select name="paymentMethod"><option value="CASH_DRAWER">درج النقدية</option><option value="CASH_SAFE">الخزينة</option><option value="BANK_TRANSFER">تحويل بنكي</option></select></label><label>ملاحظات وبيان المصروف (كهرباء، بوفيه...)<input name="notes" maxlength="500" placeholder="مثال: فاتورة كهرباء"></label><label>رقم مرجعي (اختياري)<input name="referenceNumber" maxlength="80"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'expense-form', '/api/expenses', (data) => ({ ...data, amount: toMinor(data.amount, decimals) }), 'تم تسجيل المصروف بنجاح وخصمه من الخزينة والمكسب');
   };
 
@@ -5065,6 +5069,7 @@ function bindSuppliers() {
 }
 
 async function bindSalesHistory() {
+  ensureSalesDefaultFilter();
   const expectedKey = currentSalesFilterKey();
   if (state.salesSummaryKey !== expectedKey || !state.salesSummary) {
     state.salesSummaryKey = expectedKey;
@@ -5140,6 +5145,7 @@ async function fetchSalesHistory(offset, append, button = null) {
       storeId: state.data.selectedStoreId,
       offset: String(offset),
       limit: '100',
+      tzOffset: String(new Date().getTimezoneOffset()),
     };
     if (searchVal) queryObj.search = searchVal;
     if (state.salesFrom && state.salesTo) {
@@ -5668,7 +5674,7 @@ function bindMonthlyExpenses() {
     `,
     'monthly-payment-form',
     `/api/monthly-expenses/${button.dataset.actual}/payments`,
-    (data) => ({ ...data, amount: toMinor(data.amount, decimals) }),
+    (data) => ({ ...data, amount: toMinor(data.amount, decimals), tzOffset: new Date().getTimezoneOffset() }),
     'تم تسجيل السداد بنجاح وخصمه من أرباح المتجر');
   }));
 }
@@ -5889,20 +5895,20 @@ function bindShell() {
     state.user = null;
     state.data = null;
     state.cart = [];
-    state.shiftPreset = null;
-    state.shiftFrom = '';
-    state.shiftTo = '';
+    state.shiftPreset = 'today';
+    state.shiftFrom = null;
+    state.shiftTo = null;
     state.shiftsData = null;
-    state.salesPreset = null;
-    state.salesFrom = '';
-    state.salesTo = '';
+    state.salesPreset = 'today';
+    state.salesFrom = null;
+    state.salesTo = null;
     state.salesHistory = null;
     state.salesSummary = null;
     state.salesSummaryKey = null;
-    state.supplierDatePreset = null;
-    state.supplierFrom = '';
-    state.supplierTo = '';
-    state.financialMapRange = 'all';
+    state.supplierDatePreset = 'today';
+    state.supplierFrom = null;
+    state.supplierTo = null;
+    state.financialMapRange = 'today';
     state.financialMap = null;
     state.financialMapKey = null;
     state.plRange = null;
@@ -6375,10 +6381,10 @@ function bindBackups() {
 
 function computePresetRange(preset) {
   const now = new Date();
-  const to = now.toISOString().slice(0, 10);
+  const to = localDateIso(now);
   if (preset === 'today') return { from: to, to };
-  if (preset === '7d') { const d = new Date(now); d.setUTCDate(d.getUTCDate() - 6); return { from: d.toISOString().slice(0, 10), to }; }
-  if (preset === '30d') { const d = new Date(now); d.setUTCDate(d.getUTCDate() - 29); return { from: d.toISOString().slice(0, 10), to }; }
+  if (preset === '7d') { const d = new Date(now); d.setDate(d.getDate() - 6); return { from: localDateIso(d), to }; }
+  if (preset === '30d') { const d = new Date(now); d.setDate(d.getDate() - 29); return { from: localDateIso(d), to }; }
   if (preset === 'month') return { from: `${to.slice(0, 7)}-01`, to };
   if (preset === 'year') return { from: `${to.slice(0, 4)}-01-01`, to };
   return { from: to, to };
@@ -6387,19 +6393,19 @@ function computePresetRange(preset) {
 function computeHistoryPresetRange(preset, weekStyle = 'rolling7') {
   if (preset === 'all' || !preset) return { from: '', to: '' };
   const now = new Date();
-  const to = now.toISOString().slice(0, 10);
+  const to = localDateIso(now);
   if (preset === 'today') return { from: to, to };
   if (preset === 'week') {
     const d = new Date(now);
     if (weekStyle === 'weekMonday') {
-      const day = d.getUTCDay();
-      d.setUTCDate(d.getUTCDate() - (day === 0 ? 6 : day - 1));
+      const day = d.getDay();
+      d.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
     } else if (weekStyle === 'weekSunday') {
-      d.setUTCDate(d.getUTCDate() - d.getUTCDay());
+      d.setDate(d.getDate() - d.getDay());
     } else {
-      d.setUTCDate(d.getUTCDate() - 7);
+      d.setDate(d.getDate() - 7);
     }
-    return { from: d.toISOString().slice(0, 10), to };
+    return { from: localDateIso(d), to };
   }
   if (preset === 'month') return { from: `${to.slice(0, 7)}-01`, to };
   return { from: '', to: '' };
@@ -6493,13 +6499,13 @@ function bindTopProducts() {
       void loadGrowthForecast(y, m);
     });
   });
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateIso();
   state.analyticsTo ??= today;
-  if (!state.analyticsFrom) { const start = new Date(); start.setUTCDate(start.getUTCDate() - 29); state.analyticsFrom = start.toISOString().slice(0, 10); }
+  if (!state.analyticsFrom) { const start = new Date(); start.setDate(start.getDate() - 29); state.analyticsFrom = localDateIso(start); }
   const key = `${state.data.selectedStoreId}:${state.analyticsFrom}:${state.analyticsTo}`;
   if (state.analyticsKey === key) return;
   state.analyticsKey = key;
-  const query = new URLSearchParams({ storeId: state.data.selectedStoreId, from: state.analyticsFrom, to: state.analyticsTo });
+  const query = new URLSearchParams({ storeId: state.data.selectedStoreId, from: state.analyticsFrom, to: state.analyticsTo, tzOffset: String(new Date().getTimezoneOffset()) });
   const canViewPurchases = state.data.capabilities.canViewAccounting;
   void Promise.all([api(`/api/reports/top-products?${query}`), canViewPurchases ? api(`/api/reports/purchases?${query}`) : Promise.resolve(null)]).then(([products, suppliers]) => {
     state.productStats = products;
@@ -6524,7 +6530,7 @@ function bindProfitLoss() {
     state.page = 'financial-map';
     render();
   });
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateIso();
   state.reportFrom ??= today;
   state.reportTo ??= today;
   const load = async (from, to) => {
@@ -6534,7 +6540,7 @@ function bindProfitLoss() {
     if (state.reportKey === key) return;
     state.reportKey = key;
     try {
-      const query = new URLSearchParams({ from, to, storeId: state.data.selectedStoreId });
+      const query = new URLSearchParams({ from, to, storeId: state.data.selectedStoreId, tzOffset: String(new Date().getTimezoneOffset()) });
       state.report = await api(`/api/reports/profit-loss?${query}`);
       render();
     } catch (error) {
@@ -7608,9 +7614,6 @@ async function doCheckout() {
     invalidateFinancialCaches();
     state.salesHistoryTotal = undefined;
     state.salesHistorySearch = '';
-    state.salesPreset = 'all';
-    state.salesFrom = '';
-    state.salesTo = '';
     await loadData(state.data.selectedStoreId);
     state.page = 'pos';
     render();

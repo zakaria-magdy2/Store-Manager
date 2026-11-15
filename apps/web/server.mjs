@@ -319,7 +319,7 @@ const ExpenseSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.s
 const CustomerReturnSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), paymentMethod: z.enum(['CASH', 'CARD', 'MOBILE', 'OTHER']), items: z.array(z.object({ originalSaleItemId: z.string().min(1).max(80), quantity: z.string().regex(/^[1-9]\d{0,8}$/) })).min(1).max(100) });
 const RecurringObligationSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), categoryCode: z.enum(['RENT', 'UTILITIES', 'TRANSPORT', 'MAINTENANCE', 'SUPPLIES', 'OTHER']), name: z.string().min(2).max(120).trim(), dueDay: z.number().int().min(1).max(31), initialAmount: z.string().regex(/^[1-9]\d{0,14}$/).optional() });
 const MonthlyActualSchema = z.object({ year: z.number().int().min(2000).max(9999), month: z.number().int().min(1).max(12), amount: z.string().regex(/^[1-9]\d{0,14}$/) });
-const MonthlyPaymentSchema = z.object({ idempotencyKey: z.string().uuid(), amount: z.string().regex(/^[1-9]\d{0,14}$/), paymentMethod: z.enum(['CASH_DRAWER', 'CASH_SAFE', 'BANK_TRANSFER']), referenceNumber: z.string().max(80).trim().optional() });
+const MonthlyPaymentSchema = z.object({ idempotencyKey: z.string().uuid(), amount: z.string().regex(/^[1-9]\d{0,14}$/), paymentMethod: z.enum(['CASH_DRAWER', 'CASH_SAFE', 'BANK_TRANSFER']), referenceNumber: z.string().max(80).trim().optional(), tzOffset: z.number().int().min(-840).max(840).optional() });
 const SupplierReturnSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), items: z.array(z.object({ purchaseItemId: z.string().min(1).max(80), quantity: z.string().regex(/^[1-9]\d{0,8}$/) })).min(1).max(100) });
 const BackupSchema = z.object({ passphrase: z.string().min(12).max(256) });
 const CreateStocktakeSchema = z.object({
@@ -420,6 +420,53 @@ function localDayUtcBounds(dateMs = Date.now(), tzOffsetMinutes = new Date().get
     startIso: new Date(startUtcMs).toISOString(),
     endIso: new Date(endUtcMs).toISOString(),
   };
+}
+
+function queryRangeBounds(fromStr, toStr, url) {
+  const rawTz = url?.searchParams?.get('tzOffset');
+  // Default to UTC (0) when tzOffset is omitted so existing UTC callers/tests behave identically,
+  // while applying browser local timezone boundaries when tzOffset is provided by the UI.
+  const tzOffsetMinutes = (rawTz === undefined || rawTz === null || rawTz === '')
+    ? 0
+    : normalizeTzOffsetMinutes(rawTz);
+  const [fy, fm, fd] = fromStr.split('-').map(Number);
+  const [ty, tm, td] = toStr.split('-').map(Number);
+  const offsetMs = tzOffsetMinutes * 60000;
+  const startUtcMs = Date.UTC(fy, fm - 1, fd, 0, 0, 0, 0) + offsetMs;
+  const endExclusiveUtcMs = Date.UTC(ty, tm - 1, td + 1, 0, 0, 0, 0) + offsetMs;
+  return {
+    fromStr,
+    toStr,
+    tzOffsetMinutes,
+    startIso: new Date(startUtcMs).toISOString(),
+    endExclusiveIso: new Date(endExclusiveUtcMs).toISOString(),
+  };
+}
+
+function parseNonNegativeMinorInput(value, label = 'القيمة النقدية') {
+  const str = String(value ?? '0').trim();
+  if (!/^\d{1,15}$/.test(str)) {
+    throw Object.assign(new Error(`${label} غير صالحة`), { status: 400 });
+  }
+  return BigInt(str);
+}
+
+function paymentMethodArabicLabel(method) {
+  switch (String(method || 'CASH').toUpperCase()) {
+    case 'CASH':
+    case 'CASH_DRAWER':
+      return 'نقدي (الدرج)';
+    case 'CASH_SAFE':
+      return 'الخزينة';
+    case 'BANK_TRANSFER':
+      return 'تحويل بنكي / إنستاباي';
+    case 'CARD':
+      return 'بطاقة بنكية';
+    case 'MOBILE':
+      return 'محفظة إلكترونية';
+    default:
+      return String(method || 'نقدي');
+  }
 }
 
 function parseShiftStartMinutes(shiftStartTime) {
@@ -1082,31 +1129,34 @@ async function profitLossReport(ctx, url) {
   if (!storeId || !stores.some((store) => store.id === storeId)) throw Object.assign(new Error('Store scope mismatch'), { status: 403 });
   const tenant = await tenantRepo.findById(ctx.tenantId);
   if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
-  const start = `${url.searchParams.get('from')}T00:00:00.000Z`;
-  const end = `${url.searchParams.get('to')}T23:59:59.999Z`;
+  const fromStr = url.searchParams.get('from');
+  const toStr = url.searchParams.get('to');
+  const bounds = queryRangeBounds(fromStr, toStr, url);
+  const start = bounds.startIso;
+  const endExclusive = bounds.endExclusiveIso;
   const sales = await db.selectFrom('sales').innerJoin('sale_items', 'sale_items.sale_id', 'sales.id')
     .select(['sales.id as id', 'sales.created_at as createdAt', 'sale_items.quantity as quantity', 'sale_items.unit_price as unitPrice', 'sale_items.line_discount as lineDiscount', 'sale_items.cart_discount_share as cartDiscountShare', 'sale_items.cost_of_goods_sold as cogs'])
     .where('sales.tenant_id', '=', ctx.tenantId).where('sales.store_id', '=', storeId).where('sales.status', '=', 'COMPLETED')
-    .where('sales.created_at', '>=', start).where('sales.created_at', '<=', end).execute();
+    .where('sales.created_at', '>=', start).where('sales.created_at', '<', endExclusive).execute();
   const returns = await db.selectFrom('customer_returns').select(['id', 'refund_amount as refundAmount', 'payment_method as paymentMethod', 'created_at as createdAt'])
-    .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).where('created_at', '>=', start).where('created_at', '<=', end).execute();
+    .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).where('created_at', '>=', start).where('created_at', '<', endExclusive).execute();
   const returnLines = returns.length ? await db.selectFrom('customer_return_items').select(['return_id as returnId', 'cost_amount as costAmount'])
     .where('tenant_id', '=', ctx.tenantId).where('return_id', 'in', returns.map((item) => item.id)).execute() : [];
   const varianceRows = await db.selectFrom('journal_entries').innerJoin('journal_lines', 'journal_lines.journal_entry_id', 'journal_entries.id')
     .innerJoin('accounts', 'accounts.id', 'journal_lines.account_id').select(['journal_lines.entry_type as side', 'journal_lines.amount as amount'])
     .where('journal_entries.tenant_id', '=', ctx.tenantId).where('journal_entries.store_id', '=', storeId)
-    .where('journal_entries.source_type', '=', 'SUPPLIER_RETURN').where('journal_entries.entry_date', '>=', url.searchParams.get('from'))
-    .where('journal_entries.entry_date', '<=', url.searchParams.get('to')).where('accounts.account_code', '=', '5090').execute();
+    .where('journal_entries.source_type', '=', 'SUPPLIER_RETURN').where('journal_entries.created_at', '>=', start)
+    .where('journal_entries.created_at', '<', endExclusive).where('accounts.account_code', '=', '5090').execute();
   const directExpenses = await db.selectFrom('operating_expense_records').select(['amount', 'payment_method as paymentMethod'])
     .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).where('expense_type', '=', 'DIRECT_DAILY')
-    .where('expense_date', '>=', url.searchParams.get('from')).where('expense_date', '<=', url.searchParams.get('to')).execute();
+    .where('expense_date', '>=', fromStr).where('expense_date', '<=', toStr).execute();
   const monthlyPayments = await db.selectFrom('operating_expense_records').select(['amount', 'expense_date as expenseDate', 'payment_method as paymentMethod'])
     .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).where('expense_type', '=', 'MONTHLY_RECURRING_PAYMENT')
-    .where('expense_date', '>=', url.searchParams.get('from')).where('expense_date', '<=', url.searchParams.get('to')).execute();
+    .where('expense_date', '>=', fromStr).where('expense_date', '<=', toStr).execute();
   const salePayments = await db.selectFrom('sale_payments').innerJoin('sales', 'sales.id', 'sale_payments.sale_id')
-    .select(['sale_payments.method as method', 'sale_payments.amount as amount', 'sales.change_given as changeGiven'])
-    .where('sale_payments.tenant_id', '=', ctx.tenantId).where('sales.store_id', '=', storeId)
-    .where('sale_payments.created_at', '>=', start).where('sale_payments.created_at', '<=', end).execute();
+    .select(['sale_payments.sale_id as saleId', 'sale_payments.method as method', 'sale_payments.amount as amount', 'sales.change_given as changeGiven'])
+    .where('sale_payments.tenant_id', '=', ctx.tenantId).where('sales.store_id', '=', storeId).where('sales.status', '=', 'COMPLETED')
+    .where('sale_payments.created_at', '>=', start).where('sale_payments.created_at', '<', endExclusive).execute();
   const minYear = from.getUTCFullYear(), maxYear = to.getUTCFullYear();
   const actuals = await db.selectFrom('monthly_expense_actuals').selectAll().where('tenant_id', '=', ctx.tenantId)
     .where((eb) => eb.or([eb('store_id', '=', storeId), eb('store_id', 'is', null)]))
@@ -1138,8 +1188,16 @@ async function profitLossReport(ctx, url) {
     }
   }
   const operatingProfit = grossProfit - directExpenseTotal - monthlyExpenseTotal;
+  const seenCashSaleChange = new Set();
+  let totalCashChangeGiven = 0n;
+  for (const item of salePayments) {
+    if (item.method === 'CASH' && !seenCashSaleChange.has(item.saleId)) {
+      seenCashSaleChange.add(item.saleId);
+      totalCashChangeGiven += BigInt(item.changeGiven ?? 0);
+    }
+  }
   const cashSales = salePayments.filter((item) => item.method === 'CASH').reduce((sum, item) => sum + BigInt(item.amount), 0n)
-    - salePayments.filter((item) => item.method === 'CASH').reduce((sum, item) => sum + BigInt(item.changeGiven), 0n)
+    - totalCashChangeGiven
     - returns.filter((item) => item.paymentMethod === 'CASH').reduce((sum, item) => sum + BigInt(item.refundAmount), 0n);
   const electronicSales = salePayments.filter((item) => item.method !== 'CASH').reduce((sum, item) => sum + BigInt(item.amount), 0n)
     - returns.filter((item) => item.paymentMethod !== 'CASH').reduce((sum, item) => sum + BigInt(item.refundAmount), 0n);
@@ -1150,8 +1208,6 @@ async function profitLossReport(ctx, url) {
     .where((eb) => eb.or([eb('year', '<', to.getUTCFullYear()), eb.and([eb('year', '=', to.getUTCFullYear()), eb('month', '<=', to.getUTCMonth() + 1)])])).execute();
   const pendingDue = unpaid.reduce((sum, item) => sum + BigInt(item.amount) - BigInt(item.paidAmount), 0n);
 
-  const fromStr = url.searchParams.get('from');
-  const toStr = url.searchParams.get('to');
   const rawDb = database.getRawDatabase();
   const userRowsPl = rawDb.prepare('SELECT id, full_name, username FROM users WHERE tenant_id = ?').all(ctx.tenantId);
   const userMapPl = new Map(userRowsPl.map((u) => [u.id, u.full_name || u.username]));
@@ -1163,10 +1219,10 @@ async function profitLossReport(ctx, url) {
     FROM supplier_purchases p
     INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
     WHERE p.tenant_id = ? AND p.store_id = ? AND p.initial_paid_amount > 0
-      AND substr(COALESCE(p.purchased_at, p.created_at), 1, 10) >= ?
-      AND substr(COALESCE(p.purchased_at, p.created_at), 1, 10) <= ?
+      AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') >= ?
+      AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') < ?
     ORDER BY COALESCE(p.purchased_at, p.created_at) DESC
-  `).all(ctx.tenantId, storeId, fromStr, toStr);
+  `).all(ctx.tenantId, storeId, start, endExclusive);
 
   const supPayRows = rawDb.prepare(`
     SELECT sp.id, sp.purchase_id, p.invoice_number, COALESCE(sp.paid_at, sp.created_at) AS paid_at,
@@ -1176,17 +1232,17 @@ async function profitLossReport(ctx, url) {
     INNER JOIN supplier_purchases p ON p.id = sp.purchase_id AND p.tenant_id = sp.tenant_id
     INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
     WHERE sp.tenant_id = ? AND p.store_id = ?
-      AND substr(COALESCE(sp.paid_at, sp.created_at), 1, 10) >= ?
-      AND substr(COALESCE(sp.paid_at, sp.created_at), 1, 10) <= ?
+      AND replace(COALESCE(sp.paid_at, sp.created_at), ' ', 'T') >= ?
+      AND replace(COALESCE(sp.paid_at, sp.created_at), ' ', 'T') < ?
     ORDER BY COALESCE(sp.paid_at, sp.created_at) DESC
-  `).all(ctx.tenantId, storeId, fromStr, toStr);
+  `).all(ctx.tenantId, storeId, start, endExclusive);
 
   const supRetCreditRow = rawDb.prepare(`
     SELECT COALESCE(SUM(credit_amount), 0) AS total_credit
     FROM supplier_returns
     WHERE tenant_id = ? AND store_id = ?
-      AND substr(created_at, 1, 10) >= ? AND substr(created_at, 1, 10) <= ?
-  `).get(ctx.tenantId, storeId, fromStr, toStr);
+      AND replace(created_at, ' ', 'T') >= ? AND replace(created_at, ' ', 'T') < ?
+  `).get(ctx.tenantId, storeId, start, endExclusive);
 
   const money = (amount) => moneyJson(Money.fromMinor(amount, tenant.currency));
 
@@ -1547,12 +1603,13 @@ async function topProductsReport(ctx, url) {
   const fromValue = url.searchParams.get('from');
   const toValue = url.searchParams.get('to');
   if ((fromValue === null) !== (toValue === null)) throw Object.assign(new Error('Both report dates are required'), { status: 400 });
-  let start = null, end = null;
+  let start = null, endExclusive = null;
   if (fromValue && toValue) {
     const from = reportDay(fromValue), to = reportDay(toValue);
     if (from > to) throw Object.assign(new Error('Report start date must be before end date'), { status: 400 });
-    start = `${fromValue}T00:00:00.000Z`;
-    end = `${toValue}T23:59:59.999Z`;
+    const bounds = queryRangeBounds(fromValue, toValue, url);
+    start = bounds.startIso;
+    endExclusive = bounds.endExclusiveIso;
   }
   const stores = await storeRepo.listByTenant(ctx);
   const requestedStore = url.searchParams.get('storeId');
@@ -1573,10 +1630,10 @@ async function topProductsReport(ctx, url) {
     INNER JOIN products p ON p.id = si.product_id AND p.tenant_id = si.tenant_id
     WHERE si.tenant_id = ? AND si.store_id = ? AND s.status = 'COMPLETED'
       AND (? IS NULL OR s.created_at >= ?)
-      AND (? IS NULL OR s.created_at <= ?)
+      AND (? IS NULL OR s.created_at < ?)
     GROUP BY p.id, p.name, p.sku
     HAVING unitsSold > 0
-  `).all(ctx.tenantId, storeId, start, start, end, end);
+  `).all(ctx.tenantId, storeId, start, start, endExclusive, endExclusive);
   const products = result.map((row) => {
     const revMinor = BigInt(row.netRevenue ?? 0);
     const cogsMinor = BigInt(row.netCogs ?? 0);
@@ -1624,11 +1681,11 @@ async function topProductsReport(ctx, url) {
     LEFT JOIN product_variants pv ON pv.id = spi.variant_id AND pv.tenant_id = spi.tenant_id
     LEFT JOIN products p ON p.id = pv.product_id AND p.tenant_id = spi.tenant_id
     WHERE spi.tenant_id = ? AND spi.store_id = ?
-      AND (? IS NULL OR substr(sp.purchased_at, 1, 10) >= ?)
-      AND (? IS NULL OR substr(sp.purchased_at, 1, 10) <= ?)
+      AND (? IS NULL OR replace(COALESCE(sp.purchased_at, sp.created_at), ' ', 'T') >= ?)
+      AND (? IS NULL OR replace(COALESCE(sp.purchased_at, sp.created_at), ' ', 'T') < ?)
     GROUP BY COALESCE(p.id, spi.variant_id), COALESCE(p.name, spi.product_name), COALESCE(p.sku, spi.sku)
     HAVING unitsOrdered > 0
-  `).all(ctx.tenantId, storeId, fromValue, fromValue, toValue, toValue);
+  `).all(ctx.tenantId, storeId, start, start, endExclusive, endExclusive);
   const mostPurchasedProducts = purchasedRows.map((row) => {
     const ordered = BigInt(row.unitsOrdered ?? 0);
     const returned = BigInt(row.returnedToSupplier ?? 0);
@@ -1658,10 +1715,10 @@ async function topProductsReport(ctx, url) {
     INNER JOIN products p ON p.id = si.product_id AND p.tenant_id = si.tenant_id
     WHERE si.tenant_id = ? AND si.store_id = ? AND s.status = 'COMPLETED'
       AND (? IS NULL OR s.created_at >= ?)
-      AND (? IS NULL OR s.created_at <= ?)
+      AND (? IS NULL OR s.created_at < ?)
     GROUP BY si.variant_id, si.product_name, si.sku, si.variant_attributes_json, p.name, p.options_json
     HAVING unitsSold > 0
-  `).all(ctx.tenantId, storeId, start, start, end, end);
+  `).all(ctx.tenantId, storeId, start, start, endExclusive, endExclusive);
   const sizeCounter = new Map();
   const colorCounter = new Map();
   let totalVariantUnits = 0n;
@@ -1719,6 +1776,7 @@ async function purchaseSupplierReport(ctx, url) {
   if (!fromValue || !toValue) throw Object.assign(new Error('Both report dates are required'), { status: 400 });
   const from = reportDay(fromValue), to = reportDay(toValue);
   if (from > to) throw Object.assign(new Error('Report start date must be before end date'), { status: 400 });
+  const bounds = queryRangeBounds(fromValue, toValue, url);
   const stores = await storeRepo.listByTenant(ctx);
   const requestedStore = url.searchParams.get('storeId');
   const storeId = ctx.storeId ?? requestedStore ?? stores[0]?.id;
@@ -1732,9 +1790,9 @@ async function purchaseSupplierReport(ctx, url) {
       SUM(COALESCE((SELECT SUM(spi.quantity) FROM supplier_purchase_items spi WHERE spi.tenant_id = p.tenant_id AND spi.purchase_id = p.id), 0)) AS unitsOrdered
     FROM supplier_purchases p
     INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
-    WHERE p.tenant_id = ? AND p.store_id = ? AND substr(p.purchased_at, 1, 10) >= ? AND substr(p.purchased_at, 1, 10) <= ?
+    WHERE p.tenant_id = ? AND p.store_id = ? AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') >= ? AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') < ?
     GROUP BY s.id, s.name
-  `).all(ctx.tenantId, storeId, fromValue, toValue);
+  `).all(ctx.tenantId, storeId, bounds.startIso, bounds.endExclusiveIso);
   const suppliers = rows.map((row) => {
     const totalMinor = BigInt(row.totalAmount ?? 0);
     const paidMinor = BigInt(row.paidAmount ?? 0);
@@ -1771,6 +1829,13 @@ async function financialMapReport(ctx, url) {
   const rawDb = database.getRawDatabase();
   const from = url.searchParams.get('from') || '';
   const to = url.searchParams.get('to') || '';
+  if (Boolean(from) !== Boolean(to)) throw Object.assign(new Error('يجب تحديد تاريخ البداية والنهاية معًا'), { status: 400 });
+  let bounds = null;
+  if (from && to) {
+    const f = reportDay(from), t = reportDay(to);
+    if (f > t) throw Object.assign(new Error('تاريخ البداية يجب أن يسبق تاريخ النهاية'), { status: 400 });
+    bounds = queryRangeBounds(from, to, url);
+  }
 
   const userRows = await db.selectFrom('users').select(['id', 'full_name as fullName', 'username']).where('tenant_id', '=', ctx.tenantId).execute();
   const userMap = new Map(userRows.map((u) => [u.id, u.fullName || u.username]));
@@ -1801,39 +1866,36 @@ async function financialMapReport(ctx, url) {
     WHERE s.tenant_id = ? AND s.store_id = ? AND s.status = 'COMPLETED'
   `;
   const salesParams = [ctx.tenantId, storeId];
-  if (from) { salesSql += ` AND substr(s.created_at, 1, 10) >= ?`; salesParams.push(from); }
-  if (to) { salesSql += ` AND substr(s.created_at, 1, 10) <= ?`; salesParams.push(to); }
-  salesSql += ` ORDER BY s.created_at ASC LIMIT 400`;
+  if (bounds) { salesSql += ` AND s.created_at >= ? AND s.created_at < ?`; salesParams.push(bounds.startIso, bounds.endExclusiveIso); }
+  salesSql += ` ORDER BY s.created_at ASC`;
   const salesRows = rawDb.prepare(salesSql).all(...salesParams);
 
   // 2. Supplier purchases initial payments
   let supInitSql = `
-    SELECT p.id, p.invoice_number, COALESCE(p.purchased_at, p.created_at) as created_at, p.initial_paid_amount as amount, p.created_by_user_id, s.name as supplier_name
+    SELECT p.id, p.invoice_number, COALESCE(p.purchased_at, p.created_at) as created_at, p.initial_paid_amount as amount, p.notes, p.created_by_user_id, s.name as supplier_name
     FROM supplier_purchases p
     INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
     WHERE p.tenant_id = ? AND p.store_id = ? AND p.initial_paid_amount > 0
   `;
   const supInitParams = [ctx.tenantId, storeId];
-  if (from) { supInitSql += ` AND substr(p.purchased_at, 1, 10) >= ?`; supInitParams.push(from); }
-  if (to) { supInitSql += ` AND substr(p.purchased_at, 1, 10) <= ?`; supInitParams.push(to); }
-  supInitSql += ` ORDER BY p.purchased_at ASC LIMIT 200`;
+  if (bounds) { supInitSql += ` AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') >= ? AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') < ?`; supInitParams.push(bounds.startIso, bounds.endExclusiveIso); }
+  supInitSql += ` ORDER BY COALESCE(p.purchased_at, p.created_at) ASC`;
   const supInitRows = rawDb.prepare(supInitSql).all(...supInitParams);
 
   // 3. Supplier installment payments
   let supPaySql = `
-    SELECT sp.id, p.invoice_number, COALESCE(sp.paid_at, sp.created_at) as created_at, sp.amount, sp.payment_method, sp.created_by_user_id, s.name as supplier_name
+    SELECT sp.id, p.invoice_number, COALESCE(sp.paid_at, sp.created_at) as created_at, sp.amount, sp.payment_method, sp.reference_number, sp.created_by_user_id, s.name as supplier_name
     FROM supplier_payments sp
     INNER JOIN supplier_purchases p ON p.id = sp.purchase_id AND p.tenant_id = sp.tenant_id
     INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
     WHERE sp.tenant_id = ? AND p.store_id = ?
   `;
   const supPayParams = [ctx.tenantId, storeId];
-  if (from) { supPaySql += ` AND substr(sp.paid_at, 1, 10) >= ?`; supPayParams.push(from); }
-  if (to) { supPaySql += ` AND substr(sp.paid_at, 1, 10) <= ?`; supPayParams.push(to); }
-  supPaySql += ` ORDER BY sp.paid_at ASC LIMIT 300`;
+  if (bounds) { supPaySql += ` AND replace(COALESCE(sp.paid_at, sp.created_at), ' ', 'T') >= ? AND replace(COALESCE(sp.paid_at, sp.created_at), ' ', 'T') < ?`; supPayParams.push(bounds.startIso, bounds.endExclusiveIso); }
+  supPaySql += ` ORDER BY COALESCE(sp.paid_at, sp.created_at) ASC`;
   const supPayRows = rawDb.prepare(supPaySql).all(...supPayParams);
 
-  // 4. Operating Expenses (Using actual created_at timestamp instead of date-only)
+  // 4. Operating Expenses (stored with local calendar expense_date)
   let expSql = `
     SELECT oer.id, COALESCE(oer.created_at, oer.expense_date) as created_at, oer.expense_date, oer.amount, oer.payment_method, oer.notes, oer.expense_type, oer.created_by_user_id,
       COALESCE(ec.name, 'مصروف تشغيلي') AS category_name,
@@ -1847,7 +1909,7 @@ async function financialMapReport(ctx, url) {
   const expParams = [ctx.tenantId, storeId];
   if (from) { expSql += ` AND substr(oer.expense_date, 1, 10) >= ?`; expParams.push(from); }
   if (to) { expSql += ` AND substr(oer.expense_date, 1, 10) <= ?`; expParams.push(to); }
-  expSql += ` ORDER BY COALESCE(oer.created_at, oer.expense_date) ASC LIMIT 300`;
+  expSql += ` ORDER BY COALESCE(oer.created_at, oer.expense_date) ASC`;
   const expRows = rawDb.prepare(expSql).all(...expParams);
 
   // 5. Customer Returns
@@ -1858,10 +1920,22 @@ async function financialMapReport(ctx, url) {
     WHERE cr.tenant_id = ? AND cr.store_id = ?
   `;
   const retParams = [ctx.tenantId, storeId];
-  if (from) { retSql += ` AND substr(cr.created_at, 1, 10) >= ?`; retParams.push(from); }
-  if (to) { retSql += ` AND substr(cr.created_at, 1, 10) <= ?`; retParams.push(to); }
-  retSql += ` ORDER BY cr.created_at ASC LIMIT 200`;
+  if (bounds) { retSql += ` AND cr.created_at >= ? AND cr.created_at < ?`; retParams.push(bounds.startIso, bounds.endExclusiveIso); }
+  retSql += ` ORDER BY cr.created_at ASC`;
   const retRows = rawDb.prepare(retSql).all(...retParams);
+
+  // 6. Supplier Return Cost Variance (Account 5090 — aligns COGS/operatingProfit with Profit & Loss & Sales)
+  let varSql = `
+    SELECT jl.entry_type AS side, jl.amount
+    FROM journal_entries je
+    INNER JOIN journal_lines jl ON jl.journal_entry_id = je.id
+    INNER JOIN accounts a ON a.id = jl.account_id
+    WHERE je.tenant_id = ? AND je.store_id = ? AND je.source_type = 'SUPPLIER_RETURN' AND a.account_code = '5090'
+  `;
+  const varParams = [ctx.tenantId, storeId];
+  if (bounds) { varSql += ` AND je.created_at >= ? AND je.created_at < ?`; varParams.push(bounds.startIso, bounds.endExclusiveIso); }
+  const varRows = rawDb.prepare(varSql).all(...varParams);
+  const supplierReturnVarianceMinor = varRows.reduce((sum, r) => sum + (r.side === 'DEBIT' ? BigInt(r.amount) : -BigInt(r.amount)), 0n);
 
   const timeline = [];
 
@@ -1886,37 +1960,42 @@ async function financialMapReport(ctx, url) {
 
   for (const p of supInitRows) {
     const amt = BigInt(p.amount ?? 0);
+    const formattedAmt = `${Money.fromMinor(amt, currency).toDecimalString()} ${currency}`;
+    const invRef = p.invoice_number || p.id.slice(0, 8);
     timeline.push({
       id: `${p.id}-init`,
       timestamp: toIsoTimestamp(p.created_at),
       type: 'SUPPLIER_PAYMENT',
       category: 'سداد تاجر',
-      title: `دفعة نقدية عند استلام فاتورة شراء #${p.invoice_number || p.id.slice(0, 8)}`,
+      title: `سددت ${formattedAmt} للتاجر ${p.supplier_name}`,
       reference: p.invoice_number,
       party: `التاجر: ${p.supplier_name}`,
       actor: userMap.get(p.created_by_user_id) || 'المسؤول',
       amountIn: '0',
       amountOut: amt.toString(),
       profitImpact: '0',
-      details: `دفعة سداد نقدية للتاجر ${p.supplier_name} - حركة سيولة نقدية (البضاعة بالمخزن أصل وليست خسارة)`,
+      details: `سددت ${formattedAmt} للتاجر ${p.supplier_name} — دفعة مقدمة عند استلام فاتورة #${invRef}${p.notes ? ` · ${p.notes}` : ''}`,
     });
   }
 
   for (const p of supPayRows) {
     const amt = BigInt(p.amount ?? 0);
+    const formattedAmt = `${Money.fromMinor(amt, currency).toDecimalString()} ${currency}`;
+    const methodLabel = paymentMethodArabicLabel(p.payment_method || 'CASH');
+    const invRef = p.invoice_number || p.id.slice(0, 8);
     timeline.push({
       id: p.id,
       timestamp: toIsoTimestamp(p.created_at),
       type: 'SUPPLIER_PAYMENT',
       category: 'سداد تاجر',
-      title: `سداد للتاجر: ${p.supplier_name} (فاتورة #${p.invoice_number || ''})`,
+      title: `سددت ${formattedAmt} للتاجر ${p.supplier_name}`,
       reference: p.invoice_number,
       party: `التاجر: ${p.supplier_name}`,
       actor: userMap.get(p.created_by_user_id) || 'المسؤول',
       amountIn: '0',
       amountOut: amt.toString(),
       profitImpact: '0',
-      details: `سداد دفعة من حساب التاجر ${p.supplier_name} - حركة سيولة نقدية (تسوية مستحقات)`,
+      details: `سددت ${formattedAmt} للتاجر ${p.supplier_name} — من حساب فاتورة #${invRef} (${methodLabel})${p.reference_number ? ` · مرجع: ${p.reference_number}` : ''}`,
     });
   }
 
@@ -1995,19 +2074,22 @@ async function financialMapReport(ctx, url) {
     item.runningProfit = runningProfitMinor.toString();
   }
 
-  const netCashFlowMinor = totalSalesMinor - totalSupplierPaidMinor - totalExpensesMinor - totalRefundsMinor;
+  const netSalesMinor = totalSalesMinor - totalRefundsMinor;
+  const netCashFlowMinor = netSalesMinor - totalSupplierPaidMinor - totalExpensesMinor;
   const netReturnLossMinor = totalRefundsMinor - totalReturnedCostMinor;
-  const operatingProfitMinor = totalGrossProfitMinor - totalExpensesMinor - netReturnLossMinor;
+  const operatingProfitMinor = totalGrossProfitMinor - totalExpensesMinor - netReturnLossMinor - supplierReturnVarianceMinor;
 
   return {
     currency,
     range: { from, to },
     summary: {
       totalSales: totalSalesMinor.toString(),
+      netSales: netSalesMinor.toString(),
       totalGrossProfit: totalGrossProfitMinor.toString(),
       totalSupplierPaid: totalSupplierPaidMinor.toString(),
       totalExpensesPaid: totalExpensesMinor.toString(),
       totalRefunds: totalRefundsMinor.toString(),
+      supplierReturnVariance: supplierReturnVarianceMinor.toString(),
       operatingProfit: operatingProfitMinor.toString(),
       netCashFlow: netCashFlowMinor.toString(),
       realizedCashProfit: netCashFlowMinor.toString(),
@@ -2477,18 +2559,19 @@ async function currentData(ctx, url) {
         remainingAmount: moneyJson(Money.fromMinor(amount - paid, actual.currency)), status: actual.status,
         payments: payments.map((item) => ({ id: item.id, amount: moneyJson(Money.fromMinor(BigInt(item.amount), item.currency)), method: item.payment_method, referenceNumber: item.reference_number, paidAt: item.expense_date })) } : null };
   });
-  const today = new Date().toISOString().slice(0, 10);
+  const tzOffsetMinutes = normalizeTzOffsetMinutes(url.searchParams.get('tzOffset'));
+  const todayBounds = localDayUtcBounds(Date.now(), tzOffsetMinutes);
   const todaySalesRow = canViewSales ? rawDbData.prepare(`
     SELECT COUNT(id) AS cnt,
       COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = sales.tenant_id AND si.sale_id = sales.id)), 0) AS gross
     FROM sales
-    WHERE tenant_id = ? AND store_id = ? AND status = 'COMPLETED' AND substr(created_at, 1, 10) = ?
-  `).get(ctx.tenantId, storeId, today) : { cnt: 0, gross: 0 };
+    WHERE tenant_id = ? AND store_id = ? AND status = 'COMPLETED' AND created_at >= ? AND created_at < ?
+  `).get(ctx.tenantId, storeId, todayBounds.startIso, todayBounds.endIso) : { cnt: 0, gross: 0 };
   const todayReturnsRow = canViewSales ? rawDbData.prepare(`
     SELECT COALESCE(SUM(refund_amount), 0) AS refunds
     FROM customer_returns
-    WHERE tenant_id = ? AND store_id = ? AND substr(created_at, 1, 10) = ?
-  `).get(ctx.tenantId, storeId, today) : { refunds: 0 };
+    WHERE tenant_id = ? AND store_id = ? AND created_at >= ? AND created_at < ?
+  `).get(ctx.tenantId, storeId, todayBounds.startIso, todayBounds.endIso) : { refunds: 0 };
   const todaySalesCount = Number(todaySalesRow?.cnt ?? 0);
   const revenueMinor = (BigInt(todaySalesRow?.gross ?? 0) - BigInt(todayReturnsRow?.refunds ?? 0)).toString();
   const canManageUsers = ctx.hasPermission(Permissions.USERS_MANAGE);
@@ -2503,8 +2586,6 @@ async function currentData(ctx, url) {
     ? await db.selectFrom('accounting_periods').selectAll().where('tenant_id', '=', ctx.tenantId).orderBy('start_date', 'desc').execute()
     : [];
 
-  const tzOffsetMinutes = normalizeTzOffsetMinutes(url.searchParams.get('tzOffset'));
-  const todayBounds = localDayUtcBounds(Date.now(), tzOffsetMinutes);
   const rawDatabase = database.getRawDatabase();
   const activeShiftRow = rawDatabase.prepare(
     "SELECT id, shift_number as shiftNumber, started_at as startedAt, opening_cash as openingCash, notes FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' ORDER BY started_at DESC LIMIT 1"
@@ -2658,10 +2739,15 @@ async function handleApi(req, res, url) {
     const from = url.searchParams.get('from');
     const to = url.searchParams.get('to');
     if ((from === null) !== (to === null)) throw Object.assign(new Error('يجب تحديد تاريخ البداية والنهاية معًا'), { status: 400 });
-    if (from && to) { reportDay(from); reportDay(to); if (from > to) throw Object.assign(new Error('تاريخ البداية يجب أن يسبق تاريخ النهاية'), { status: 400 }); }
+    let bounds = null;
+    if (from && to) {
+      reportDay(from); reportDay(to);
+      if (from > to) throw Object.assign(new Error('تاريخ البداية يجب أن يسبق تاريخ النهاية'), { status: 400 });
+      bounds = queryRangeBounds(from, to, url);
+    }
     const conditions = ["tenant_id = ?", "store_id = ?"];
     const args = [ctx.tenantId, storeId];
-    if (from && to) { conditions.push("substr(created_at, 1, 10) >= ?", "substr(created_at, 1, 10) <= ?"); args.push(from, to); }
+    if (bounds) { conditions.push("created_at >= ?", "created_at < ?"); args.push(bounds.startIso, bounds.endExclusiveIso); }
     if (search) {
       conditions.push("(instr(lower(sale_number), lower(?)) > 0 OR instr(lower(coalesce(customer_name, '')), lower(?)) > 0 OR EXISTS (SELECT 1 FROM sale_items si WHERE si.tenant_id = sales.tenant_id AND si.store_id = sales.store_id AND si.sale_id = sales.id AND (instr(lower(si.product_name), lower(?)) > 0 OR instr(lower(si.sku), lower(?)) > 0)))");
       args.push(search, search, search, search);
@@ -2709,9 +2795,9 @@ async function handleApi(req, res, url) {
     } else {
       const retConds = ['cr.tenant_id = ?', 'cr.store_id = ?'];
       const retArgs = [ctx.tenantId, storeId];
-      if (from && to) {
-        retConds.push('substr(cr.created_at, 1, 10) >= ?', 'substr(cr.created_at, 1, 10) <= ?');
-        retArgs.push(from, to);
+      if (bounds) {
+        retConds.push('cr.created_at >= ?', 'cr.created_at < ?');
+        retArgs.push(bounds.startIso, bounds.endExclusiveIso);
       }
       const retAgg = rawDatabase.prepare(`
         SELECT COALESCE(SUM(cr.refund_amount), 0) AS refunds,
@@ -2724,9 +2810,9 @@ async function handleApi(req, res, url) {
 
       const varConds = ["je.tenant_id = ?", "je.store_id = ?", "je.source_type = 'SUPPLIER_RETURN'", "a.account_code = '5090'"];
       const varArgs = [ctx.tenantId, storeId];
-      if (from && to) {
-        varConds.push('je.entry_date >= ?', 'je.entry_date <= ?');
-        varArgs.push(from, to);
+      if (bounds) {
+        varConds.push('je.created_at >= ?', 'je.created_at < ?');
+        varArgs.push(bounds.startIso, bounds.endExclusiveIso);
       }
       const varRows = rawDatabase.prepare(`
         SELECT jl.entry_type AS side, jl.amount
@@ -3428,7 +3514,7 @@ async function handleApi(req, res, url) {
     const shiftId = randomUUID();
     const shiftNumber = generateNextShiftNumber(ctx.tenantId);
     const nowIso = new Date().toISOString();
-    const openingCash = BigInt(body.openingCash ?? '0');
+    const openingCash = parseNonNegativeMinorInput(body.openingCash ?? '0', 'الرصيد الافتتاحي');
     const notes = body.notes?.trim() || null;
 
     rawDb.prepare(`
@@ -3465,14 +3551,15 @@ async function handleApi(req, res, url) {
     const rawDb = database.getRawDatabase();
     const shift = rawDb.prepare("SELECT * FROM cashier_shifts WHERE id = ? AND tenant_id = ?").get(shiftId, ctx.tenantId);
     if (!shift) throw Object.assign(new Error('الشفت غير موجود'), { status: 404 });
+    if (ctx.storeId && shift.store_id !== ctx.storeId) throw Object.assign(new Error('غير مصرح بالوصول لشيفت فرع آخر'), { status: 403 });
     if (shift.status !== 'OPEN') throw Object.assign(new Error('هذا الشفت مغلق بالفعل'), { status: 409 });
     if (shift.user_id !== ctx.userId && ctx.roleId !== 'OWNER' && ctx.roleId !== 'STORE_MANAGER') {
       throw Object.assign(new Error('غير مصرح بإغلاق شفت موظف آخر'), { status: 403 });
     }
 
     const nowIso = new Date().toISOString();
-    const actualCash = BigInt(body.actualCash ?? '0');
-    const handoverCash = BigInt(body.handoverCash ?? '0');
+    const actualCash = parseNonNegativeMinorInput(body.actualCash ?? '0', 'النقدية الفعلية');
+    const handoverCash = parseNonNegativeMinorInput(body.handoverCash ?? '0', 'مبلغ التسليم');
     const notes = body.notes?.trim() || shift.notes || null;
 
     const salesDuringShift = rawDb.prepare(`
@@ -3579,13 +3666,20 @@ async function handleApi(req, res, url) {
       sql += ` AND cs.user_id = ?`;
       params.push(filterUser);
     }
-    if (from) {
-      sql += ` AND substr(cs.started_at, 1, 10) >= ?`;
-      params.push(from);
-    }
-    if (to) {
-      sql += ` AND substr(cs.started_at, 1, 10) <= ?`;
-      params.push(to);
+    if (from && to) {
+      reportDay(from); reportDay(to);
+      if (from > to) throw Object.assign(new Error('تاريخ البداية يجب أن يسبق تاريخ النهاية'), { status: 400 });
+      const bounds = queryRangeBounds(from, to, url);
+      sql += ` AND cs.started_at >= ? AND cs.started_at < ?`;
+      params.push(bounds.startIso, bounds.endExclusiveIso);
+    } else if (from) {
+      reportDay(from);
+      sql += ` AND cs.started_at >= ?`;
+      params.push(queryRangeBounds(from, from, url).startIso);
+    } else if (to) {
+      reportDay(to);
+      sql += ` AND cs.started_at < ?`;
+      params.push(queryRangeBounds(to, to, url).endExclusiveIso);
     }
 
     sql += ` ORDER BY cs.started_at DESC LIMIT 200`;
@@ -3708,6 +3802,7 @@ async function handleApi(req, res, url) {
     const rawDb = database.getRawDatabase();
     const shift = rawDb.prepare("SELECT * FROM cashier_shifts WHERE id = ? AND tenant_id = ?").get(shiftId, ctx.tenantId);
     if (!shift) throw Object.assign(new Error('الشيفت غير موجود'), { status: 404 });
+    if (ctx.storeId && shift.store_id !== ctx.storeId) throw Object.assign(new Error('غير مصرح بالوصول لفواتير شيفت فرع آخر'), { status: 403 });
     const tenant = await tenantRepo.findById(ctx.tenantId);
     const currency = typeof tenant?.currency === 'string' ? tenant.currency : (tenant?.currency?.code ?? 'EGP');
     const endTime = shift.ended_at || new Date().toISOString();
@@ -4036,7 +4131,8 @@ async function handleApi(req, res, url) {
   if (monthlyPaymentMatch) {
     ctx.assertPermission(Permissions.EXPENSES_MONTHLY_PAY);
     const body = validate(MonthlyPaymentSchema, await readJson(req));
-    const payment = await recurringExpenses.pay(ctx, { ...body, id: randomUUID(), actualId: monthlyPaymentMatch[1], amount: BigInt(body.amount), paidAt: new Date() });
+    const expenseDate = body.tzOffset !== undefined ? localDayUtcBounds(Date.now(), body.tzOffset).dateStr : undefined;
+    const payment = await recurringExpenses.pay(ctx, { ...body, id: randomUUID(), actualId: monthlyPaymentMatch[1], amount: BigInt(body.amount), paidAt: new Date(), expenseDate });
     return json(res, 201, { id: payment.id, remaining: payment.remaining.toString() });
   }
 
