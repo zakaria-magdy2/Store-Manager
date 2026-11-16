@@ -4012,69 +4012,75 @@ function expensesView() {
   return `
     <div class="page-heading-row">
       <div>
-        <h2 style="margin:0;font-size:20px;font-weight:800;color:var(--ink);">المصروفات والالتزامات</h2>
+        <h2 class="expense-page-title">المصروفات والالتزامات</h2>
       </div>
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <div class="expense-page-actions">
         <button type="button" class="button button-secondary" id="new-monthly-obligation">+ إضافة التزام (إيجار/مرتبات)</button>
         <button type="button" class="button button-primary" id="new-expense">+ إضافة مصروف (كهرباء/نثريات)</button>
       </div>
     </div>
 
     <!-- شريط أرشيف وتصفح الشهور -->
-    <div class="panel" style="padding:10px 16px;margin-bottom:18px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;background:var(--surface);">
-      <div style="display:flex;align-items:center;gap:10px;">
-        
-        <div>
-          <span style="font-size:12px;color:var(--muted);font-weight:700;">سجل شهر:</span>
-          <strong style="font-size:15px;color:var(--ink);margin-inline-start:4px;">${monthName} ${currentYear}</strong>
-          ${isActualCurrentMonth ? '<span class="status-pill status-complete" style="font-size:11px;margin-inline-start:8px;padding:2px 8px;">الشهر الجاري</span>' : '<span class="status-pill status-low" style="font-size:11px;margin-inline-start:8px;padding:2px 8px;">أرشيف سابق</span>'}
+    <section class="expense-month-bar">
+      <div class="expense-month-info">
+        <span class="expense-month-icon">${icon('calendar', 20)}</span>
+        <div class="expense-month-meta">
+          <span class="expense-month-kicker">فترة عرض المصروفات</span>
+          <div class="expense-month-title-row">
+            <strong class="expense-month-title">${monthName} ${currentYear}</strong>
+            ${isActualCurrentMonth ? '<span class="status-pill status-complete expense-month-pill">الشهر الجاري</span>' : '<span class="status-pill status-low expense-month-pill">أرشيف سابق</span>'}
+          </div>
         </div>
       </div>
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-        <button type="button" class="button button-secondary button-sm" id="btn-prev-month" data-year="${prevYear}" data-month="${prevMonth}" style="font-size:12px;padding:4px 12px;">
-          ◀ السابق
-        </button>
-        <select id="expense-month-picker" class="field-select" style="height:32px;font-size:12.5px;font-weight:700;padding:0 8px;border-radius:8px;">
-          ${sortedMonths.map((p) => `
-            <option value="${p.year}-${p.month}" ${p.year === currentYear && p.month === currentMonth ? 'selected' : ''}>
-              ${arabicMonths[p.month - 1]} ${p.year}
-            </option>
-          `).join('')}
-        </select>
-        <button type="button" class="button button-secondary button-sm" id="btn-next-month" data-year="${nextYear}" data-month="${nextMonth}" style="font-size:12px;padding:4px 12px;">
-          التالي ▶
-        </button>
+      <div class="expense-month-controls">
+        <div class="expense-stepper" role="group" aria-label="التنقل بين الشهور">
+          <button type="button" class="expense-stepper-btn" id="btn-prev-month" data-year="${prevYear}" data-month="${prevMonth}">
+            <span class="expense-chev-prev">${icon('chevron', 14)}</span>
+            <span>السابق</span>
+          </button>
+          <select id="expense-month-picker" class="expense-month-select" aria-label="اختر الشهر">
+            ${sortedMonths.map((p) => `
+              <option value="${p.year}-${p.month}" ${p.year === currentYear && p.month === currentMonth ? 'selected' : ''}>
+                ${arabicMonths[p.month - 1]} ${p.year}
+              </option>
+            `).join('')}
+          </select>
+          <button type="button" class="expense-stepper-btn" id="btn-next-month" data-year="${nextYear}" data-month="${nextMonth}">
+            <span>التالي</span>
+            <span class="expense-chev-next">${icon('chevron', 14)}</span>
+          </button>
+        </div>
         ${!isActualCurrentMonth ? `
-          <button type="button" class="button button-secondary button-sm" id="btn-current-month" data-year="${now.getFullYear()}" data-month="${now.getMonth() + 1}" style="font-size:12px;color:var(--purple);border-color:var(--purple);padding:4px 10px;">
+          <button type="button" class="button button-secondary button-sm expense-current-btn" id="btn-current-month" data-year="${now.getFullYear()}" data-month="${now.getMonth() + 1}">
             العودة للشهر الحالي
           </button>
         ` : ''}
       </div>
-    </div>
+    </section>
 
     <!-- ملخص أرقام الشهر -->
-    <div class="inventory-summary" style="grid-template-columns: repeat(4, minmax(0, 1fr));margin-bottom:20px;">
+    <div class="inventory-summary expense-summary-grid">
       <div class="inventory-summary-card">
         <span class="summary-badge summary-indigo">${icon('chart', 18)}</span>
         <div><small>إجمالي الإيجار والالتزامات</small><strong>${format(accrued)}</strong></div>
       </div>
       <div class="inventory-summary-card">
-        <span class="summary-badge summary-teal" style="background:var(--green-soft);color:var(--green);">${icon('check', 18)}</span>
-        <div><small>المسدد من الالتزامات</small><strong style="color:var(--green, #15803d);">${format(totalPaid)}</strong></div>
+        <span class="summary-badge summary-badge-green">${icon('check', 18)}</span>
+        <div><small>المسدد من الالتزامات</small><strong class="expense-val-green">${format(totalPaid)}</strong></div>
       </div>
       <div class="inventory-summary-card">
         <span class="summary-badge summary-amber">${icon('wallet', 18)}</span>
-        <div><small>الباقي غير المسدد</small><strong style="color:${BigInt(due) > 0n ? 'var(--rose, #be123c)' : 'var(--green, #15803d)'};">${format(due)}</strong></div>
+        <div><small>الباقي غير المسدد</small><strong class="${BigInt(due) > 0n ? 'expense-val-rose' : 'expense-val-green'}">${format(due)}</strong></div>
       </div>
       <div class="inventory-summary-card">
-        <span class="summary-badge summary-amber" style="background:var(--rose-soft);color:var(--rose);">${icon('wallet', 18)}</span>
-        <div><small>المصروفات المباشرة المسجلة</small><strong style="color:var(--rose, #be123c);">${format(totalDirectExpenses)}</strong></div>
+        <span class="summary-badge summary-badge-rose">${icon('wallet', 18)}</span>
+        <div><small>المصروفات المباشرة المسجلة</small><strong class="expense-val-rose">${format(totalDirectExpenses)}</strong></div>
       </div>
     </div>
 
     <!-- قائمة الالتزامات بنمط بطاقات التجار المصغرة -->
-    <div style="margin:22px 0 14px;">
-      <h3 style="margin:0;font-size:15px;font-weight:800;color:var(--ink);">الالتزامات الشهرية</h3>
+    <div class="expense-section-heading">
+      <h3>الالتزامات الشهرية</h3>
     </div>
 
     ${items.length ? items.map((item) => {
@@ -4179,13 +4185,13 @@ function expensesView() {
     `}
 
     <!-- سجل المصروفات المباشرة (مثل الكهرباء والصيانة) -->
-    <section class="panel compact-panel" style="margin-top:24px;">
+    <section class="panel compact-panel expense-direct-panel">
       <div class="panel-heading">
         <div>
-          <h3 style="font-size:15px;font-weight:800;color:var(--ink);margin:0;">سجل المصروفات المباشرة لشهر ${monthName} (${currentMonthExpenses.length} مصروف)</h3>
-          <p style="margin:2px 0 0;font-size:11.5px;color:var(--muted);">المصروفات التي تم تسجيلها (كهرباء، فواتير، مستلزمات، صيانة...).</p>
+          <h3>سجل المصروفات المباشرة لشهر ${monthName} (${currentMonthExpenses.length} مصروف)</h3>
+          <p>المصروفات التي تم تسجيلها (كهرباء، فواتير، مستلزمات، صيانة...).</p>
         </div>
-        <button type="button" class="button button-primary button-sm" id="new-expense-table-btn" style="font-size:12px;padding:4px 14px;">+ إضافة مصروف جديد</button>
+        <button type="button" class="button button-primary button-sm" id="new-expense-table-btn">+ إضافة مصروف جديد</button>
       </div>
 
       ${currentMonthExpenses.length ? `
@@ -4204,10 +4210,10 @@ function expensesView() {
               ${currentMonthExpenses.map((expense) => `
                 <tr>
                   <td><strong>${escapeHtml(expense.date)}</strong></td>
-                  <td><span class="status-pill status-complete" style="font-size:11.5px;font-weight:700;">${escapeHtml(expense.category)}</span></td>
+                  <td><span class="status-pill status-complete">${escapeHtml(expense.category)}</span></td>
                   <td><strong>${escapeHtml(expense.notes || 'مصروف مباشر')}</strong>${expense.referenceNumber ? ` · <span class="sku-code">${escapeHtml(expense.referenceNumber)}</span>` : ''}</td>
                   <td>${expense.paymentMethod === 'CASH_DRAWER' ? 'درج النقدية' : expense.paymentMethod === 'CASH_SAFE' ? 'الخزينة' : 'تحويل بنكي'}</td>
-                  <td style="text-align:left;" class="table-total" style="color:var(--rose, #be123c);font-weight:800;">${money(expense.amount)}</td>
+                  <td class="table-total expense-table-amount">${money(expense.amount)}</td>
                 </tr>
               `).join('')}
             </tbody>
