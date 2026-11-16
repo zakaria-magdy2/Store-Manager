@@ -520,6 +520,12 @@ async function loadData(storeId, year = state.selectedExpenseYear, month = state
   params.set('tzOffset', String(new Date().getTimezoneOffset()));
   const query = params.toString() ? `?${params.toString()}` : '';
   state.data = await api(`/api/data${query}`);
+  state.purchasesKey = null;
+  state.purchasesHistory = null;
+  state.purchasesSuppliers = null;
+  state.purchasesSummary = null;
+  state.returnsKey = null;
+  state.returnsHistory = null;
 }
 
 async function start() {
@@ -678,11 +684,24 @@ function invalidateFinancialCaches() {
   state.salesHistory = null;
   state.salesSummary = null;
   state.salesSummaryKey = null;
+  state.returnsHistory = null;
+  state.returnsHistoryTotal = 0;
+  state.returnsTotalAmount = null;
+  state.returnsKey = null;
+  state.purchasesHistory = null;
+  state.purchasesHistoryTotal = 0;
+  state.purchasesSummary = null;
+  state.purchasesSuppliers = null;
+  state.purchasesKey = null;
   state.shiftsData = null;
   state.financialMap = null;
   state.financialMapKey = null;
   state.growthForecast = null;
   state.growthForecastKey = null;
+}
+
+function accountingView() {
+  return profitLossView();
 }
 
 function invalidateUsersDerivedCache() {
@@ -1731,7 +1750,7 @@ function salesView() {
   const searchQuery = (state.salesHistorySearch ?? '').trim().toLowerCase();
   const hasReturnFilter = Boolean((from && to) || searchQuery);
   const matchingSaleNumbers = new Set(sales.map((sale) => String(sale.saleNumber ?? '').toLowerCase()).filter(Boolean));
-  const returns = hasReturnFilter
+  const fallbackReturns = hasReturnFilter
     ? allReturns.filter((item) => {
         if (from && to) {
           const itemDay = item.createdAt ? localDateIso(new Date(item.createdAt)) : '';
@@ -1749,6 +1768,8 @@ function salesView() {
         return true;
       })
     : allReturns;
+  const returns = state.returnsHistory ?? fallbackReturns;
+  const returnsTotalCount = state.returnsHistoryTotal ?? returns.length;
 
   const isCashier = state.data.user.role === 'CASHIER' || Boolean(state.data.capabilities.cashierMode);
   const canViewCogs = Boolean(state.data.capabilities.canViewCogs);
@@ -1871,7 +1892,7 @@ function salesView() {
           <h3 style="font-size: 15px; font-weight: 800; color: var(--ink);">سجل فواتير المرتجعات السابقة</h3>
           <p style="font-size: 11px; color: var(--muted);">كل عمليات الاسترجاع المسجلة على فواتير المبيعات مع المبالغ المستردة والمخزون المرتجع</p>
         </div>
-        <span class="status-pill status-complete">${hasReturnFilter ? `${returns.length} من ${allReturns.length} مرتجع` : `${returns.length} حركة مرتجع`}</span>
+        <span class="status-pill status-complete">${returns.length < returnsTotalCount ? `${returns.length} من ${returnsTotalCount} مرتجع` : `${returnsTotalCount} حركة مرتجع`}</span>
       </div>
     </div>
 
@@ -1879,7 +1900,7 @@ function salesView() {
       <summary style="padding:12px 18px;">
         <span style="font-size:13.5px;font-weight:750;color:var(--ink);">عرض جدول المرتجعات التفصيلي</span>
         <div style="display:flex;align-items:center;gap:10px;">
-          <span class="status-pill status-complete">${returns.length} مرتجع</span>
+          <span class="status-pill status-complete">${returnsTotalCount} مرتجع</span>
           <span class="disclosure-chevron" aria-hidden="true">${icon('chevron', 16)}</span>
         </div>
       </summary>
@@ -1909,6 +1930,7 @@ function salesView() {
               </tbody>
             </table>
           </div>
+          ${returns.length < returnsTotalCount ? '<div class="sales-history-more"><button type="button" class="button button-secondary" id="returns-history-more">عرض مرتجعات أقدم</button></div>' : ''}
         ` : `<div class="empty-row">${hasReturnFilter ? 'لا توجد مرتجعات مطابقة للفلتر في هذه الفترة.' : 'لا توجد مرتجعات مسجلة في هذا المتجر حتى الآن.'}</div>`}
       </div>
     </details>
@@ -2702,8 +2724,13 @@ function showPurchaseModelVariantsModal(modelGroup, purchase, supplier) {
   });
 }
 
+function currentPurchasesFilterKey() {
+  return `${state.data?.selectedStoreId ?? ''}|${state.supplierFrom || ''}|${state.supplierTo || ''}|${(state.supplierSearch ?? '').trim()}`;
+}
+
 function suppliersView() {
-  const suppliers = state.data.suppliers;
+  const bootstrapSuppliers = state.data.suppliers ?? [];
+  const suppliers = state.purchasesSuppliers ?? bootstrapSuppliers;
   const currency = state.data.company.currency;
   const today = localDateIso();
   if (state.supplierFrom === null || state.supplierFrom === undefined || state.supplierTo === null || state.supplierTo === undefined) {
@@ -2713,34 +2740,59 @@ function suppliersView() {
   }
   const from = state.supplierFrom ?? '';
   const to = state.supplierTo ?? '';
+  const searchQuery = (state.supplierSearch ?? '').trim();
+  const hasServerPurchases = state.purchasesKey === currentPurchasesFilterKey() && Array.isArray(state.purchasesHistory);
   const preset = syncPresetWithDates(state.supplierDatePreset, from, to, ['all', 'today', 'week', 'month', 'year'], 'weekSunday', 'all');
 
-  const filterPurchase = (p) => {
-    if (!from && !to) return true;
-    const day = p.purchasedAt ? localDateIso(new Date(p.purchasedAt)) : '';
-    if (from && day < from) return false;
-    if (to && day > to) return false;
+  const filterPurchaseFallback = (p) => {
+    if (from && to) {
+      const day = p.purchasedAt ? localDateIso(new Date(p.purchasedAt)) : '';
+      if (!day || day < from || day > to) return false;
+    }
+    if (searchQuery) {
+      const needle = searchQuery.toLowerCase();
+      const inv = String(p.invoiceNumber ?? '').toLowerCase();
+      const notes = String(p.notes ?? '').toLowerCase();
+      const itemsText = (p.items ?? []).map((i) => `${i.productName ?? ''} ${i.sku ?? ''}`).join(' ').toLowerCase();
+      if (!inv.includes(needle) && !notes.includes(needle) && !itemsText.includes(needle)) return false;
+    }
     return true;
   };
 
   const processedSuppliers = suppliers.map((supplier) => {
-    const purchases = supplier.purchases.filter(filterPurchase);
-    const totalPurchasedMinor = purchases.reduce((sum, p) => sum + BigInt(p.totalAmount.amount), 0n);
-    const totalPaidMinor = purchases.reduce((sum, p) => sum + BigInt(p.paidAmount.amount), 0n);
-    const balanceDueMinor = purchases.reduce((sum, p) => sum + BigInt(p.remainingAmount.amount), 0n);
+    if (hasServerPurchases) {
+      const loadedPurchases = state.purchasesHistory.filter((p) => p.supplierId === supplier.id);
+      return {
+        ...supplier,
+        purchases: loadedPurchases,
+        totalPurchaseCount: Number(supplier.purchaseCount ?? loadedPurchases.length),
+        filteredPurchased: String(supplier.totalPurchased ?? '0'),
+        filteredPaid: String(supplier.totalPaid ?? '0'),
+        filteredDue: String(supplier.balanceDue ?? '0'),
+      };
+    }
+    const purchases = (supplier.purchases ?? []).filter(filterPurchaseFallback);
+    const useUnfilteredTotals = !from && !to && !searchQuery && supplier.totalPurchased !== undefined;
+    const totalPurchasedMinor = useUnfilteredTotals ? BigInt(supplier.totalPurchased) : purchases.reduce((sum, p) => sum + BigInt(p.totalAmount.amount), 0n);
+    const totalPaidMinor = useUnfilteredTotals ? BigInt(supplier.totalPaid) : purchases.reduce((sum, p) => sum + BigInt(p.paidAmount.amount), 0n);
+    const balanceDueMinor = useUnfilteredTotals ? BigInt(supplier.balanceDue) : purchases.reduce((sum, p) => sum + BigInt(p.remainingAmount.amount), 0n);
     return {
       ...supplier,
       purchases,
+      totalPurchaseCount: useUnfilteredTotals ? Number(supplier.purchaseCount ?? purchases.length) : purchases.length,
       filteredPurchased: totalPurchasedMinor.toString(),
       filteredPaid: totalPaidMinor.toString(),
       filteredDue: balanceDueMinor.toString(),
     };
   });
 
-  const allFilteredPurchases = processedSuppliers.flatMap((s) => s.purchases);
-  const totalPurchasedAll = allFilteredPurchases.reduce((sum, p) => sum + BigInt(p.totalAmount.amount), 0n).toString();
-  const totalPaidAll = allFilteredPurchases.reduce((sum, p) => sum + BigInt(p.paidAmount.amount), 0n).toString();
-  const totalDueAll = allFilteredPurchases.reduce((sum, p) => sum + BigInt(p.remainingAmount.amount), 0n).toString();
+  const summaryObj = hasServerPurchases ? state.purchasesSummary : null;
+  const totalPurchasedAll = summaryObj?.totalPurchased?.amount ?? processedSuppliers.reduce((sum, s) => sum + BigInt(s.filteredPurchased), 0n).toString();
+  const totalPaidAll = summaryObj?.totalPaid?.amount ?? processedSuppliers.reduce((sum, s) => sum + BigInt(s.filteredPaid), 0n).toString();
+  const totalDueAll = summaryObj?.balanceDue?.amount ?? processedSuppliers.reduce((sum, s) => sum + BigInt(s.filteredDue), 0n).toString();
+  const loadedPurchasesCount = hasServerPurchases ? state.purchasesHistory.length : processedSuppliers.reduce((sum, s) => sum + s.purchases.length, 0);
+  const totalPurchasesCount = Number(summaryObj?.purchaseCount ?? loadedPurchasesCount);
+  const hasMorePurchases = hasServerPurchases && loadedPurchasesCount < totalPurchasesCount;
   const amount = (value) => money({ amount: value, currency, decimals: currencyDecimals(currency) });
 
   const purchaseDisclosure = (supplier, purchase) => {
@@ -2904,7 +2956,7 @@ function suppliersView() {
     </div>
 
     <section class="pro-filter-card">
-      <div class="pro-filter-row">
+      <div class="pro-filter-row pro-filter-row-presets">
         <div class="pro-filter-pills">
           <span class="pro-filter-label">
             ${icon('filter', 15)} تصفية الفواتير:
@@ -2915,7 +2967,13 @@ function suppliersView() {
           <button type="button" class="pro-filter-pill ${preset === 'month' ? 'active' : ''}" data-sup-preset="month">هذا الشهر</button>
           <button type="button" class="pro-filter-pill ${preset === 'year' ? 'active' : ''}" data-sup-preset="year">هذا العام</button>
         </div>
-        <form id="supplier-date-filter" class="pro-date-inputs">
+      </div>
+      <form id="supplier-date-filter" class="pro-filter-row pro-filter-row-split">
+        <div class="pro-search-wrap">
+          ${icon('search', 16)}
+          <input name="search" value="${escapeHtml(state.supplierSearch ?? '')}" placeholder="ابحث برقم فاتورة الشراء أو اسم الصنف أو الكود...">
+        </div>
+        <div class="pro-date-inputs">
           <div class="pro-input-wrap">
             <label>${icon('calendar', 14)} من:</label>
             <input type="date" name="from" value="${from}">
@@ -2925,9 +2983,9 @@ function suppliersView() {
             <input type="date" name="to" value="${to}">
           </div>
           <button type="submit" class="button button-primary button-sm">تطبيق</button>
-          ${from || to ? '<button type="button" class="text-action reset-sup-filter text-rose">مسح</button>' : ''}
-        </form>
-      </div>
+          ${from || to || searchQuery ? '<button type="button" class="text-action reset-sup-filter text-rose">مسح</button>' : ''}
+        </div>
+      </form>
     </section>
 
     <div class="inventory-summary expense-summary-grid">
@@ -2937,15 +2995,15 @@ function suppliersView() {
       </div>
       <div class="inventory-summary-card">
         <span class="summary-badge summary-teal">${icon('bag', 18)}</span>
-        <div><small>إجمالي المشتريات ${from || to ? '(في الفترة)' : ''}</small><strong class="table-total">${amount(totalPurchasedAll)}</strong></div>
+        <div><small>إجمالي المشتريات ${from || to || searchQuery ? '(في الفترة)' : ''}</small><strong class="table-total">${amount(totalPurchasedAll)}</strong></div>
       </div>
       <div class="inventory-summary-card">
         <span class="summary-badge summary-green">${icon('check', 18)}</span>
-        <div><small>تم السداد للتجار ${from || to ? '(في الفترة)' : ''}</small><strong class="table-total text-green">${amount(totalPaidAll)}</strong></div>
+        <div><small>تم السداد للتجار ${from || to || searchQuery ? '(في الفترة)' : ''}</small><strong class="table-total text-green">${amount(totalPaidAll)}</strong></div>
       </div>
       <div class="inventory-summary-card">
         <span class="summary-badge summary-amber">${icon('wallet', 18)}</span>
-        <div><small>مستحق للتجار ${from || to ? '(في الفترة)' : ''}</small><strong class="table-total ${BigInt(totalDueAll) > 0n ? 'text-rose' : ''}">${amount(totalDueAll)}</strong></div>
+        <div><small>مستحق للتجار ${from || to || searchQuery ? '(في الفترة)' : ''}</small><strong class="table-total ${BigInt(totalDueAll) > 0n ? 'text-rose' : ''}">${amount(totalDueAll)}</strong></div>
       </div>
     </div>
 
@@ -2958,7 +3016,7 @@ function suppliersView() {
             </span>
             <div>
               <h3>${escapeHtml(supplier.name)}</h3>
-              <p>${escapeHtml(supplier.phone || 'بدون رقم هاتف')} · ${supplier.purchases.length} فاتورة مسجلة</p>
+              <p>${escapeHtml(supplier.phone || 'بدون رقم هاتف')} · ${supplier.totalPurchaseCount ?? supplier.purchases.length} فاتورة مسجلة${supplier.purchases.length < (supplier.totalPurchaseCount ?? supplier.purchases.length) ? ` (معروض ${supplier.purchases.length})` : ''}</p>
             </div>
             <div class="supplier-meta-pills">
               <span class="purchase-meta-pill">مشتريات: <strong class="table-total">${amount(supplier.filteredPurchased)}</strong></span>
@@ -2981,6 +3039,7 @@ function suppliersView() {
         <button class="button button-primary" id="empty-new-supplier">إضافة تاجر</button>
       </section>
     `}
+    ${hasMorePurchases ? `<div class="sales-history-more"><button type="button" class="button button-secondary" id="purchases-history-more">عرض فواتير أقدم (${loadedPurchasesCount} من ${totalPurchasesCount})</button></div>` : ''}
   `;
 }
 
@@ -3151,8 +3210,11 @@ function profitLossView() {
       <div>
         <p class="page-lead">ملخص مباشر وواضح لأرباح المتجر بعد خصم تكلفة البضاعة والمصروفات، بدون أي تعقيد.</p>
       </div>
-      <div style="display:flex;align-items:center;gap:10px;">
-        <button type="button" class="button button-secondary" id="btn-pl-to-financial-map" style="font-weight:700;">
+      <div class="table-actions-inline">
+        <button type="button" class="button button-secondary" id="btn-open-journal-ledger">
+          ${icon('box', 16)} دفتر القيود المحاسبية
+        </button>
+        <button type="button" class="button button-secondary" id="btn-pl-to-financial-map">
           ${icon('chart', 16)} المسار المالي
         </button>
       </div>
@@ -4368,6 +4430,46 @@ function bindExpenses() {
   document.querySelector('#new-expense-table-btn')?.addEventListener('click', openExpenseModal);
 }
 
+async function fetchPurchasesHistory(offset, append, button = null) {
+  const requestKey = currentPurchasesFilterKey();
+  try {
+    const queryObj = {
+      storeId: state.data.selectedStoreId,
+      offset: String(offset),
+      limit: '50',
+      tzOffset: String(new Date().getTimezoneOffset()),
+    };
+    const searchVal = (state.supplierSearch ?? '').trim();
+    if (searchVal) queryObj.search = searchVal;
+    if (state.supplierFrom && state.supplierTo) {
+      queryObj.from = state.supplierFrom;
+      queryObj.to = state.supplierTo;
+    }
+    const params = new URLSearchParams(queryObj);
+    const result = await api(`/api/purchases?${params.toString()}`);
+    state.purchasesHistory = append ? [...(state.purchasesHistory ?? []), ...result.payload.purchases] : result.payload.purchases;
+    state.purchasesSuppliers = result.payload.suppliers;
+    state.purchasesHistoryTotal = result.payload.total;
+    state.purchasesSummary = result.payload.summary;
+    state.purchasesKey = requestKey;
+    render();
+  } catch (error) {
+    state.purchasesKey = null;
+    toast(error.message, 'error');
+    if (button) button.disabled = false;
+  }
+}
+
+function findLoadedPurchase(purchaseId) {
+  const fromPaged = (state.purchasesHistory ?? []).find((item) => item.id === purchaseId);
+  if (fromPaged) {
+    const sup = (state.purchasesSuppliers ?? state.data.suppliers ?? []).find((s) => s.id === fromPaged.supplierId);
+    return { purchase: fromPaged, supplier: sup };
+  }
+  const sup = (state.data.suppliers ?? []).find((s) => (s.purchases ?? []).some((p) => p.id === purchaseId));
+  return { purchase: sup?.purchases?.find((p) => p.id === purchaseId) ?? null, supplier: sup ?? null };
+}
+
 function bindSuppliers() {
   document.querySelector('#new-supplier, #empty-new-supplier')?.addEventListener('click', () => supplierModal('<label>اسم التاجر<input name="name" required minlength="2" maxlength="120"></label><label>رقم الهاتف<input name="phone" maxlength="40" type="tel"></label><label>ملاحظات<input name="notes" maxlength="500"></label>', 'supplier-form', '/api/suppliers'));
   const purchase = (supplierId = '') => {
@@ -5077,6 +5179,11 @@ function bindSuppliers() {
       updatePurchaseTotal();
     });
   };
+  const expectedKey = currentPurchasesFilterKey();
+  if (state.purchasesKey !== expectedKey) {
+    void fetchPurchasesHistory(0, false);
+  }
+
   document.querySelector('#new-purchase')?.addEventListener('click', () => purchase());
   document.querySelectorAll('.purchase-for-supplier').forEach((button) => button.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -5085,22 +5192,21 @@ function bindSuppliers() {
   document.querySelectorAll('.view-model-sizes-btn').forEach((button) => button.addEventListener('click', () => {
     const purchaseId = button.dataset.purchaseId;
     const modelKey = button.dataset.modelKey;
-    const supplier = state.data.suppliers.find((s) => s.purchases.some((p) => p.id === purchaseId));
-    const purchase = supplier?.purchases.find((p) => p.id === purchaseId);
-    if (!purchase) return;
-    const groups = groupPurchaseItemsByModel(purchase, state.data.products);
+    const { purchase: foundPurchase, supplier } = findLoadedPurchase(purchaseId);
+    if (!foundPurchase) return;
+    const groups = groupPurchaseItemsByModel(foundPurchase, state.data.products);
     const group = groups.find((g) => g.key === modelKey);
-    if (group) showPurchaseModelVariantsModal(group, purchase, supplier);
+    if (group) showPurchaseModelVariantsModal(group, foundPurchase, supplier);
   }));
   document.querySelectorAll('.print-purchase-labels').forEach((button) => button.addEventListener('click', () => {
-    const purchaseRecord = state.data.suppliers.flatMap((supplier) => supplier.purchases).find((item) => item.id === button.dataset.purchaseId);
+    const { purchase: purchaseRecord } = findLoadedPurchase(button.dataset.purchaseId);
     if (purchaseRecord) showBarcodeLabelsModal({ purchase: purchaseRecord });
   }));
   document.querySelectorAll('.return-supplier-item').forEach((button) => button.addEventListener('click', () => {
-    const purchase = state.data.suppliers.flatMap((supplier) => supplier.purchases).find((item) => item.id === button.dataset.purchase);
-    const line = purchase?.items.find((item) => item.id === button.dataset.item);
+    const { purchase: foundPurchase } = findLoadedPurchase(button.dataset.purchase);
+    const line = foundPurchase?.items.find((item) => item.id === button.dataset.item);
     if (!line) return;
-    supplierModal(`<p>${escapeHtml(line.productName)} \u00b7 \u0627\u0644\u0643\u0645\u064a\u0629 \u0627\u0644\u0645\u062a\u0627\u062d\u0629 \u0644\u0644\u0625\u0631\u062c\u0627\u0639: <strong>${line.returnableQuantity}</strong>. \u064a\u064f\u062d\u0633\u0628 \u0631\u0635\u064a\u062f \u0627\u0644\u062a\u0627\u062c\u0631 \u0628\u0633\u0639\u0631 \u0627\u0644\u0641\u0627\u062a\u0648\u0631\u0629.</p><label>\u0627\u0644\u0643\u0645\u064a\u0629 \u0627\u0644\u0645\u0631\u0627\u062f \u0625\u0631\u062c\u0627\u0639\u0647\u0627<input name="quantity" type="number" min="1" max="${line.returnableQuantity}" step="1" value="1" required></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'supplier-return-form', `/api/purchases/${purchase.id}/returns`, (data) => ({ idempotencyKey: data.idempotencyKey, storeId: data.storeId, items: [{ purchaseItemId: line.id, quantity: data.quantity }] }), '\u062a\u0645 \u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u0645\u0631\u062a\u062c\u0639 \u0648\u062a\u062d\u062f\u064a\u062b \u0627\u0644\u0645\u062e\u0632\u0648\u0646 \u0648\u0631\u0635\u064a\u062f \u0627\u0644\u062a\u0627\u062c\u0631');
+    supplierModal(`<p>${escapeHtml(line.productName)} \u00b7 \u0627\u0644\u0643\u0645\u064a\u0629 \u0627\u0644\u0645\u062a\u0627\u062d\u0629 \u0644\u0644\u0625\u0631\u062c\u0627\u0639: <strong>${line.returnableQuantity}</strong>. \u064a\u064f\u062d\u0633\u0628 \u0631\u0635\u064a\u062f \u0627\u0644\u062a\u0627\u062c\u0631 \u0628\u0633\u0639\u0631 \u0627\u0644\u0641\u0627\u062a\u0648\u0631\u0629.</p><label>\u0627\u0644\u0643\u0645\u064a\u0629 \u0627\u0644\u0645\u0631\u0627\u062f \u0625\u0631\u062c\u0627\u0639\u0647\u0627<input name="quantity" type="number" min="1" max="${line.returnableQuantity}" step="1" value="1" required></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'supplier-return-form', `/api/purchases/${foundPurchase.id}/returns`, (data) => ({ idempotencyKey: data.idempotencyKey, storeId: data.storeId, items: [{ purchaseItemId: line.id, quantity: data.quantity }] }), '\u062a\u0645 \u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u0645\u0631\u062a\u062c\u0639 \u0648\u062a\u062d\u062f\u064a\u062b \u0627\u0644\u0645\u062e\u0632\u0648\u0646 \u0648\u0631\u0635\u064a\u062f \u0627\u0644\u062a\u0627\u062c\u0631');
   }));
   document.querySelectorAll('.pay-purchase').forEach((button) => button.addEventListener('click', () => {
     const decimals = currencyDecimals(state.data.company.currency), digits = BigInt(button.dataset.remaining).toString().padStart(decimals + 1, '0');
@@ -5114,12 +5220,15 @@ function bindSuppliers() {
     state.supplierDatePreset = preset;
     state.supplierFrom = range.from;
     state.supplierTo = range.to;
-    render();
+    state.purchasesHistory = null;
+    state.purchasesKey = null;
+    void fetchPurchasesHistory(0, false);
   }));
 
   document.querySelector('#supplier-date-filter')?.addEventListener('submit', (event) => {
     event.preventDefault();
     const fd = new FormData(event.currentTarget);
+    const search = String(fd.get('search') ?? '').trim();
     const from = String(fd.get('from') ?? '').trim();
     const to = String(fd.get('to') ?? '').trim();
     if ((from && !to) || (!from && to)) {
@@ -5130,18 +5239,60 @@ function bindSuppliers() {
       toast('تاريخ البداية لازم يكون قبل تاريخ النهاية', 'error');
       return;
     }
+    state.supplierSearch = search;
     state.supplierFrom = from;
     state.supplierTo = to;
-    state.supplierDatePreset = syncPresetWithDates(null, from, to, ['all', 'today', 'week', 'month', 'year'], 'weekSunday', 'all');
-    render();
+    state.supplierDatePreset = (!from && !to) ? 'all' : syncPresetWithDates(null, from, to, ['all', 'today', 'week', 'month', 'year'], 'weekSunday', 'all');
+    state.purchasesHistory = null;
+    state.purchasesKey = null;
+    void fetchPurchasesHistory(0, false);
   });
 
   document.querySelector('.reset-sup-filter')?.addEventListener('click', () => {
     state.supplierDatePreset = 'all';
+    state.supplierSearch = '';
     state.supplierFrom = '';
     state.supplierTo = '';
-    render();
+    state.purchasesHistory = null;
+    state.purchasesKey = null;
+    void fetchPurchasesHistory(0, false);
   });
+
+  document.querySelector('#purchases-history-more')?.addEventListener('click', (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    const currentLength = (state.purchasesHistory ?? []).length;
+    void fetchPurchasesHistory(currentLength, true, button);
+  });
+}
+
+async function fetchReturnsHistory(offset, append, button = null) {
+  const requestKey = currentSalesFilterKey();
+  try {
+    const searchVal = (state.salesHistorySearch ?? '').trim();
+    const queryObj = {
+      storeId: state.data.selectedStoreId,
+      offset: String(offset),
+      limit: '100',
+      tzOffset: String(new Date().getTimezoneOffset()),
+    };
+    if (searchVal) queryObj.search = searchVal;
+    if (state.salesFrom && state.salesTo) {
+      queryObj.from = state.salesFrom;
+      queryObj.to = state.salesTo;
+    }
+    const params = new URLSearchParams(queryObj);
+    const result = await api(`/api/customer-returns?${params.toString()}`);
+    state.returnsHistory = append ? [...(state.returnsHistory ?? []), ...result.payload.returns] : result.payload.returns;
+    state.returnsHistoryTotal = result.payload.total;
+    state.returnsTotalAmount = result.payload.totalRefunds;
+    state.returnsKey = requestKey;
+    render();
+  } catch (error) {
+    state.returnsKey = null;
+    if (button) button.disabled = false;
+    toast(error.message, 'error');
+  }
 }
 
 async function bindSalesHistory() {
@@ -5150,6 +5301,10 @@ async function bindSalesHistory() {
   if (state.salesSummaryKey !== expectedKey || !state.salesSummary) {
     state.salesSummaryKey = expectedKey;
     void fetchSalesHistory(0, false);
+  }
+  if (state.returnsKey !== expectedKey) {
+    state.returnsKey = expectedKey;
+    void fetchReturnsHistory(0, false);
   }
 
   document.querySelectorAll('[data-sales-preset]').forEach((btn) => {
@@ -5163,7 +5318,9 @@ async function bindSalesHistory() {
       state.salesHistoryTotal = 0;
       state.salesSummary = null;
       state.salesSummaryKey = currentSalesFilterKey();
-      await fetchSalesHistory(0, false);
+      state.returnsHistory = [];
+      state.returnsKey = currentSalesFilterKey();
+      await Promise.all([fetchSalesHistory(0, false), fetchReturnsHistory(0, false)]);
     });
   });
 
@@ -5190,7 +5347,9 @@ async function bindSalesHistory() {
     state.salesHistoryTotal = 0;
     state.salesSummary = null;
     state.salesSummaryKey = currentSalesFilterKey();
-    await fetchSalesHistory(0, false);
+    state.returnsHistory = [];
+    state.returnsKey = currentSalesFilterKey();
+    await Promise.all([fetchSalesHistory(0, false), fetchReturnsHistory(0, false)]);
   });
 
   document.querySelector('#reset-sales-filter')?.addEventListener('click', async () => {
@@ -5202,7 +5361,9 @@ async function bindSalesHistory() {
     state.salesHistoryTotal = 0;
     state.salesSummary = null;
     state.salesSummaryKey = currentSalesFilterKey();
-    await fetchSalesHistory(0, false);
+    state.returnsHistory = [];
+    state.returnsKey = currentSalesFilterKey();
+    await Promise.all([fetchSalesHistory(0, false), fetchReturnsHistory(0, false)]);
   });
 
   document.querySelector('#sales-history-more')?.addEventListener('click', async (event) => {
@@ -5210,6 +5371,13 @@ async function bindSalesHistory() {
     button.disabled = true;
     const currentLength = (state.salesHistory ?? state.data.sales ?? []).length;
     await fetchSalesHistory(currentLength, true, button);
+  });
+
+  document.querySelector('#returns-history-more')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    const currentLength = (state.returnsHistory ?? []).length;
+    await fetchReturnsHistory(currentLength, true, button);
   });
 }
 
@@ -5758,7 +5926,9 @@ function bindMonthlyExpenses() {
 function computeSystemAlerts(data) {
   const lowStock = data?.lowStock ?? [];
   const suppliersDue = (data?.suppliers ?? []).filter((s) => {
-    const due = (Array.isArray(s?.purchases) ? s.purchases : []).reduce((sum, p) => sum + BigInt(p?.remainingAmount?.amount ?? 0), 0n);
+    const due = s?.balanceDue !== undefined
+      ? BigInt(s.balanceDue)
+      : (Array.isArray(s?.purchases) ? s.purchases : []).reduce((sum, p) => sum + BigInt(p?.remainingAmount?.amount ?? 0), 0n);
     return due > 0n;
   });
   const monthlyDue = (data?.monthlyExpenses ?? []).filter((m) => m?.actual && BigInt(m.actual?.remainingAmount?.amount ?? 0) > 0n);
@@ -5843,7 +6013,9 @@ function showNotificationsModal() {
               </div>
               <div style="display:grid;gap:6px;max-height:170px;overflow-y:auto;font-size:12px;">
                 ${suppliersDue.map((s) => {
-                  const due = (Array.isArray(s?.purchases) ? s.purchases : []).reduce((sum, p) => sum + BigInt(p?.remainingAmount?.amount ?? 0), 0n);
+                  const due = s?.balanceDue !== undefined
+                    ? BigInt(s.balanceDue)
+                    : (Array.isArray(s?.purchases) ? s.purchases : []).reduce((sum, p) => sum + BigInt(p?.remainingAmount?.amount ?? 0), 0n);
                   return `<div class="notif-divider" style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:5px 0;"><span>• <strong>${escapeHtml(s.name)}</strong></span><span class="notif-amount" style="font-weight:800;white-space:nowrap;">متبقي: ${money({ amount: due.toString(), currency, decimals })}</span></div>`;
                 }).join('')}
               </div>
@@ -5984,6 +6156,8 @@ function bindShell() {
     state.supplierDatePreset = 'today';
     state.supplierFrom = null;
     state.supplierTo = null;
+    state.supplierSearch = '';
+    invalidateFinancialCaches();
     state.financialMapRange = 'today';
     state.financialMap = null;
     state.financialMapKey = null;
@@ -6593,8 +6767,116 @@ function bindTopProducts() {
     toast(error.message, 'error');
   });
 }
+async function showJournalLedgerModal() {
+  const modal = getModalRoot();
+  const currency = state.data.company.currency;
+  const decimals = currencyDecimals(currency);
+  let entries = [];
+  let total = 0;
+  let offset = 0;
+  let from = state.reportFrom || '';
+  let to = state.reportTo || '';
+  let sourceType = '';
+  const sourceLabels = {
+    SALE: 'فاتورة بيع',
+    RETURN: 'مرتجع عميل',
+    PURCHASE: 'فاتورة شراء',
+    PURCHASE_PAYMENT: 'سداد تاجر',
+    SUPPLIER_RETURN: 'مرتجع لتاجر',
+    EXPENSE: 'مصروف',
+    CASH_TRANSFER: 'تحويل خزينة',
+    SHIFT_VARIANCE: 'تسوية شيفت',
+    INVENTORY_ADJUSTMENT: 'تسوية / جرد مخزون',
+  };
+
+  const loadPage = async (append) => {
+    const queryObj = { storeId: state.data.selectedStoreId, offset: String(offset), limit: '50' };
+    if (from && to) { queryObj.from = from; queryObj.to = to; }
+    if (sourceType) queryObj.sourceType = sourceType;
+    const res = await api(`/api/journal-entries?${new URLSearchParams(queryObj).toString()}`);
+    entries = append ? [...entries, ...res.payload.entries] : res.payload.entries;
+    total = res.payload.total;
+    draw();
+  };
+
+  const draw = () => {
+    modal.innerHTML = `
+      <div class="modal-backdrop">
+        <section class="panel modal-card modal-wide">
+          <div class="panel-heading">
+            <div>
+              <h3>دفتر القيود المحاسبية الكامل</h3>
+              <p>عرض ${entries.length} من إجمالي ${total} قيد محاسبي مزدوج (المدين = الدائن)</p>
+            </div>
+            <button type="button" class="button button-secondary button-sm" data-close-modal>إغلاق</button>
+          </div>
+          <form id="journal-ledger-filter" class="pro-filter-row pro-filter-row-split">
+            <select name="sourceType">
+              <option value="" ${!sourceType ? 'selected' : ''}>كل أنواع القيود</option>
+              ${Object.entries(sourceLabels).map(([k, lbl]) => `<option value="${k}" ${sourceType === k ? 'selected' : ''}>${escapeHtml(lbl)}</option>`).join('')}
+            </select>
+            <div class="pro-date-inputs">
+              <div class="pro-input-wrap"><label>من:</label><input type="date" name="from" value="${from}"></div>
+              <div class="pro-input-wrap"><label>إلى:</label><input type="date" name="to" value="${to}"></div>
+              <button type="submit" class="button button-primary button-sm">تطبيق</button>
+              ${from || to || sourceType ? '<button type="button" id="reset-journal-filter" class="button button-secondary button-sm">الكل</button>' : ''}
+            </div>
+          </form>
+          ${entries.length ? `
+            <div class="table-scroll analytics-scroll-box">
+              <table class="compact-table zebra-table">
+                <thead><tr><th>رقم القيد</th><th>التاريخ</th><th>النوع</th><th>البيان</th><th>المدين</th><th>الدائن</th><th>الاتزان</th></tr></thead>
+                <tbody>
+                  ${entries.map((entry) => `
+                    <tr>
+                      <td><span class="sku-code">${escapeHtml(entry.entryNumber)}</span></td>
+                      <td>${escapeHtml(String(entry.date).slice(0, 10))}</td>
+                      <td><span class="status-pill">${escapeHtml(sourceLabels[entry.sourceType] ?? entry.sourceType)}</span></td>
+                      <td>${escapeHtml(entry.description)}</td>
+                      <td class="table-total">${money({ amount: entry.debitTotal, currency, decimals })}</td>
+                      <td class="table-total">${money({ amount: entry.creditTotal, currency, decimals })}</td>
+                      <td><span class="status-pill ${entry.balanced ? 'status-complete' : 'status-low'}">${entry.balanced ? 'متزن ✓' : 'غير متزن'}</span></td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+            ${entries.length < total ? `<div class="sales-history-more"><button type="button" class="button button-secondary" id="journal-ledger-more">عرض قيود أقدم (${entries.length} من ${total})</button></div>` : ''}
+          ` : '<div class="empty-row">لا توجد قيود محاسبية في النطاق المحدد.</div>'}
+        </section>
+      </div>
+    `;
+    modal.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { modal.innerHTML = ''; }));
+    modal.querySelector('#journal-ledger-filter')?.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.currentTarget);
+      const nextFrom = String(fd.get('from') ?? '').trim();
+      const nextTo = String(fd.get('to') ?? '').trim();
+      if ((nextFrom && !nextTo) || (!nextFrom && nextTo)) { toast('حدد تاريخي البداية والنهاية معاً', 'error'); return; }
+      from = nextFrom;
+      to = nextTo;
+      sourceType = String(fd.get('sourceType') ?? '').trim();
+      offset = 0;
+      void loadPage(false);
+    });
+    modal.querySelector('#reset-journal-filter')?.addEventListener('click', () => {
+      from = ''; to = ''; sourceType = ''; offset = 0;
+      void loadPage(false);
+    });
+    modal.querySelector('#journal-ledger-more')?.addEventListener('click', () => {
+      offset = entries.length;
+      void loadPage(true);
+    });
+  };
+
+  await loadPage(false).catch((error) => { toast(error.message, 'error'); });
+}
+
 function bindProfitLoss() {
   bindAccounting();
+  document.querySelector('#btn-open-journal-ledger')?.addEventListener('click', () => {
+    void showJournalLedgerModal();
+  });
   document.querySelector('#pl-section-select')?.addEventListener('change', (event) => {
     state.plSection = event.currentTarget.value;
     render();

@@ -212,6 +212,13 @@ rawDbInit.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_cashier_shifts_tenant_store ON cashier_shifts(tenant_id, store_id, started_at);
   CREATE INDEX IF NOT EXISTS idx_cashier_shifts_user_status ON cashier_shifts(tenant_id, user_id, status);
+  CREATE TABLE IF NOT EXISTS auth_rate_limits (
+    scope TEXT NOT NULL,
+    key TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    started_at INTEGER NOT NULL,
+    PRIMARY KEY (scope, key)
+  );
 `);
 
 function generateNextShiftNumber(tenantId) {
@@ -541,35 +548,252 @@ async function computeDrawerBookBalanceMinor(conn, tenantId, storeId) {
   const { drawer } = await computeTreasuryBalancesMinor(conn, tenantId, storeId);
   return drawer;
 }
-const failedLogins = new Map();
+
+// ---------------------------------------------------------------------------
+// Paged history helpers (purchases, journal entries, customer returns).
+// The bootstrap payload only carries a recent window; these helpers give the UI
+// access to the complete history with filters while totals always come from SQL
+// aggregates over every matching row, never from the loaded window.
+// ---------------------------------------------------------------------------
+const BOOTSTRAP_PURCHASE_WINDOW = 200;
+const HISTORY_PAGE_MAX = 100;
+
+function chunkIds(ids, size = 400) {
+  const out = [];
+  for (let i = 0; i < ids.length; i += size) out.push(ids.slice(i, i + size));
+  return out;
+}
+
+function parsePaging(url, defaultLimit = 50) {
+  const offset = Math.max(0, Math.min(Number.parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 100000000));
+  const limit = Math.max(1, Math.min(Number.parseInt(url.searchParams.get('limit') ?? String(defaultLimit), 10) || defaultLimit, HISTORY_PAGE_MAX));
+  return { offset, limit };
+}
+
+function parseHistoryRange(url) {
+  const from = url.searchParams.get('from');
+  const to = url.searchParams.get('to');
+  if ((from === null || from === '') !== (to === null || to === '')) throw Object.assign(new Error('يجب تحديد تاريخ البداية والنهاية معًا'), { status: 400 });
+  if (!from || !to) return { from: null, to: null, bounds: null };
+  reportDay(from); reportDay(to);
+  if (from > to) throw Object.assign(new Error('تاريخ البداية يجب أن يسبق تاريخ النهاية'), { status: 400 });
+  return { from, to, bounds: queryRangeBounds(from, to, url) };
+}
+
+async function resolveHistoryStore(ctx, url) {
+  const stores = await storeRepo.listByTenant(ctx);
+  const storeId = ctx.storeId ?? url.searchParams.get('storeId') ?? stores[0]?.id;
+  if (!storeId || !stores.some((store) => store.id === storeId)) throw Object.assign(new Error('الفرع المحدد غير متاح لهذا المستخدم'), { status: 403 });
+  return storeId;
+}
+
+async function tenantCurrencyCode(tenantId) {
+  const tenant = await tenantRepo.findById(tenantId);
+  return typeof tenant?.currency === 'string' ? tenant.currency : (tenant?.currency?.code ?? 'EGP');
+}
+
+async function tenantUserNameMap(tenantId) {
+  const rows = await db.selectFrom('users').select(['id', 'username', 'full_name as fullName']).where('tenant_id', '=', tenantId).execute();
+  return new Map(rows.map((u) => [u.id, u.fullName || u.username]));
+}
+
+function purchaseFilterSql({ tenantId, storeId, bounds = null, supplierId = null, search = '' }) {
+  const conds = ['p.tenant_id = ?', 'p.store_id = ?'];
+  const args = [tenantId, storeId];
+  if (bounds) {
+    conds.push("replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') >= ?", "replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') < ?");
+    args.push(bounds.startIso, bounds.endExclusiveIso);
+  }
+  if (supplierId) { conds.push('p.supplier_id = ?'); args.push(supplierId); }
+  if (search) {
+    conds.push(`(instr(lower(coalesce(p.invoice_number, '')), lower(?)) > 0 OR instr(lower(coalesce(p.notes, '')), lower(?)) > 0 OR EXISTS (SELECT 1 FROM supplier_purchase_items i WHERE i.tenant_id = p.tenant_id AND i.purchase_id = p.id AND (instr(lower(i.product_name), lower(?)) > 0 OR instr(lower(i.sku), lower(?)) > 0)))`);
+    args.push(search, search, search, search);
+  }
+  return { where: conds.join(' AND '), args };
+}
+
+/** Full-history (or filtered) supplier totals computed in SQL: never limited by a page window. */
+function supplierPurchaseAggregates(filter) {
+  const { where, args } = purchaseFilterSql(filter);
+  const rows = database.getRawDatabase().prepare(`
+    SELECT p.supplier_id AS supplierId,
+      COUNT(*) AS purchaseCount,
+      COALESCE(SUM(p.total_amount), 0) AS totalAmount,
+      COALESCE(SUM(p.initial_paid_amount), 0) AS initialPaid,
+      COALESCE(SUM((SELECT COALESCE(SUM(sp.amount), 0) FROM supplier_payments sp WHERE sp.tenant_id = p.tenant_id AND sp.purchase_id = p.id)), 0) AS laterPaid,
+      COALESCE(SUM((SELECT COALESCE(SUM(sr.credit_amount), 0) FROM supplier_returns sr WHERE sr.tenant_id = p.tenant_id AND sr.purchase_id = p.id)), 0) AS returnedCredit
+    FROM supplier_purchases p
+    WHERE ${where}
+    GROUP BY p.supplier_id
+  `).all(...args);
+  const map = new Map();
+  for (const row of rows) {
+    const total = BigInt(row.totalAmount ?? 0);
+    const paid = BigInt(row.initialPaid ?? 0) + BigInt(row.laterPaid ?? 0);
+    const returned = BigInt(row.returnedCredit ?? 0);
+    map.set(row.supplierId, { purchaseCount: Number(row.purchaseCount ?? 0), total, paid, returned, due: total - paid - returned });
+  }
+  return map;
+}
+
+function serializeSupplierSummary(supplier, totals, currency, purchases) {
+  const t = totals ?? { purchaseCount: 0, total: 0n, paid: 0n, returned: 0n, due: 0n };
+  return {
+    id: supplier.id,
+    name: supplier.name,
+    phone: supplier.phone,
+    notes: supplier.notes,
+    purchases,
+    purchaseCount: t.purchaseCount,
+    purchasesComplete: purchases.length >= t.purchaseCount,
+    totalPurchased: t.total.toString(),
+    totalPaid: t.paid.toString(),
+    returnedCredit: t.returned.toString(),
+    balanceDue: t.due.toString(),
+    currency,
+  };
+}
+
+/** Serializes purchase rows with their items, payments and returns, loading children only for these rows. */
+async function loadPurchaseEntries(tenantId, purchaseRows, userMap) {
+  if (!purchaseRows.length) return [];
+  const ids = purchaseRows.map((p) => p.id);
+  const items = [];
+  const payments = [];
+  const vendorReturns = [];
+  for (const chunk of chunkIds(ids)) {
+    items.push(...await db.selectFrom('supplier_purchase_items').selectAll().where('tenant_id', '=', tenantId).where('purchase_id', 'in', chunk).execute());
+    payments.push(...await db.selectFrom('supplier_payments').selectAll().where('tenant_id', '=', tenantId).where('purchase_id', 'in', chunk).execute());
+    vendorReturns.push(...await db.selectFrom('supplier_returns').selectAll().where('tenant_id', '=', tenantId).where('purchase_id', 'in', chunk).orderBy('created_at', 'desc').execute());
+  }
+  const returnedQuantityByPurchaseItem = new Map();
+  for (const chunk of chunkIds(items.map((item) => item.id))) {
+    const rows = await db.selectFrom('supplier_return_items').selectAll().where('tenant_id', '=', tenantId).where('purchase_item_id', 'in', chunk).execute();
+    for (const row of rows) returnedQuantityByPurchaseItem.set(row.purchase_item_id, (returnedQuantityByPurchaseItem.get(row.purchase_item_id) ?? 0n) + BigInt(row.quantity));
+  }
+  const group = (rows, key) => {
+    const map = new Map();
+    for (const row of rows) { const bucket = map.get(row[key]) ?? []; bucket.push(row); map.set(row[key], bucket); }
+    return map;
+  };
+  const itemsByPurchase = group(items, 'purchase_id');
+  const paymentsByPurchase = group(payments, 'purchase_id');
+  const returnsByPurchase = group(vendorReturns, 'purchase_id');
+  return purchaseRows.map((purchase) => {
+    const purchasePayments = paymentsByPurchase.get(purchase.id) ?? [];
+    const purchaseReturns = returnsByPurchase.get(purchase.id) ?? [];
+    const paid = BigInt(purchase.initial_paid_amount) + purchasePayments.reduce((sum, payment) => sum + BigInt(payment.amount), 0n);
+    const returnCredit = purchaseReturns.reduce((sum, item) => sum + BigInt(item.credit_amount), 0n);
+    return {
+      id: purchase.id,
+      supplierId: purchase.supplier_id,
+      invoiceNumber: purchase.invoice_number,
+      purchasedAt: purchase.purchased_at,
+      createdByUserId: purchase.created_by_user_id,
+      createdByName: userMap.get(purchase.created_by_user_id) || 'المسؤول',
+      totalAmount: moneyJson(Money.fromMinor(BigInt(purchase.total_amount), purchase.currency)),
+      paidAmount: moneyJson(Money.fromMinor(paid, purchase.currency)),
+      returnedCredit: moneyJson(Money.fromMinor(returnCredit, purchase.currency)),
+      remainingAmount: moneyJson(Money.fromMinor(BigInt(purchase.total_amount) - paid - returnCredit, purchase.currency)),
+      targetProfitPercent: purchase.target_profit_percent ?? null,
+      expectedRetailTotal: purchase.expected_retail_total !== null && purchase.expected_retail_total !== undefined ? moneyJson(Money.fromMinor(BigInt(purchase.expected_retail_total), purchase.currency)) : null,
+      notes: purchase.notes,
+      items: (itemsByPurchase.get(purchase.id) ?? []).map((line) => {
+        const returned = returnedQuantityByPurchaseItem.get(line.id) ?? 0n;
+        return {
+          id: line.id,
+          productName: line.product_name,
+          sku: line.sku,
+          quantity: line.quantity.toString(),
+          returnableQuantity: (BigInt(line.quantity) - returned).toString(),
+          unitCost: moneyJson(Money.fromMinor(BigInt(line.unit_cost), line.currency)),
+          retailPrice: line.retail_price !== null && line.retail_price !== undefined ? moneyJson(Money.fromMinor(BigInt(line.retail_price), line.currency)) : null,
+        };
+      }),
+      payments: purchasePayments.map((payment) => ({ id: payment.id, amount: moneyJson(Money.fromMinor(BigInt(payment.amount), payment.currency)), paymentMethod: payment.payment_method, referenceNumber: payment.reference_number, paidAt: payment.paid_at, createdByUserId: payment.created_by_user_id, createdByName: userMap.get(payment.created_by_user_id) || 'المسؤول' })),
+      returns: purchaseReturns.map((item) => ({ id: item.id, returnNumber: item.return_number, creditAmount: moneyJson(Money.fromMinor(BigInt(item.credit_amount), item.currency)), createdAt: item.created_at })),
+    };
+  });
+}
+
+async function serializeJournalEntries(journalHeaders) {
+  const lines = [];
+  for (const chunk of chunkIds(journalHeaders.map((entry) => entry.id))) {
+    lines.push(...await db.selectFrom('journal_lines').innerJoin('accounts', 'accounts.id', 'journal_lines.account_id')
+      .select(['journal_lines.journal_entry_id as entryId', 'journal_lines.entry_type as side', 'journal_lines.amount as amount', 'journal_lines.currency as currency', 'journal_lines.memo as memo', 'accounts.account_code as accountCode', 'accounts.account_name as accountName'])
+      .where('journal_lines.journal_entry_id', 'in', chunk).orderBy('journal_lines.created_at').execute());
+  }
+  const linesByEntryId = new Map();
+  for (const line of lines) {
+    const bucket = linesByEntryId.get(line.entryId) ?? [];
+    bucket.push(line);
+    linesByEntryId.set(line.entryId, bucket);
+  }
+  return journalHeaders.map((entry) => {
+    const entryLines = linesByEntryId.get(entry.id) ?? [];
+    const debit = entryLines.filter((line) => line.side === 'DEBIT').reduce((sum, line) => sum + BigInt(line.amount), 0n);
+    const credit = entryLines.filter((line) => line.side === 'CREDIT').reduce((sum, line) => sum + BigInt(line.amount), 0n);
+    return { id: entry.id, entryNumber: entry.entry_number, date: entry.entry_date, sourceType: entry.source_type, description: entryLines[0]?.memo?.split(' — ')[0] ?? entry.source_type, debitTotal: debit.toString(), creditTotal: credit.toString(), balanced: debit === credit, lines: entryLines.map((line) => ({ side: line.side, accountCode: line.accountCode, accountName: line.accountName, amount: moneyJson(Money.fromMinor(BigInt(line.amount), line.currency)), memo: line.memo })) };
+  });
+}
+
+function customerReturnFilterSql({ tenantId, storeId, bounds = null, search = '' }) {
+  const conds = ['cr.tenant_id = ?', 'cr.store_id = ?'];
+  const args = [tenantId, storeId];
+  if (bounds) { conds.push('cr.created_at >= ?', 'cr.created_at < ?'); args.push(bounds.startIso, bounds.endExclusiveIso); }
+  if (search) {
+    conds.push(`(instr(lower(cr.return_number), lower(?)) > 0 OR instr(lower(s.sale_number), lower(?)) > 0 OR instr(lower(coalesce(cr.payment_method, '')), lower(?)) > 0 OR instr(lower(coalesce(s.customer_name, '')), lower(?)) > 0 OR EXISTS (SELECT 1 FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id AND (instr(lower(si.product_name), lower(?)) > 0 OR instr(lower(si.sku), lower(?)) > 0)))`);
+    args.push(search, search, search, search, search, search);
+  }
+  return { where: conds.join(' AND '), args };
+}
 const MAX_FAILED_LOGINS = 6;
-const failedPasswordChanges = new Map();
 const MAX_FAILED_PASSWORD_CHANGES = 5;
 const LOCK_WINDOW_MS = 10 * 60 * 1000;
 const MAX_FAILED_KEYS = 2000;
 
-function pruneFailedLogins() {
+function getAuthFailures(scope, key) {
+  const row = database.getRawDatabase().prepare('SELECT count, started_at AS startedAt FROM auth_rate_limits WHERE scope = ? AND key = ?').get(scope, key);
+  return row ? { count: Number(row.count), startedAt: Number(row.startedAt) } : { count: 0, startedAt: Date.now() };
+}
+
+function recordAuthFailure(scope, key, windowMs = LOCK_WINDOW_MS) {
   const now = Date.now();
-  for (const [k, v] of failedLogins.entries()) {
-    if (now - v.startedAt >= LOCK_WINDOW_MS) failedLogins.delete(k);
+  const current = getAuthFailures(scope, key);
+  const inWindow = now - current.startedAt < windowMs;
+  const nextCount = (inWindow ? current.count : 0) + 1;
+  const nextStart = inWindow ? current.startedAt : now;
+  database.getRawDatabase().prepare(`
+    INSERT INTO auth_rate_limits (scope, key, count, started_at) VALUES (?, ?, ?, ?)
+    ON CONFLICT(scope, key) DO UPDATE SET count = excluded.count, started_at = excluded.started_at
+  `).run(scope, key, nextCount, nextStart);
+  return { count: nextCount, startedAt: nextStart };
+}
+
+function clearAuthFailures(scope, key) {
+  database.getRawDatabase().prepare('DELETE FROM auth_rate_limits WHERE scope = ? AND key = ?').run(scope, key);
+}
+
+function pruneAuthRateLimits(scope = null) {
+  const rawDb = database.getRawDatabase();
+  const cutoff = Date.now() - LOCK_WINDOW_MS;
+  if (scope) {
+    rawDb.prepare('DELETE FROM auth_rate_limits WHERE scope = ? AND started_at <= ?').run(scope, cutoff);
+    const total = Number(rawDb.prepare('SELECT COUNT(*) AS cnt FROM auth_rate_limits WHERE scope = ?').get(scope)?.cnt ?? 0);
+    if (total > MAX_FAILED_KEYS) {
+      rawDb.prepare('DELETE FROM auth_rate_limits WHERE scope = ? AND key IN (SELECT key FROM auth_rate_limits WHERE scope = ? ORDER BY started_at ASC LIMIT ?)').run(scope, scope, total - MAX_FAILED_KEYS);
+    }
+    return;
   }
-  while (failedLogins.size > MAX_FAILED_KEYS) {
-    const oldestKey = failedLogins.keys().next().value;
-    if (!oldestKey) break;
-    failedLogins.delete(oldestKey);
-  }
+  rawDb.prepare('DELETE FROM auth_rate_limits WHERE started_at <= ?').run(cutoff);
+}
+
+function pruneFailedLogins() {
+  pruneAuthRateLimits('login');
 }
 
 function pruneFailedPasswordChanges() {
-  const now = Date.now();
-  for (const [k, v] of failedPasswordChanges.entries()) {
-    if (now - v.startedAt >= LOCK_WINDOW_MS) failedPasswordChanges.delete(k);
-  }
-  while (failedPasswordChanges.size > MAX_FAILED_KEYS) {
-    const oldestKey = failedPasswordChanges.keys().next().value;
-    if (!oldestKey) break;
-    failedPasswordChanges.delete(oldestKey);
-  }
+  pruneAuthRateLimits('pwd_change');
 }
 
 function escapeCsvCell(value) {
@@ -2755,52 +2979,36 @@ async function currentData(ctx, url) {
   const journalHeaders = canViewAccounting ? await db.selectFrom('journal_entries').selectAll()
     .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId)
     .orderBy('entry_date', 'desc').orderBy('created_at', 'desc').limit(200).execute() : [];
-  const allJournalLines = journalHeaders.length
-    ? await db.selectFrom('journal_lines').innerJoin('accounts', 'accounts.id', 'journal_lines.account_id')
-      .select(['journal_lines.journal_entry_id as entryId', 'journal_lines.entry_type as side', 'journal_lines.amount as amount', 'journal_lines.currency as currency', 'journal_lines.memo as memo', 'accounts.account_code as accountCode', 'accounts.account_name as accountName'])
-      .where('journal_lines.journal_entry_id', 'in', journalHeaders.map((entry) => entry.id)).orderBy('journal_lines.created_at').execute()
-    : [];
-  const linesByEntryId = new Map();
-  for (const line of allJournalLines) {
-    const bucket = linesByEntryId.get(line.entryId) ?? [];
-    bucket.push(line);
-    linesByEntryId.set(line.entryId, bucket);
-  }
-  const accountingEntries = journalHeaders.map((entry) => {
-    const lines = linesByEntryId.get(entry.id) ?? [];
-    const debit = lines.filter((line) => line.side === 'DEBIT').reduce((sum, line) => sum + BigInt(line.amount), 0n);
-    const credit = lines.filter((line) => line.side === 'CREDIT').reduce((sum, line) => sum + BigInt(line.amount), 0n);
-    return { id: entry.id, entryNumber: entry.entry_number, date: entry.entry_date, sourceType: entry.source_type, description: lines[0]?.memo?.split(' — ')[0] ?? entry.source_type, debitTotal: debit.toString(), creditTotal: credit.toString(), balanced: debit === credit, lines: lines.map((line) => ({ side: line.side, accountCode: line.accountCode, accountName: line.accountName, amount: moneyJson(Money.fromMinor(BigInt(line.amount), line.currency)), memo: line.memo })) };
-  });
-  const canViewExpenses = ctx.hasPermission(Permissions.EXPENSES_DIRECT_CREATE) || canViewAccounting;
-  const expenseRows = canViewExpenses ? await db.selectFrom('operating_expense_records').innerJoin('expense_categories', 'expense_categories.id', 'operating_expense_records.category_id')
-    .select(['operating_expense_records.id as id', 'operating_expense_records.expense_date as date', 'operating_expense_records.amount as amount', 'operating_expense_records.currency as currency', 'operating_expense_records.payment_method as paymentMethod', 'operating_expense_records.notes as notes', 'operating_expense_records.reference_number as referenceNumber', 'expense_categories.name as category'])
-    .where('operating_expense_records.tenant_id', '=', ctx.tenantId).where('operating_expense_records.store_id', '=', storeId).where('operating_expense_records.expense_type', '=', 'DIRECT_DAILY')
-    .orderBy('operating_expense_records.expense_date', 'desc').execute() : [];
-  const canManageCatalog = ctx.hasPermission(Permissions.CATALOG_MANAGE);
-  const suppliers = canManageCatalog ? await db.selectFrom('suppliers').selectAll().where('tenant_id', '=', ctx.tenantId).where('is_active', '=', 1).orderBy('name').execute() : [];
-  const purchases = canManageCatalog ? await db.selectFrom('supplier_purchases').selectAll().where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).orderBy('purchased_at', 'desc').limit(200).execute() : [];
-  const purchaseItems = canManageCatalog && purchases.length ? await db.selectFrom('supplier_purchase_items').selectAll().where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).where('purchase_id', 'in', purchases.map((p) => p.id)).execute() : [];
-  const supplierPayments = canManageCatalog ? await db.selectFrom('supplier_payments').selectAll().where('tenant_id', '=', ctx.tenantId).execute() : [];
-  const supplierReturnRows = canManageCatalog ? await db.selectFrom('supplier_returns').selectAll().where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).orderBy('created_at', 'desc').execute() : [];
-  const supplierReturnItems = canManageCatalog ? await db.selectFrom('supplier_return_items').selectAll().where('tenant_id', '=', ctx.tenantId).execute() : [];
-  const returnedQuantityByPurchaseItem = new Map();
-  for (const item of supplierReturnItems) returnedQuantityByPurchaseItem.set(item.purchase_item_id, (returnedQuantityByPurchaseItem.get(item.purchase_item_id) ?? 0n) + BigInt(item.quantity));
-  const supplierData = suppliers.map((supplier) => {
-    const entries = purchases.filter((purchase) => purchase.supplier_id === supplier.id).map((purchase) => {
-      const payments = supplierPayments.filter((payment) => payment.purchase_id === purchase.id);
-      const vendorReturns = supplierReturnRows.filter((item) => item.purchase_id === purchase.id);
-      const paid = BigInt(purchase.initial_paid_amount) + payments.reduce((sum, payment) => sum + BigInt(payment.amount), 0n);
-      const returnCredit = vendorReturns.reduce((sum, item) => sum + BigInt(item.credit_amount), 0n);
-      return { id: purchase.id, invoiceNumber: purchase.invoice_number, purchasedAt: purchase.purchased_at, createdByUserId: purchase.created_by_user_id, createdByName: userMap.get(purchase.created_by_user_id) || 'المسؤول', totalAmount: moneyJson(Money.fromMinor(BigInt(purchase.total_amount), purchase.currency)), paidAmount: moneyJson(Money.fromMinor(paid, purchase.currency)), returnedCredit: moneyJson(Money.fromMinor(returnCredit, purchase.currency)), remainingAmount: moneyJson(Money.fromMinor(BigInt(purchase.total_amount) - paid - returnCredit, purchase.currency)), targetProfitPercent: purchase.target_profit_percent ?? null, expectedRetailTotal: purchase.expected_retail_total !== null && purchase.expected_retail_total !== undefined ? moneyJson(Money.fromMinor(BigInt(purchase.expected_retail_total), purchase.currency)) : null, notes: purchase.notes, items: purchaseItems.filter((line) => line.purchase_id === purchase.id).map((line) => { const returned = returnedQuantityByPurchaseItem.get(line.id) ?? 0n; return { id: line.id, productName: line.product_name, sku: line.sku, quantity: line.quantity.toString(), returnableQuantity: (BigInt(line.quantity) - returned).toString(), unitCost: moneyJson(Money.fromMinor(BigInt(line.unit_cost), line.currency)), retailPrice: line.retail_price !== null && line.retail_price !== undefined ? moneyJson(Money.fromMinor(BigInt(line.retail_price), line.currency)) : null }; }), payments: payments.map((payment) => ({ id: payment.id, amount: moneyJson(Money.fromMinor(BigInt(payment.amount), payment.currency)), paymentMethod: payment.payment_method, referenceNumber: payment.reference_number, paidAt: payment.paid_at, createdByUserId: payment.created_by_user_id, createdByName: userMap.get(payment.created_by_user_id) || 'المسؤول' })), returns: vendorReturns.map((item) => ({ id: item.id, returnNumber: item.return_number, creditAmount: moneyJson(Money.fromMinor(BigInt(item.credit_amount), item.currency)), createdAt: item.created_at })) };
-    });
-    return { id: supplier.id, name: supplier.name, phone: supplier.phone, notes: supplier.notes, purchases: entries, totalPurchased: entries.reduce((sum, item) => sum + BigInt(item.totalAmount.amount), 0n).toString(), totalPaid: entries.reduce((sum, item) => sum + BigInt(item.paidAmount.amount), 0n).toString(), balanceDue: entries.reduce((sum, item) => sum + BigInt(item.remainingAmount.amount), 0n).toString(), currency: tenant.currency };
-  });
+  const accountingEntriesTotal = canViewAccounting
+    ? Number(rawDbData.prepare('SELECT COUNT(*) AS total FROM journal_entries WHERE tenant_id = ? AND store_id = ?').get(ctx.tenantId, storeId)?.total ?? 0)
+    : 0;
+  const customerReturnsTotal = canViewSales
+    ? Number(rawDbData.prepare('SELECT COUNT(*) AS total FROM customer_returns WHERE tenant_id = ? AND store_id = ?').get(ctx.tenantId, storeId)?.total ?? 0)
+    : 0;
+  const accountingEntries = await serializeJournalEntries(journalHeaders);
   const monthlyNow = new Date();
   const reqYear = Number(url.searchParams.get('year'));
   const reqMonth = Number(url.searchParams.get('month'));
-  const monthlyYear = (reqYear >= 2020 && reqYear <= 2040) ? reqYear : monthlyNow.getUTCFullYear();
-  const monthlyMonth = (reqMonth >= 1 && reqMonth <= 12) ? reqMonth : (monthlyNow.getUTCMonth() + 1);
+  const hasExplicitMonth = (reqYear >= 2020 && reqYear <= 2040) && (reqMonth >= 1 && reqMonth <= 12);
+  const monthlyYear = hasExplicitMonth ? reqYear : monthlyNow.getUTCFullYear();
+  const monthlyMonth = hasExplicitMonth ? reqMonth : (monthlyNow.getUTCMonth() + 1);
+  const monthPrefix = `${monthlyYear}-${String(monthlyMonth).padStart(2, '0')}`;
+  const canViewExpenses = ctx.hasPermission(Permissions.EXPENSES_DIRECT_CREATE) || canViewAccounting;
+  let expenseQuery = canViewExpenses ? db.selectFrom('operating_expense_records').innerJoin('expense_categories', 'expense_categories.id', 'operating_expense_records.category_id')
+    .select(['operating_expense_records.id as id', 'operating_expense_records.expense_date as date', 'operating_expense_records.amount as amount', 'operating_expense_records.currency as currency', 'operating_expense_records.payment_method as paymentMethod', 'operating_expense_records.notes as notes', 'operating_expense_records.reference_number as referenceNumber', 'expense_categories.name as category'])
+    .where('operating_expense_records.tenant_id', '=', ctx.tenantId).where('operating_expense_records.store_id', '=', storeId).where('operating_expense_records.expense_type', '=', 'DIRECT_DAILY') : null;
+  if (expenseQuery && hasExplicitMonth) {
+    expenseQuery = expenseQuery.where('operating_expense_records.expense_date', 'like', `${monthPrefix}-%`);
+  }
+  const expenseRows = expenseQuery ? await expenseQuery.orderBy('operating_expense_records.expense_date', 'desc').limit(BOOTSTRAP_PURCHASE_WINDOW).execute() : [];
+  const canManageCatalog = ctx.hasPermission(Permissions.CATALOG_MANAGE);
+  const suppliers = canManageCatalog ? await db.selectFrom('suppliers').selectAll().where('tenant_id', '=', ctx.tenantId).where('is_active', '=', 1).orderBy('name').execute() : [];
+  // Recent window only; full history is served by GET /api/purchases. Supplier totals below cover all history.
+  const purchases = canManageCatalog ? await db.selectFrom('supplier_purchases').selectAll().where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).orderBy('purchased_at', 'desc').limit(BOOTSTRAP_PURCHASE_WINDOW).execute() : [];
+  const purchaseEntries = canManageCatalog ? await loadPurchaseEntries(ctx.tenantId, purchases, userMap) : [];
+  const supplierTotals = canManageCatalog ? supplierPurchaseAggregates({ tenantId: ctx.tenantId, storeId }) : new Map();
+  const supplierReturnRows = canManageCatalog ? await db.selectFrom('supplier_returns').selectAll().where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).orderBy('created_at', 'desc').limit(BOOTSTRAP_PURCHASE_WINDOW).execute() : [];
+  const supplierData = suppliers.map((supplier) => serializeSupplierSummary(supplier, supplierTotals.get(supplier.id), tenant.currency, purchaseEntries.filter((entry) => entry.supplierId === supplier.id)));
   const canViewMonthlyExpenses = ctx.hasPermission(Permissions.EXPENSES_MONTHLY_CONFIRM) || ctx.hasPermission(Permissions.EXPENSES_MONTHLY_PAY) || ctx.hasPermission(Permissions.REPORTS_MONTHLY_VIEW);
   const monthlyObligations = canViewMonthlyExpenses ? await db.selectFrom('recurring_expense_obligations')
     .innerJoin('expense_categories', 'expense_categories.id', 'recurring_expense_obligations.category_id')
@@ -2932,6 +3140,8 @@ async function currentData(ctx, url) {
     suppliers: canManageCatalog ? supplierData : [],
     supplierReturns: canManageCatalog ? supplierReturnRows.map((item) => ({ id: item.id, returnNumber: item.return_number, purchaseId: item.purchase_id, creditAmount: moneyJson(Money.fromMinor(BigInt(item.credit_amount), item.currency)), createdAt: item.created_at })) : [],
     accountingEntries,
+    accountingEntriesTotal,
+    customerReturnsTotal,
     accountingPeriods: accountingPeriods.map((period) => ({ id: period.id, name: period.name, startDate: period.start_date, endDate: period.end_date, status: period.status, closedAt: period.closed_at })),
     drawerBookBalance: drawerBookBalanceMinor !== null ? moneyJson(Money.fromMinor(drawerBookBalanceMinor, tenant.currency)) : null,
     treasuryBalances: treasuryMinor ? {
@@ -3157,6 +3367,123 @@ async function handleApi(req, res, url) {
     });
   }
 
+  if (method === 'GET' && path === '/api/purchases') {
+    const ctx = await requireContext(req);
+    ctx.assertPermission(Permissions.CATALOG_MANAGE);
+    const storeId = await resolveHistoryStore(ctx, url);
+    const { offset, limit } = parsePaging(url, 50);
+    const { from, to, bounds } = parseHistoryRange(url);
+    const search = (url.searchParams.get('search') ?? '').trim().slice(0, 120);
+    const supplierIdParam = (url.searchParams.get('supplierId') ?? '').trim();
+    if (supplierIdParam.length > 64) throw Object.assign(new Error('معرّف التاجر غير صالح'), { status: 400 });
+    const filter = { tenantId: ctx.tenantId, storeId, bounds, supplierId: supplierIdParam || null, search };
+    const { where, args } = purchaseFilterSql(filter);
+    const rawDatabase = database.getRawDatabase();
+    const total = Number(rawDatabase.prepare(`SELECT COUNT(*) AS total FROM supplier_purchases p WHERE ${where}`).get(...args)?.total ?? 0);
+    const rows = rawDatabase.prepare(`SELECT p.* FROM supplier_purchases p WHERE ${where} ORDER BY p.purchased_at DESC, p.id DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
+    const currency = await tenantCurrencyCode(ctx.tenantId);
+    const userMap = await tenantUserNameMap(ctx.tenantId);
+    const entries = await loadPurchaseEntries(ctx.tenantId, rows, userMap);
+    const totals = supplierPurchaseAggregates(filter);
+    const supplierRows = await db.selectFrom('suppliers').selectAll().where('tenant_id', '=', ctx.tenantId).where('is_active', '=', 1).orderBy('name').execute();
+    const visibleSuppliers = filter.supplierId ? supplierRows.filter((s) => s.id === filter.supplierId) : supplierRows;
+    let sumTotal = 0n; let sumPaid = 0n; let sumReturned = 0n; let sumDue = 0n;
+    for (const t of totals.values()) { sumTotal += t.total; sumPaid += t.paid; sumReturned += t.returned; sumDue += t.due; }
+    const asMoney = (minor) => moneyJson(Money.fromMinor(minor, currency));
+    return json(res, 200, {
+      payload: {
+        purchases: entries,
+        suppliers: visibleSuppliers.map((supplier) => serializeSupplierSummary(supplier, totals.get(supplier.id), currency, [])),
+        total,
+        offset,
+        limit,
+        summary: {
+          purchaseCount: total,
+          supplierCount: visibleSuppliers.length,
+          totalPurchased: asMoney(sumTotal),
+          totalPaid: asMoney(sumPaid),
+          returnedCredit: asMoney(sumReturned),
+          balanceDue: asMoney(sumDue),
+          from, to, hasSearch: Boolean(search),
+        },
+      },
+    });
+  }
+
+  if (method === 'GET' && path === '/api/journal-entries') {
+    const ctx = await requireContext(req);
+    ctx.assertPermission(Permissions.REPORTS_FINANCIAL_VIEW);
+    const storeId = await resolveHistoryStore(ctx, url);
+    const { offset, limit } = parsePaging(url, 50);
+    const { from, to } = parseHistoryRange(url);
+    const sourceType = (url.searchParams.get('sourceType') ?? '').trim();
+    if (sourceType && !/^[A-Z_]{1,40}$/.test(sourceType)) throw Object.assign(new Error('نوع القيد غير صالح'), { status: 400 });
+    const conds = ['tenant_id = ?', 'store_id = ?'];
+    const args = [ctx.tenantId, storeId];
+    if (from && to) { conds.push('substr(entry_date, 1, 10) >= ?', 'substr(entry_date, 1, 10) <= ?'); args.push(from, to); }
+    if (sourceType) { conds.push('source_type = ?'); args.push(sourceType); }
+    const where = conds.join(' AND ');
+    const rawDatabase = database.getRawDatabase();
+    const total = Number(rawDatabase.prepare(`SELECT COUNT(*) AS total FROM journal_entries WHERE ${where}`).get(...args)?.total ?? 0);
+    const headers = rawDatabase.prepare(`SELECT * FROM journal_entries WHERE ${where} ORDER BY entry_date DESC, created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
+    const entries = await serializeJournalEntries(headers);
+    return json(res, 200, { payload: { entries, total, offset, limit, from, to, sourceType: sourceType || null } });
+  }
+
+  if (method === 'GET' && path === '/api/customer-returns') {
+    const ctx = await requireContext(req);
+    if (!ctx.hasPermission(Permissions.REPORTS_DAILY_VIEW) && ctx.roleId !== 'CASHIER') throw Object.assign(new Error('غير مصرح بعرض سجل المرتجعات'), { status: 403 });
+    const storeId = await resolveHistoryStore(ctx, url);
+    const { offset, limit } = parsePaging(url, 100);
+    const { bounds } = parseHistoryRange(url);
+    const search = (url.searchParams.get('search') ?? '').trim().slice(0, 120);
+    const { where, args } = customerReturnFilterSql({ tenantId: ctx.tenantId, storeId, bounds, search });
+    const rawDatabase = database.getRawDatabase();
+    const agg = rawDatabase.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(cr.refund_amount), 0) AS refunds FROM customer_returns cr INNER JOIN sales s ON s.id = cr.original_sale_id AND s.tenant_id = cr.tenant_id WHERE ${where}`).get(...args);
+    const rows = rawDatabase.prepare(`SELECT cr.id AS id, cr.return_number AS returnNumber, cr.created_at AS createdAt, cr.refund_amount AS refundAmount, cr.currency AS currency, cr.payment_method AS paymentMethod, s.sale_number AS saleNumber FROM customer_returns cr INNER JOIN sales s ON s.id = cr.original_sale_id AND s.tenant_id = cr.tenant_id WHERE ${where} ORDER BY cr.created_at DESC, cr.id DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
+    const currency = await tenantCurrencyCode(ctx.tenantId);
+    return json(res, 200, {
+      payload: {
+        returns: rows.map((item) => ({ ...item, refundAmount: moneyJson(Money.fromMinor(BigInt(item.refundAmount), item.currency)) })),
+        total: Number(agg?.total ?? 0),
+        totalRefunds: moneyJson(Money.fromMinor(BigInt(agg?.refunds ?? 0), currency)),
+        offset,
+        limit,
+      },
+    });
+  }
+
+  if (method === 'GET' && path === '/api/expenses') {
+    const ctx = await requireContext(req);
+    const canViewExpenses = ctx.hasPermission(Permissions.EXPENSES_DIRECT_CREATE) || ctx.hasPermission(Permissions.REPORTS_FINANCIAL_VIEW);
+    if (!canViewExpenses) throw Object.assign(new Error('غير مصرح بعرض المصروفات'), { status: 403 });
+    const storeId = await resolveHistoryStore(ctx, url);
+    const { offset, limit } = parsePaging(url, 100);
+    const { from, to } = parseHistoryRange(url);
+    const search = (url.searchParams.get('search') ?? '').trim().slice(0, 120);
+    const conds = ['e.tenant_id = ?', 'e.store_id = ?', "e.expense_type = 'DIRECT_DAILY'"];
+    const args = [ctx.tenantId, storeId];
+    if (from && to) { conds.push('e.expense_date >= ?', 'e.expense_date <= ?'); args.push(from, to); }
+    if (search) {
+      conds.push("(instr(lower(c.name), lower(?)) > 0 OR instr(lower(coalesce(e.notes, '')), lower(?)) > 0 OR instr(lower(coalesce(e.reference_number, '')), lower(?)) > 0)");
+      args.push(search, search, search);
+    }
+    const where = conds.join(' AND ');
+    const rawDatabase = database.getRawDatabase();
+    const agg = rawDatabase.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(e.amount), 0) AS totalAmount FROM operating_expense_records e INNER JOIN expense_categories c ON c.id = e.category_id AND c.tenant_id = e.tenant_id WHERE ${where}`).get(...args);
+    const rows = rawDatabase.prepare(`SELECT e.id AS id, e.expense_date AS date, e.amount AS amount, e.currency AS currency, e.payment_method AS paymentMethod, e.notes AS notes, e.reference_number AS referenceNumber, c.name AS category FROM operating_expense_records e INNER JOIN expense_categories c ON c.id = e.category_id AND c.tenant_id = e.tenant_id WHERE ${where} ORDER BY e.expense_date DESC, e.created_at DESC, e.id DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
+    const currency = await tenantCurrencyCode(ctx.tenantId);
+    return json(res, 200, {
+      payload: {
+        expenses: rows.map((expense) => ({ ...expense, amount: moneyJson(Money.fromMinor(BigInt(expense.amount), expense.currency)) })),
+        total: Number(agg?.total ?? 0),
+        totalAmount: moneyJson(Money.fromMinor(BigInt(agg?.totalAmount ?? 0), currency)),
+        offset,
+        limit,
+      },
+    });
+  }
+
   const saleDetailMatch = method === 'GET' ? path.match(/^\/api\/sales\/([0-9a-f-]+)$/i) : null;
   if (saleDetailMatch) {
     const ctx = await requireContext(req);
@@ -3258,20 +3585,19 @@ async function handleApi(req, res, url) {
     pruneFailedLogins();
     const normalizedUsername = body.username.trim().toLowerCase();
     const key = normalizedUsername;
-    const failures = failedLogins.get(key) ?? { count: 0, startedAt: Date.now() };
+    const failures = getAuthFailures('login', key);
     if (Date.now() - failures.startedAt < LOCK_WINDOW_MS && failures.count >= MAX_FAILED_LOGINS) {
       throw Object.assign(new Error('محاولات كثيرة. انتظر عشر دقائق ثم حاول مرة أخرى.'), { status: 429 });
     }
     try {
       const session = await auth.login({ tenantCode: state.companyCode, username: body.username, password: body.password });
-      failedLogins.delete(key);
+      clearAuthFailures('login', key);
       const loginCtx = await auth.validateSession(session.token);
       await recordAudit(loginCtx, { storeId: session.user.storeId ?? null, actorUserId: session.user.id, actorUsername: session.user.username, actorRole: session.user.role, action: 'AUTH_LOGIN_SUCCESS', entityType: 'SESSION', entityId: session.user.id, summary: `تسجيل دخول ناجح للمستخدم (${session.user.username})` });
       const maxAge = Math.max(0, Math.floor((Date.parse(session.expiresAt) - Date.now()) / 1000));
       return json(res, 200, { user: session.user }, { 'Set-Cookie': `retailos_session=${encodeURIComponent(session.token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}` });
     } catch {
-      const next = Date.now() - failures.startedAt < LOCK_WINDOW_MS ? failures : { count: 0, startedAt: Date.now() };
-      failedLogins.set(key, { count: next.count + 1, startedAt: next.startedAt });
+      const updatedFailure = recordAuthFailure('login', key);
       const tenants = await tenantRepo.listAll();
       if (tenants[0]) {
         const matchedUser = await userRepo.findByUsername(tenants[0].id, normalizedUsername);
@@ -3285,7 +3611,7 @@ async function handleApi(req, res, url) {
           entityType: 'SESSION',
           entityId: matchedUser?.id ?? null,
           summary: `محاولة تسجيل دخول فاشلة للحساب (${normalizedUsername})`,
-          metadata: { attemptCount: next.count + 1 },
+          metadata: { attemptCount: updatedFailure.count },
         });
       }
       throw Object.assign(new Error('اسم المستخدم أو كلمة المرور غير صحيحة'), { status: 401 });
@@ -4224,7 +4550,7 @@ async function handleApi(req, res, url) {
   if (method === 'POST' && path === '/api/account/password') {
     pruneFailedPasswordChanges();
     const rateLimitKey = `${ctx.tenantId}:${ctx.userId}`;
-    const failures = failedPasswordChanges.get(rateLimitKey) ?? { count: 0, startedAt: Date.now() };
+    const failures = getAuthFailures('pwd_change', rateLimitKey);
     if (Date.now() - failures.startedAt < LOCK_WINDOW_MS && failures.count >= MAX_FAILED_PASSWORD_CHANGES) {
       throw Object.assign(new Error('محاولات كثيرة خاطئة. يرجى الانتظار 10 دقائق قبل المحاولة مجدداً.'), { status: 429 });
     }
@@ -4233,11 +4559,10 @@ async function handleApi(req, res, url) {
     const currentUser = await userRepo.findById(ctx, ctx.userId);
     const validCurrent = currentUser && await passwordHasher.verify(currentUser.passwordHash, body.currentPassword);
     if (!validCurrent) {
-      const next = Date.now() - failures.startedAt < LOCK_WINDOW_MS ? failures : { count: 0, startedAt: Date.now() };
-      failedPasswordChanges.set(rateLimitKey, { count: next.count + 1, startedAt: next.startedAt });
+      recordAuthFailure('pwd_change', rateLimitKey);
       throw Object.assign(new Error('Current password is incorrect'), { status: 400 });
     }
-    failedPasswordChanges.delete(rateLimitKey);
+    clearAuthFailures('pwd_change', rateLimitKey);
     const passwordHash = await passwordHasher.hash(body.newPassword);
     await db.transaction().execute(async (trx) => {
       await trx.updateTable('users').set({ password_hash: passwordHash }).where('tenant_id', '=', ctx.tenantId).where('id', '=', ctx.userId).execute();

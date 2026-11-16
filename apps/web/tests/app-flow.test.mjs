@@ -1930,3 +1930,186 @@ test('keeps /api/sales strictly pure while separating profit-loss expenses and f
     await rm(sepDataDir, { recursive: true, force: true }).catch(() => {});
   }
 });
+
+test('release readiness: full paged history (>200 purchases, journals, returns, expenses) and SQLite-persistent auth throttling across restart', async () => {
+  const rrDataDir = await mkdtemp(join(appDir, '.test-readiness-'));
+  let rrPort = await reservePort();
+  let rrUrl = `http://127.0.0.1:${rrPort}`;
+  let rrLog = '';
+
+  const startSrv = async () => {
+    const child = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        PORT: String(rrPort),
+        RETAILOS_DATA_DIR: rrDataDir,
+        RETAILOS_COMPANY_NAME: 'متجر الجاهزية',
+        RETAILOS_COMPANY_CODE: 'READINESS',
+        RETAILOS_CURRENCY: 'EGP',
+        RETAILOS_STORE_NAME: 'الفرع الرئيسي',
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    child.stderr.on('data', (chunk) => { rrLog += chunk.toString(); });
+    for (let i = 0; i < 160; i += 1) {
+      if (child.exitCode !== null) throw new Error(`rrServer exited (${child.exitCode}): ${rrLog}`);
+      try {
+        const res = await fetch(`${rrUrl}/api/bootstrap`);
+        if (res.ok) return child;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 125));
+    }
+    throw new Error(`rrServer did not become ready: ${rrLog}`);
+  };
+
+  let rrServer = await startSrv();
+  const rrReq = async (path, { method = 'GET', body, cookieStr } = {}) => {
+    const headers = { Origin: rrUrl };
+    if (body) headers['Content-Type'] = 'application/json';
+    if (cookieStr) headers.Cookie = cookieStr;
+    const response = await fetch(`${rrUrl}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const payload = await response.json();
+    return { response, payload };
+  };
+
+  try {
+    assert.equal((await rrReq('/api/setup', {
+      method: 'POST',
+      body: { ownerUsername: 'rr_owner', ownerName: 'مدير الجاهزية', password: 'Readiness-Password-2026' },
+    })).response.status, 201, rrLog);
+
+    const loginOk = await rrReq('/api/login', {
+      method: 'POST',
+      body: { username: 'rr_owner', password: 'Readiness-Password-2026' },
+    });
+    assert.equal(loginOk.response.status, 200);
+    const ownerCookie = loginOk.response.headers.get('set-cookie').split(';')[0];
+
+    const data0 = await rrReq('/api/data', { cookieStr: ownerCookie });
+    const storeId = data0.payload.selectedStoreId;
+    const cat = await rrReq('/api/categories', { method: 'POST', cookieStr: ownerCookie, body: { name: 'ملابس' } });
+    const prod = await rrReq('/api/products', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        name: 'قميص جاهز',
+        sku: 'RR-SHIRT',
+        categoryId: cat.payload.id,
+        hasVariants: false,
+        options: [],
+        variants: [{ sku: 'RR-SHIRT-1', retailPrice: '10000', reorderPoint: '1', attributes: {} }],
+      },
+    });
+    assert.equal(prod.response.status, 201);
+    const d1 = await rrReq('/api/data', { cookieStr: ownerCookie });
+    const variantId = d1.payload.products[0].variants[0].id;
+    const sup = await rrReq('/api/suppliers', { method: 'POST', cookieStr: ownerCookie, body: { name: 'مورد السجل الكامل' } });
+
+    // Create 205 supplier purchases (10000 total, 2000 paid each => 2050000 total, 410000 paid, 1640000 due)
+    for (let idx = 1; idx <= 205; idx += 1) {
+      const nHex = idx.toString(16).padStart(4, '0');
+      const res = await rrReq('/api/purchases', {
+        method: 'POST',
+        cookieStr: ownerCookie,
+        body: {
+          idempotencyKey: `cccccccc-1111-4111-8111-00000000${nHex}`,
+          supplierId: sup.payload.id,
+          storeId,
+          invoiceNumber: `PINV-${String(idx).padStart(3, '0')}`,
+          totalAmount: '10000',
+          paidAmount: '2000',
+          paymentMethod: 'CASH',
+          items: [{ variantId, quantity: '1', unitCost: '10000' }],
+        },
+      });
+      assert.equal(res.response.status, 201, `Purchase ${idx} failed`);
+    }
+
+    // Bootstrap keeps only 200 rows in window, yet carries accurate full SQL totals for all 205 invoices
+    const bootstrapData = await rrReq('/api/data', { cookieStr: ownerCookie });
+    const bootSup = bootstrapData.payload.suppliers.find((s) => s.id === sup.payload.id);
+    assert.equal(bootSup.purchases.length, 200);
+    assert.equal(bootSup.purchaseCount, 205);
+    assert.equal(bootSup.purchasesComplete, false);
+    assert.equal(bootSup.totalPurchased, '2050000');
+    assert.equal(bootSup.totalPaid, '410000');
+    assert.equal(bootSup.balanceDue, '1640000');
+
+    // Paged /api/purchases reaches invoices 201..205 beyond the 200-row cap & searches oldest invoice PINV-001
+    const tailPage = await rrReq(`/api/purchases?storeId=${storeId}&offset=200&limit=50`, { cookieStr: ownerCookie });
+    assert.equal(tailPage.response.status, 200);
+    assert.equal(tailPage.payload.payload.total, 205);
+    assert.equal(tailPage.payload.payload.purchases.length, 5);
+    assert.equal(tailPage.payload.payload.summary.totalPurchased.amount, '2050000');
+    assert.equal(tailPage.payload.payload.summary.balanceDue.amount, '1640000');
+
+    const oldestSearch = await rrReq(`/api/purchases?storeId=${storeId}&search=PINV-001`, { cookieStr: ownerCookie });
+    assert.equal(oldestSearch.response.status, 200);
+    assert.equal(oldestSearch.payload.payload.total, 1);
+    assert.equal(oldestSearch.payload.payload.purchases[0].invoiceNumber, 'PINV-001');
+
+    // Verify /api/journal-entries supports filtering & paging across >205 journal entries
+    const jePage = await rrReq(`/api/journal-entries?storeId=${storeId}&sourceType=PURCHASE&offset=200&limit=20`, { cookieStr: ownerCookie });
+    assert.equal(jePage.response.status, 200);
+    assert.equal(jePage.payload.payload.total, 205);
+    assert.equal(jePage.payload.payload.entries.length, 5);
+    assert.ok(jePage.payload.payload.entries.every((e) => e.balanced));
+
+    // Verify /api/customer-returns & /api/expenses endpoints respond cleanly with totals
+    const retList = await rrReq(`/api/customer-returns?storeId=${storeId}`, { cookieStr: ownerCookie });
+    assert.equal(retList.response.status, 200);
+    assert.equal(retList.payload.payload.total, 0);
+
+    const todayStr = new Date().toISOString().slice(0, 10);
+    await rrReq('/api/expenses', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: 'cccccccc-2222-4222-8222-000000000001',
+        storeId,
+        categoryCode: 'OTHER',
+        amount: '3500',
+        paymentMethod: 'CASH_DRAWER',
+        expenseDate: todayStr,
+        notes: 'مصروف جاهزية',
+      },
+    });
+    const expList = await rrReq(`/api/expenses?storeId=${storeId}&search=${encodeURIComponent('جاهزية')}`, { cookieStr: ownerCookie });
+    assert.equal(expList.response.status, 200);
+    assert.equal(expList.payload.payload.total, 1);
+    assert.equal(expList.payload.payload.totalAmount.amount, '3500');
+
+    // Verify persistent SQLite auth throttling survives server process restart
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      const bad = await rrReq('/api/login', {
+        method: 'POST',
+        body: { username: 'rr_owner', password: 'Wrong-Password-Attempt' },
+      });
+      assert.equal(bad.response.status, 401);
+    }
+    const lockedBeforeRestart = await rrReq('/api/login', {
+      method: 'POST',
+      body: { username: 'rr_owner', password: 'Readiness-Password-2026' },
+    });
+    assert.equal(lockedBeforeRestart.response.status, 429);
+
+    rrServer.kill('SIGTERM');
+    await once(rrServer, 'exit').catch(() => {});
+    rrPort = await reservePort();
+    rrUrl = `http://127.0.0.1:${rrPort}`;
+    rrServer = await startSrv();
+
+    const lockedAfterRestart = await rrReq('/api/login', {
+      method: 'POST',
+      body: { username: 'rr_owner', password: 'Readiness-Password-2026' },
+    });
+    assert.equal(lockedAfterRestart.response.status, 429);
+  } finally {
+    if (rrServer && rrServer.exitCode === null) {
+      rrServer.kill('SIGTERM');
+      await once(rrServer, 'exit').catch(() => {});
+    }
+    await rm(rrDataDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
