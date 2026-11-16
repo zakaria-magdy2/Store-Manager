@@ -1,5 +1,6 @@
-import type { Kysely, Migration } from 'kysely';
-import { Migrator } from 'kysely';
+import type { Kysely } from 'kysely';
+import type { Migration } from 'kysely/migration';
+import { Migrator } from 'kysely/migration';
 import { Logger } from '../logger/logger.js';
 import type { RetailOSDatabase } from './types.js';
 import * as initialFoundation from './migrations/001_initial_foundation.js';

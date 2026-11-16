@@ -18,8 +18,8 @@
   },
   "devDependencies": {
     "@retailos/tsconfig": "workspace:*",
-    "typescript": "^5.8.2",
-    "rimraf": "^6.0.1",
-    "vitest": "^3.0.7"
+    "typescript": "^6.0.3",
+    "rimraf": "^6.1.4",
+    "vitest": "^5.1.0"
   }
 }
