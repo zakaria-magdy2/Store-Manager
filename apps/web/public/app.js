@@ -479,12 +479,23 @@ function toMinor(decimal, decimals) {
   return `${BigInt(whole) * (10n ** BigInt(decimals)) + BigInt(fraction.padEnd(decimals, '0') || '0')}`;
 }
 
+const FALLBACK_ATTR_LABELS = {
+  color: 'اللون',
+  colour: 'اللون',
+  size: 'المقاس',
+  style: 'الموديل',
+  material: 'الخامة',
+  type: 'النوع',
+};
+
 function formatVariantAttributes(product, attributes, fallback = 'النمط الأساسي') {
   if (!attributes) return fallback;
   const entries = Object.entries(attributes);
   if (!entries.length) return fallback;
   return entries.map(([key, value]) => {
-    const optName = product?.options?.find((option) => option.key === key)?.name ?? key;
+    const optName = product?.options?.find((option) => option.key === key)?.name
+      ?? FALLBACK_ATTR_LABELS[String(key).toLowerCase()]
+      ?? key;
     return `${optName}: ${value}`;
   }).join(' · ');
 }
@@ -7749,10 +7760,10 @@ function collectEligibleStocktakeVariants(detail) {
     for (const v of product.variants ?? []) {
       if (v.isActive === false || existingIds.has(v.id)) continue;
       if (!allowZero && Number(v.quantity ?? 0) <= 0) continue;
-      const attrs = v.attributes ? Object.values(v.attributes).join(' / ') : '';
+      const attrs = formatVariantAttributes(product, v.attributes, '');
       options.push({
         variantId: v.id,
-        label: attrs ? `${product.name} (${attrs}) — ${v.sku}` : `${product.name} — ${v.sku}`,
+        label: attrs ? `${product.name} — ${attrs} (${v.sku})` : `${product.name} (${v.sku})`,
       });
     }
   }
@@ -7859,7 +7870,7 @@ function findStocktakeSmartMatches(queryText, detail) {
     const catName = categoryNameById.get(product.categoryId) ?? '';
     for (const v of product.variants ?? []) {
       if (v.isActive === false || lineByVariantId.has(v.id)) continue;
-      const variantLabel = v.attributes ? Object.values(v.attributes).join(' / ') : '';
+      const variantLabel = formatVariantAttributes(product, v.attributes, '');
       const haystack = `${product.name} ${product.brand ?? ''} ${variantLabel} ${product.sku} ${v.sku} ${v.barcode ?? ''} ${catName}`.toLowerCase();
       if (!q || haystack.includes(q)) {
         const exactCode = Boolean(q) && ((v.barcode && v.barcode.toLowerCase() === q) || v.sku.toLowerCase() === q || product.sku.toLowerCase() === q);
@@ -7919,7 +7930,8 @@ function renderStocktakeSmartDropdownHtml(queryText, detail) {
       return `<div class="stocktake-smart-item ${idx === safeHighlight ? 'is-highlighted' : ''}" data-smart-idx="${idx}" role="option">
         <span class="product-avatar ${m.imageProduct?.imagePath ? 'has-image' : ''}">${thumb}</span>
         <div class="stocktake-smart-info">
-          <strong>${escapeHtml(m.productName)}${m.variantLabel ? ` <small class="stocktake-variant-sub">(${escapeHtml(m.variantLabel)})</small>` : ''}</strong>
+          <strong class="stocktake-smart-title">${escapeHtml(m.productName)}</strong>
+          ${m.variantLabel ? `<span class="stocktake-variant-sub">${escapeHtml(m.variantLabel)}</span>` : ''}
           <small><span class="sku-code">${escapeHtml(m.sku)}</span>${m.categoryName ? ` · ${escapeHtml(m.categoryName)}` : ''}${!detail.session.blindHidden ? ` · المتوقع: ${m.expectedQuantity}` : ''}</small>
         </div>
         <div class="stocktake-smart-actions">${actionHtml}</div>

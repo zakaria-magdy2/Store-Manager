@@ -825,11 +825,22 @@ function signedMoneyJson(minorValue, currency) {
   return { amount: minor.toString(), currency: currencyCode, decimals: meta.decimals };
 }
 
+const VARIANT_ATTR_LABELS = {
+  color: 'اللون',
+  colour: 'اللون',
+  size: 'المقاس',
+  style: 'الموديل',
+  material: 'الخامة',
+  type: 'النوع',
+};
+
 function parseVariantLabelFromJson(attributesJson) {
   try {
     const parsed = JSON.parse(attributesJson || '{}');
     if (!parsed || typeof parsed !== 'object') return '';
-    return Object.entries(parsed).map(([k, v]) => `${k}: ${v}`).join(' · ');
+    return Object.entries(parsed)
+      .map(([k, v]) => `${VARIANT_ATTR_LABELS[String(k).toLowerCase()] ?? k}: ${v}`)
+      .join(' · ');
   } catch {
     return '';
   }
