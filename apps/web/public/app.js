@@ -1315,25 +1315,25 @@ function salesTable(sales) {
                 <td>
                   ${hasReturn ? `
                     <div class="sale-net-stack">
-                      <strong class="table-total" style="font-size:13.5px;color:var(--ink);">${money(displayTotal)}</strong>
-                      <small class="sale-return-sub"><span class="line-through-muted">${money(origTotal)}</span> · مرتجع -${money(returnedAmt)}</small>
+                      <strong class="table-total">${money(displayTotal)}</strong>
+                      <small class="sale-return-sub"><span class="line-through-muted"><bdi dir="ltr">${money(origTotal)}</bdi></span> · مرتجع <bdi dir="ltr">-${money(returnedAmt)}</bdi></small>
                     </div>
                   ` : `
-                    <strong class="table-total" style="font-size:13.5px;color:var(--ink);">${money(displayTotal)}</strong>
+                    <strong class="table-total">${money(displayTotal)}</strong>
                   `}
                 </td>
                 ${canViewCogs ? `
                   <td><span class="table-total">${sale.cogs ? money(sale.cogs) : '—'}</span></td>
-                  <td>${sale.grossProfit ? `<strong class="table-total" style="color:${BigInt(sale.grossProfit.amount) >= 0n ? 'var(--green, #15803d)' : 'var(--rose, #be123c)'};">${money(sale.grossProfit)}</strong>` : '—'}</td>
+                  <td>${sale.grossProfit ? `<strong class="table-total ${BigInt(sale.grossProfit.amount) >= 0n ? 'text-green' : 'text-rose'}">${money(sale.grossProfit)}</strong>` : '—'}</td>
                 ` : ''}
                 <td>${statusBadge}</td>
-                <td style="text-align:center;">
-                  <div style="display:inline-flex;align-items:center;gap:6px;justify-content:center;">
-                    <button type="button" class="button button-secondary button-sm invoice-open" data-sale-open="${sale.id}" style="height:30px;padding:0 10px;font-size:12px;font-weight:700;">
+                <td class="cell-center">
+                  <div class="table-actions-inline">
+                    <button type="button" class="button button-secondary button-sm invoice-open" data-sale-open="${sale.id}">
                       تفاصيل
                     </button>
                     ${canReturn ? `
-                      <button type="button" class="button button-secondary button-sm start-return" data-sale="${sale.id}" style="height:30px;padding:0 10px;font-size:12px;color:var(--rose,var(--rose, #be123c));border-color:var(--rose,var(--rose, #be123c));font-weight:750;">
+                      <button type="button" class="button button-secondary button-sm start-return text-rose" data-sale="${sale.id}">
                         مرتجع
                       </button>
                     ` : ''}
@@ -1602,7 +1602,7 @@ function inventoryView() {
   }
   const expectedStockProfitMinor = totalStockRetailMinor - totalStockCostMinor;
   const isNegativeExpectedProfit = expectedStockProfitMinor < 0n;
-  const expectedProfitColor = isNegativeExpectedProfit ? 'var(--rose, var(--rose, #be123c))' : 'var(--green, #15803d)';
+  const expectedProfitClass = isNegativeExpectedProfit ? 'text-rose' : 'text-green';
 
   const items = data.products.filter((product) => product.itemKind === 'PRODUCT').map((product) => {
     const matrix = extractProductMatrix(product);
@@ -1639,75 +1639,75 @@ function inventoryView() {
   const summaryCardsHtml = isCashier ? `
     <div class="inventory-summary-card">
       <div>
-        <small style="color:var(--muted);font-size:11.5px;font-weight:700;">إجمالي البضاعة بالمخزن</small>
-        <strong style="font-size:18px;display:block;margin-top:2px;">${totalStockUnits} قطعة</strong>
-        <span style="font-size:11px;color:var(--muted);">${catalogProducts.length} موديل مسجل</span>
+        <small class="inv-card-label">إجمالي البضاعة بالمخزن</small>
+        <strong class="inv-card-value">${totalStockUnits} قطعة</strong>
+        <span class="inv-card-sub">${catalogProducts.length} موديل مسجل</span>
       </div>
     </div>
     <div class="inventory-summary-card">
       <div>
-        <small style="color:var(--muted);font-size:11.5px;font-weight:700;">موديلات متوفرة</small>
-        <strong style="font-size:18px;display:block;margin-top:2px;color:var(--green, #15803d);">${inStockModelsCount} موديل</strong>
-        <span style="font-size:11px;color:var(--muted);">متاح للبيع حالياً</span>
+        <small class="inv-card-label">موديلات متوفرة</small>
+        <strong class="inv-card-value text-green">${inStockModelsCount} موديل</strong>
+        <span class="inv-card-sub">متاح للبيع حالياً</span>
       </div>
     </div>
     <div class="inventory-summary-card">
       <div>
-        <small style="color:var(--muted);font-size:11.5px;font-weight:700;">مقاسات تحتاج طلب</small>
-        <strong style="font-size:18px;display:block;margin-top:2px;color:${lowStockModelsCount > 0 ? 'var(--amber, #d97706)' : 'var(--green, #15803d)'};">${lowStockModelsCount} موديل</strong>
-        <span style="font-size:11px;color:var(--muted);">وصلت لحد إعادة الطلب</span>
+        <small class="inv-card-label">مقاسات تحتاج طلب</small>
+        <strong class="inv-card-value ${lowStockModelsCount > 0 ? 'text-amber' : 'text-green'}">${lowStockModelsCount} موديل</strong>
+        <span class="inv-card-sub">وصلت لحد إعادة الطلب</span>
       </div>
     </div>` : `
     <div class="inventory-summary-card">
       <div>
-        <small style="color:var(--muted);font-size:11.5px;font-weight:700;">إجمالي البضاعة بالمخزن</small>
-        <strong style="font-size:18px;display:block;margin-top:2px;">${totalStockUnits} قطعة</strong>
-        <span style="font-size:11px;color:var(--muted);">${catalogProducts.length} موديل مسجل</span>
+        <small class="inv-card-label">إجمالي البضاعة بالمخزن</small>
+        <strong class="inv-card-value">${totalStockUnits} قطعة</strong>
+        <span class="inv-card-sub">${catalogProducts.length} موديل مسجل</span>
       </div>
     </div>
     <div class="inventory-summary-card">
       <div>
-        <small style="color:var(--muted);font-size:11.5px;font-weight:700;">سعر التكلفة الفعلي (رأس المال)</small>
-        <strong style="font-size:18px;display:block;margin-top:2px;color:var(--ink);">${money({ amount: totalStockCostMinor.toString(), currency, decimals })}</strong>
-        <span style="font-size:11px;color:var(--muted);">بسعر الشراء الفعلي (WAC)</span>
+        <small class="inv-card-label">سعر التكلفة الفعلي (رأس المال)</small>
+        <strong class="inv-card-value table-total">${money({ amount: totalStockCostMinor.toString(), currency, decimals })}</strong>
+        <span class="inv-card-sub">بسعر الشراء الفعلي (WAC)</span>
       </div>
     </div>
     <div class="inventory-summary-card">
       <div>
-        <small style="color:var(--muted);font-size:11.5px;font-weight:700;">القيمة البيعية للبضاعة</small>
-        <strong style="font-size:18px;display:block;margin-top:2px;color:var(--purple);">${money({ amount: totalStockRetailMinor.toString(), currency, decimals })}</strong>
-        <span style="font-size:11px;color:var(--muted);">إجمالي سعر البيع للقطع</span>
+        <small class="inv-card-label">القيمة البيعية للبضاعة</small>
+        <strong class="inv-card-value table-total text-purple">${money({ amount: totalStockRetailMinor.toString(), currency, decimals })}</strong>
+        <span class="inv-card-sub">إجمالي سعر البيع للقطع</span>
       </div>
     </div>
     <div class="inventory-summary-card">
       <div>
-        <small style="color:var(--muted);font-size:11.5px;font-weight:700;">المكسب والربح المتوقع منها</small>
-        <strong style="font-size:18px;display:block;margin-top:2px;color:${expectedProfitColor};">${money({ amount: expectedStockProfitMinor.toString(), currency, decimals })}</strong>
-        <span style="font-size:11px;color:${expectedProfitColor};font-weight:600;">${isNegativeExpectedProfit ? 'عجز متوقع مقارنة بالتكلفة' : 'هامش ربح تقريبي عند البيع'}</span>
+        <small class="inv-card-label">المكسب والربح المتوقع منها</small>
+        <strong class="inv-card-value table-total ${expectedProfitClass}">${money({ amount: expectedStockProfitMinor.toString(), currency, decimals })}</strong>
+        <span class="inv-card-sub ${expectedProfitClass}">${isNegativeExpectedProfit ? 'عجز متوقع مقارنة بالتكلفة' : 'هامش ربح تقريبي عند البيع'}</span>
       </div>
     </div>`;
 
   return `<div class="page-heading-row"><div><p class="page-lead">${isCashier ? 'متابعة أرصدة المخزون والمقاسات والأسعار المتاحة للبيع.' : 'متابعة وجرد أرصدة المخزون للموديلات والأصناف الحالية وتقييم رأس المال والأرباح المتوقعة.'}</p></div><div class="products-heading-actions">${data.capabilities.canManageStores ? '<button class="button button-secondary" id="new-store-btn">+ إضافة فرع</button>' : ''}${data.capabilities.canTransferInventory && data.stores.length > 1 ? '<button class="button button-secondary" id="transfer-stock-btn">تحويل مخزون بين الفروع</button>' : ''}${data.capabilities.canAdjustInventory ? `<button class="button button-secondary" id="record-damage-btn">تسجيل تالف / هالك</button><button class="button button-secondary" id="adjust-stock-btn">تسوية سريعة لصنف</button><button class="button button-primary" id="open-full-stocktake-btn" data-page="stocktake">${icon('scan', 16)} جرد شامل للمحل</button>` : ''}<a class="button button-secondary" href="/api/reports/export.csv?type=inventory&storeId=${encodeURIComponent(data.selectedStoreId)}" download>تصدير CSV</a>${!isCashier ? `<button class="button button-primary" data-page="suppliers">فاتورة شراء من تاجر</button>` : ''}</div></div>
-  <div class="inventory-summary" style="grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 16px;">${summaryCardsHtml}
+  <div class="inventory-summary ${isCashier ? '' : 'expense-summary-grid'}">${summaryCardsHtml}
   </div>
-  <section class="panel"><div class="panel-heading"><div><h3>أرصدة الموديلات والمقاسات</h3><p>اضغط على الموديل لعرض مصفوفة الألوان والمقاسات</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="ابحث عن الموديل أو الكود أو المقاس" value="${escapeHtml(state.query)}"></label></div>${items.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل</th><th>كود الموديل</th><th>الألوان والمقاسات</th><th style="text-align:center;">إجمالي الرصيد</th>${!isCashier ? '<th>سعر التكلفة (الفعلي)</th><th>سعر البيع</th><th>المكسب المتوقع</th>' : '<th>سعر البيع</th>'}<th>حالة المقاسات</th></tr></thead><tbody>${items.map((product) => `<tr><td><button type="button" class="product-name-action inventory-product-details" data-product-id="${product.id}"><span class="product-avatar ${product.imagePath ? 'has-image' : ''}">${product.imagePath ? renderProductThumb(product) : escapeHtml(product.name.slice(0, 1))}</span><span class="product-name-stack"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand || 'اضغط لعرض جدول المقاسات')}</small></span></button></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${product.matrix.isMatrix ? `<div class="model-sub-badges">${product.matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(product.matrix.colorSummaryLabel)}</span>` : ''}${product.matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(product.matrix.sizeRangeLabel)}</span>` : ''}</div>` : `<small>${product.variants.length} نسخة</small>`}</td><td style="text-align:center;"><strong>${product.quantity}</strong> قطعة</td>${!isCashier ? (() => {
+  <section class="panel"><div class="panel-heading"><div><h3>أرصدة الموديلات والمقاسات</h3><p>اضغط على الموديل لعرض مصفوفة الألوان والمقاسات</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="ابحث عن الموديل أو الكود أو المقاس" value="${escapeHtml(state.query)}"></label></div>${items.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل</th><th>كود الموديل</th><th>الألوان والمقاسات</th><th class="cell-center">إجمالي الرصيد</th>${!isCashier ? '<th>سعر التكلفة (الفعلي)</th><th>سعر البيع</th><th>المكسب المتوقع</th>' : '<th>سعر البيع</th>'}<th>حالة المقاسات</th></tr></thead><tbody>${items.map((product) => `<tr><td><button type="button" class="product-name-action inventory-product-details" data-product-id="${product.id}"><span class="product-avatar ${product.imagePath ? 'has-image' : ''}">${product.imagePath ? renderProductThumb(product) : escapeHtml(product.name.slice(0, 1))}</span><span class="product-name-stack"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand || 'اضغط لعرض جدول المقاسات')}</small></span></button></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${product.matrix.isMatrix ? `<div class="model-sub-badges">${product.matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(product.matrix.colorSummaryLabel)}</span>` : ''}${product.matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(product.matrix.sizeRangeLabel)}</span>` : ''}</div>` : `<small>${product.variants.length} نسخة</small>`}</td><td class="cell-center"><strong>${product.quantity}</strong> قطعة</td>${!isCashier ? (() => {
   const unitRetail = product.unitRetail;
   const unitCost = product.cost;
   const hasRetail = unitRetail && BigInt(unitRetail.amount) > 0n;
   let unitProfitStr = '—';
-  let unitProfitColor = 'var(--green, #15803d)';
+  let unitProfitClass = 'text-green';
   if (hasRetail && unitCost) {
     const profitMinor = BigInt(unitRetail.amount) - BigInt(unitCost.amount);
-    if (profitMinor < 0n) unitProfitColor = 'var(--rose, var(--rose, #be123c))';
+    if (profitMinor < 0n) unitProfitClass = 'text-rose';
     unitProfitStr = money({ amount: profitMinor.toString(), currency: unitRetail.currency, decimals: unitRetail.decimals });
   }
   return `
-    <td>${unitCost ? money(unitCost) : '—'}</td>
-    <td>${hasRetail ? `<strong style="color:var(--purple);">${money(unitRetail)}</strong>` : '<span class="status-pill" style="background:var(--amber-soft);color:var(--amber);">بانتظار التسعير</span>'}</td>
-    <td><strong style="color:${unitProfitColor};">${unitProfitStr}</strong>${hasRetail && unitCost ? '<br><small style="color:var(--muted);font-size:10px;">لكل قطعة</small>' : ''}</td>
+    <td><span class="table-total">${unitCost ? money(unitCost) : '—'}</span></td>
+    <td>${hasRetail ? `<strong class="table-total text-purple">${money(unitRetail)}</strong>` : '<span class="status-pill status-pending-price">بانتظار التسعير</span>'}</td>
+    <td><strong class="table-total ${unitProfitClass}">${unitProfitStr}</strong>${hasRetail && unitCost ? '<br><small class="inv-unit-sub">لكل قطعة</small>' : ''}</td>
   `;
 })() : `
-  <td>${product.unitRetail && BigInt(product.unitRetail.amount) > 0n ? `<strong style="color:var(--purple);">${money(product.unitRetail)}</strong>` : '<span class="status-pill" style="background:var(--amber-soft);color:var(--amber);">بانتظار التسعير</span>'}</td>
+  <td>${product.unitRetail && BigInt(product.unitRetail.amount) > 0n ? `<strong class="table-total text-purple">${money(product.unitRetail)}</strong>` : '<span class="status-pill status-pending-price">بانتظار التسعير</span>'}</td>
 `}<td>${product.hasLowVariant ? '<span class="status-pill status-low">مقاسات تحتاج طلب</span>' : '<span class="status-pill status-complete">متوفر</span>'}</td></tr>`).join('')}</tbody></table></div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('box', 28)}</div><strong>مفيش منتجات في المخزون</strong><p>سجّل فاتورة شراء لإضافة البضاعة للمخزون.</p>${!isCashier ? '<button class="button button-primary" data-page="suppliers">فاتورة شراء</button>' : ''}</div>`}</section>`;
 }
 
@@ -1943,8 +1943,8 @@ function shiftsView() {
   const isCashier = state.data.user.role === 'CASHIER' || Boolean(state.data.capabilities.cashierMode);
   const shiftFrom = state.shiftFrom || '';
   const shiftTo = state.shiftTo || '';
-  const activePreset = syncPresetWithDates(state.shiftPreset, shiftFrom, shiftTo, ['all', 'today', 'week', 'month'], 'weekMonday', 'all');
-  const shiftPeriodLabels = { all: 'جميع الشيفتات المسجلة', today: 'اليوم', week: 'هذا الأسبوع', month: 'هذا الشهر', custom: 'في الفترة المحددة' };
+  const activePreset = syncPresetWithDates(state.shiftPreset, shiftFrom, shiftTo, ['all', 'today', 'week', 'month', 'year'], 'weekMonday', 'all');
+  const shiftPeriodLabels = { all: 'جميع الشيفتات المسجلة', today: 'اليوم', week: 'هذا الأسبوع', month: 'هذا الشهر', year: 'هذا العام', custom: 'في الفترة المحددة' };
   const shiftsData = state.shiftsData;
 
   if (!shiftsData) {
@@ -1961,27 +1961,28 @@ function shiftsView() {
       </div>
       <div>
         ${state.data.activeShift ? `
-          <button type="button" class="button button-primary" id="shifts-end-now-btn" style="background:#5948d8;border-color:#5948d8;">
+          <button type="button" class="button button-primary" id="shifts-end-now-btn">
             ${icon('clock', 16)} إنهاء الشيفت الحالي (${escapeHtml(state.data.activeShift.shiftNumber)})
           </button>
         ` : `
-          <button type="button" class="button button-primary" id="shifts-start-now-btn" style="background:#059669;border-color:#059669;">
+          <button type="button" class="button button-primary" id="shifts-start-now-btn">
             ${icon('play', 16)} بدء شيفت جديد
           </button>
         `}
       </div>
     </div>
 
-    <section class="pro-filter-card" style="margin-bottom:18px;">
+    <section class="pro-filter-card">
       <div class="pro-filter-row">
         <div class="pro-filter-pills">
-          <span style="font-size:12px;font-weight:700;color:var(--muted);display:inline-flex;align-items:center;gap:6px;">
+          <span class="pro-filter-label">
             ${icon('filter', 15)} تصفية الشيفتات:
           </span>
           <button type="button" class="pro-filter-pill ${activePreset === 'all' ? 'active' : ''}" data-shift-preset="all">كل الشيفتات</button>
           <button type="button" class="pro-filter-pill ${activePreset === 'today' ? 'active' : ''}" data-shift-preset="today">اليوم</button>
           <button type="button" class="pro-filter-pill ${activePreset === 'week' ? 'active' : ''}" data-shift-preset="week">هذا الأسبوع</button>
           <button type="button" class="pro-filter-pill ${activePreset === 'month' ? 'active' : ''}" data-shift-preset="month">هذا الشهر</button>
+          <button type="button" class="pro-filter-pill ${activePreset === 'year' ? 'active' : ''}" data-shift-preset="year">هذا العام</button>
         </div>
         <form id="shifts-date-filter" class="pro-date-inputs">
           <div class="pro-input-wrap">
@@ -1992,49 +1993,49 @@ function shiftsView() {
             <label>${icon('calendar', 14)} إلى:</label>
             <input type="date" name="to" value="${state.shiftTo || ''}">
           </div>
-          <button type="submit" class="button button-primary button-sm" style="height:38px;padding:0 14px;">تطبيق</button>
-          ${shiftFrom || shiftTo ? '<button type="button" id="reset-shifts-filter" class="text-action" style="font-size:12px;color:var(--rose, #be123c);font-weight:700;">مسح الفلتر</button>' : ''}
+          <button type="submit" class="button button-primary button-sm">تطبيق</button>
+          ${shiftFrom || shiftTo ? '<button type="button" id="reset-shifts-filter" class="text-action text-rose">مسح الفلتر</button>' : ''}
         </form>
       </div>
     </section>
 
-    <div class="fm-card-grid" style="grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 18px;">
+    <div class="fm-card-grid">
       <div class="fm-kpi-card">
         <small>إجمالي عدد الشيفتات</small>
-        <strong style="color:var(--ink);">${summary.totalShifts ?? shifts.length} شيفت</strong>
-        <small style="color:var(--muted);">${shiftPeriodLabels[activePreset] ?? 'جميع الشيفتات المسجلة'}</small>
+        <strong>${summary.totalShifts ?? shifts.length} شيفت</strong>
+        <small>${shiftPeriodLabels[activePreset] ?? 'جميع الشيفتات المسجلة'}</small>
       </div>
       <div class="fm-kpi-card">
         <small>صافي مبيعات الشيفتات</small>
-        <strong style="color:var(--green, #15803d);">${format(summary.totalSales ?? '0')}</strong>
-        <small style="color:var(--muted);">${BigInt(summary.totalReturns ?? '0') > 0n ? `بعد خصم مرتجعات: ${format(summary.totalReturns)}` : 'المحصل من كافة الفواتير'}</small>
+        <strong class="table-total text-green">${format(summary.totalSales ?? '0')}</strong>
+        <small>${BigInt(summary.totalReturns ?? '0') > 0n ? `بعد خصم مرتجعات: <bdi dir="ltr">${format(summary.totalReturns)}</bdi>` : 'المحصل من كافة الفواتير'}</small>
       </div>
       ${!isCashier ? `
         <div class="fm-kpi-card fm-kpi-profit">
-          <small style="color:var(--purple);font-weight:750;">إجمالي أرباح الشيفتات</small>
-          <strong>${format(summary.totalProfit ?? '0')}</strong>
-          <small style="color:var(--muted);">مجمل ربح البضاعة المباعة</small>
+          <small class="text-purple">إجمالي أرباح الشيفتات</small>
+          <strong class="table-total">${format(summary.totalProfit ?? '0')}</strong>
+          <small>مجمل ربح البضاعة المباعة</small>
         </div>
       ` : ''}
       <div class="fm-kpi-card">
         <small>صافي عجز / زيادة الأدراج</small>
-        <strong style="color:${BigInt(summary.totalVariance ?? '0') === 0n ? 'var(--green, #15803d)' : BigInt(summary.totalVariance ?? '0') > 0n ? 'var(--blue, #2563eb)' : 'var(--rose,var(--rose, #be123c))'};">
+        <strong class="${BigInt(summary.totalVariance ?? '0') === 0n ? 'text-green' : BigInt(summary.totalVariance ?? '0') > 0n ? 'text-blue table-total' : 'text-rose table-total'}">
           ${BigInt(summary.totalVariance ?? '0') === 0n ? 'متطابق (0.00)' : format(summary.totalVariance ?? '0')}
         </strong>
-        <small style="color:var(--muted);">فروقات الجرد الفعلي</small>
+        <small>فروقات الجرد الفعلي</small>
       </div>
     </div>
 
     <section class="panel compact-panel">
       <div class="panel-heading">
         <div>
-          <h3 style="font-size:16px;font-weight:800;color:var(--ink);">قائمة الشيفتات المسجلة (${shifts.length} شيفت)</h3>
+          <h3>قائمة الشيفتات المسجلة (${shifts.length} شيفت)</h3>
           <p>تفاصيل كل شفت، توقيت الحضور والانصراف، مبيعات الكاشير، ورصيد التوريد والتسليم.</p>
         </div>
       </div>
 
       ${shifts.length ? `
-        <div class="table-scroll analytics-scroll-box" style="max-height:550px; overflow-y:auto;">
+        <div class="table-scroll analytics-scroll-box">
           <table class="compact-table zebra-table">
             <thead>
               <tr>
@@ -2047,40 +2048,40 @@ function shiftsView() {
                 ${!isCashier ? '<th>الأرباح</th>' : ''}
                 <th>المتوقع بالدرج</th>
                 <th>الفعلي المعدود</th>
-                <th style="text-align:center;">الفارق</th>
+                <th class="cell-center">الفارق</th>
                 <th>المبلغ المورد</th>
-                <th style="text-align:center;">الفواتير</th>
+                <th class="cell-center">الفواتير</th>
               </tr>
             </thead>
             <tbody>
               ${shifts.map((s) => {
                 const varianceNum = BigInt(s.variance || '0');
                 const varianceBadge = varianceNum === 0n
-                  ? '<span class="status-pill status-complete" style="font-size:11px;">متطابق ✓</span>'
+                  ? '<span class="status-pill status-complete">متطابق ✓</span>'
                   : varianceNum > 0n
-                  ? `<span class="status-pill status-complete" style="background:var(--blue-soft);color:var(--blue);border-color:var(--blue);font-size:11px;">+${format(s.variance)} (زيادة)</span>`
-                  : `<span class="status-pill status-low" style="font-size:11px;">${format(s.variance)} (عجز)</span>`;
+                  ? `<span class="status-pill status-complete"><bdi dir="ltr">+${format(s.variance)}</bdi> (زيادة)</span>`
+                  : `<span class="status-pill status-low"><bdi dir="ltr">${format(s.variance)}</bdi> (عجز)</span>`;
                 return `
                   <tr>
-                    <td><strong style="color:var(--purple);font-family:monospace;letter-spacing:0.5px;">${escapeHtml(s.shiftNumber)}</strong></td>
-                    <td><strong>${escapeHtml(s.userName)}</strong><br><small style="color:var(--muted);">${roleLabel(s.userRole)}</small></td>
+                    <td><strong class="text-purple sku-code">${escapeHtml(s.shiftNumber)}</strong></td>
+                    <td><strong>${escapeHtml(s.userName)}</strong><br><small class="text-muted">${roleLabel(s.userRole)}</small></td>
                     <td>
                       <div>${new Date(s.startedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })} ${new Date(s.startedAt).toLocaleDateString('ar-EG', { month: 'numeric', day: 'numeric' })}</div>
-                      <div style="font-size:11px;color:var(--muted);">${s.endedAt ? `${new Date(s.endedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}` : '<span style="color:var(--green, #15803d);font-weight:700;">مفتوحة حالياً</span>'}</div>
+                      <div>${s.endedAt ? `<small class="text-muted">${new Date(s.endedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</small>` : '<small class="text-green"><strong>مفتوحة حالياً</strong></small>'}</div>
                     </td>
                     <td><span class="sku-code">${escapeHtml(s.duration)}</span></td>
-                    <td>${format(s.openingCash)}</td>
+                    <td class="table-total">${format(s.openingCash)}</td>
                     <td>
-                      <strong style="color:var(--green, #15803d);">${format(s.salesRevenue)}</strong>
-                      <br><small style="color:var(--muted);">${s.salesCount} فاتورة${BigInt(s.returnedTotal || '0') > 0n ? ` · <span style="color:var(--rose, #be123c);">مرتجع -${format(s.returnedTotal)}</span>` : ''}</small>
+                      <strong class="table-total text-green">${format(s.salesRevenue)}</strong>
+                      <br><small class="text-muted">${s.salesCount} فاتورة${BigInt(s.returnedTotal || '0') > 0n ? ` · <span class="text-rose">مرتجع <bdi dir="ltr">-${format(s.returnedTotal)}</bdi></span>` : ''}</small>
                     </td>
-                    ${!isCashier ? `<td><strong style="color:var(--purple);">${format(s.grossProfit ?? '0')}</strong></td>` : ''}
-                    <td>${format(s.expectedCash)}</td>
-                    <td><strong>${s.status === 'OPEN' ? '—' : format(s.actualCash)}</strong></td>
-                    <td style="text-align:center;">${s.status === 'OPEN' ? '<span class="status-pill" style="font-size:11px;">قيد العمل</span>' : varianceBadge}</td>
-                    <td><strong>${format(s.handoverCash)}</strong></td>
-                    <td style="text-align:center;">
-                      <button type="button" class="button button-sm button-secondary view-shift-sales-btn" data-shift-id="${s.id}" data-shift-number="${escapeHtml(s.shiftNumber)}" style="font-size:11.5px;padding:3px 10px;">
+                    ${!isCashier ? `<td><strong class="table-total text-purple">${format(s.grossProfit ?? '0')}</strong></td>` : ''}
+                    <td class="table-total">${format(s.expectedCash)}</td>
+                    <td><strong class="${s.status === 'OPEN' ? '' : 'table-total'}">${s.status === 'OPEN' ? '—' : format(s.actualCash)}</strong></td>
+                    <td class="cell-center">${s.status === 'OPEN' ? '<span class="status-pill">قيد العمل</span>' : varianceBadge}</td>
+                    <td><strong class="table-total">${format(s.handoverCash)}</strong></td>
+                    <td class="cell-center">
+                      <button type="button" class="button button-sm button-secondary view-shift-sales-btn" data-shift-id="${s.id}" data-shift-number="${escapeHtml(s.shiftNumber)}">
                         عرض الفواتير (${s.salesCount})
                       </button>
                     </td>
@@ -2541,7 +2542,7 @@ function bindShifts() {
     }
     state.shiftFrom = from;
     state.shiftTo = to;
-    state.shiftPreset = syncPresetWithDates(null, from, to, ['all', 'today', 'week', 'month'], 'weekMonday', 'all');
+    state.shiftPreset = syncPresetWithDates(null, from, to, ['all', 'today', 'week', 'month', 'year'], 'weekMonday', 'all');
     await loadShifts();
   });
 
@@ -2712,7 +2713,7 @@ function suppliersView() {
   }
   const from = state.supplierFrom ?? '';
   const to = state.supplierTo ?? '';
-  const preset = syncPresetWithDates(state.supplierDatePreset, from, to, ['all', 'today', 'week', 'month'], 'weekSunday', 'all');
+  const preset = syncPresetWithDates(state.supplierDatePreset, from, to, ['all', 'today', 'week', 'month', 'year'], 'weekSunday', 'all');
 
   const filterPurchase = (p) => {
     if (!from && !to) return true;
@@ -2764,10 +2765,10 @@ function suppliersView() {
           <div class="purchase-summary-finances">
             <div class="purchase-summary-total">
               <small>إجمالي الفاتورة</small>
-              <strong>${money(purchase.totalAmount)}</strong>
+              <strong class="table-total">${money(purchase.totalAmount)}</strong>
             </div>
-            <span class="status-pill ${isPaid ? 'status-complete' : 'status-low'}" style="font-weight:700;">
-              ${isPaid ? '✓ مسددة بالكامل' : `متبقي ${money(purchase.remainingAmount)}`}
+            <span class="status-pill ${isPaid ? 'status-complete' : 'status-low'}">
+              ${isPaid ? '✓ مسددة بالكامل' : `متبقي <bdi dir="ltr">${money(purchase.remainingAmount)}</bdi>`}
             </span>
             <span class="disclosure-chevron" aria-hidden="true">${icon('chevron', 16)}</span>
           </div>
@@ -2781,21 +2782,21 @@ function suppliersView() {
             </div>
             <div class="purchase-finance-box paid">
               <small>المدفوع للتاجر</small>
-              <strong>${money(purchase.paidAmount)}</strong>
+              <strong class="table-total">${money(purchase.paidAmount)}</strong>
             </div>
             <div class="purchase-finance-box ${isPaid ? 'paid' : 'due'}">
               <small>المتبقي للتاجر</small>
-              <strong>${money(purchase.remainingAmount)}</strong>
+              <strong class="table-total">${money(purchase.remainingAmount)}</strong>
             </div>
             ${hasExpectedRetail ? `
               <div class="purchase-finance-box">
                 <small>إجمالي البيع المتوقع / الربح الفعلي</small>
-                <strong style="font-size:13px;color:var(--purple);">${money(purchase.expectedRetailTotal)} <span style="color:${expectedProfitMinor >= 0n ? 'var(--green)' : 'var(--rose)'};">(${expectedProfitMinor >= 0n ? '+' : ''}${money({ ...purchase.expectedRetailTotal, amount: expectedProfitMinor.toString() })})</span></strong>
+                <strong class="text-purple"><bdi dir="ltr">${money(purchase.expectedRetailTotal)}</bdi> <span class="${expectedProfitMinor >= 0n ? 'text-green' : 'text-rose'}">(<bdi dir="ltr">${expectedProfitMinor >= 0n ? '+' : ''}${money({ ...purchase.expectedRetailTotal, amount: expectedProfitMinor.toString() })}</bdi>)</span></strong>
               </div>
             ` : `
               <div class="purchase-finance-box">
                 <small>المسؤول والملاحظات</small>
-                <strong style="font-size:13px;">${escapeHtml(purchase.createdByName || 'المسؤول')}${purchase.notes ? ` · ${escapeHtml(purchase.notes)}` : ''}</strong>
+                <strong>${escapeHtml(purchase.createdByName || 'المسؤول')}${purchase.notes ? ` · ${escapeHtml(purchase.notes)}` : ''}</strong>
               </div>
             `}
           </div>
@@ -2829,14 +2830,14 @@ function suppliersView() {
                           </div>
                         </div>
                       </td>
-                      <td style="text-align:center;">
-                        <span class="status-pill status-complete" style="font-size:12.5px;font-weight:800;">${group.totalQuantity} قطعة</span>
+                      <td class="cell-center">
+                        <span class="status-pill status-complete">${group.totalQuantity} قطعة</span>
                       </td>
-                      <td>${money({ amount: avgCost, currency: group.currency, decimals: group.decimals })}</td>
-                      <td>${avgRetail !== null ? `<strong style="color:var(--purple);">${money({ amount: avgRetail, currency: group.currency, decimals: group.decimals })}</strong>` : '<span style="color:var(--muted);">—</span>'}</td>
+                      <td class="table-total">${money({ amount: avgCost, currency: group.currency, decimals: group.decimals })}</td>
+                      <td>${avgRetail !== null ? `<strong class="table-total text-purple">${money({ amount: avgRetail, currency: group.currency, decimals: group.decimals })}</strong>` : '<span class="text-muted">—</span>'}</td>
                       <td class="table-total">${money({ amount: group.totalCostMinor.toString(), currency: group.currency, decimals: group.decimals })}</td>
                       <td>
-                        <button type="button" class="button button-secondary button-sm view-model-sizes-btn" data-purchase-id="${purchase.id}" data-model-key="${group.key}" style="font-size:11.5px;padding:4px 12px;height:32px;">
+                        <button type="button" class="button button-secondary button-sm view-model-sizes-btn" data-purchase-id="${purchase.id}" data-model-key="${group.key}">
                           عرض المقاسات والألوان (${group.items.length})
                         </button>
                       </td>
@@ -2853,7 +2854,7 @@ function suppliersView() {
                 <button type="button" class="button button-primary button-sm pay-purchase" data-purchase="${purchase.id}" data-remaining="${purchase.remainingAmount.amount}">
                   ${icon('wallet', 15)} تسجيل سداد للتاجر
                 </button>
-              ` : '<span class="status-pill status-complete" style="font-size:12px;font-weight:700;padding:6px 14px;">✓ مسددة بالكامل</span>'}
+              ` : '<span class="status-pill status-complete">✓ مسددة بالكامل</span>'}
               <button type="button" class="button button-secondary button-sm print-purchase-labels" data-purchase-id="${purchase.id}">
                 طباعة باركود العلب
               </button>
@@ -2865,22 +2866,22 @@ function suppliersView() {
           </div>
 
           ${purchase.payments.length || purchase.returns.length ? `
-            <details class="compact-disclosure" style="margin-top:8px;border-radius:10px;border:1px solid var(--line);background:var(--surface-soft);">
-              <summary style="padding:10px 14px;font-size:12px;font-weight:700;">
+            <details class="compact-disclosure">
+              <summary>
                 <span>سجل حركات السداد والمرتجعات (${purchase.payments.length + purchase.returns.length} حركة)</span>
-                <span class="disclosure-chevron" style="width:26px;height:26px;">${icon('chevron', 14)}</span>
+                <span class="disclosure-chevron">${icon('chevron', 14)}</span>
               </summary>
-              <div class="disclosure-content" style="padding:4px 14px 12px;">
+              <div class="disclosure-content">
                 ${purchase.payments.map((p) => `
-                  <div class="invoice-history-row" style="display:flex;justify-content:space-between;padding:7px 0;font-size:12px;">
+                  <div class="invoice-history-row">
                     <span>سداد ${methodLabel(p.paymentMethod)} بواسطة <strong>${escapeHtml(p.createdByName || 'المسؤول')}</strong> · ${new Date(p.paidAt).toLocaleDateString('ar-EG')}</span>
-                    <strong style="color:var(--green, #15803d);">${money(p.amount)}</strong>
+                    <strong class="table-total text-green">${money(p.amount)}</strong>
                   </div>
                 `).join('')}
                 ${purchase.returns.map((r) => `
-                  <div class="invoice-history-row" style="display:flex;justify-content:space-between;padding:7px 0;font-size:12px;color:var(--rose,var(--rose, #be123c));">
+                  <div class="invoice-history-row text-rose">
                     <span>مرتجع ${escapeHtml(r.returnNumber)} · ${new Date(r.createdAt).toLocaleDateString('ar-EG')}</span>
-                    <strong>${money(r.creditAmount)}</strong>
+                    <strong class="table-total">${money(r.creditAmount)}</strong>
                   </div>
                 `).join('')}
               </div>
@@ -2905,13 +2906,14 @@ function suppliersView() {
     <section class="pro-filter-card">
       <div class="pro-filter-row">
         <div class="pro-filter-pills">
-          <span style="font-size:12px;font-weight:700;color:var(--muted);display:inline-flex;align-items:center;gap:6px;">
+          <span class="pro-filter-label">
             ${icon('filter', 15)} تصفية الفواتير:
           </span>
           <button type="button" class="pro-filter-pill ${preset === 'all' ? 'active' : ''}" data-sup-preset="all">كل الفواتير</button>
           <button type="button" class="pro-filter-pill ${preset === 'today' ? 'active' : ''}" data-sup-preset="today">اليوم</button>
           <button type="button" class="pro-filter-pill ${preset === 'week' ? 'active' : ''}" data-sup-preset="week">هذا الأسبوع</button>
           <button type="button" class="pro-filter-pill ${preset === 'month' ? 'active' : ''}" data-sup-preset="month">هذا الشهر</button>
+          <button type="button" class="pro-filter-pill ${preset === 'year' ? 'active' : ''}" data-sup-preset="year">هذا العام</button>
         </div>
         <form id="supplier-date-filter" class="pro-date-inputs">
           <div class="pro-input-wrap">
@@ -2922,50 +2924,50 @@ function suppliersView() {
             <label>${icon('calendar', 14)} إلى:</label>
             <input type="date" name="to" value="${to}">
           </div>
-          <button type="submit" class="button button-primary button-sm" style="height:38px;padding:0 14px;">تطبيق</button>
-          ${from || to ? '<button type="button" class="text-action reset-sup-filter" style="font-size:12px;color:var(--rose, #be123c);font-weight:700;">مسح</button>' : ''}
+          <button type="submit" class="button button-primary button-sm">تطبيق</button>
+          ${from || to ? '<button type="button" class="text-action reset-sup-filter text-rose">مسح</button>' : ''}
         </form>
       </div>
     </section>
 
-    <div class="inventory-summary" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
+    <div class="inventory-summary expense-summary-grid">
       <div class="inventory-summary-card">
         <span class="summary-badge summary-indigo">${icon('users', 18)}</span>
         <div><small>التجار المسجلون</small><strong>${suppliers.length}</strong></div>
       </div>
       <div class="inventory-summary-card">
         <span class="summary-badge summary-teal">${icon('bag', 18)}</span>
-        <div><small>إجمالي المشتريات ${from || to ? '(في الفترة)' : ''}</small><strong>${amount(totalPurchasedAll)}</strong></div>
+        <div><small>إجمالي المشتريات ${from || to ? '(في الفترة)' : ''}</small><strong class="table-total">${amount(totalPurchasedAll)}</strong></div>
       </div>
       <div class="inventory-summary-card">
-        <span class="summary-badge summary-green" style="background:var(--green-soft);color:var(--green);">${icon('check', 18)}</span>
-        <div><small>تم السداد للتجار ${from || to ? '(في الفترة)' : ''}</small><strong style="color:var(--green, #15803d);">${amount(totalPaidAll)}</strong></div>
+        <span class="summary-badge summary-green">${icon('check', 18)}</span>
+        <div><small>تم السداد للتجار ${from || to ? '(في الفترة)' : ''}</small><strong class="table-total text-green">${amount(totalPaidAll)}</strong></div>
       </div>
       <div class="inventory-summary-card">
         <span class="summary-badge summary-amber">${icon('wallet', 18)}</span>
-        <div><small>مستحق للتجار ${from || to ? '(في الفترة)' : ''}</small><strong style="color:${BigInt(totalDueAll) > 0n ? 'var(--rose, #be123c)' : 'inherit'};">${amount(totalDueAll)}</strong></div>
+        <div><small>مستحق للتجار ${from || to ? '(في الفترة)' : ''}</small><strong class="table-total ${BigInt(totalDueAll) > 0n ? 'text-rose' : ''}">${amount(totalDueAll)}</strong></div>
       </div>
     </div>
 
     ${processedSuppliers.length ? processedSuppliers.map((supplier) => `
       <details class="supplier-card" open>
         <summary class="supplier-summary-bar">
-          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-            <span class="product-avatar" style="width:38px;height:38px;border-radius:10px;background:var(--purple-soft);color:var(--purple);font-size:16px;font-weight:800;display:grid;place-items:center;">
+          <div class="supplier-summary-main">
+            <span class="product-avatar">
               ${escapeHtml(supplier.name.slice(0, 1))}
             </span>
             <div>
-              <h3 style="margin:0;font-size:15px;font-weight:800;color:var(--ink);">${escapeHtml(supplier.name)}</h3>
-              <p style="margin:2px 0 0;font-size:12px;color:var(--muted);">${escapeHtml(supplier.phone || 'بدون رقم هاتف')} · ${supplier.purchases.length} فاتورة مسجلة</p>
+              <h3>${escapeHtml(supplier.name)}</h3>
+              <p>${escapeHtml(supplier.phone || 'بدون رقم هاتف')} · ${supplier.purchases.length} فاتورة مسجلة</p>
             </div>
-            <div style="display:flex;align-items:center;gap:8px;margin-inline-start:8px;flex-wrap:wrap;">
-              <span class="purchase-meta-pill">مشتريات: <strong>${amount(supplier.filteredPurchased)}</strong></span>
-              <span class="purchase-meta-pill" style="color:var(--green, #15803d);">مدفوع: <strong>${amount(supplier.filteredPaid)}</strong></span>
-              <span class="purchase-meta-pill" style="color:${BigInt(supplier.filteredDue) > 0n ? 'var(--rose, #be123c)' : 'var(--green, #15803d)'};">متبقي: <strong>${amount(supplier.filteredDue)}</strong></span>
+            <div class="supplier-meta-pills">
+              <span class="purchase-meta-pill">مشتريات: <strong class="table-total">${amount(supplier.filteredPurchased)}</strong></span>
+              <span class="purchase-meta-pill text-green">مدفوع: <strong class="table-total text-green">${amount(supplier.filteredPaid)}</strong></span>
+              <span class="purchase-meta-pill ${BigInt(supplier.filteredDue) > 0n ? 'text-rose' : 'text-green'}">متبقي: <strong class="table-total ${BigInt(supplier.filteredDue) > 0n ? 'text-rose' : 'text-green'}">${amount(supplier.filteredDue)}</strong></span>
             </div>
           </div>
-          <div style="display:flex;align-items:center;gap:12px;">
-            <button type="button" class="button button-secondary button-sm purchase-for-supplier" data-supplier="${supplier.id}" style="font-size:12px;">+ فاتورة شراء جديدة</button>
+          <div class="supplier-summary-actions">
+            <button type="button" class="button button-secondary button-sm purchase-for-supplier" data-supplier="${supplier.id}">+ فاتورة شراء جديدة</button>
             <span class="disclosure-chevron" aria-hidden="true">${icon('chevron', 16)}</span>
           </div>
         </summary>
@@ -3232,13 +3234,13 @@ function topProductsView() {
   const mostPurchasedBlock = `
     <section class="panel compact-panel">
       <div class="panel-heading"><div><h3>أكثر الموديلات والمنتجات التي طلبناها من التجار وجاءت</h3><p>إحصائية البضاعة الواردة حسب عدد القطع المطلوبة والمستلم والتكلفة</p></div><span class="status-pill status-complete">${mostPurchased.length} موديل وارد</span></div>
-      ${mostPurchased.length ? `<div class="table-scroll analytics-scroll-box"><table class="compact-table"><thead><tr><th>#</th><th>الموديل / المنتج</th><th>كود الموديل</th><th>الكمية المطلوبة</th><th>مرتجع للتاجر</th><th>المستلم بالمخزن</th><th>عدد الفواتير</th><th>متوسط تكلفة القطعة</th><th>إجمالي تكلفة الشراء</th></tr></thead><tbody>${mostPurchased.map((item, idx) => `<tr><td><span class="product-rank ${idx === 0 ? 'product-rank-first' : ''}">${idx + 1}</span></td><td><strong>${escapeHtml(item.name)}</strong></td><td><span class="sku-code">${escapeHtml(item.sku || '—')}</span></td><td><div class="product-units-cell"><strong>${item.unitsOrdered} قطعة</strong><span class="product-units-track"><i style="width:${Math.max(5, Number((BigInt(item.unitsOrdered) * 100n) / maxUnitsPurchased))}%"></i></span></div></td><td>${item.returnedUnits}</td><td><strong>${item.netUnitsReceived}</strong> قطعة</td><td>${item.invoiceCount} فاتورة</td><td>${money(item.avgUnitCost)}</td><td class="table-total">${money(item.totalCost)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">لا توجد فواتير مشتريات مسجلة في هذه الفترة.</div>'}
+      ${mostPurchased.length ? `<div class="table-scroll analytics-scroll-box"><table class="compact-table"><thead><tr><th>#</th><th>الموديل / المنتج</th><th>كود الموديل</th><th>الكمية المطلوبة</th><th>مرتجع للتاجر</th><th>المستلم بالمخزن</th><th>عدد الفواتير</th><th>متوسط تكلفة القطعة</th><th>إجمالي تكلفة الشراء</th></tr></thead><tbody>${mostPurchased.map((item, idx) => `<tr><td><span class="product-rank ${idx === 0 ? 'product-rank-first' : ''}">${idx + 1}</span></td><td><strong>${escapeHtml(item.name)}</strong></td><td><span class="sku-code">${escapeHtml(item.sku || '—')}</span></td><td><div class="product-units-cell"><strong>${item.unitsOrdered} قطعة</strong><span class="product-units-track"><i style="width:${Math.max(5, Number((BigInt(item.unitsOrdered) * 100n) / maxUnitsPurchased))}%"></i></span></div></td><td>${item.returnedUnits}</td><td><strong>${item.netUnitsReceived}</strong> قطعة</td><td>${item.invoiceCount} فاتورة</td><td class="table-total">${money(item.avgUnitCost)}</td><td class="table-total">${money(item.totalCost)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">لا توجد فواتير مشتريات مسجلة في هذه الفترة.</div>'}
     </section>`;
 
   const topSellingBlock = `
     <section class="panel compact-panel">
       <div class="panel-heading"><div><h3>الموديلات والمنتجات الأكثر مبيعًا وربحية</h3><p>ترتيب الموديلات حسب الكمية المباعة وقيمة المبيعات والأرباح</p></div><span class="status-pill status-complete">${products.length} موديل مباع</span></div>
-      ${products.length ? `<div class="table-scroll analytics-scroll-box"><table class="compact-table"><thead><tr><th>#</th><th>الموديل</th><th>الكود</th><th>الكمية المباعة</th><th>الفواتير</th><th>إجمالي المبيعات</th><th>تكلفة المباع</th><th>مجمل الربح</th><th>الهامش</th></tr></thead><tbody>${products.map((product, index) => `<tr><td><span class="product-rank ${index === 0 ? 'product-rank-first' : ''}">${index + 1}</span></td><td><strong>${escapeHtml(product.name)}</strong></td><td><span class="sku-code">${escapeHtml(product.sku || '—')}</span></td><td><div class="product-units-cell"><strong>${product.unitsSold}</strong><span class="product-units-track"><i style="width:${Math.max(5, Number((BigInt(product.unitsSold) * 100n) / maxUnitsSold))}%"></i></span></div></td><td>${product.orderCount}</td><td class="table-total">${money(product.netRevenue)}</td><td>${product.cogs ? money(product.cogs) : '—'}</td><td class="table-total">${product.grossProfit ? money(product.grossProfit) : '—'}</td><td><span class="kpi-tag ${Number(product.marginPercent ?? 0) >= 25 ? 'kpi-tag-green' : 'kpi-tag-indigo'}">${escapeHtml(product.marginPercent ?? '0.0')}%</span></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">لا توجد مبيعات في الفترة المحددة.</div>'}
+      ${products.length ? `<div class="table-scroll analytics-scroll-box"><table class="compact-table"><thead><tr><th>#</th><th>الموديل</th><th>الكود</th><th>الكمية المباعة</th><th>الفواتير</th><th>إجمالي المبيعات</th><th>تكلفة المباع</th><th>مجمل الربح</th><th>الهامش</th></tr></thead><tbody>${products.map((product, index) => `<tr><td><span class="product-rank ${index === 0 ? 'product-rank-first' : ''}">${index + 1}</span></td><td><strong>${escapeHtml(product.name)}</strong></td><td><span class="sku-code">${escapeHtml(product.sku || '—')}</span></td><td><div class="product-units-cell"><strong>${product.unitsSold}</strong><span class="product-units-track"><i style="width:${Math.max(5, Number((BigInt(product.unitsSold) * 100n) / maxUnitsSold))}%"></i></span></div></td><td>${product.orderCount}</td><td class="table-total">${money(product.netRevenue)}</td><td class="table-total">${product.cogs ? money(product.cogs) : '—'}</td><td class="table-total">${product.grossProfit ? money(product.grossProfit) : '—'}</td><td><span class="kpi-tag ${Number(product.marginPercent ?? 0) >= 25 ? 'kpi-tag-green' : 'kpi-tag-indigo'}">${escapeHtml(product.marginPercent ?? '0.0')}%</span></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">لا توجد مبيعات في الفترة المحددة.</div>'}
     </section>`;
 
   const sizesColorsBlock = `
@@ -3257,7 +3259,7 @@ function topProductsView() {
   const suppliersBlock = state.data.capabilities.canViewAccounting ? `
     <section class="panel compact-panel">
       <div class="panel-heading"><div><h3>إحصائيات التجار والموردين والمسحوبات</h3><p>إجمالي الطلبات وعدد القطع والمسدد والمتبقي لكل تاجر في الفترة</p></div><span class="status-pill status-complete">${vendors?.suppliers?.length ?? 0} تاجر</span></div>
-      ${vendors?.suppliers?.length ? `<div class="table-scroll analytics-scroll-box"><table class="compact-table"><thead><tr><th>#</th><th>اسم التاجر</th><th>عدد الفواتير</th><th>إجمالي القطع المطلوبة</th><th>إجمالي المشتريات</th><th>المدفوع</th><th>المرتجعات</th><th>المتبقي للتاجر</th></tr></thead><tbody>${vendors.suppliers.map((s, idx) => `<tr><td>${idx + 1}</td><td><strong>${escapeHtml(s.name)}</strong></td><td>${s.invoiceCount} فاتورة</td><td><strong>${s.unitsOrdered ?? '—'}</strong> قطعة</td><td class="table-total">${money(s.totalAmount)}</td><td>${s.paidAmount ? money(s.paidAmount) : '—'}</td><td>${s.returnedCredit ? money(s.returnedCredit) : '—'}</td><td>${s.balanceDue && BigInt(s.balanceDue.amount) > 0n ? `<span class="status-pill status-low">${money(s.balanceDue)}</span>` : '<span class="status-pill status-complete">مسدد</span>'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">لا توجد مشتريات مسجلة من التجار في هذه الفترة.</div>'}
+      ${vendors?.suppliers?.length ? `<div class="table-scroll analytics-scroll-box"><table class="compact-table"><thead><tr><th>#</th><th>اسم التاجر</th><th>عدد الفواتير</th><th>إجمالي القطع المطلوبة</th><th>إجمالي المشتريات</th><th>المدفوع</th><th>المرتجعات</th><th>المتبقي للتاجر</th></tr></thead><tbody>${vendors.suppliers.map((s, idx) => `<tr><td>${idx + 1}</td><td><strong>${escapeHtml(s.name)}</strong></td><td>${s.invoiceCount} فاتورة</td><td><strong>${s.unitsOrdered ?? '—'}</strong> قطعة</td><td class="table-total">${money(s.totalAmount)}</td><td class="table-total">${s.paidAmount ? money(s.paidAmount) : '—'}</td><td class="table-total">${s.returnedCredit ? money(s.returnedCredit) : '—'}</td><td>${s.balanceDue && BigInt(s.balanceDue.amount) > 0n ? `<span class="status-pill status-low"><bdi dir="ltr">${money(s.balanceDue)}</bdi></span>` : '<span class="status-pill status-complete">مسدد</span>'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">لا توجد مشتريات مسجلة من التجار في هذه الفترة.</div>'}
     </section>` : '';
 
   const inventoryHealthBlock = `
@@ -5130,7 +5132,7 @@ function bindSuppliers() {
     }
     state.supplierFrom = from;
     state.supplierTo = to;
-    state.supplierDatePreset = syncPresetWithDates(null, from, to, ['all', 'today', 'week', 'month'], 'weekSunday', 'all');
+    state.supplierDatePreset = syncPresetWithDates(null, from, to, ['all', 'today', 'week', 'month', 'year'], 'weekSunday', 'all');
     render();
   });
 
