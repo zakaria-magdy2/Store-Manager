@@ -18,7 +18,7 @@ export class SqliteUserRepository implements UserRepository {
       phone: row.phone ?? undefined,
       employmentStartDate: row.employment_start_date ?? row.created_at.slice(0, 10),
       shiftStartTime: row.shift_start_time ?? undefined,
-      lateGraceMinutes: Number(row.late_grace_minutes ?? 0),
+      lateGraceMinutes: row.late_grace_minutes ?? 0,
       role: row.role as Role,
       isActive: Boolean(row.is_active),
       createdAt: new Date(row.created_at),
