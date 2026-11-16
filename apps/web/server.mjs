@@ -2235,9 +2235,9 @@ async function financialMapReport(ctx, url) {
   let salesSql = `
     SELECT s.id, s.sale_number, s.created_at, s.customer_name, s.cashier_user_id,
       (SELECT sp.method FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id LIMIT 1) AS payment_method,
-      COALESCE((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS revenue,
+      COALESCE((SELECT SUM(si.net_revenue) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS revenue,
       COALESCE((SELECT SUM(si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS cogs,
-      COALESCE((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS gross_profit
+      COALESCE((SELECT SUM(si.net_revenue - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS gross_profit
     FROM sales s
     WHERE s.tenant_id = ? AND s.store_id = ? AND s.status = 'COMPLETED'
   `;
@@ -2718,16 +2718,16 @@ async function growthForecastReport(ctx, url) {
 
   const curSalesRow = rawDb.prepare(`
     SELECT COUNT(s.id) as salesCount,
-      COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as revenue,
-      COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as profit
+      COALESCE(SUM((SELECT SUM(si.net_revenue) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as revenue,
+      COALESCE(SUM((SELECT SUM(si.net_revenue - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as profit
     FROM sales s
     WHERE s.tenant_id = ? AND s.store_id = ? AND s.status = 'COMPLETED' AND substr(s.created_at, 1, 7) = ?
   `).get(ctx.tenantId, storeId, curPrefix);
 
   const prevSalesRow = rawDb.prepare(`
     SELECT COUNT(s.id) as salesCount,
-      COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as revenue,
-      COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as profit
+      COALESCE(SUM((SELECT SUM(si.net_revenue) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as revenue,
+      COALESCE(SUM((SELECT SUM(si.net_revenue - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as profit
     FROM sales s
     WHERE s.tenant_id = ? AND s.store_id = ? AND s.status = 'COMPLETED' AND substr(s.created_at, 1, 7) = ?
   `).get(ctx.tenantId, storeId, prevPrefix);
@@ -2787,8 +2787,8 @@ async function growthForecastReport(ctx, url) {
   const salesMonthsRows = rawDb.prepare(`
     SELECT substr(s.created_at, 1, 7) as yearMonth,
       COUNT(s.id) as salesCount,
-      COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as revenue,
-      COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as profit
+      COALESCE(SUM((SELECT SUM(si.net_revenue) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as revenue,
+      COALESCE(SUM((SELECT SUM(si.net_revenue - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) as profit
     FROM sales s
     WHERE s.tenant_id = ? AND s.store_id = ? AND s.status = 'COMPLETED'
     GROUP BY substr(s.created_at, 1, 7)
@@ -3129,7 +3129,7 @@ async function currentData(ctx, url) {
   const todayBounds = localDayUtcBounds(Date.now(), tzOffsetMinutes);
   const todaySalesRow = canViewSales ? rawDbData.prepare(`
     SELECT COUNT(id) AS cnt,
-      COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = sales.tenant_id AND si.sale_id = sales.id)), 0) AS gross
+      COALESCE(SUM((SELECT SUM(si.net_revenue) FROM sale_items si WHERE si.tenant_id = sales.tenant_id AND si.sale_id = sales.id)), 0) AS gross
     FROM sales
     WHERE tenant_id = ? AND store_id = ? AND status = 'COMPLETED' AND created_at >= ? AND created_at < ?
   `).get(ctx.tenantId, storeId, todayBounds.startIso, todayBounds.endIso) : { cnt: 0, gross: 0 };
@@ -3342,7 +3342,7 @@ async function handleApi(req, res, url) {
 
     const aggSales = rawDatabase.prepare(`
       SELECT
-        COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = sales.tenant_id AND si.sale_id = sales.id)), 0) AS gross_sales,
+        COALESCE(SUM((SELECT SUM(si.net_revenue) FROM sale_items si WHERE si.tenant_id = sales.tenant_id AND si.sale_id = sales.id)), 0) AS gross_sales,
         COALESCE(SUM((SELECT SUM(si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = sales.tenant_id AND si.sale_id = sales.id)), 0) AS gross_cogs,
         COALESCE(SUM((SELECT SUM(si.quantity) FROM sale_items si WHERE si.tenant_id = sales.tenant_id AND si.sale_id = sales.id)), 0) AS gross_units
       FROM sales
@@ -4119,7 +4119,7 @@ async function handleApi(req, res, url) {
 
     const salesDuringShift = rawDb.prepare(`
       SELECT s.id, s.sale_number, s.created_at,
-        COALESCE((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS total_amount,
+        COALESCE((SELECT SUM(si.net_revenue) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS total_amount,
         COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id AND sp.method = 'CASH'), 0) AS cash_paid,
         s.change_given,
         COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id AND sp.method != 'CASH'), 0) AS electronic_paid
@@ -4254,7 +4254,7 @@ async function handleApi(req, res, url) {
 
     const salesDuringShift = rawDb.prepare(`
       SELECT s.id,
-        COALESCE((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS total_amount,
+        COALESCE((SELECT SUM(si.net_revenue) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS total_amount,
         COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id AND sp.method = 'CASH'), 0) AS cash_paid,
         s.change_given
       FROM sales s
@@ -4385,8 +4385,8 @@ async function handleApi(req, res, url) {
       const endTime = row.ended_at || new Date().toISOString();
       const salesQuery = rawDb.prepare(`
         SELECT COUNT(s.id) as salesCount,
-          COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) AS totalRevenue,
-          COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) AS grossProfit,
+          COALESCE(SUM((SELECT SUM(si.net_revenue) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) AS totalRevenue,
+          COALESCE(SUM((SELECT SUM(si.net_revenue - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id)), 0) AS grossProfit,
           COALESCE(SUM((SELECT SUM(sp.amount) FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id AND sp.method = 'CASH')), 0) AS cashPaid,
           COALESCE(SUM(s.change_given), 0) AS changeGiven
         FROM sales s
@@ -4500,7 +4500,7 @@ async function handleApi(req, res, url) {
     const salesRows = rawDb.prepare(`
       SELECT s.id, s.sale_number, s.created_at, s.customer_name, s.status, s.change_given,
         COALESCE((SELECT sp.method FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id LIMIT 1), 'CASH') as payment_method,
-        COALESCE((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS total_amount,
+        COALESCE((SELECT SUM(si.net_revenue) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS total_amount,
         COALESCE((SELECT SUM(si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS total_cogs,
         COALESCE((SELECT SUM(si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS sold_qty,
         (SELECT COUNT(si.id) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id) as items_count,

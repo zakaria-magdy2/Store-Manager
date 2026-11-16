@@ -1,8 +1,10 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -2129,5 +2131,185 @@ test('release readiness: full paged history (>200 purchases, journals, returns, 
       await once(rrServer, 'exit').catch(() => {});
     }
     await rm(rrDataDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test('multi-unit sale with line and cart discounts keeps P&L, Financial Map, Sales, and Shifts aligned via net_revenue', async () => {
+  const discDataDir = await mkdtemp(join(appDir, '.test-discount-'));
+  let discPort = await reservePort();
+  let discUrl = `http://127.0.0.1:${discPort}`;
+  let discLog = '';
+
+  const stopChild = async (child) => {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    child.kill('SIGTERM');
+    await Promise.race([once(child, 'exit'), new Promise((resolve) => setTimeout(resolve, 3000))]).catch(() => {});
+  };
+
+  const startSrv = async () => {
+    const child = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        PORT: String(discPort),
+        RETAILOS_DATA_DIR: discDataDir,
+        RETAILOS_COMPANY_NAME: 'متجر الخصومات',
+        RETAILOS_COMPANY_CODE: 'DISC',
+        RETAILOS_CURRENCY: 'EGP',
+        RETAILOS_STORE_NAME: 'الفرع الرئيسي',
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    child.stderr.on('data', (chunk) => { discLog += chunk.toString(); });
+    for (let i = 0; i < 240; i += 1) {
+      if (child.exitCode !== null) throw new Error(`discServer exited (${child.exitCode}): ${discLog}`);
+      try {
+        const res = await fetch(`${discUrl}/api/bootstrap`);
+        if (res.ok) return child;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 125));
+    }
+    throw new Error(`discServer did not become ready: ${discLog}`);
+  };
+
+  let discServer = await startSrv();
+  const dReq = async (path, { method = 'GET', body, cookieStr } = {}) => {
+    const headers = { Origin: discUrl };
+    if (body) headers['Content-Type'] = 'application/json';
+    if (cookieStr) headers.Cookie = cookieStr;
+    const response = await fetch(`${discUrl}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const payload = await response.json();
+    return { response, payload };
+  };
+
+  try {
+    assert.equal((await dReq('/api/setup', {
+      method: 'POST',
+      body: { ownerUsername: 'disc_owner', ownerName: 'مدير الخصم', password: 'Discount-Password-2026' },
+    })).response.status, 201, discLog);
+
+    const loginRes = await dReq('/api/login', {
+      method: 'POST',
+      body: { username: 'disc_owner', password: 'Discount-Password-2026' },
+    });
+    assert.equal(loginRes.response.status, 200);
+    let ownerCookie = loginRes.response.headers.get('set-cookie').split(';')[0];
+
+    const data0 = await dReq('/api/data', { cookieStr: ownerCookie });
+    const storeId = data0.payload.selectedStoreId;
+    const cat = await dReq('/api/categories', { method: 'POST', cookieStr: ownerCookie, body: { name: 'ملابس' } });
+    const prod = await dReq('/api/products', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        name: 'بنطلون خصم',
+        sku: 'DISC-PANT',
+        categoryId: cat.payload.id,
+        hasVariants: false,
+        options: [],
+        variants: [{ sku: 'DISC-PANT-1', retailPrice: '10000', reorderPoint: '1', attributes: {} }],
+      },
+    });
+    assert.equal(prod.response.status, 201);
+    const d1 = await dReq('/api/data', { cookieStr: ownerCookie });
+    const variantId = d1.payload.products[0].variants[0].id;
+    const sup = await dReq('/api/suppliers', { method: 'POST', cookieStr: ownerCookie, body: { name: 'مورد الخصومات' } });
+    const pur = await dReq('/api/purchases', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: 'dddddddd-1111-4111-8111-000000000001',
+        supplierId: sup.payload.id,
+        storeId,
+        invoiceNumber: 'DPUR-1',
+        totalAmount: '16000',
+        paidAmount: '16000',
+        paymentMethod: 'CASH',
+        items: [{ variantId, quantity: '4', unitCost: '4000' }],
+      },
+    });
+    assert.equal(pur.response.status, 201);
+
+    const shiftRes = await dReq('/api/shifts/start', { method: 'POST', cookieStr: ownerCookie, body: { storeId, openingCash: '0' } });
+    assert.equal(shiftRes.response.status, 201);
+
+    const saleRes = await dReq('/api/checkout', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        storeId,
+        idempotencyKey: 'dddddddd-2222-4222-8222-000000000002',
+        items: [{ variantId, quantity: '2' }],
+        payment: { method: 'CASH', amount: '20000' },
+      },
+    });
+    assert.equal(saleRes.response.status, 201, JSON.stringify(saleRes.payload));
+
+    // Append a second multi-unit sale (qty=2, line_discount=3000, cart_discount_share=1000, net_revenue=16000)
+    // alongside sale #1 (qty=2, net_revenue=20000). Combined netSales=36000, cogs=16000, profit=20000
+    // (buggy qty*discount SQL would yield 32000 instead of 36000).
+    await stopChild(discServer);
+    const rawDb = new DatabaseSync(join(discDataDir, 'retailos.sqlite'));
+    const s1 = rawDb.prepare('SELECT * FROM sales WHERE id = ?').get(saleRes.payload.id);
+    const si1 = rawDb.prepare('SELECT * FROM sale_items WHERE sale_id = ?').get(saleRes.payload.id);
+    const sale2Id = randomUUID();
+    const sale2Time = new Date(Date.parse(s1.created_at) + 1000).toISOString();
+    rawDb.prepare(`
+      INSERT INTO sales (id, tenant_id, store_id, sale_number, idempotency_key, customer_name, currency, subtotal, discount_total, total, paid_total, change_given, cashier_user_id, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(sale2Id, s1.tenant_id, s1.store_id, 'INV-DISC-2', randomUUID(), null, s1.currency, 20000, 4000, 16000, 16000, 0, s1.cashier_user_id, 'COMPLETED', sale2Time);
+    rawDb.prepare(`
+      INSERT INTO sale_items (id, sale_id, tenant_id, store_id, variant_id, product_id, product_name, sku, item_type, quantity, unit_price, line_discount, cart_discount_share, net_revenue, unit_cost_snapshot, cost_of_goods_sold, currency, created_at, variant_attributes_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(randomUUID(), sale2Id, si1.tenant_id, si1.store_id, si1.variant_id, si1.product_id, si1.product_name, si1.sku, si1.item_type, 2, 10000, 3000, 1000, 16000, 4000, 8000, si1.currency, sale2Time, si1.variant_attributes_json ?? null);
+    rawDb.prepare(`
+      INSERT INTO sale_payments (id, sale_id, tenant_id, method, amount, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(randomUUID(), sale2Id, s1.tenant_id, 'CASH', 16000, sale2Time);
+    rawDb.close();
+
+    discPort = await reservePort();
+    discUrl = `http://127.0.0.1:${discPort}`;
+    discServer = await startSrv();
+    const reLogin = await dReq('/api/login', {
+      method: 'POST',
+      body: { username: 'disc_owner', password: 'Discount-Password-2026' },
+    });
+    assert.equal(reLogin.response.status, 200);
+    ownerCookie = reLogin.response.headers.get('set-cookie').split(';')[0];
+
+    const todayStr = cairoDateIso();
+    const [pl, fm, salesPage, shiftsRes] = await Promise.all([
+      dReq(`/api/reports/profit-loss?from=${todayStr}&to=${todayStr}`, { cookieStr: ownerCookie }),
+      dReq(`/api/reports/financial-map?storeId=${storeId}`, { cookieStr: ownerCookie }),
+      dReq(`/api/sales?storeId=${storeId}&limit=10`, { cookieStr: ownerCookie }),
+      dReq(`/api/shifts?storeId=${storeId}`, { cookieStr: ownerCookie }),
+    ]);
+
+    assert.equal(pl.response.status, 200);
+    assert.equal(pl.payload.profitLoss.grossSales.amount, '40000');
+    assert.equal(pl.payload.profitLoss.discounts.amount, '4000');
+    assert.equal(pl.payload.profitLoss.netSales.amount, '36000');
+    assert.equal(pl.payload.profitLoss.cogs.amount, '16000');
+    assert.equal(pl.payload.profitLoss.grossProfit.amount, '20000');
+    assert.equal(pl.payload.profitLoss.operatingProfit.amount, '20000');
+
+    assert.equal(fm.response.status, 200);
+    assert.equal(fm.payload.summary.netSales, '36000');
+    assert.equal(fm.payload.summary.totalCogs, '16000');
+    assert.equal(fm.payload.summary.operatingProfit, '20000');
+    assert.equal(fm.payload.summary.netCashFlow, '20000');
+
+    assert.equal(salesPage.response.status, 200);
+    assert.equal(salesPage.payload.payload.summary.netSales.amount, '36000');
+    assert.equal(salesPage.payload.payload.summary.grossProfit.amount, '20000');
+    assert.equal(salesPage.payload.payload.summary.operatingProfit.amount, '20000');
+
+    assert.equal(shiftsRes.response.status, 200);
+    assert.equal(shiftsRes.payload.summary.totalSales, '36000');
+    assert.equal(shiftsRes.payload.summary.totalProfit, '20000');
+  } finally {
+    await stopChild(discServer);
+    await rm(discDataDir, { recursive: true, force: true }).catch(() => {});
   }
 });
