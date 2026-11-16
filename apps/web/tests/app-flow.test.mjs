@@ -1883,6 +1883,9 @@ test('keeps /api/sales strictly pure while separating profit-loss expenses and f
     assert.equal(salesReport.response.status, 200);
     assert.equal(salesReport.payload.payload.summary.invoiceCount, 1);
     assert.equal(salesReport.payload.payload.summary.returnsCount, 1);
+    assert.equal(salesReport.payload.payload.summary.grossUnits, '3');
+    assert.equal(salesReport.payload.payload.summary.returnedUnits, '1');
+    assert.equal(salesReport.payload.payload.summary.netUnits, '2');
     assert.equal(salesReport.payload.payload.summary.netSales.amount, '80000');
     assert.equal(salesReport.payload.payload.summary.cogs.amount, '40000');
     assert.equal(salesReport.payload.payload.summary.grossProfit.amount, '40000');

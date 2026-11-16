@@ -3048,25 +3048,29 @@ async function handleApi(req, res, url) {
     const aggSales = rawDatabase.prepare(`
       SELECT
         COALESCE(SUM((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = sales.tenant_id AND si.sale_id = sales.id)), 0) AS gross_sales,
-        COALESCE(SUM((SELECT SUM(si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = sales.tenant_id AND si.sale_id = sales.id)), 0) AS gross_cogs
+        COALESCE(SUM((SELECT SUM(si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = sales.tenant_id AND si.sale_id = sales.id)), 0) AS gross_cogs,
+        COALESCE(SUM((SELECT SUM(si.quantity) FROM sale_items si WHERE si.tenant_id = sales.tenant_id AND si.sale_id = sales.id)), 0) AS gross_units
       FROM sales
       WHERE ${where}
     `).get(...args);
 
     let summaryReturns = 0n;
     let summaryReturnedCost = 0n;
+    let summaryReturnedUnits = 0n;
     let summaryReturnsCount = 0;
     if (search) {
       const retAgg = rawDatabase.prepare(`
         SELECT COUNT(cr.id) AS ret_count,
           COALESCE(SUM(cr.refund_amount), 0) AS refunds,
-          COALESCE(SUM((SELECT SUM(cri.cost_amount) FROM customer_return_items cri WHERE cri.tenant_id = cr.tenant_id AND cri.return_id = cr.id)), 0) AS ret_cost
+          COALESCE(SUM((SELECT SUM(cri.cost_amount) FROM customer_return_items cri WHERE cri.tenant_id = cr.tenant_id AND cri.return_id = cr.id)), 0) AS ret_cost,
+          COALESCE(SUM((SELECT SUM(cri.quantity) FROM customer_return_items cri WHERE cri.tenant_id = cr.tenant_id AND cri.return_id = cr.id)), 0) AS ret_units
         FROM customer_returns cr
         WHERE cr.tenant_id = ? AND cr.store_id = ? AND cr.original_sale_id IN (SELECT id FROM sales WHERE ${where})
       `).get(ctx.tenantId, storeId, ...args);
       summaryReturnsCount = Number(retAgg?.ret_count ?? 0);
       summaryReturns = BigInt(retAgg?.refunds ?? 0);
       summaryReturnedCost = BigInt(retAgg?.ret_cost ?? 0);
+      summaryReturnedUnits = BigInt(retAgg?.ret_units ?? 0);
     } else {
       const retConds = ['cr.tenant_id = ?', 'cr.store_id = ?'];
       const retArgs = [ctx.tenantId, storeId];
@@ -3077,17 +3081,21 @@ async function handleApi(req, res, url) {
       const retAgg = rawDatabase.prepare(`
         SELECT COUNT(cr.id) AS ret_count,
           COALESCE(SUM(cr.refund_amount), 0) AS refunds,
-          COALESCE(SUM((SELECT SUM(cri.cost_amount) FROM customer_return_items cri WHERE cri.tenant_id = cr.tenant_id AND cri.return_id = cr.id)), 0) AS ret_cost
+          COALESCE(SUM((SELECT SUM(cri.cost_amount) FROM customer_return_items cri WHERE cri.tenant_id = cr.tenant_id AND cri.return_id = cr.id)), 0) AS ret_cost,
+          COALESCE(SUM((SELECT SUM(cri.quantity) FROM customer_return_items cri WHERE cri.tenant_id = cr.tenant_id AND cri.return_id = cr.id)), 0) AS ret_units
         FROM customer_returns cr
         WHERE ${retConds.join(' AND ')}
       `).get(...retArgs);
       summaryReturnsCount = Number(retAgg?.ret_count ?? 0);
       summaryReturns = BigInt(retAgg?.refunds ?? 0);
       summaryReturnedCost = BigInt(retAgg?.ret_cost ?? 0);
+      summaryReturnedUnits = BigInt(retAgg?.ret_units ?? 0);
     }
 
     const grossSalesMinor = BigInt(aggSales?.gross_sales ?? 0);
     const netSalesMinor = grossSalesMinor - summaryReturns;
+    const grossUnitsMinor = BigInt(aggSales?.gross_units ?? 0);
+    const netUnitsMinor = grossUnitsMinor - summaryReturnedUnits;
     const cogsMinor = BigInt(aggSales?.gross_cogs ?? 0) - summaryReturnedCost;
     const grossProfitMinor = netSalesMinor - cogsMinor;
 
@@ -3124,6 +3132,9 @@ async function handleApi(req, res, url) {
         summary: {
           invoiceCount: total,
           returnsCount: summaryReturnsCount,
+          grossUnits: grossUnitsMinor.toString(),
+          returnedUnits: summaryReturnedUnits.toString(),
+          netUnits: netUnitsMinor.toString(),
           grossSales: toMoneySummary(grossSalesMinor),
           returnsTotal: toMoneySummary(summaryReturns),
           netSales: toMoneySummary(netSalesMinor),

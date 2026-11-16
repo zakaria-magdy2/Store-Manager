@@ -1768,7 +1768,7 @@ function salesView() {
         <div class="sales-pricing-item">
           <small>إجمالي المبيعات (الصافي)</small>
           <strong>${money(sum.netSales)}</strong>
-          ${hasReturnsAmt ? `<small style="color:var(--muted);display:block;font-size:11px;margin-top:3px;">قبل المرتجع: <bdi dir="ltr" style="display:inline-block;">${money(sum.grossSales)}</bdi> · المرتجع: <bdi dir="ltr" style="display:inline-block;">-${money(sum.returnsTotal)}</bdi></small>` : ''}
+          ${hasReturnsAmt ? `<small class="sales-pricing-sub">قبل المرتجع: <bdi dir="ltr">${money(sum.grossSales)}</bdi> · المرتجع: <bdi dir="ltr">-${money(sum.returnsTotal)}</bdi></small>` : ''}
         </div>
         <div class="sales-pricing-item">
           <small>تكلفة البضاعة الأصلية</small>
@@ -1781,7 +1781,7 @@ function salesView() {
         <div class="sales-pricing-item">
           <small>عدد الفواتير</small>
           <strong>${sum.invoiceCount ?? totalCount} فاتورة</strong>
-          ${sum.returnsCount ? `<small style="color:var(--muted);display:block;font-size:11px;margin-top:3px;">مرتجعات الفترة: ${sum.returnsCount}</small>` : ''}
+          <small class="sales-pricing-sub">الإجمالي: ${sum.netUnits ?? '0'} قطعة${sum.returnsCount ? ` · ${sum.returnsCount} مرتجع` : ''}</small>
         </div>
       </div>
     </section>
@@ -1797,7 +1797,7 @@ function salesView() {
         <div class="sales-pricing-item">
           <small>صافي المبيعات</small>
           <strong>${money(sum.netSales)}</strong>
-          ${hasReturnsAmt ? `<small style="color:var(--muted);display:block;font-size:11px;margin-top:3px;">قبل المرتجع: ${money(sum.grossSales)}</small>` : ''}
+          ${hasReturnsAmt ? `<small class="sales-pricing-sub">قبل المرتجع: <bdi dir="ltr">${money(sum.grossSales)}</bdi></small>` : ''}
         </div>
         <div class="sales-pricing-item">
           <small>إجمالي المرتجعات</small>
@@ -1805,7 +1805,8 @@ function salesView() {
         </div>
         <div class="sales-pricing-item">
           <small>عدد الفواتير</small>
-          <strong>${sum.invoiceCount ?? totalCount}</strong>
+          <strong>${sum.invoiceCount ?? totalCount} فاتورة</strong>
+          <small class="sales-pricing-sub">الإجمالي: ${sum.netUnits ?? '0'} قطعة</small>
         </div>
       </div>
     </section>
@@ -8062,11 +8063,6 @@ function stocktakeView() {
             <strong>جرد تصنيف محدد</strong>
             <small>جرد قسم معين فقط (دوري / أسبوعي) بدون تعطيل المحل.</small>
           </label>
-          <label class="stocktake-scope-card">
-            <input type="radio" name="scope" value="PARTIAL">
-            <strong>جرد انتقائي / أصناف محددة</strong>
-            <small>ابدأ بقائمة فارغة وأضف الأصناف بالبحث بالاسم أو مسح الباركود لعدّها فقط.</small>
-          </label>
         </div>
         <div id="stocktake-category-wrap" class="stocktake-category-wrap" hidden>
           <label>اختر التصنيف المطلوب جرده
@@ -8726,7 +8722,7 @@ function bindStocktake() {
         card.classList.toggle('is-selected', Boolean(input?.checked));
       });
       if (catWrap) catWrap.hidden = checked !== 'CATEGORY';
-      if (zeroWrap) zeroWrap.style.display = checked === 'PARTIAL' ? 'none' : '';
+      if (zeroWrap) zeroWrap.hidden = false;
     };
     scopeRadios?.forEach((r) => r.addEventListener('change', syncScopeUi));
     syncScopeUi();
