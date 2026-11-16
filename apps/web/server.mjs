@@ -1147,6 +1147,16 @@ async function profitLossReport(ctx, url) {
     .where('journal_entries.tenant_id', '=', ctx.tenantId).where('journal_entries.store_id', '=', storeId)
     .where('journal_entries.source_type', '=', 'SUPPLIER_RETURN').where('journal_entries.created_at', '>=', start)
     .where('journal_entries.created_at', '<', endExclusive).where('accounts.account_code', '=', '5090').execute();
+  const invAdjustmentRows = await db.selectFrom('journal_entries').innerJoin('journal_lines', 'journal_lines.journal_entry_id', 'journal_entries.id')
+    .innerJoin('accounts', 'accounts.id', 'journal_lines.account_id').select(['journal_lines.entry_type as side', 'journal_lines.amount as amount'])
+    .where('journal_entries.tenant_id', '=', ctx.tenantId).where('journal_entries.store_id', '=', storeId)
+    .where('journal_entries.source_type', '=', 'ADJUSTMENT').where('journal_entries.created_at', '>=', start)
+    .where('journal_entries.created_at', '<', endExclusive).where('accounts.account_code', '=', '5090').execute();
+  const shiftClosingRows = await db.selectFrom('journal_entries').innerJoin('journal_lines', 'journal_lines.journal_entry_id', 'journal_entries.id')
+    .innerJoin('accounts', 'accounts.id', 'journal_lines.account_id').select(['accounts.account_code as code', 'journal_lines.entry_type as side', 'journal_lines.amount as amount'])
+    .where('journal_entries.tenant_id', '=', ctx.tenantId).where('journal_entries.store_id', '=', storeId)
+    .where('journal_entries.source_type', '=', 'SESSION_CLOSING').where('journal_entries.created_at', '>=', start)
+    .where('journal_entries.created_at', '<', endExclusive).where('accounts.account_code', 'in', ['6090', '4010']).execute();
   const directExpenses = await db.selectFrom('operating_expense_records').select(['amount', 'payment_method as paymentMethod'])
     .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).where('expense_type', '=', 'DIRECT_DAILY')
     .where('expense_date', '>=', fromStr).where('expense_date', '<=', toStr).execute();
@@ -1174,6 +1184,12 @@ async function profitLossReport(ctx, url) {
   const refunds = returns.reduce((sum, item) => sum + BigInt(item.refundAmount), 0n);
   const returnedCost = returnLines.reduce((sum, item) => sum + BigInt(item.costAmount), 0n);
   const inventoryCostVariance = varianceRows.reduce((sum, item) => sum + (item.side === 'DEBIT' ? BigInt(item.amount) : -BigInt(item.amount)), 0n);
+  const inventoryAdjustmentsLoss = invAdjustmentRows.reduce((sum, item) => sum + (item.side === 'DEBIT' ? BigInt(item.amount) : -BigInt(item.amount)), 0n);
+  const shiftCashVarianceLoss = shiftClosingRows.reduce((sum, item) => {
+    if (item.code === '6090') return sum + (item.side === 'DEBIT' ? BigInt(item.amount) : -BigInt(item.amount));
+    if (item.code === '4010') return sum - (item.side === 'CREDIT' ? BigInt(item.amount) : -BigInt(item.amount));
+    return sum;
+  }, 0n);
   cogs += inventoryCostVariance - returnedCost;
   const netSales = grossSales - discounts - refunds;
   const grossProfit = netSales - cogs;
@@ -1187,7 +1203,7 @@ async function profitLossReport(ctx, url) {
       if (!actuals.some((item) => item.obligation_id === obligation.id && item.year === year && item.month === month)) missingMonthlyActuals.push({ name: obligation.name, year, month });
     }
   }
-  const operatingProfit = grossProfit - directExpenseTotal - monthlyExpenseTotal;
+  const operatingProfit = grossProfit - directExpenseTotal - monthlyExpenseTotal - inventoryAdjustmentsLoss - shiftCashVarianceLoss;
   const seenCashSaleChange = new Set();
   let totalCashChangeGiven = 0n;
   for (const item of salePayments) {
@@ -1225,7 +1241,7 @@ async function profitLossReport(ctx, url) {
   `).all(ctx.tenantId, storeId, start, endExclusive);
 
   const supPayRows = rawDb.prepare(`
-    SELECT sp.id, sp.purchase_id, p.invoice_number, COALESCE(sp.paid_at, sp.created_at) AS paid_at,
+    SELECT sp.id, sp.purchase_id, sp.idempotency_key, p.invoice_number, COALESCE(sp.paid_at, sp.created_at) AS paid_at,
       sp.amount, sp.payment_method, sp.reference_number, sp.created_by_user_id,
       s.id AS supplier_id, s.name AS supplier_name
     FROM supplier_payments sp
@@ -1244,7 +1260,36 @@ async function profitLossReport(ctx, url) {
       AND replace(created_at, ' ', 'T') >= ? AND replace(created_at, ' ', 'T') < ?
   `).get(ctx.tenantId, storeId, start, endExclusive);
 
+  const plExpenseRows = rawDb.prepare(`
+    SELECT oer.id, oer.expense_date, COALESCE(oer.created_at, oer.expense_date) AS recorded_at,
+      oer.amount, oer.payment_method, oer.notes, oer.reference_number, oer.expense_type, oer.created_by_user_id,
+      COALESCE(ec.name, 'مصروف تشغيلي') AS category_name,
+      COALESCE(reo.name, ec.name, 'التزام شهري') AS obligation_name
+    FROM operating_expense_records oer
+    LEFT JOIN expense_categories ec ON ec.id = oer.category_id AND ec.tenant_id = oer.tenant_id
+    LEFT JOIN monthly_expense_actuals mea ON mea.id = oer.monthly_actual_id AND mea.tenant_id = oer.tenant_id
+    LEFT JOIN recurring_expense_obligations reo ON reo.id = mea.obligation_id AND reo.tenant_id = oer.tenant_id
+    WHERE oer.tenant_id = ? AND oer.store_id = ?
+      AND oer.expense_date >= ? AND oer.expense_date <= ?
+    ORDER BY oer.expense_date DESC, COALESCE(oer.created_at, oer.expense_date) DESC
+  `).all(ctx.tenantId, storeId, fromStr, toStr);
+
   const money = (amount) => moneyJson(Money.fromMinor(amount, tenant.currency));
+
+  const expenseItems = plExpenseRows.map((row) => {
+    const isMonthly = row.expense_type === 'MONTHLY_RECURRING_PAYMENT';
+    return {
+      id: row.id,
+      expenseDate: row.expense_date,
+      recordedAt: row.recorded_at,
+      type: isMonthly ? 'MONTHLY' : 'DAILY',
+      categoryName: isMonthly ? row.obligation_name : row.category_name,
+      paymentMethod: row.payment_method,
+      notes: row.notes || row.reference_number || '',
+      actorName: userMapPl.get(row.created_by_user_id) || 'المسؤول',
+      amount: money(BigInt(row.amount ?? 0)),
+    };
+  });
 
   let supplierInitialPaid = 0n;
   let supplierInstallmentPaid = 0n;
@@ -1269,14 +1314,16 @@ async function profitLossReport(ctx, url) {
   }
   for (const row of supPayRows) {
     const amt = BigInt(row.amount ?? 0);
-    supplierInstallmentPaid += amt;
+    const isInitial = String(row.idempotency_key || '').endsWith(':initial') || String(row.id || '').endsWith(':payment:initial');
+    if (isInitial) supplierInitialPaid += amt;
+    else supplierInstallmentPaid += amt;
     supplierPaymentItems.push({
       id: row.id,
       purchaseId: row.purchase_id,
       supplierId: row.supplier_id,
       supplierName: row.supplier_name,
       invoiceNumber: row.invoice_number || row.purchase_id.slice(0, 8),
-      type: 'INSTALLMENT',
+      type: isInitial ? 'INITIAL' : 'INSTALLMENT',
       paymentMethod: row.payment_method || 'CASH',
       referenceNumber: row.reference_number || null,
       paidAt: row.paid_at,
@@ -1293,7 +1340,20 @@ async function profitLossReport(ctx, url) {
   const netCashRemaining = netCollections - totalCashOutflows;
 
   return { storeId, from: fromStr, to: toStr, currency: tenant.currency, missingMonthlyActuals,
-    profitLoss: { grossSales: money(grossSales), discounts: money(discounts), returns: money(refunds), netSales: money(netSales), cogs: money(cogs), grossProfit: money(grossProfit), directExpenses: money(directExpenseTotal), monthlyExpenses: money(monthlyExpenseTotal), operatingProfit: money(operatingProfit) },
+    profitLoss: {
+      grossSales: money(grossSales),
+      discounts: money(discounts),
+      returns: money(refunds),
+      netSales: money(netSales),
+      cogs: money(cogs),
+      grossProfit: money(grossProfit),
+      directExpenses: money(directExpenseTotal),
+      monthlyExpenses: money(monthlyExpenseTotal),
+      inventoryAdjustmentsLoss: money(inventoryAdjustmentsLoss),
+      shiftCashVarianceLoss: money(shiftCashVarianceLoss),
+      operatingProfit: money(operatingProfit),
+    },
+    expenseItems,
     cashFlow: { cashSales: money(cashSales), electronicSales: money(electronicSales), directExpenseOutflow: money(directCashOutflow), monthlyObligationOutflow: money(monthlyCashOutflow), pendingUnpaidObligations: money(pendingDue) },
     supplierPayments: {
       initialPaid: money(supplierInitialPaid),
@@ -1856,11 +1916,12 @@ async function financialMapReport(ctx, url) {
     return str;
   };
 
-  // 1. Sales
+  // 1. Sales (with original merchandise COGS)
   let salesSql = `
     SELECT s.id, s.sale_number, s.created_at, s.customer_name, s.cashier_user_id,
       (SELECT sp.method FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id LIMIT 1) AS payment_method,
       COALESCE((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS revenue,
+      COALESCE((SELECT SUM(si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS cogs,
       COALESCE((SELECT SUM((si.unit_price - si.line_discount - si.cart_discount_share) * si.quantity - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS gross_profit
     FROM sales s
     WHERE s.tenant_id = ? AND s.store_id = ? AND s.status = 'COMPLETED'
@@ -1870,7 +1931,19 @@ async function financialMapReport(ctx, url) {
   salesSql += ` ORDER BY s.created_at ASC`;
   const salesRows = rawDb.prepare(salesSql).all(...salesParams);
 
-  // 2. Supplier purchases initial payments
+  // 2. Supplier Purchase Bills (includes credit / partial purchases for complete timeline audit)
+  let supBillsSql = `
+    SELECT p.id, p.invoice_number, COALESCE(p.purchased_at, p.created_at) AS created_at, p.total_amount, p.initial_paid_amount, p.notes, p.created_by_user_id, s.name AS supplier_name
+    FROM supplier_purchases p
+    INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
+    WHERE p.tenant_id = ? AND p.store_id = ?
+  `;
+  const supBillsParams = [ctx.tenantId, storeId];
+  if (bounds) { supBillsSql += ` AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') >= ? AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') < ?`; supBillsParams.push(bounds.startIso, bounds.endExclusiveIso); }
+  supBillsSql += ` ORDER BY COALESCE(p.purchased_at, p.created_at) ASC`;
+  const supBillsRows = rawDb.prepare(supBillsSql).all(...supBillsParams);
+
+  // 3. Supplier purchases legacy initial_paid_amount > 0 + supplier_payments table
   let supInitSql = `
     SELECT p.id, p.invoice_number, COALESCE(p.purchased_at, p.created_at) as created_at, p.initial_paid_amount as amount, p.notes, p.created_by_user_id, s.name as supplier_name
     FROM supplier_purchases p
@@ -1882,9 +1955,8 @@ async function financialMapReport(ctx, url) {
   supInitSql += ` ORDER BY COALESCE(p.purchased_at, p.created_at) ASC`;
   const supInitRows = rawDb.prepare(supInitSql).all(...supInitParams);
 
-  // 3. Supplier installment payments
   let supPaySql = `
-    SELECT sp.id, p.invoice_number, COALESCE(sp.paid_at, sp.created_at) as created_at, sp.amount, sp.payment_method, sp.reference_number, sp.created_by_user_id, s.name as supplier_name
+    SELECT sp.id, sp.idempotency_key, p.invoice_number, COALESCE(sp.paid_at, sp.created_at) as created_at, sp.amount, sp.payment_method, sp.reference_number, sp.created_by_user_id, s.name as supplier_name
     FROM supplier_payments sp
     INNER JOIN supplier_purchases p ON p.id = sp.purchase_id AND p.tenant_id = sp.tenant_id
     INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
@@ -1924,7 +1996,20 @@ async function financialMapReport(ctx, url) {
   retSql += ` ORDER BY cr.created_at ASC`;
   const retRows = rawDb.prepare(retSql).all(...retParams);
 
-  // 6. Supplier Return Cost Variance (Account 5090 — aligns COGS/operatingProfit with Profit & Loss & Sales)
+  // 6. Supplier Return Credit Events & Variance (Account 5090)
+  let supRetSql = `
+    SELECT sr.id, sr.return_number, sr.credit_amount, sr.created_at, sr.created_by_user_id,
+      p.invoice_number, s.name AS supplier_name
+    FROM supplier_returns sr
+    INNER JOIN supplier_purchases p ON p.id = sr.purchase_id AND p.tenant_id = sr.tenant_id
+    INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
+    WHERE sr.tenant_id = ? AND sr.store_id = ?
+  `;
+  const supRetParams = [ctx.tenantId, storeId];
+  if (bounds) { supRetSql += ` AND replace(sr.created_at, ' ', 'T') >= ? AND replace(sr.created_at, ' ', 'T') < ?`; supRetParams.push(bounds.startIso, bounds.endExclusiveIso); }
+  supRetSql += ` ORDER BY sr.created_at ASC`;
+  const supRetRows = rawDb.prepare(supRetSql).all(...supRetParams);
+
   let varSql = `
     SELECT jl.entry_type AS side, jl.amount
     FROM journal_entries je
@@ -1937,14 +2022,56 @@ async function financialMapReport(ctx, url) {
   const varRows = rawDb.prepare(varSql).all(...varParams);
   const supplierReturnVarianceMinor = varRows.reduce((sum, r) => sum + (r.side === 'DEBIT' ? BigInt(r.amount) : -BigInt(r.amount)), 0n);
 
+  // 7. Inventory Damage, Stock Adjustments & Stocktake Shrinkage/Surplus (Account 5090 / source_type='ADJUSTMENT')
+  let invAdjSql = `
+    SELECT je.id, je.entry_number, je.created_at, je.created_by_user_id, MAX(jl.memo) AS memo,
+      SUM(CASE WHEN jl.entry_type = 'DEBIT' THEN jl.amount ELSE -jl.amount END) AS net_loss
+    FROM journal_entries je
+    INNER JOIN journal_lines jl ON jl.journal_entry_id = je.id
+    INNER JOIN accounts a ON a.id = jl.account_id
+    WHERE je.tenant_id = ? AND je.store_id = ? AND je.source_type = 'ADJUSTMENT' AND a.account_code = '5090'
+  `;
+  const invAdjParams = [ctx.tenantId, storeId];
+  if (bounds) { invAdjSql += ` AND je.created_at >= ? AND je.created_at < ?`; invAdjParams.push(bounds.startIso, bounds.endExclusiveIso); }
+  invAdjSql += ` GROUP BY je.id ORDER BY je.created_at ASC`;
+  const invAdjRows = rawDb.prepare(invAdjSql).all(...invAdjParams);
+
+  // 8. Drawer Shift-Close Adjustments (Account 1010 / source_type='SESSION_CLOSING')
+  let shiftCloseSql = `
+    SELECT je.id, je.entry_number, je.created_at, je.created_by_user_id, MAX(jl.memo) AS memo,
+      SUM(CASE WHEN jl.entry_type = 'DEBIT' THEN jl.amount ELSE -jl.amount END) AS cash_delta
+    FROM journal_entries je
+    INNER JOIN journal_lines jl ON jl.journal_entry_id = je.id
+    INNER JOIN accounts a ON a.id = jl.account_id
+    WHERE je.tenant_id = ? AND je.store_id = ? AND je.source_type = 'SESSION_CLOSING' AND a.account_code = '1010'
+  `;
+  const shiftCloseParams = [ctx.tenantId, storeId];
+  if (bounds) { shiftCloseSql += ` AND je.created_at >= ? AND je.created_at < ?`; shiftCloseParams.push(bounds.startIso, bounds.endExclusiveIso); }
+  shiftCloseSql += ` GROUP BY je.id ORDER BY je.created_at ASC`;
+  const shiftCloseRows = rawDb.prepare(shiftCloseSql).all(...shiftCloseParams);
+
+  // 9. Internal Treasury Transfers (source_type='TRANSFER')
+  let transferSql = `
+    SELECT je.id, je.entry_number, je.created_at, je.created_by_user_id, MAX(jl.memo) AS memo, MAX(jl.amount) AS amount
+    FROM journal_entries je
+    INNER JOIN journal_lines jl ON jl.journal_entry_id = je.id
+    WHERE je.tenant_id = ? AND je.store_id = ? AND je.source_type = 'TRANSFER'
+  `;
+  const transferParams = [ctx.tenantId, storeId];
+  if (bounds) { transferSql += ` AND je.created_at >= ? AND je.created_at < ?`; transferParams.push(bounds.startIso, bounds.endExclusiveIso); }
+  transferSql += ` GROUP BY je.id ORDER BY je.created_at ASC`;
+  const transferRows = rawDb.prepare(transferSql).all(...transferParams);
+
   const timeline = [];
 
   for (const s of salesRows) {
     const rev = BigInt(s.revenue ?? 0);
+    const cogs = BigInt(s.cogs ?? 0);
     const profit = BigInt(s.gross_profit ?? 0);
     timeline.push({
       id: s.id,
       timestamp: toIsoTimestamp(s.created_at),
+      sortOrder: 1,
       type: 'SALE',
       category: 'بيع',
       title: `فاتورة بيع #${s.sale_number}`,
@@ -1953,8 +2080,31 @@ async function financialMapReport(ctx, url) {
       actor: userMap.get(s.cashier_user_id) || 'الكاشير',
       amountIn: rev.toString(),
       amountOut: '0',
+      cogsAmount: cogs.toString(),
       profitImpact: profit.toString(),
-      details: `إيراد: ${Money.fromMinor(rev, currency).toDecimalString()} ${currency} · ربح البيع: ${Money.fromMinor(profit, currency).toDecimalString()} ${currency}`,
+      details: `قيمة البيع: ${Money.fromMinor(rev, currency).toDecimalString()} ${currency} · تكلفة البضاعة الأصلي: ${Money.fromMinor(cogs, currency).toDecimalString()} ${currency}`,
+    });
+  }
+
+  for (const b of supBillsRows) {
+    const billAmt = BigInt(b.total_amount ?? 0);
+    const invRef = b.invoice_number || b.id.slice(0, 8);
+    const formattedBill = `${Money.fromMinor(billAmt, currency).toDecimalString()} ${currency}`;
+    timeline.push({
+      id: `${b.id}-bill`,
+      timestamp: toIsoTimestamp(b.created_at),
+      sortOrder: 2,
+      type: 'SUPPLIER_PURCHASE',
+      category: 'فاتورة شراء',
+      title: `فاتورة بضاعة #${invRef} بقيمة ${formattedBill}`,
+      reference: b.invoice_number,
+      party: `التاجر: ${b.supplier_name}`,
+      actor: userMap.get(b.created_by_user_id) || 'المسؤول',
+      amountIn: '0',
+      amountOut: '0',
+      billAmount: billAmt.toString(),
+      profitImpact: '0',
+      details: `استلام بضاعة للمخزون بقيمة ${formattedBill} من ${b.supplier_name} (السداد النقدي يُخصم في بند سداد التاجر)${b.notes ? ` · ${b.notes}` : ''}`,
     });
   }
 
@@ -1965,6 +2115,7 @@ async function financialMapReport(ctx, url) {
     timeline.push({
       id: `${p.id}-init`,
       timestamp: toIsoTimestamp(p.created_at),
+      sortOrder: 3,
       type: 'SUPPLIER_PAYMENT',
       category: 'سداد تاجر',
       title: `سددت ${formattedAmt} للتاجر ${p.supplier_name}`,
@@ -1983,9 +2134,11 @@ async function financialMapReport(ctx, url) {
     const formattedAmt = `${Money.fromMinor(amt, currency).toDecimalString()} ${currency}`;
     const methodLabel = paymentMethodArabicLabel(p.payment_method || 'CASH');
     const invRef = p.invoice_number || p.id.slice(0, 8);
+    const isInitial = String(p.idempotency_key || '').endsWith(':initial') || String(p.id || '').endsWith(':payment:initial');
     timeline.push({
       id: p.id,
       timestamp: toIsoTimestamp(p.created_at),
+      sortOrder: 3,
       type: 'SUPPLIER_PAYMENT',
       category: 'سداد تاجر',
       title: `سددت ${formattedAmt} للتاجر ${p.supplier_name}`,
@@ -1995,7 +2148,28 @@ async function financialMapReport(ctx, url) {
       amountIn: '0',
       amountOut: amt.toString(),
       profitImpact: '0',
-      details: `سددت ${formattedAmt} للتاجر ${p.supplier_name} — من حساب فاتورة #${invRef} (${methodLabel})${p.reference_number ? ` · مرجع: ${p.reference_number}` : ''}`,
+      details: `سددت ${formattedAmt} للتاجر ${p.supplier_name} — ${isInitial ? 'دفعة مقدمة عند استلام' : 'سداد دفعة من حساب'} فاتورة #${invRef} (${methodLabel})${p.reference_number ? ` · مرجع: ${p.reference_number}` : ''}`,
+    });
+  }
+
+  for (const sr of supRetRows) {
+    const creditAmt = BigInt(sr.credit_amount ?? 0);
+    const formattedCredit = `${Money.fromMinor(creditAmt, currency).toDecimalString()} ${currency}`;
+    const invRef = sr.invoice_number || '';
+    timeline.push({
+      id: sr.id,
+      timestamp: toIsoTimestamp(sr.created_at),
+      sortOrder: 4,
+      type: 'SUPPLIER_RETURN',
+      category: 'مرتجع لمورد',
+      title: `مرتجع بضاعة للتاجر ${sr.supplier_name} (#${sr.return_number})`,
+      reference: sr.return_number,
+      party: `التاجر: ${sr.supplier_name}`,
+      actor: userMap.get(sr.created_by_user_id) || 'المسؤول',
+      amountIn: '0',
+      amountOut: '0',
+      profitImpact: '0',
+      details: `تخفيض حساب التاجر عن فاتورة #${invRef} بقيمة ${formattedCredit} (إشعار خصم حساب غير نقدي)`,
     });
   }
 
@@ -2006,6 +2180,7 @@ async function financialMapReport(ctx, url) {
     timeline.push({
       id: e.id,
       timestamp: toIsoTimestamp(e.created_at, e.expense_date),
+      sortOrder: 5,
       type: 'EXPENSE',
       category: isMonthly ? 'التزام شهري' : 'مصروف يومي',
       title: label,
@@ -2015,17 +2190,18 @@ async function financialMapReport(ctx, url) {
       amountIn: '0',
       amountOut: amt.toString(),
       profitImpact: (-amt).toString(),
-      details: e.notes || (isMonthly ? 'سداد قسط التزام شهري (إيجار/مرافق)' : 'مصروف تشغيل يومي'),
+      details: e.notes || (isMonthly ? 'سداد التزام شهري (إيجار / مرافق)' : 'مصروف تشغيل يومي'),
     });
   }
 
   for (const r of retRows) {
     const refundAmt = BigInt(r.refund_amount ?? 0);
     const costAmt = BigInt(r.returned_cost ?? 0);
-    const lostMargin = refundAmt - costAmt; // Only the lost profit margin from the returned merchandise
+    const lostMargin = refundAmt - costAmt;
     timeline.push({
       id: r.id,
       timestamp: toIsoTimestamp(r.created_at),
+      sortOrder: 6,
       type: 'CUSTOMER_RETURN',
       category: 'مرتجع للعميل',
       title: `مرتجع بيع #${r.return_number}`,
@@ -2034,21 +2210,95 @@ async function financialMapReport(ctx, url) {
       actor: userMap.get(r.created_by_user_id) || 'الكاشير',
       amountIn: '0',
       amountOut: refundAmt.toString(),
+      returnedCostAmount: costAmt.toString(),
       profitImpact: (-lostMargin).toString(),
-      details: `استرداد نقدي بقيمة ${Money.fromMinor(refundAmt, currency).toDecimalString()} ${currency} (تمت استعادة البضاعة للمخزن بتكلفة ${Money.fromMinor(costAmt, currency).toDecimalString()} ${currency})`,
+      details: `رد مبلغ للعميل: ${Money.fromMinor(refundAmt, currency).toDecimalString()} ${currency} (استعادة بضاعة للمخزن بتكلفة ${Money.fromMinor(costAmt, currency).toDecimalString()} ${currency})`,
     });
   }
 
-  timeline.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
+  for (const adj of invAdjRows) {
+    const netLoss = BigInt(adj.net_loss ?? 0);
+    const absAmt = netLoss >= 0n ? netLoss : -netLoss;
+    const label = String(adj.memo ?? '').split(' — ')[0] || 'تسوية مخزنية';
+    timeline.push({
+      id: adj.id,
+      timestamp: toIsoTimestamp(adj.created_at),
+      sortOrder: 7,
+      type: 'INVENTORY_EVENT',
+      category: 'تالف / جرد مخزون',
+      title: label,
+      reference: adj.entry_number,
+      party: 'المخزون',
+      actor: userMap.get(adj.created_by_user_id) || 'المسؤول',
+      amountIn: '0',
+      amountOut: '0',
+      nonCashCostImpact: netLoss.toString(),
+      profitImpact: (-netLoss).toString(),
+      details: `${netLoss >= 0n ? 'خصم قيمة عجز/تالف' : 'فائض جرد مخزون'} بالتكلفة: ${Money.fromMinor(absAmt, currency).toDecimalString()} ${currency} (أثر مخزني لا يخصم كاش)`,
+    });
+  }
+
+  for (const sc of shiftCloseRows) {
+    const delta = BigInt(sc.cash_delta ?? 0);
+    if (delta === 0n) continue;
+    const isSurplus = delta > 0n;
+    const absAmt = isSurplus ? delta : -delta;
+    const label = String(sc.memo ?? '').split(' — ')[0] || (isSurplus ? 'فائض درج النقدية' : 'عجز درج النقدية');
+    timeline.push({
+      id: sc.id,
+      timestamp: toIsoTimestamp(sc.created_at),
+      sortOrder: 8,
+      type: 'SHIFT_CASH_ADJUSTMENT',
+      category: isSurplus ? 'فائض درج' : 'عجز درج',
+      title: label,
+      reference: sc.entry_number,
+      party: 'درج النقدية',
+      actor: userMap.get(sc.created_by_user_id) || 'المسؤول',
+      amountIn: isSurplus ? absAmt.toString() : '0',
+      amountOut: isSurplus ? '0' : absAmt.toString(),
+      profitImpact: delta.toString(),
+      details: `تسوية درج النقدية عند التقفيل (${isSurplus ? 'فائض نقدي +' : 'عجز نقدي -'} ${Money.fromMinor(absAmt, currency).toDecimalString()} ${currency})`,
+    });
+  }
+
+  for (const tr of transferRows) {
+    const amt = BigInt(tr.amount ?? 0);
+    const label = String(tr.memo ?? '').split(' — ')[0] || 'تحويل نقدية داخلي';
+    timeline.push({
+      id: tr.id,
+      timestamp: toIsoTimestamp(tr.created_at),
+      sortOrder: 9,
+      type: 'TREASURY_TRANSFER',
+      category: 'تحويل داخلي',
+      title: label,
+      reference: tr.entry_number,
+      party: 'الخزينة / الدرج / البنك',
+      actor: userMap.get(tr.created_by_user_id) || 'المسؤول',
+      amountIn: '0',
+      amountOut: '0',
+      profitImpact: '0',
+      details: `تحويل مالي داخلي بقيمة ${Money.fromMinor(amt, currency).toDecimalString()} ${currency} بين حسابات المتجر (لا يغير إجمالي السيولة)`,
+    });
+  }
+
+  timeline.sort((a, b) => {
+    if (a.timestamp < b.timestamp) return -1;
+    if (a.timestamp > b.timestamp) return 1;
+    return (a.sortOrder ?? 99) - (b.sortOrder ?? 99);
+  });
 
   let runningCashMinor = 0n;
   let runningProfitMinor = 0n;
   let totalSalesMinor = 0n;
+  let grossCogsOfSalesMinor = 0n;
   let totalGrossProfitMinor = 0n;
+  let totalPurchasesBilledMinor = 0n;
   let totalSupplierPaidMinor = 0n;
   let totalExpensesMinor = 0n;
   let totalRefundsMinor = 0n;
   let totalReturnedCostMinor = 0n;
+  let totalInvAdjustmentLossMinor = 0n;
+  let totalShiftCashVarianceMinor = 0n;
 
   for (const item of timeline) {
     const inAmt = BigInt(item.amountIn);
@@ -2060,14 +2310,21 @@ async function financialMapReport(ctx, url) {
 
     if (item.type === 'SALE') {
       totalSalesMinor += inAmt;
+      grossCogsOfSalesMinor += BigInt(item.cogsAmount ?? 0);
       totalGrossProfitMinor += BigInt(item.profitImpact);
+    } else if (item.type === 'SUPPLIER_PURCHASE') {
+      totalPurchasesBilledMinor += BigInt(item.billAmount ?? 0);
     } else if (item.type === 'SUPPLIER_PAYMENT') {
       totalSupplierPaidMinor += outAmt;
     } else if (item.type === 'EXPENSE') {
       totalExpensesMinor += outAmt;
     } else if (item.type === 'CUSTOMER_RETURN') {
       totalRefundsMinor += outAmt;
-      totalReturnedCostMinor += (outAmt + pImpact);
+      totalReturnedCostMinor += BigInt(item.returnedCostAmount ?? 0);
+    } else if (item.type === 'INVENTORY_EVENT') {
+      totalInvAdjustmentLossMinor += BigInt(item.nonCashCostImpact ?? 0);
+    } else if (item.type === 'SHIFT_CASH_ADJUSTMENT') {
+      totalShiftCashVarianceMinor += inAmt - outAmt;
     }
 
     item.runningCash = runningCashMinor.toString();
@@ -2075,9 +2332,10 @@ async function financialMapReport(ctx, url) {
   }
 
   const netSalesMinor = totalSalesMinor - totalRefundsMinor;
-  const netCashFlowMinor = netSalesMinor - totalSupplierPaidMinor - totalExpensesMinor;
+  const totalCogsMinor = grossCogsOfSalesMinor - totalReturnedCostMinor + supplierReturnVarianceMinor;
+  const netCashFlowMinor = netSalesMinor - totalSupplierPaidMinor - totalExpensesMinor + totalShiftCashVarianceMinor;
   const netReturnLossMinor = totalRefundsMinor - totalReturnedCostMinor;
-  const operatingProfitMinor = totalGrossProfitMinor - totalExpensesMinor - netReturnLossMinor - supplierReturnVarianceMinor;
+  const operatingProfitMinor = totalGrossProfitMinor - totalExpensesMinor - netReturnLossMinor - supplierReturnVarianceMinor - totalInvAdjustmentLossMinor + totalShiftCashVarianceMinor;
 
   return {
     currency,
@@ -2085,11 +2343,15 @@ async function financialMapReport(ctx, url) {
     summary: {
       totalSales: totalSalesMinor.toString(),
       netSales: netSalesMinor.toString(),
+      totalCogs: totalCogsMinor.toString(),
       totalGrossProfit: totalGrossProfitMinor.toString(),
+      totalPurchasesBilled: totalPurchasesBilledMinor.toString(),
       totalSupplierPaid: totalSupplierPaidMinor.toString(),
       totalExpensesPaid: totalExpensesMinor.toString(),
       totalRefunds: totalRefundsMinor.toString(),
       supplierReturnVariance: supplierReturnVarianceMinor.toString(),
+      inventoryAdjustmentsLoss: totalInvAdjustmentLossMinor.toString(),
+      shiftCashVariance: totalShiftCashVarianceMinor.toString(),
       operatingProfit: operatingProfitMinor.toString(),
       netCashFlow: netCashFlowMinor.toString(),
       realizedCashProfit: netCashFlowMinor.toString(),
@@ -2782,14 +3044,16 @@ async function handleApi(req, res, url) {
 
     let summaryReturns = 0n;
     let summaryReturnedCost = 0n;
-    let summaryVariance = 0n;
+    let summaryReturnsCount = 0;
     if (search) {
       const retAgg = rawDatabase.prepare(`
-        SELECT COALESCE(SUM(cr.refund_amount), 0) AS refunds,
+        SELECT COUNT(cr.id) AS ret_count,
+          COALESCE(SUM(cr.refund_amount), 0) AS refunds,
           COALESCE(SUM((SELECT SUM(cri.cost_amount) FROM customer_return_items cri WHERE cri.tenant_id = cr.tenant_id AND cri.return_id = cr.id)), 0) AS ret_cost
         FROM customer_returns cr
         WHERE cr.tenant_id = ? AND cr.store_id = ? AND cr.original_sale_id IN (SELECT id FROM sales WHERE ${where})
       `).get(ctx.tenantId, storeId, ...args);
+      summaryReturnsCount = Number(retAgg?.ret_count ?? 0);
       summaryReturns = BigInt(retAgg?.refunds ?? 0);
       summaryReturnedCost = BigInt(retAgg?.ret_cost ?? 0);
     } else {
@@ -2800,33 +3064,20 @@ async function handleApi(req, res, url) {
         retArgs.push(bounds.startIso, bounds.endExclusiveIso);
       }
       const retAgg = rawDatabase.prepare(`
-        SELECT COALESCE(SUM(cr.refund_amount), 0) AS refunds,
+        SELECT COUNT(cr.id) AS ret_count,
+          COALESCE(SUM(cr.refund_amount), 0) AS refunds,
           COALESCE(SUM((SELECT SUM(cri.cost_amount) FROM customer_return_items cri WHERE cri.tenant_id = cr.tenant_id AND cri.return_id = cr.id)), 0) AS ret_cost
         FROM customer_returns cr
         WHERE ${retConds.join(' AND ')}
       `).get(...retArgs);
+      summaryReturnsCount = Number(retAgg?.ret_count ?? 0);
       summaryReturns = BigInt(retAgg?.refunds ?? 0);
       summaryReturnedCost = BigInt(retAgg?.ret_cost ?? 0);
-
-      const varConds = ["je.tenant_id = ?", "je.store_id = ?", "je.source_type = 'SUPPLIER_RETURN'", "a.account_code = '5090'"];
-      const varArgs = [ctx.tenantId, storeId];
-      if (bounds) {
-        varConds.push('je.created_at >= ?', 'je.created_at < ?');
-        varArgs.push(bounds.startIso, bounds.endExclusiveIso);
-      }
-      const varRows = rawDatabase.prepare(`
-        SELECT jl.entry_type AS side, jl.amount
-        FROM journal_entries je
-        INNER JOIN journal_lines jl ON jl.journal_entry_id = je.id
-        INNER JOIN accounts a ON a.id = jl.account_id
-        WHERE ${varConds.join(' AND ')}
-      `).all(...varArgs);
-      summaryVariance = varRows.reduce((s, r) => s + (r.side === 'DEBIT' ? BigInt(r.amount) : -BigInt(r.amount)), 0n);
     }
 
     const grossSalesMinor = BigInt(aggSales?.gross_sales ?? 0);
     const netSalesMinor = grossSalesMinor - summaryReturns;
-    const cogsMinor = BigInt(aggSales?.gross_cogs ?? 0) + summaryVariance - summaryReturnedCost;
+    const cogsMinor = BigInt(aggSales?.gross_cogs ?? 0) - summaryReturnedCost;
     const grossProfitMinor = netSalesMinor - cogsMinor;
 
     let directExpMinor = 0n;
@@ -2861,6 +3112,7 @@ async function handleApi(req, res, url) {
         limit,
         summary: {
           invoiceCount: total,
+          returnsCount: summaryReturnsCount,
           grossSales: toMoneySummary(grossSalesMinor),
           returnsTotal: toMoneySummary(summaryReturns),
           netSales: toMoneySummary(netSalesMinor),

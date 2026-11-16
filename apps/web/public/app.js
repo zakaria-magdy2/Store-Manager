@@ -1312,8 +1312,8 @@ function salesTable(sales) {
                   `}
                 </td>
                 ${canViewCogs ? `
-                  <td><span>${sale.cogs ? money(sale.cogs) : '—'}</span></td>
-                  <td>${sale.grossProfit ? `<strong style="color:${BigInt(sale.grossProfit.amount) >= 0n ? 'var(--green, #15803d)' : 'var(--rose, #be123c)'};">${money(sale.grossProfit)}</strong>` : '—'}</td>
+                  <td><span class="table-total">${sale.cogs ? money(sale.cogs) : '—'}</span></td>
+                  <td>${sale.grossProfit ? `<strong class="table-total" style="color:${BigInt(sale.grossProfit.amount) >= 0n ? 'var(--green, #15803d)' : 'var(--rose, #be123c)'};">${money(sale.grossProfit)}</strong>` : '—'}</td>
                 ` : ''}
                 <td>${statusBadge}</td>
                 <td style="text-align:center;">
@@ -1338,7 +1338,7 @@ function salesTable(sales) {
 }
 
 function methodLabel(method) {
-  return ({ CASH: 'نقدي', CARD: 'بطاقة', MOBILE: 'محفظة', OTHER: 'أخرى' })[method] ?? method;
+  return ({ CASH: 'نقدي', CARD: 'بطاقة', MOBILE: 'محفظة', OTHER: 'أخرى', CASH_DRAWER: 'درج النقدية', CASH_SAFE: 'الخزينة', BANK_TRANSFER: 'تحويل بنكي' })[method] ?? method;
 }
 
 const COLOR_OPTION_NAMES = new Set(['color', 'colour', 'لون', 'اللون', 'الالوان', 'الألوان']);
@@ -1709,7 +1709,7 @@ function salesView() {
   const allReturns = state.data.customerReturns ?? [];
   const from = state.salesFrom ?? '';
   const to = state.salesTo ?? '';
-  const preset = syncPresetWithDates(state.salesPreset, from, to, ['all', 'today', 'week', 'month'], 'rolling7', 'all');
+  const preset = syncPresetWithDates(state.salesPreset, from, to, ['all', 'today', 'week', 'month', 'year'], 'rolling7', 'all');
   const fallbackSales = (state.data.sales ?? []).filter((sale) => {
     if (!from || !to) return true;
     const itemDay = sale.createdAt ? localDateIso(new Date(sale.createdAt)) : '';
@@ -1742,36 +1742,35 @@ function salesView() {
   const isCashier = state.data.user.role === 'CASHIER' || Boolean(state.data.capabilities.cashierMode);
   const canViewCogs = Boolean(state.data.capabilities.canViewCogs);
   const sum = state.salesSummary;
-  const isNetProfit = sum?.operatingProfit ? BigInt(sum.operatingProfit.amount) >= 0n : (sum?.grossProfit ? BigInt(sum.grossProfit.amount) >= 0n : true);
+  const isGrossProfit = sum?.grossProfit ? BigInt(sum.grossProfit.amount) >= 0n : true;
   const hasReturnsAmt = sum?.returnsTotal && BigInt(sum.returnsTotal.amount ?? '0') > 0n;
   const summaryHtml = sum ? (!isCashier && canViewCogs ? `
     <section class="panel compact-panel" style="margin-bottom:14px;">
       <div class="panel-heading">
         <div>
-          <h3>ملخص البضاعة المباعة والأرباح</h3>
-          <p>ملخص المبيعات بعد المرتجعات وتكلفة البضاعة والمصروفات وصافي الأرباح</p>
+          <h3>ملخص المبيعات</h3>
+          <p>ملخص المبيعات بعد المرتجعات وتكلفة البضاعة الأصلية والمكسب وعدد الفواتير</p>
         </div>
-        <span class="status-pill status-complete">${sum.invoiceCount ?? totalCount} فاتورة</span>
+        <span class="status-pill status-complete">${sum.invoiceCount ?? totalCount} فاتورة${sum.returnsCount ? ` · ${sum.returnsCount} مرتجع` : ''}</span>
       </div>
       <div class="sales-pricing-summary-strip">
         <div class="sales-pricing-item">
-          <small>إجمالي المبيعات</small>
+          <small>إجمالي المبيعات (الصافي)</small>
           <strong>${money(sum.netSales)}</strong>
-          ${hasReturnsAmt ? `<small style="color:var(--muted);display:block;font-size:11px;margin-top:3px;">قبل المرتجع: ${money(sum.grossSales)} · المرتجع: -${money(sum.returnsTotal)}</small>` : ''}
+          ${hasReturnsAmt ? `<small style="color:var(--muted);display:block;font-size:11px;margin-top:3px;">قبل المرتجع: <bdi dir="ltr" style="display:inline-block;">${money(sum.grossSales)}</bdi> · المرتجع: <bdi dir="ltr" style="display:inline-block;">-${money(sum.returnsTotal)}</bdi></small>` : ''}
         </div>
         <div class="sales-pricing-item">
-          <small>تكلفة البضاعة</small>
+          <small>تكلفة البضاعة الأصلية</small>
           <strong>${sum.cogs ? money(sum.cogs) : '—'}</strong>
         </div>
-        <div class="sales-pricing-item">
-          <small>المصروفات</small>
-          <strong>${sum.totalExpenses ? money(sum.totalExpenses) : '—'}</strong>
-          ${sum.hasSearch ? '<small style="color:var(--muted);display:block;font-size:11px;margin-top:3px;">على كامل الفترة المحددة</small>' : ''}
+        <div class="sales-pricing-item ${isGrossProfit ? 'sales-pricing-profit' : 'sales-pricing-loss'}">
+          <small>مكسب المبيعات</small>
+          <strong>${sum.grossProfit ? money(sum.grossProfit) : '—'}</strong>
         </div>
-        <div class="sales-pricing-item ${isNetProfit ? 'sales-pricing-profit' : 'sales-pricing-loss'}">
-          <small>الأرباح</small>
-          <strong>${sum.operatingProfit ? money(sum.operatingProfit) : (sum.grossProfit ? money(sum.grossProfit) : '—')}</strong>
-          ${sum.grossProfit ? `<small style="color:var(--muted);display:block;font-size:11px;margin-top:3px;">ربح البضاعة: ${money(sum.grossProfit)}</small>` : ''}
+        <div class="sales-pricing-item">
+          <small>عدد الفواتير</small>
+          <strong>${sum.invoiceCount ?? totalCount} فاتورة</strong>
+          ${sum.returnsCount ? `<small style="color:var(--muted);display:block;font-size:11px;margin-top:3px;">مرتجعات الفترة: ${sum.returnsCount}</small>` : ''}
         </div>
       </div>
     </section>
@@ -1804,7 +1803,7 @@ function salesView() {
   return `
     <div class="page-heading-row">
       <div>
-        <p class="page-lead">كل فواتير البيع محفوظة مع ملخص البيع والتكلفة الأصلية والمكسب والمرتجعات. اختر فترة أو ابحث برقم الفاتورة أو اسم المنتج.</p>
+        <p class="page-lead">كل فواتير البيع والمرتجعات محفوظة مع صافي المبيعات وتكلفة البضاعة الأصلية ومكسب البيع وعدد الفواتير. اختر فترة أو ابحث برقم الفاتورة أو اسم المنتج.</p>
       </div>
       <button class="button button-primary" data-page="pos">${icon('plus', 18)} بيع جديد</button>
     </div>
@@ -1818,6 +1817,7 @@ function salesView() {
           <button type="button" class="pro-filter-pill ${preset === 'today' ? 'active' : ''}" data-sales-preset="today">اليوم</button>
           <button type="button" class="pro-filter-pill ${preset === 'week' ? 'active' : ''}" data-sales-preset="week">هذا الأسبوع</button>
           <button type="button" class="pro-filter-pill ${preset === 'month' ? 'active' : ''}" data-sales-preset="month">هذا الشهر</button>
+          <button type="button" class="pro-filter-pill ${preset === 'year' ? 'active' : ''}" data-sales-preset="year">هذا العام</button>
           <button type="button" class="pro-filter-pill ${preset === 'all' ? 'active' : ''}" data-sales-preset="all">كل المبيعات</button>
         </div>
       </div>
@@ -2984,48 +2984,51 @@ function profitLossView() {
 
   let contentHtml = '';
   if (report) {
-    const netSalesAmt = BigInt(report.profitLoss.netSales.amount);
-    const cogsAmt = BigInt(report.profitLoss.cogs.amount);
-    const grossProfitAmt = BigInt(report.profitLoss.grossProfit.amount);
     const directExpAmt = BigInt(report.profitLoss.directExpenses.amount);
     const monthlyExpAmt = BigInt(report.profitLoss.monthlyExpenses.amount);
     const totalExpAmt = directExpAmt + monthlyExpAmt;
+    const invAdjAmt = BigInt(report.profitLoss.inventoryAdjustmentsLoss?.amount ?? '0');
+    const shiftVarLossAmt = BigInt(report.profitLoss.shiftCashVarianceLoss?.amount ?? '0');
+    const totalDeductionsAmt = totalExpAmt + invAdjAmt + shiftVarLossAmt;
     const netProfitAmt = BigInt(report.profitLoss.operatingProfit.amount);
     const isProfit = netProfitAmt >= 0n;
-    const sp = report.supplierPayments ?? { totalPaid: { amount: '0', currency, decimals }, initialPaid: { amount: '0', currency, decimals }, installmentPaid: { amount: '0', currency, decimals }, supplierReturnsCredit: { amount: '0', currency, decimals }, count: 0, items: [] };
-    const supplierPayItems = sp.items ?? [];
+    const expenseItems = report.expenseItems ?? [];
+    const pendingUnpaidAmt = BigInt(report.cashFlow?.pendingUnpaidObligations?.amount ?? '0');
+    const missingMonthlyCount = (report.missingMonthlyActuals ?? []).length;
 
     contentHtml = `
-      <div class="compact-kpi-grid compact-kpi-grid-5">
+      <div class="compact-kpi-grid">
         <article class="compact-kpi-card">
-          <div class="compact-kpi-top"><span>إجمالي المبيعات</span><span class="kpi-tag kpi-tag-indigo">${report.from} ← ${report.to}</span></div>
+          <div class="compact-kpi-top"><span>إجمالي المبيعات (الصافي)</span><span class="kpi-tag kpi-tag-indigo">${report.from} ← ${report.to}</span></div>
           <strong class="compact-kpi-value">${money(report.profitLoss.netSales)}</strong>
           <small>بعد خصم مرتجعات بقيمة ${money(report.profitLoss.returns)}</small>
         </article>
         <article class="compact-kpi-card">
-          <div class="compact-kpi-top"><span>تكلفة البضاعة المباعة</span><span class="kpi-tag kpi-tag-amber">تكلفة الشراء</span></div>
+          <div class="compact-kpi-top"><span>تكلفة البضاعة المباعة</span><span class="kpi-tag kpi-tag-amber">التكلفة الأصلية</span></div>
           <strong class="compact-kpi-value">${money(report.profitLoss.cogs)}</strong>
-          <small>سعر شراء البضاعة التي تم بيعها</small>
+          <small>سعر شراء البضاعة التي تم بيعها في الفترة</small>
         </article>
         <article class="compact-kpi-card">
-          <div class="compact-kpi-top"><span>إجمالي المصروفات</span><span class="kpi-tag kpi-tag-amber">مصروفات المتجر</span></div>
-          <strong class="compact-kpi-value">${money({ amount: totalExpAmt.toString(), currency, decimals })}</strong>
-          <small>يومية: ${money(report.profitLoss.directExpenses)} · شهرية: ${money(report.profitLoss.monthlyExpenses)}</small>
-        </article>
-        <article class="compact-kpi-card">
-          <div class="compact-kpi-top"><span>المدفوع للتجار والموردين</span><span class="kpi-tag kpi-tag-red">سداد تجار (${sp.count ?? supplierPayItems.length})</span></div>
-          <strong class="compact-kpi-value" style="color:var(--rose, #be123c);">${money(sp.totalPaid)}</strong>
-          <small>مقدم فواتير: ${money(sp.initialPaid)} · دفعات سداد: ${money(sp.installmentPaid)}</small>
+          <div class="compact-kpi-top"><span>إجمالي المصروفات والتشغيل</span><span class="kpi-tag kpi-tag-amber">مصروفات المتجر (${expenseItems.length})</span></div>
+          <strong class="compact-kpi-value">${money({ amount: totalDeductionsAmt.toString(), currency, decimals })}</strong>
+          <small>يومية: ${money(report.profitLoss.directExpenses)} · شهرية/إيجار: ${money(report.profitLoss.monthlyExpenses)}${invAdjAmt !== 0n ? ` · تسوية مخزون: ${money({ amount: invAdjAmt.toString(), currency, decimals })}` : ''}${shiftVarLossAmt !== 0n ? ` · فرق درج: ${money({ amount: shiftVarLossAmt.toString(), currency, decimals })}` : ''}</small>
         </article>
         <article class="compact-kpi-card ${isProfit ? 'compact-kpi-positive' : 'compact-kpi-negative'}" style="border-width:2px;">
-          <div class="compact-kpi-top"><span>${isProfit ? 'الأرباح المحققة' : 'الخسائر'}</span><span class="kpi-tag ${isProfit ? 'kpi-tag-green' : 'kpi-tag-red'}">${isProfit ? 'أرباح لك ✓' : 'عجز مالي !'}</span></div>
+          <div class="compact-kpi-top"><span>${isProfit ? 'الأرباح الصافية' : 'صافي الخسائر'}</span><span class="kpi-tag ${isProfit ? 'kpi-tag-green' : 'kpi-tag-red'}">${isProfit ? 'مكسب صافي' : 'خسارة صافية (-)'}</span></div>
           <strong class="compact-kpi-value" style="font-size:21px;color:${isProfit ? 'var(--green, #15803d)' : 'var(--rose, #be123c)'};">${money(report.profitLoss.operatingProfit)}</strong>
-          <small>${isProfit ? 'صافي الربح بعد تكلفة البضاعة والمصروفات' : 'عجز في الفترة المحددة'}</small>
+          <small>${isProfit ? 'صافي المكسب بعد خصم التكلفة وكل المصروفات' : 'صافي الخسارة بعد خصم التكلفة وكل المصروفات'}</small>
         </article>
       </div>
 
+      ${(pendingUnpaidAmt > 0n || missingMonthlyCount > 0) ? `
+        <div class="callout-warning" style="margin-bottom:14px;padding:10px 14px;border-radius:10px;background:#fef3c7;border:1px solid #f59e0b;color:#92400e;font-size:12.5px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+          <span>تنبيه التزامات شهرية: ${pendingUnpaidAmt > 0n ? `توجد التزامات شهرية غير مسددة بقيمة <strong>${money(report.cashFlow.pendingUnpaidObligations)}</strong>` : ''}${pendingUnpaidAmt > 0n && missingMonthlyCount > 0 ? ' · ' : ''}${missingMonthlyCount > 0 ? `عدد ${missingMonthlyCount} بنود شهرية لم تُسجل فواتيرها الفعلية بعد` : ''} (لا تُخصم من صافي الربح إلا بعد السداد الفعلي).</span>
+          <button type="button" class="button button-secondary button-sm" data-page="expenses">مراجعة المصروفات</button>
+        </div>
+      ` : ''}
+
       <section class="panel compact-panel" style="margin-top:14px;">
-        <div class="panel-heading"><div><h3>ملخص الأرباح والخسائر</h3><p>حساب صافي الربح أو الخسارة: إجمالي المبيعات − تكلفة البضاعة المباعة = مجمل الربح − المصروفات = الصافي</p></div></div>
+        <div class="panel-heading"><div><h3>ملخص الأرباح والخسائر العام</h3><p>صافي المبيعات − تكلفة البضاعة المباعة = ربح البضاعة − كل مصروفات الفترة (يومية وإيجارات وفواتير) = صافي الربح أو الخسارة</p></div></div>
         <div class="table-scroll">
           <table class="compact-table">
             <thead>
@@ -3033,7 +3036,7 @@ function profitLossView() {
             </thead>
             <tbody>
               <tr>
-                <td><strong>إجمالي المبيعات المحصلة (الصافي بعد المرتجعات)</strong><br><small>إجمالي الفواتير ${money(report.profitLoss.grossSales)} − خصومات ${money(report.profitLoss.discounts)} − مرتجعات ${money(report.profitLoss.returns)}</small></td>
+                <td><strong>إجمالي المبيعات (الصافي بعد المرتجعات والخصومات)</strong><br><small>إجمالي الفواتير <span class="table-total">${money(report.profitLoss.grossSales)}</span> − خصومات <span class="table-total">${money(report.profitLoss.discounts)}</span> − مرتجعات <span class="table-total">${money(report.profitLoss.returns)}</span></small></td>
                 <td style="text-align:left;" class="table-total">${money(report.profitLoss.netSales)}</td>
                 <td><span class="status-pill status-complete">إيراد (+)</span></td>
               </tr>
@@ -3043,19 +3046,38 @@ function profitLossView() {
                 <td><span class="status-pill status-low">خصم (-)</span></td>
               </tr>
               <tr style="background:var(--surface-soft);">
-                <td><strong>مجمل الربح التجاري</strong></td>
+                <td><strong>مجمل ربح البضاعة</strong></td>
                 <td style="text-align:left;" class="table-total"><strong>${money(report.profitLoss.grossProfit)}</strong></td>
-                <td><span>الربح الإجمالي</span></td>
+                <td><span>ربح البيع قبل المصروفات</span></td>
               </tr>
               <tr>
-                <td><strong>يُخصم: مصروفات المتجر والتشغيل</strong><br><small>إيجار، فواتير، التزامات شهرية ومصاريف يومية</small></td>
-                <td style="text-align:left;" class="table-total">${money({ amount: totalExpAmt.toString(), currency, decimals })}</td>
+                <td><strong>يُخصم: المصروفات اليومية والتشغيلية</strong><br><small>نثريات، تشغيل، صيانة، ومصروفات يومية مسجلة</small></td>
+                <td style="text-align:left;" class="table-total">${money(report.profitLoss.directExpenses)}</td>
                 <td><span class="status-pill status-low">خصم (-)</span></td>
               </tr>
+              <tr>
+                <td><strong>يُخصم: المصروفات الشهرية والإيجارات</strong><br><small>إيجار، كهرباء، رواتب، والتزامات شهرية مسددة في الفترة</small></td>
+                <td style="text-align:left;" class="table-total">${money(report.profitLoss.monthlyExpenses)}</td>
+                <td><span class="status-pill status-low">خصم (-)</span></td>
+              </tr>
+              ${invAdjAmt !== 0n ? `
+                <tr>
+                  <td><strong>${invAdjAmt > 0n ? 'يُخصم: تالف وعجز تسويات المخزون' : 'يُضاف: فائض تسويات وجرد المخزون'}</strong><br><small>تعديلات المخزون والتالف المحسوبة بالتكلفة</small></td>
+                  <td style="text-align:left;" class="table-total">${money({ amount: (invAdjAmt >= 0n ? invAdjAmt : -invAdjAmt).toString(), currency, decimals })}</td>
+                  <td><span class="status-pill ${invAdjAmt > 0n ? 'status-low' : 'status-complete'}">${invAdjAmt > 0n ? 'خصم (-)' : 'إضافة (+)'}</span></td>
+                </tr>
+              ` : ''}
+              ${shiftVarLossAmt !== 0n ? `
+                <tr>
+                  <td><strong>${shiftVarLossAmt > 0n ? 'يُخصم: عجز تقفيل درج النقدية' : 'يُضاف: فائض تقفيل درج النقدية'}</strong><br><small>فروق النقدية الفعلية عند إغلاق الشفتات</small></td>
+                  <td style="text-align:left;" class="table-total">${money({ amount: (shiftVarLossAmt >= 0n ? shiftVarLossAmt : -shiftVarLossAmt).toString(), currency, decimals })}</td>
+                  <td><span class="status-pill ${shiftVarLossAmt > 0n ? 'status-low' : 'status-complete'}">${shiftVarLossAmt > 0n ? 'خصم (-)' : 'إضافة (+)'}</span></td>
+                </tr>
+              ` : ''}
               <tr style="border-top:2px solid var(--line);background:color-mix(in srgb,${isProfit ? 'var(--brand-soft)' : 'var(--rose-soft)'} 50%,var(--panel));">
-                <td><strong style="font-size:15px;">الربح التشغيلي المحقق (${isProfit ? 'أرباح' : 'خسائر'})</strong></td>
+                <td><strong style="font-size:15px;">صافي الربح والخسارة (${isProfit ? 'مكسب' : 'خسارة'})</strong></td>
                 <td style="text-align:left;" class="table-total"><strong style="font-size:17px;color:${isProfit ? 'var(--green, #15803d)' : 'var(--rose, #be123c)'};">${money(report.profitLoss.operatingProfit)}</strong></td>
-                <td><span class="status-pill ${isProfit ? 'status-complete' : 'status-low'}">${isProfit ? 'أرباح' : 'خسائر'}</span></td>
+                <td><span class="status-pill ${isProfit ? 'status-complete' : 'status-low'}">${isProfit ? 'مكسب صافي' : 'خسارة (-)'}</span></td>
               </tr>
             </tbody>
           </table>
@@ -3065,50 +3087,47 @@ function profitLossView() {
       <section class="panel compact-panel" style="margin-top:14px;">
         <div class="panel-heading">
           <div>
-            <h3>تفاصيل المبالغ المدفوعة للتجار والموردين (${report.from} ← ${report.to})</h3>
-            <p>كل دفعة مسددة لأي تاجر سواء مقدم فاتورة شراء جديدة أو سداد دفعة من الحساب المستحق (منفصلة عن صافي ربح المبيعات)</p>
+            <h3>تفاصيل المصروفات المسجلة خلال الفترة (${escapeHtml(report.from)} ← ${escapeHtml(report.to)})</h3>
+            <p>كل المصروفات اليومية والشهرية (الإيجارات والرواتب والفواتير) المخصومة في تقرير الأرباح والخسائر</p>
           </div>
-          <div class="panel-actions" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-            ${BigInt(sp.supplierReturnsCredit?.amount ?? '0') > 0n ? `<span class="status-pill status-complete">مرتجع للتجار: ${money(sp.supplierReturnsCredit)}</span>` : ''}
-            <span class="status-pill ${supplierPayItems.length ? 'status-low' : 'status-complete'}">الإجمالي المدفوع: ${money(sp.totalPaid)}</span>
-          </div>
+          <span class="status-pill ${expenseItems.length ? 'status-low' : 'status-complete'}">الإجمالي: ${money({ amount: totalExpAmt.toString(), currency, decimals })}</span>
         </div>
-        ${supplierPayItems.length ? `
+        ${expenseItems.length ? `
           <div class="table-scroll">
             <table class="compact-table zebra-table">
               <thead>
                 <tr>
-                  <th>التاريخ والوقت</th>
-                  <th>التاجر / المورد</th>
-                  <th>رقم الفاتورة</th>
-                  <th>نوع الدفعة</th>
-                  <th>طريقة السداد</th>
+                  <th>تاريخ المصروف</th>
+                  <th>البند</th>
+                  <th>النوع</th>
+                  <th>طريقة الدفع</th>
+                  <th>ملاحظات</th>
                   <th>المسؤول</th>
-                  <th style="text-align:left;">المبلغ المدفوع</th>
+                  <th style="text-align:left;">المبلغ</th>
                 </tr>
               </thead>
               <tbody>
-                ${supplierPayItems.map((item) => `
+                ${expenseItems.map((item) => `
                   <tr>
-                    <td>${new Intl.DateTimeFormat('ar-EG', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(item.paidAt))}</td>
-                    <td><strong>${escapeHtml(item.supplierName)}</strong></td>
-                    <td><span class="sku-code">#${escapeHtml(item.invoiceNumber)}</span></td>
-                    <td><span class="status-pill ${item.type === 'INITIAL' ? 'status-partial' : 'status-complete'}" style="font-size:11px;">${item.type === 'INITIAL' ? 'مقدم فاتورة شراء' : 'سداد دفعة للتاجر'}</span></td>
-                    <td><span class="payment-badge">${methodLabel(item.paymentMethod === 'BANK_TRANSFER' ? 'OTHER' : item.paymentMethod)}</span>${item.paymentMethod === 'BANK_TRANSFER' ? ' <small>(تحويل بنكي)</small>' : ''}</td>
+                    <td>${escapeHtml(item.expenseDate)}</td>
+                    <td><strong>${escapeHtml(item.categoryName)}</strong></td>
+                    <td><span class="status-pill ${item.type === 'MONTHLY' ? 'status-partial' : 'status-low'}" style="font-size:11px;">${item.type === 'MONTHLY' ? 'التزام شهري / إيجار' : 'مصروف يومي'}</span></td>
+                    <td><span class="payment-badge">${methodLabel(item.paymentMethod === 'BANK_TRANSFER' ? 'OTHER' : item.paymentMethod)}</span></td>
+                    <td>${item.notes ? escapeHtml(item.notes) : '—'}</td>
                     <td>${escapeHtml(item.actorName || 'المسؤول')}</td>
-                    <td style="text-align:left;"><strong style="color:var(--rose, #be123c);">${money(item.amount)}</strong></td>
+                    <td style="text-align:left;" class="table-total"><strong style="color:var(--rose, #be123c);">${money(item.amount)}</strong></td>
                   </tr>
                 `).join('')}
               </tbody>
               <tfoot>
                 <tr style="background:var(--surface-soft);font-weight:800;">
-                  <td colspan="6"><strong>إجمالي المدفوع للتجار في هذه الفترة (${supplierPayItems.length} حركة)</strong></td>
-                  <td style="text-align:left;"><strong style="color:var(--rose, #be123c);">${money(sp.totalPaid)}</strong></td>
+                  <td colspan="6"><strong>إجمالي المصروفات المخصومة (${expenseItems.length} بند)</strong></td>
+                  <td style="text-align:left;" class="table-total"><strong style="color:var(--rose, #be123c);">${money({ amount: totalExpAmt.toString(), currency, decimals })}</strong></td>
                 </tr>
               </tfoot>
             </table>
           </div>
-        ` : `<div class="empty-row">لم يتم تسجيل أي مبالغ مدفوعة للتجار خلال الفترة من ${escapeHtml(report.from)} إلى ${escapeHtml(report.to)}.</div>`}
+        ` : `<div class="empty-row">لا توجد مصروفات مسجلة خلال الفترة من ${escapeHtml(report.from)} إلى ${escapeHtml(report.to)}.</div>`}
       </section>
     `;
   }
@@ -3727,12 +3746,12 @@ function financialMapView() {
   const { summary, timeline, range } = mapData;
   const fmFrom = range?.from ?? '';
   const fmTo = range?.to ?? '';
-  const activePreset = syncPresetWithDates(state.financialMapRange, fmFrom, fmTo, ['all', 'today', 'week', 'month'], 'rolling7', 'all');
+  const activePreset = syncPresetWithDates(state.financialMapRange, fmFrom, fmTo, ['all', 'today', 'week', 'month', 'year'], 'rolling7', 'all');
 
   return `
     <div class="page-heading-row">
       <div>
-        <p class="page-lead">المسار المالي: تتبع حركة الفلوس الداخلة والخارجة خطوة بخطوة (المبيعات − سداد الموردين − المصروفات) وصولاً للرصيد المتبقي.</p>
+        <p class="page-lead">المسار المالي: سجل شامل لكل الحركات والعمليات بالترتيب الزمني (مبيعات، فواتير وسداد تجار، مصروفات، مرتجعات، جرد، وتحويلات) مع حركة السيولة خطوة بخطوة.</p>
       </div>
       <div>
         <button type="button" class="button button-secondary" data-page="reports">عرض تقرير الأرباح والخسائر ←</button>
@@ -3749,6 +3768,7 @@ function financialMapView() {
           <button type="button" class="pro-filter-pill ${activePreset === 'today' ? 'active' : ''}" data-fm-preset="today">اليوم</button>
           <button type="button" class="pro-filter-pill ${activePreset === 'week' ? 'active' : ''}" data-fm-preset="week">هذا الأسبوع</button>
           <button type="button" class="pro-filter-pill ${activePreset === 'month' ? 'active' : ''}" data-fm-preset="month">هذا الشهر</button>
+          <button type="button" class="pro-filter-pill ${activePreset === 'year' ? 'active' : ''}" data-fm-preset="year">هذا العام</button>
         </div>
         <form id="fm-date-filter" class="pro-date-inputs">
           <div class="pro-input-wrap">
@@ -3765,30 +3785,36 @@ function financialMapView() {
       </div>
     </section>
 
-    <div class="fm-card-grid" style="grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px;">
+    <div class="compact-kpi-grid compact-kpi-grid-5 fm-card-grid" style="margin-bottom: 16px;">
       <div class="fm-kpi-card">
-        <small>صافي المبيعات المحصلة (+)</small>
-        <strong style="color:var(--green, #15803d);font-size:18px;">+${format(summary.netSales ?? summary.totalSales)}</strong>
-        <small style="color:var(--muted);">${BigInt(summary.totalRefunds ?? '0') > 0n ? `قبل المرتجع: ${format(summary.totalSales)} · مرتجع: -${format(summary.totalRefunds)}` : 'إجمالي الفلوس الداخلة من فواتير البيع'}</small>
+        <small>إجمالي المبيعات (الصافي +)</small>
+        <strong style="color:var(--green, #15803d);font-size:18px;">${format(summary.netSales ?? summary.totalSales)}</strong>
+        <small style="color:var(--muted);">${BigInt(summary.totalRefunds ?? '0') > 0n ? `قبل المرتجع: <bdi dir="ltr" style="display:inline-block;">${format(summary.totalSales)}</bdi> · مرتجع: <bdi dir="ltr" style="display:inline-block;">-${format(summary.totalRefunds)}</bdi>` : 'إجمالي الفلوس المحصلة من المبيعات'}</small>
       </div>
       <div class="fm-kpi-card">
-        <small>سداد دفعات الموردين (-)</small>
-        <strong style="color:var(--rose, #be123c);font-size:18px;">-${format(summary.totalSupplierPaid)}</strong>
-        <small style="color:var(--muted);">مبالغ مسددة للتجار والموردين</small>
+        <small>تكلفة البضاعة الأصلي (مرجعي)</small>
+        <strong style="color:var(--ink, #1e293b);font-size:18px;">${format(summary.totalCogs ?? '0')}</strong>
+        <small style="color:var(--muted);">سعر شراء البضاعة المباعة (لا يُخصم مع سداد التجار)</small>
       </div>
       <div class="fm-kpi-card">
-        <small>المصروفات المسددة (-)</small>
-        <strong style="color:var(--rose, #be123c);font-size:18px;">-${format(summary.totalExpensesPaid)}</strong>
-        <small style="color:var(--muted);">إيجار ومصروفات تشغيلية مؤكدة</small>
+        <small>إجمالي المصروفات المسددة (-)</small>
+        <strong style="color:var(--rose, #be123c);font-size:18px;">${format(summary.totalExpensesPaid)}</strong>
+        <small style="color:var(--muted);">يومية وإيجارات والتزامات مؤكدة</small>
+      </div>
+      <div class="fm-kpi-card">
+        <small>الدفعات المسددة للتجار (-)</small>
+        <strong style="color:var(--rose, #be123c);font-size:18px;">${format(summary.totalSupplierPaid)}</strong>
+        <small style="color:var(--muted);">${BigInt(summary.totalPurchasesBilled ?? '0') > 0n ? `فواتير الشراء بالفترة: <bdi dir="ltr">${format(summary.totalPurchasesBilled)}</bdi>` : 'مقدم فواتير + دفعات سداد التجار'}</small>
       </div>
       ${(() => {
         const cashMinor = BigInt(summary.netCashFlow ?? summary.realizedCashProfit ?? '0');
+        const shiftVar = BigInt(summary.shiftCashVariance ?? '0');
         const isCashPositive = cashMinor >= 0n;
         return `
           <div class="fm-kpi-card" style="border-right:3px solid ${isCashPositive ? 'var(--blue, #2563eb)' : 'var(--rose, #be123c)'};">
-            <small style="color:${isCashPositive ? 'var(--blue, #2563eb)' : 'var(--rose, #be123c)'};font-weight:750;">الرصيد المتبقي بعد الحركات (=)</small>
-            <strong style="color:${isCashPositive ? 'var(--green, #15803d)' : 'var(--rose, #be123c)'};font-size:19px;">${isCashPositive ? '+' : ''}${format(summary.netCashFlow ?? summary.realizedCashProfit)}</strong>
-            <small style="color:var(--muted);">صافي المبيعات − سداد الموردين − المصروفات</small>
+            <small style="color:${isCashPositive ? 'var(--blue, #2563eb)' : 'var(--rose, #be123c)'};font-weight:750;">صافي المسار المالي / المتبقي (=)</small>
+            <strong style="color:${isCashPositive ? 'var(--green, #15803d)' : 'var(--rose, #be123c)'};font-size:19px;">${format(summary.netCashFlow ?? summary.realizedCashProfit)}</strong>
+            <small style="color:var(--muted);">${isCashPositive ? 'فائض حركة نقدية' : 'عجز / منصرف أكثر من المحصل'}${shiftVar !== 0n ? ' · يشمل تسوية الدرج' : ''}</small>
           </div>
         `;
       })()}
@@ -3797,8 +3823,8 @@ function financialMapView() {
     <section class="panel compact-panel">
       <div class="panel-heading">
         <div>
-          <h3 style="font-size:16px;font-weight:800;color:var(--ink);">المسار المالي خطوة بخطوة (كيف وصلت لهذا الرقم)</h3>
-          <p>تسلسل الحركات المالية بالترتيب الزمني (من البداية حتى الآن) مع إظهار رصيدك في كل خطوة وصولاً للرصيد المتبقي (${timeline.length} حركة مسجلة)</p>
+          <h3 style="font-size:16px;font-weight:800;color:var(--ink);">المسار المالي خطوة بخطوة (كل الحركات من البداية حتى النهاية)</h3>
+          <p>تسلسل كامل لكل العمليات المسجلة بالترتيب الزمني مع أثر كل خطوة على الرصيد النقدي المتاح (${timeline.length} حركة مسجلة)</p>
         </div>
       </div>
 
@@ -3807,53 +3833,115 @@ function financialMapView() {
           <table class="compact-table fm-timeline-table">
             <thead>
               <tr>
-                <th style="width:40px;text-align:center;">#</th>
-                <th>نوع الحركة</th>
+                <th style="width:42px;text-align:center;">#</th>
+                <th style="width:126px;">نوع الحركة</th>
                 <th>البيان والتفاصيل</th>
-                <th>التاريخ والوقت</th>
-                <th>المسؤول والطرف</th>
-                <th style="text-align:left;">المبلغ</th>
-                <th style="text-align:center;">الرصيد بعد الحركة</th>
+                <th style="width:104px;">التاريخ والوقت</th>
+                <th style="width:118px;">المسؤول والطرف</th>
+                <th style="width:116px;text-align:left;">أثر الحركة</th>
+                <th style="width:118px;text-align:center;">الرصيد بعد الحركة</th>
               </tr>
             </thead>
             <tbody>
               ${timeline.map((item, index) => {
-                const isSale = item.type === 'SALE';
-                const isSupplier = item.type === 'SUPPLIER_PAYMENT';
-                const isExpense = item.type === 'EXPENSE';
-                const badgeClass = isSale ? 'fm-sale' : isSupplier ? 'fm-supplier' : isExpense ? 'fm-expense' : 'fm-return';
-                const badgeIcon = isSale ? "+" : isSupplier ? "-" : isExpense ? "-" : "±";
-                const flowColor = isSale ? 'var(--green, #15803d)' : 'var(--rose, #be123c)';
-                const flowSign = isSale ? '+' : '-';
-                const flowAmount = isSale ? item.amountIn : item.amountOut;
                 const formattedDate = formatDateTime(item.timestamp);
+                const inAmt = BigInt(item.amountIn ?? '0');
+                const outAmt = BigInt(item.amountOut ?? '0');
+                let badgeClass = 'fm-transfer';
+                let badgeIcon = '•';
+                let flowColor = 'var(--muted)';
+                let flowHtml = 'قيد / بدون كاش';
+
+                if (item.type === 'SALE') {
+                  badgeClass = 'fm-sale';
+                  badgeIcon = '+';
+                  flowColor = 'var(--green, #15803d)';
+                  flowHtml = `<bdi dir="ltr" style="display:inline-block;">+${format(item.amountIn)}</bdi>`;
+                } else if (item.type === 'SUPPLIER_PURCHASE') {
+                  badgeClass = 'fm-purchase';
+                  badgeIcon = '↓';
+                  flowColor = '#0369a1';
+                  flowHtml = `فاتورة <bdi dir="ltr" style="display:inline-block;">${format(item.billAmount ?? '0')}</bdi>`;
+                } else if (item.type === 'SUPPLIER_PAYMENT') {
+                  badgeClass = 'fm-supplier';
+                  badgeIcon = '-';
+                  flowColor = 'var(--rose, #be123c)';
+                  flowHtml = `<bdi dir="ltr" style="display:inline-block;">-${format(item.amountOut)}</bdi>`;
+                } else if (item.type === 'SUPPLIER_RETURN') {
+                  badgeClass = 'fm-purchase';
+                  badgeIcon = '↺';
+                  flowColor = '#0369a1';
+                  flowHtml = 'تخفيض دين تاجر';
+                } else if (item.type === 'EXPENSE') {
+                  badgeClass = 'fm-expense';
+                  badgeIcon = '-';
+                  flowColor = 'var(--rose, #be123c)';
+                  flowHtml = `<bdi dir="ltr" style="display:inline-block;">-${format(item.amountOut)}</bdi>`;
+                } else if (item.type === 'CUSTOMER_RETURN') {
+                  badgeClass = 'fm-return';
+                  badgeIcon = '-';
+                  flowColor = 'var(--rose, #be123c)';
+                  flowHtml = `<bdi dir="ltr" style="display:inline-block;">-${format(item.amountOut)}</bdi>`;
+                } else if (item.type === 'INVENTORY_EVENT') {
+                  badgeClass = 'fm-inv';
+                  badgeIcon = '!';
+                  const costDelta = BigInt(item.nonCashCostImpact ?? '0');
+                  flowColor = costDelta >= 0n ? 'var(--rose, #be123c)' : 'var(--green, #15803d)';
+                  const absCost = costDelta >= 0n ? costDelta : -costDelta;
+                  flowHtml = `مخزون: <bdi dir="ltr" style="display:inline-block;">${costDelta >= 0n ? '-' : '+'}${format(absCost.toString())}</bdi>`;
+                } else if (item.type === 'SHIFT_CASH_ADJUSTMENT') {
+                  if (inAmt > 0n) {
+                    badgeClass = 'fm-surplus';
+                    badgeIcon = '+';
+                    flowColor = 'var(--green, #15803d)';
+                    flowHtml = `<bdi dir="ltr" style="display:inline-block;">+${format(item.amountIn)}</bdi>`;
+                  } else {
+                    badgeClass = 'fm-shortage';
+                    badgeIcon = '-';
+                    flowColor = 'var(--rose, #be123c)';
+                    flowHtml = `<bdi dir="ltr" style="display:inline-block;">-${format(item.amountOut)}</bdi>`;
+                  }
+                } else if (item.type === 'TREASURY_TRANSFER') {
+                  badgeClass = 'fm-transfer';
+                  badgeIcon = '⇄';
+                  flowColor = 'var(--muted)';
+                  flowHtml = 'تحويل داخلي (±0)';
+                } else if (inAmt > 0n) {
+                  badgeClass = 'fm-sale';
+                  badgeIcon = '+';
+                  flowColor = 'var(--green, #15803d)';
+                  flowHtml = `<bdi dir="ltr" style="display:inline-block;">+${format(item.amountIn)}</bdi>`;
+                } else if (outAmt > 0n) {
+                  badgeClass = 'fm-return';
+                  badgeIcon = '-';
+                  flowColor = 'var(--rose, #be123c)';
+                  flowHtml = `<bdi dir="ltr" style="display:inline-block;">-${format(item.amountOut)}</bdi>`;
+                }
 
                 return `
                   <tr>
-                    <td style="text-align:center;font-weight:800;color:var(--muted);font-size:12px;">#${index + 1}</td>
+                    <td style="text-align:center;font-weight:800;color:var(--muted);font-size:11.5px;">#${index + 1}</td>
                     <td>
                       <span class="fm-badge ${badgeClass}">
                         <span>${badgeIcon}</span> ${escapeHtml(item.category)}
                       </span>
                     </td>
                     <td>
-                      <strong style="font-size:13.5px;color:var(--ink);">${escapeHtml(item.title)}</strong>
-                      <div style="font-size:11.5px;color:var(--muted);margin-top:2px;">${escapeHtml(item.details)}</div>
+                      <strong style="font-size:13px;color:var(--ink);">${escapeHtml(item.title)}</strong>
+                      <div style="font-size:11px;color:var(--muted);margin-top:2px;">${escapeHtml(item.details)}</div>
                     </td>
                     <td>
-                      <span style="font-size:12px;color:var(--ink-soft);font-weight:600;">${formattedDate}</span>
+                      <span style="font-size:11.5px;color:var(--ink-soft);font-weight:600;">${formattedDate}</span>
                     </td>
                     <td>
                       <strong>${escapeHtml(item.party)}</strong>
-                      <div style="font-size:11px;color:var(--muted);">بواسطة: ${escapeHtml(item.actor)}</div>
+                      <div style="font-size:11px;color:var(--muted);">${escapeHtml(item.actor)}</div>
                     </td>
                     <td style="text-align:left;">
-                      <strong style="font-size:14px;color:${flowColor};">${flowSign} ${format(flowAmount)}</strong>
+                      <strong style="font-size:12.5px;color:${flowColor};">${flowHtml}</strong>
                     </td>
                     <td style="text-align:center;">
-                      <span class="running-chip">
-                        الرصيد: ${format(item.runningCash)}
-                      </span>
+                      <span class="running-chip">${format(item.runningCash)}</span>
                     </td>
                   </tr>
                 `;
@@ -3865,7 +3953,7 @@ function financialMapView() {
         <div class="empty-chart" style="padding:40px 15px;">
           <div class="empty-illustration">${icon('chart', 28)}</div>
           <strong>لا توجد حركات مالية في الفترة المحددة</strong>
-          <p>سجل مبيعات أو مصروفات أو سداد فواتير تجار لتظهر في المسار المالي.</p>
+          <p>سجل مبيعات أو مصروفات أو فواتير وسداد تجار لتظهر في المسار المالي.</p>
         </div>
       `}
     </section>
@@ -4232,7 +4320,7 @@ function bindFinancialMap() {
     }
     const storeId = state.data?.selectedStoreId;
     const query = new URLSearchParams({ storeId, from, to, tzOffset: String(new Date().getTimezoneOffset()) });
-    state.financialMapRange = syncPresetWithDates(null, from, to, ['all', 'today', 'week', 'month'], 'rolling7', 'all');
+    state.financialMapRange = syncPresetWithDates(null, from, to, ['all', 'today', 'week', 'month', 'year'], 'rolling7', 'all');
     state.financialMapKey = `${storeId}:${from}:${to}`;
     void api(`/api/reports/financial-map?${query.toString()}`).then((res) => {
       state.financialMap = res;
@@ -5074,7 +5162,7 @@ async function bindSalesHistory() {
       toast('تاريخ البداية لازم يكون قبل تاريخ النهاية', 'error');
       return;
     }
-    state.salesPreset = (!from && !to) ? 'all' : syncPresetWithDates(null, from, to, ['all', 'today', 'week', 'month'], 'rolling7', 'all');
+    state.salesPreset = (!from && !to) ? 'all' : syncPresetWithDates(null, from, to, ['all', 'today', 'week', 'month', 'year'], 'rolling7', 'all');
     state.salesHistorySearch = search;
     state.salesFrom = from;
     state.salesTo = to;
@@ -6376,6 +6464,7 @@ function computeHistoryPresetRange(preset, weekStyle = 'rolling7') {
     return { from: localDateIso(d), to };
   }
   if (preset === 'month') return { from: `${to.slice(0, 7)}-01`, to };
+  if (preset === 'year') return { from: `${to.slice(0, 4)}-01-01`, to };
   return { from: '', to: '' };
 }
 

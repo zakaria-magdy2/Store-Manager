@@ -1722,3 +1722,204 @@ test('updates all financial views (sales summary, shifts, shift sales, dashboard
     await rm(finDataDir, { recursive: true, force: true }).catch(() => {});
   }
 });
+
+
+test('keeps /api/sales strictly pure while separating profit-loss expenses and financial-map full cash & inventory trail', async () => {
+  const sepDataDir = await mkdtemp(join(appDir, '.test-sep-reports-'));
+  const sepPort = await reservePort();
+  const sepUrl = `http://127.0.0.1:${sepPort}`;
+  let sepLog = '';
+  const sepServer = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+    cwd: workspace,
+    env: {
+      ...process.env,
+      PORT: String(sepPort),
+      RETAILOS_DATA_DIR: sepDataDir,
+      RETAILOS_COMPANY_NAME: 'متجر الفصل المالي',
+      RETAILOS_COMPANY_CODE: 'SEP_TEST',
+      RETAILOS_CURRENCY: 'EGP',
+      RETAILOS_STORE_NAME: 'الفرع الرئيسي',
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  sepServer.stderr.on('data', (chunk) => { sepLog += chunk.toString(); });
+
+  const sepReq = async (path, { method = 'GET', body, cookieStr } = {}) => {
+    const headers = { Origin: sepUrl };
+    if (body) headers['Content-Type'] = 'application/json';
+    if (cookieStr) headers.Cookie = cookieStr;
+    const response = await fetch(`${sepUrl}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const payload = await response.json();
+    return { response, payload };
+  };
+
+  try {
+    let sepReady = false;
+    for (let i = 0; i < 240; i += 1) {
+      if (sepServer.exitCode !== null) throw new Error(`sepServer exited early (${sepServer.exitCode}): ${sepLog}`);
+      try {
+        const res = await fetch(`${sepUrl}/api/bootstrap`);
+        if (res.ok) { sepReady = true; break; }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 125));
+    }
+    assert.ok(sepReady, `sepServer did not become ready: ${sepLog}`);
+
+    assert.equal((await sepReq('/api/setup', {
+      method: 'POST',
+      body: { ownerUsername: 'sep_owner', ownerName: 'صاحب المتجر', password: 'Sep-Owner-Password-2026' },
+    })).response.status, 201, sepLog);
+
+    const loginRes = await sepReq('/api/login', {
+      method: 'POST',
+      body: { username: 'sep_owner', password: 'Sep-Owner-Password-2026' },
+    });
+    assert.equal(loginRes.response.status, 200);
+    const ownerCookie = loginRes.response.headers.get('set-cookie').split(';')[0];
+
+    const initialData = await sepReq('/api/data', { cookieStr: ownerCookie });
+    const storeId = initialData.payload.selectedStoreId;
+    const supRes = await sepReq('/api/suppliers', { method: 'POST', cookieStr: ownerCookie, body: { name: 'تاجر الفواتير' } });
+    assert.equal(supRes.response.status, 201);
+
+    const prodRes = await sepReq('/api/products', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { name: 'جاكيت شتوي', sku: 'JKT-SEP-1', variants: [{ sku: 'JKT-SEP-1-L', retailPrice: '40000', reorderPoint: '1' }] },
+    });
+    assert.equal(prodRes.response.status, 201);
+
+    const d1 = await sepReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie });
+    const variantId = d1.payload.products.find((p) => p.id === prodRes.payload.id).variants[0].id;
+
+    const purRes = await sepReq('/api/purchases', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        storeId,
+        supplierId: supRes.payload.id,
+        idempotencyKey: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaa1',
+        invoiceNumber: 'PUR-SEP-01',
+        totalAmount: '200000',
+        paidAmount: '50000',
+        paymentMethod: 'CASH',
+        items: [{ variantId, quantity: '10', unitCost: '20000', retailPrice: '40000' }],
+      },
+    });
+    assert.equal(purRes.response.status, 201, JSON.stringify(purRes.payload));
+
+    const d2 = await sepReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie });
+    const supRecord = d2.payload.suppliers.find((s) => s.id === supRes.payload.id);
+    const purchaseRecord = supRecord.purchases.find((p) => p.id === purRes.payload.id);
+    const purchaseItemId = purchaseRecord.items[0].id;
+
+    assert.equal((await sepReq('/api/shifts/start', { method: 'POST', cookieStr: ownerCookie, body: { storeId, openingCash: '0' } })).response.status, 201);
+
+    const saleRes = await sepReq('/api/checkout', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        storeId,
+        idempotencyKey: 'aaaaaaaa-2222-4222-8222-aaaaaaaaaaa2',
+        items: [{ variantId, quantity: '3' }],
+        payment: { method: 'CASH', amount: '120000' },
+      },
+    });
+    assert.equal(saleRes.response.status, 201, JSON.stringify(saleRes.payload));
+
+    const custRetRes = await sepReq(`/api/sales/${saleRes.payload.id}/returns`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: 'aaaaaaaa-3333-4333-8333-aaaaaaaaaaa3',
+        storeId,
+        paymentMethod: 'CASH',
+        items: [{ originalSaleItemId: saleRes.payload.items[0].id, quantity: '1' }],
+      },
+    });
+    assert.equal(custRetRes.response.status, 201, JSON.stringify(custRetRes.payload));
+
+    const supRetRes = await sepReq(`/api/purchases/${purRes.payload.id}/returns`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: 'aaaaaaaa-4444-4444-8444-aaaaaaaaaaa4',
+        storeId,
+        items: [{ purchaseItemId, quantity: '2' }],
+      },
+    });
+    assert.equal(supRetRes.response.status, 201, JSON.stringify(supRetRes.payload));
+
+    const today = new Date().toISOString().slice(0, 10);
+    const expRes = await sepReq('/api/expenses', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: 'aaaaaaaa-5555-4555-8555-aaaaaaaaaaa5',
+        storeId,
+        categoryCode: 'UTILITIES',
+        amount: '50000',
+        paymentMethod: 'CASH_DRAWER',
+        expenseDate: today,
+        notes: 'كهرباء المحل',
+      },
+    });
+    assert.equal(expRes.response.status, 201, JSON.stringify(expRes.payload));
+
+    const dmgRes = await sepReq('/api/inventory/damage', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: 'aaaaaaaa-6666-4666-8666-aaaaaaaaaaa6',
+        storeId,
+        variantId,
+        quantity: '1',
+        reason: 'قطعة تالفة',
+      },
+    });
+    assert.equal(dmgRes.response.status, 201, JSON.stringify(dmgRes.payload));
+
+    const salesReport = await sepReq(`/api/sales?storeId=${storeId}&from=${today}&to=${today}`, { cookieStr: ownerCookie });
+    assert.equal(salesReport.response.status, 200);
+    assert.equal(salesReport.payload.payload.summary.invoiceCount, 1);
+    assert.equal(salesReport.payload.payload.summary.returnsCount, 1);
+    assert.equal(salesReport.payload.payload.summary.netSales.amount, '80000');
+    assert.equal(salesReport.payload.payload.summary.cogs.amount, '40000');
+    assert.equal(salesReport.payload.payload.summary.grossProfit.amount, '40000');
+
+    const plReport = await sepReq(`/api/reports/profit-loss?storeId=${storeId}&from=${today}&to=${today}`, { cookieStr: ownerCookie });
+    assert.equal(plReport.response.status, 200);
+    assert.equal(plReport.payload.profitLoss.netSales.amount, '80000');
+    assert.equal(plReport.payload.profitLoss.cogs.amount, '40000');
+    assert.equal(plReport.payload.profitLoss.directExpenses.amount, '50000');
+    assert.equal(plReport.payload.profitLoss.inventoryAdjustmentsLoss.amount, '20000');
+    assert.equal(plReport.payload.profitLoss.operatingProfit.amount, '-30000');
+    assert.equal(plReport.payload.expenseItems.length, 1);
+    assert.equal(plReport.payload.expenseItems[0].amount.amount, '50000');
+    assert.equal(plReport.payload.supplierPayments.initialPaid.amount, '50000');
+    assert.equal(plReport.payload.supplierPayments.installmentPaid.amount, '0');
+
+    const fmReport = await sepReq(`/api/reports/financial-map?storeId=${storeId}&from=${today}&to=${today}`, { cookieStr: ownerCookie });
+    assert.equal(fmReport.response.status, 200);
+    assert.equal(fmReport.payload.summary.netSales, '80000');
+    assert.equal(fmReport.payload.summary.totalCogs, '40000');
+    assert.equal(fmReport.payload.summary.totalPurchasesBilled, '200000');
+    assert.equal(fmReport.payload.summary.totalSupplierPaid, '50000');
+    assert.equal(fmReport.payload.summary.totalExpensesPaid, '50000');
+    assert.equal(fmReport.payload.summary.inventoryAdjustmentsLoss, '20000');
+    assert.equal(fmReport.payload.summary.operatingProfit, '-30000');
+    assert.equal(fmReport.payload.summary.netCashFlow, '-20000');
+    assert.equal(fmReport.payload.summary.runningFinalCash, '-20000');
+
+    const types = fmReport.payload.timeline.map((e) => e.type);
+    for (const expectedType of ['SUPPLIER_PURCHASE', 'SUPPLIER_PAYMENT', 'SALE', 'CUSTOMER_RETURN', 'SUPPLIER_RETURN', 'EXPENSE', 'INVENTORY_EVENT']) {
+      assert.ok(types.includes(expectedType), `Expected timeline to include ${expectedType}, got ${types.join(', ')}`);
+    }
+    const supPayEvent = fmReport.payload.timeline.find((e) => e.type === 'SUPPLIER_PAYMENT');
+    assert.ok(supPayEvent.title.includes('سددت'));
+  } finally {
+    if (sepServer.exitCode === null) sepServer.kill('SIGTERM');
+    await once(sepServer, 'exit').catch(() => {});
+    await rm(sepDataDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
