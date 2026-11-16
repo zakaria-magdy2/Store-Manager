@@ -1,9 +1,9 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { Transform } from 'node:stream';
-import { createReadStream, createWriteStream, existsSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, join, normalize, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,6 +48,8 @@ import {
   checkSqliteFileQuick,
   verifySqliteFile,
   EscPosReceiptPrinter,
+  businessDateInTimeZone,
+  resolveValidTimeZone,
   postJournalEntry,
   applyStockMovementInTransaction,
 } from '@retailos/infrastructure';
@@ -62,6 +64,7 @@ const companyConfig = {
   name: process.env.RETAILOS_COMPANY_NAME ?? 'متجري',
   code: process.env.RETAILOS_COMPANY_CODE ?? 'STORE',
   currency: process.env.RETAILOS_CURRENCY ?? 'EGP',
+  timezone: resolveValidTimeZone(process.env.RETAILOS_TIMEZONE ?? 'Africa/Cairo'),
   storeName: process.env.RETAILOS_STORE_NAME ?? 'الفرع الرئيسي',
   storeCode: process.env.RETAILOS_STORE_CODE ?? 'MAIN',
 };
@@ -69,6 +72,7 @@ const port = Number.parseInt(process.env.PORT ?? '4173', 10);
 const origin = `http://127.0.0.1:${port}`;
 const databasePath = join(dataDir, 'retailos.sqlite');
 const dailyBackupDir = join(dataDir, 'backups', 'daily');
+const dailyBackupKeyPath = join(dataDir, '.retailos-daily.key');
 const preRestoreBackupDir = join(dataDir, 'backups', 'pre-restore');
 const quarantineBackupDir = join(dataDir, 'backups', 'quarantine');
 const backupSettingsPath = join(dataDir, 'backup-settings.json');
@@ -78,6 +82,18 @@ await mkdir(dataDir, { recursive: true });
 await mkdir(dailyBackupDir, { recursive: true });
 await mkdir(preRestoreBackupDir, { recursive: true });
 const restoredAfterCrash = await recoverPendingSqliteRestore(dataDir, databasePath, companyConfig.code);
+
+function resolveDailyBackupPassphraseSync() {
+  const envKey = (process.env.RETAILOS_DAILY_BACKUP_KEY ?? '').trim();
+  if (envKey.length >= 12) return envKey.slice(0, 256);
+  if (existsSync(dailyBackupKeyPath)) {
+    const existing = readFileSync(dailyBackupKeyPath, 'utf8').trim();
+    if (existing.length >= 12) return existing.slice(0, 256);
+  }
+  const generated = randomBytes(32).toString('base64url');
+  writeFileSync(dailyBackupKeyPath, `${generated}\n`, { encoding: 'utf8', mode: 0o600 });
+  return generated;
+}
 
 async function readBackupSettings() {
   const defaults = { mirrorPath: '', autoMirror: true, lastMirrorAt: null, lastMirrorStatus: 'UNCONFIGURED', lastMirrorError: null };
@@ -112,16 +128,31 @@ async function findNewestVerifiedCandidate(extraDirs = []) {
     try {
       const files = await readdir(dir);
       for (const name of files) {
-        if (/^retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite$/.test(name) || name === 'retailos-latest.sqlite') {
+        if (/^retailos-daily-\d{4}-\d{2}-\d{2}\.(rfbackup|sqlite)$/.test(name) || name === 'retailos-latest.rfbackup' || name === 'retailos-latest.sqlite') {
           const full = join(dir, name);
           const s = await stat(full).catch(() => null);
-          if (s && s.size > 0) candidates.push({ path: full, name, mtimeMs: s.mtimeMs });
+          if (s && s.size > 0) candidates.push({ path: full, name, mtimeMs: s.mtimeMs, encrypted: name.endsWith('.rfbackup') });
         }
       }
     } catch { /* ignore unreadable external path */ }
   }
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
   for (const item of candidates) {
+    if (item.encrypted) {
+      try {
+        const passphrase = resolveDailyBackupPassphraseSync();
+        const archive = await readFile(item.path);
+        const { decryptBackupArchive } = await import('@retailos/infrastructure');
+        const sqliteBytes = decryptBackupArchive(archive, passphrase);
+        const tempWork = await mkdtemp(join(quarantineBackupDir, 'recover-'));
+        const decryptedPath = join(tempWork, 'candidate.sqlite');
+        await writeFile(decryptedPath, sqliteBytes, { mode: 0o600 });
+        const quick = checkSqliteFileQuick(decryptedPath);
+        if (quick.ok) return { ...item, path: decryptedPath, cleanupDir: tempWork };
+        await rm(tempWork, { recursive: true, force: true }).catch(() => undefined);
+      } catch { /* try older candidate */ }
+      continue;
+    }
     const quick = checkSqliteFileQuick(item.path);
     if (quick.ok) return item;
   }
@@ -142,112 +173,84 @@ try {
   const initialSettings = await readBackupSettings();
   const candidate = await findNewestVerifiedCandidate([initialSettings.mirrorPath]);
   if (!candidate) throw startupError;
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const quarantineTargetDir = join(quarantineBackupDir, stamp);
-  await mkdir(quarantineTargetDir, { recursive: true });
-  for (const suffix of ['', '-wal', '-shm']) {
-    const src = `${databasePath}${suffix}`;
-    if (existsSync(src)) {
-      await rename(src, join(quarantineTargetDir, `retailos.sqlite${suffix}`)).catch(async () => {
-        await copyFile(src, join(quarantineTargetDir, `retailos.sqlite${suffix}`)).catch(() => undefined);
-        await rm(src, { force: true }).catch(() => undefined);
-      });
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const quarantineTargetDir = join(quarantineBackupDir, stamp);
+    await mkdir(quarantineTargetDir, { recursive: true });
+    for (const suffix of ['', '-wal', '-shm']) {
+      const src = `${databasePath}${suffix}`;
+      if (existsSync(src)) {
+        await rename(src, join(quarantineTargetDir, `retailos.sqlite${suffix}`)).catch(async () => {
+          await copyFile(src, join(quarantineTargetDir, `retailos.sqlite${suffix}`)).catch(() => undefined);
+          await rm(src, { force: true }).catch(() => undefined);
+        });
+      }
+    }
+    await copyFile(candidate.path, databasePath);
+    database.connect();
+    initialIntegrityStatus = { ...database.checkQuickIntegrity(), checkedAt: new Date().toISOString() };
+    startupRecoveryInfo = {
+      recovered: true,
+      restoredFrom: candidate.name,
+      quarantinedAt: quarantineTargetDir,
+      reason: startupError instanceof Error ? startupError.message : String(startupError),
+      at: new Date().toISOString(),
+    };
+    console.warn(`[RetailOS Recovery] Restored damaged database automatically from ${candidate.name}`);
+  } finally {
+    if (candidate.cleanupDir) {
+      await rm(candidate.cleanupDir, { recursive: true, force: true }).catch(() => undefined);
     }
   }
-  await copyFile(candidate.path, databasePath);
-  database.connect();
-  initialIntegrityStatus = { ...database.checkQuickIntegrity(), checkedAt: new Date().toISOString() };
-  startupRecoveryInfo = {
-    recovered: true,
-    restoredFrom: candidate.name,
-    quarantinedAt: quarantineTargetDir,
-    reason: startupError instanceof Error ? startupError.message : String(startupError),
-    at: new Date().toISOString(),
-  };
-  console.warn(`[RetailOS Recovery] Restored damaged database automatically from ${candidate.path}`);
 }
 const db = database.getDb();
 const migration = await new DatabaseMigrator(db).migrateToLatest();
 if (!migration.success) throw migration.error ?? new Error('Database migration failed');
 
-function generateNextSaleNumber(tenantId) {
+/** Allocates a monotonically increasing, collision-free document number inside an IMMEDIATE transaction. */
+function allocateNextDocNumber(tenantId, docType, prefix, existingTable, existingCol) {
   const rawDb = database.getRawDatabase();
-  const countRow = rawDb.prepare('SELECT COUNT(*) as cnt FROM sales WHERE tenant_id = ?').get(tenantId);
-  let seq = Number(countRow?.cnt ?? 0) + 1001;
-  while (rawDb.prepare('SELECT 1 FROM sales WHERE tenant_id = ? AND sale_number = ?').get(tenantId, `INV-${seq}`)) {
-    seq += 1;
-  }
-  return `INV-${seq}`;
+  const txn = rawDb.transaction(() => {
+    const rows = rawDb.prepare(`SELECT ${existingCol} AS num FROM ${existingTable} WHERE tenant_id = ? AND ${existingCol} IS NOT NULL`).all(tenantId);
+    let maxExisting = 1000;
+    const prefixRe = new RegExp(`^${prefix.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}(\\d+)$`);
+    for (const row of rows) {
+      const m = String(row.num ?? '').match(prefixRe);
+      if (m) {
+        const parsed = Number.parseInt(m[1], 10);
+        if (Number.isFinite(parsed) && parsed > maxExisting) maxExisting = parsed;
+      }
+    }
+    rawDb.prepare('INSERT INTO document_sequences (tenant_id, doc_type, last_seq) VALUES (?, ?, ?) ON CONFLICT(tenant_id, doc_type) DO NOTHING').run(tenantId, docType, maxExisting);
+    let row = rawDb.prepare('UPDATE document_sequences SET last_seq = last_seq + 1 WHERE tenant_id = ? AND doc_type = ? RETURNING last_seq').get(tenantId, docType);
+    let seq = Number(row?.last_seq ?? maxExisting + 1);
+    while (rawDb.prepare(`SELECT 1 FROM ${existingTable} WHERE tenant_id = ? AND ${existingCol} = ?`).get(tenantId, `${prefix}${seq}`)) {
+      row = rawDb.prepare('UPDATE document_sequences SET last_seq = last_seq + 1 WHERE tenant_id = ? AND doc_type = ? RETURNING last_seq').get(tenantId, docType);
+      seq = Number(row?.last_seq ?? seq + 1);
+    }
+    return `${prefix}${seq}`;
+  });
+  return txn.immediate();
+}
+
+function generateNextSaleNumber(tenantId) {
+  return allocateNextDocNumber(tenantId, 'SALE', 'INV-', 'sales', 'sale_number');
 }
 
 function generateNextPurchaseNumber(tenantId) {
-  const rawDb = database.getRawDatabase();
-  const countRow = rawDb.prepare('SELECT COUNT(*) as cnt FROM supplier_purchases WHERE tenant_id = ?').get(tenantId);
-  let seq = Number(countRow?.cnt ?? 0) + 1001;
-  while (rawDb.prepare('SELECT 1 FROM supplier_purchases WHERE tenant_id = ? AND invoice_number = ?').get(tenantId, `PUR-${seq}`)) {
-    seq += 1;
-  }
-  return `PUR-${seq}`;
+  return allocateNextDocNumber(tenantId, 'PURCHASE', 'PUR-', 'supplier_purchases', 'invoice_number');
 }
 
-const rawDbInit = database.getRawDatabase();
-rawDbInit.exec(`
-  CREATE TABLE IF NOT EXISTS cashier_shifts (
-    id TEXT PRIMARY KEY,
-    shift_number TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    store_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    started_at TEXT NOT NULL,
-    ended_at TEXT,
-    opening_cash INTEGER NOT NULL DEFAULT 0,
-    expected_cash INTEGER NOT NULL DEFAULT 0,
-    actual_cash INTEGER NOT NULL DEFAULT 0,
-    variance INTEGER NOT NULL DEFAULT 0,
-    handover_cash INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'OPEN',
-    notes TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_cashier_shifts_tenant_store ON cashier_shifts(tenant_id, store_id, started_at);
-  CREATE INDEX IF NOT EXISTS idx_cashier_shifts_user_status ON cashier_shifts(tenant_id, user_id, status);
-  CREATE TABLE IF NOT EXISTS auth_rate_limits (
-    scope TEXT NOT NULL,
-    key TEXT NOT NULL,
-    count INTEGER NOT NULL DEFAULT 0,
-    started_at INTEGER NOT NULL,
-    PRIMARY KEY (scope, key)
-  );
-`);
-
 function generateNextShiftNumber(tenantId) {
-  const rawDb = database.getRawDatabase();
-  const countRow = rawDb.prepare('SELECT COUNT(*) as cnt FROM cashier_shifts WHERE tenant_id = ?').get(tenantId);
-  let seq = Number(countRow?.cnt ?? 0) + 1001;
-  while (rawDb.prepare('SELECT 1 FROM cashier_shifts WHERE tenant_id = ? AND shift_number = ?').get(tenantId, `SH-${seq}`)) {
-    seq += 1;
-  }
-  return `SH-${seq}`;
+  return allocateNextDocNumber(tenantId, 'SHIFT', 'SH-', 'cashier_shifts', 'shift_number');
 }
 
 function generateNextReturnNumber(tenantId) {
-  const rawDb = database.getRawDatabase();
-  const countRow = rawDb.prepare('SELECT COUNT(*) as cnt FROM customer_returns WHERE tenant_id = ?').get(tenantId);
-  let seq = Number(countRow?.cnt ?? 0) + 1001;
-  while (rawDb.prepare('SELECT 1 FROM customer_returns WHERE tenant_id = ? AND return_number = ?').get(tenantId, `RET-${seq}`)) {
-    seq += 1;
-  }
-  return `RET-${seq}`;
+  return allocateNextDocNumber(tenantId, 'RETURN', 'RET-', 'customer_returns', 'return_number');
 }
+
 function generateNextStocktakeNumber(tenantId) {
-  const rawDb = database.getRawDatabase();
-  const countRow = rawDb.prepare('SELECT COUNT(*) as cnt FROM stocktake_sessions WHERE tenant_id = ?').get(tenantId);
-  let seq = Number(countRow?.cnt ?? 0) + 1001;
-  while (rawDb.prepare('SELECT 1 FROM stocktake_sessions WHERE tenant_id = ? AND session_number = ?').get(tenantId, `STK-${seq}`)) {
-    seq += 1;
-  }
-  return `STK-${seq}`;
+  return allocateNextDocNumber(tenantId, 'STOCKTAKE', 'STK-', 'stocktake_sessions', 'session_number');
 }
 if (restoredAfterCrash) {
   await db.updateTable('sessions').set({ is_revoked: 1 }).execute();
@@ -298,13 +301,18 @@ async function recordAudit(ctx, details) {
 if ((await tenantRepo.listAll()).length === 0) {
   const tenantId = randomUUID();
   await db.transaction().execute(async (trx) => {
-    await trx.insertInto('tenants').values({ id: tenantId, name: companyConfig.name, code: companyConfig.code, currency: companyConfig.currency }).execute();
+    await trx.insertInto('tenants').values({ id: tenantId, name: companyConfig.name, code: companyConfig.code, currency: companyConfig.currency, timezone: companyConfig.timezone }).execute();
     await trx.insertInto('stores').values({ id: randomUUID(), tenant_id: tenantId, name: companyConfig.storeName, code: companyConfig.storeCode, address: null, phone: null }).execute();
   });
-} else if (process.env.RETAILOS_COMPANY_NAME) {
+} else {
   const existing = (await tenantRepo.listAll())[0];
-  await db.updateTable('tenants').set({ name: process.env.RETAILOS_COMPANY_NAME }).where('id', '=', existing.id).execute();
-  if (process.env.RETAILOS_STORE_NAME) await db.updateTable('stores').set({ name: process.env.RETAILOS_STORE_NAME }).where('tenant_id', '=', existing.id).where('code', '=', companyConfig.storeCode).execute();
+  if (process.env.RETAILOS_COMPANY_NAME) {
+    await db.updateTable('tenants').set({ name: process.env.RETAILOS_COMPANY_NAME }).where('id', '=', existing.id).execute();
+    if (process.env.RETAILOS_STORE_NAME) await db.updateTable('stores').set({ name: process.env.RETAILOS_STORE_NAME }).where('tenant_id', '=', existing.id).where('code', '=', companyConfig.storeCode).execute();
+  }
+  if (process.env.RETAILOS_TIMEZONE) {
+    await db.updateTable('tenants').set({ timezone: companyConfig.timezone }).where('id', '=', existing.id).execute();
+  }
 }
 
 const OwnerSchema = z.object({
@@ -362,7 +370,7 @@ const CommitStocktakeSchema = z.object({
   notes: z.string().max(500).trim().optional().nullable(),
 });
 const BackupSettingsSchema = z.object({ mirrorPath: z.string().max(500).trim().default(''), autoMirror: z.boolean().default(true) });
-const DailyRestoreSchema = z.object({ filename: z.string().regex(/^retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite$/) });
+const DailyRestoreSchema = z.object({ filename: z.string().regex(/^retailos-daily-\d{4}-\d{2}-\d{2}\.(rfbackup|sqlite)$/) });
 const PasswordChangeSchema = z.object({ currentPassword: z.string().min(1).max(128), newPassword: z.string().min(12).max(128) });
 const EmployeeDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
   const date = new Date(`${value}T00:00:00.000Z`);
@@ -404,23 +412,67 @@ const InventoryAdjustSchema = z.object({
   reason: z.string().max(300).trim().optional(),
 });
 
+function timeZoneStartOfDayUtcMs(dateStr, timeZone = companyConfig.timezone) {
+  const safeTz = resolveValidTimeZone(timeZone);
+  const [y, m, d] = dateStr.split('-').map(Number);
+  let utcMs = Date.UTC(y, m - 1, d, 0, 0, 0, 0);
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: safeTz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  });
+  for (let pass = 0; pass < 2; pass += 1) {
+    const parts = Object.fromEntries(fmt.formatToParts(new Date(utcMs)).map((p) => [p.type, p.value]));
+    const wallAsUtc = Date.UTC(
+      Number.parseInt(parts.year, 10),
+      Number.parseInt(parts.month, 10) - 1,
+      Number.parseInt(parts.day, 10),
+      Number.parseInt(parts.hour, 10),
+      Number.parseInt(parts.minute, 10),
+      Number.parseInt(parts.second, 10),
+    );
+    const delta = wallAsUtc - Date.UTC(y, m - 1, d, 0, 0, 0);
+    if (delta === 0) break;
+    utcMs -= delta;
+  }
+  return utcMs;
+}
+
 function normalizeTzOffsetMinutes(raw) {
-  if (raw === undefined || raw === null || raw === '') return new Date().getTimezoneOffset();
+  if (raw === undefined || raw === null || raw === '') return null;
   const parsed = Number.parseInt(String(raw), 10);
-  if (!Number.isFinite(parsed) || parsed < -840 || parsed > 840) return new Date().getTimezoneOffset();
+  if (!Number.isFinite(parsed) || parsed < -840 || parsed > 840) return null;
   return parsed;
 }
 
-function localDayUtcBounds(dateMs = Date.now(), tzOffsetMinutes = new Date().getTimezoneOffset()) {
-  // Date.getTimezoneOffset() = (UTC - Local) in minutes, e.g. -120 for UTC+2.
-  const offsetMs = tzOffsetMinutes * 60000;
-  const shifted = new Date(dateMs - offsetMs);
-  const year = shifted.getUTCFullYear();
-  const month = shifted.getUTCMonth();
-  const day = shifted.getUTCDate();
-  const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-  const startUtcMs = Date.UTC(year, month, day, 0, 0, 0, 0) + offsetMs;
-  const endUtcMs = startUtcMs + 86400000;
+function localDayUtcBounds(dateMs = Date.now(), tzOffsetMinutes = null, timeZone = companyConfig.timezone) {
+  const explicitOffset = normalizeTzOffsetMinutes(tzOffsetMinutes);
+  if (explicitOffset !== null) {
+    const offsetMs = explicitOffset * 60000;
+    const shifted = new Date(dateMs - offsetMs);
+    const year = shifted.getUTCFullYear();
+    const month = shifted.getUTCMonth();
+    const day = shifted.getUTCDate();
+    const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    const startUtcMs = Date.UTC(year, month, day, 0, 0, 0, 0) + offsetMs;
+    const endUtcMs = startUtcMs + 86400000;
+    return {
+      dateStr,
+      monthStr: dateStr.slice(0, 7),
+      startIso: new Date(startUtcMs).toISOString(),
+      endIso: new Date(endUtcMs).toISOString(),
+    };
+  }
+  const safeTz = resolveValidTimeZone(timeZone);
+  const dateStr = businessDateInTimeZone(new Date(dateMs), safeTz);
+  const nextDateStr = businessDateInTimeZone(new Date(timeZoneStartOfDayUtcMs(dateStr, safeTz) + 30 * 3600 * 1000), safeTz);
+  const startUtcMs = timeZoneStartOfDayUtcMs(dateStr, safeTz);
+  const endUtcMs = timeZoneStartOfDayUtcMs(nextDateStr, safeTz);
   return {
     dateStr,
     monthStr: dateStr.slice(0, 7),
@@ -429,22 +481,31 @@ function localDayUtcBounds(dateMs = Date.now(), tzOffsetMinutes = new Date().get
   };
 }
 
-function queryRangeBounds(fromStr, toStr, url) {
-  const rawTz = url?.searchParams?.get('tzOffset');
-  // Default to UTC (0) when tzOffset is omitted so existing UTC callers/tests behave identically,
-  // while applying browser local timezone boundaries when tzOffset is provided by the UI.
-  const tzOffsetMinutes = (rawTz === undefined || rawTz === null || rawTz === '')
-    ? 0
-    : normalizeTzOffsetMinutes(rawTz);
-  const [fy, fm, fd] = fromStr.split('-').map(Number);
-  const [ty, tm, td] = toStr.split('-').map(Number);
-  const offsetMs = tzOffsetMinutes * 60000;
-  const startUtcMs = Date.UTC(fy, fm - 1, fd, 0, 0, 0, 0) + offsetMs;
-  const endExclusiveUtcMs = Date.UTC(ty, tm - 1, td + 1, 0, 0, 0, 0) + offsetMs;
+function queryRangeBounds(fromStr, toStr, url, timeZone = companyConfig.timezone) {
+  const explicitOffset = normalizeTzOffsetMinutes(url?.searchParams?.get('tzOffset'));
+  if (explicitOffset !== null) {
+    const [fy, fm, fd] = fromStr.split('-').map(Number);
+    const [ty, tm, td] = toStr.split('-').map(Number);
+    const offsetMs = explicitOffset * 60000;
+    const startUtcMs = Date.UTC(fy, fm - 1, fd, 0, 0, 0, 0) + offsetMs;
+    const endExclusiveUtcMs = Date.UTC(ty, tm - 1, td + 1, 0, 0, 0, 0) + offsetMs;
+    return {
+      fromStr,
+      toStr,
+      tzOffsetMinutes: explicitOffset,
+      startIso: new Date(startUtcMs).toISOString(),
+      endExclusiveIso: new Date(endExclusiveUtcMs).toISOString(),
+    };
+  }
+  const safeTz = resolveValidTimeZone(timeZone);
+  const startUtcMs = timeZoneStartOfDayUtcMs(fromStr, safeTz);
+  const toStartMs = timeZoneStartOfDayUtcMs(toStr, safeTz);
+  const nextAfterTo = businessDateInTimeZone(new Date(toStartMs + 30 * 3600 * 1000), safeTz);
+  const endExclusiveUtcMs = timeZoneStartOfDayUtcMs(nextAfterTo, safeTz);
   return {
     fromStr,
     toStr,
-    tzOffsetMinutes,
+    timeZone: safeTz,
     startIso: new Date(startUtcMs).toISOString(),
     endExclusiveIso: new Date(endExclusiveUtcMs).toISOString(),
   };
@@ -821,13 +882,18 @@ function securityHeaders() {
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
     'Cross-Origin-Opener-Policy': 'same-origin',
     'Cross-Origin-Resource-Policy': 'same-origin',
-    'Content-Security-Policy': "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    'Content-Security-Policy': "default-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
   };
 }
 
 function readCookie(req, name) {
   const cookie = req.headers.cookie?.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${name}=`));
-  return cookie ? decodeURIComponent(cookie.slice(name.length + 1)) : undefined;
+  if (!cookie) return undefined;
+  try {
+    return decodeURIComponent(cookie.slice(name.length + 1));
+  } catch {
+    return undefined;
+  }
 }
 
 const MAX_JSON_BODY_BYTES = 2 * 1024 * 1024;
@@ -1726,9 +1792,16 @@ async function syncDailyBackupToMirror(sourceDailyPath, dailyFilename, currentSe
   try {
     await mkdir(mirrorDir, { recursive: true });
     await copyFileAtomic(sourceDailyPath, join(mirrorDir, dailyFilename));
-    await copyFileAtomic(sourceDailyPath, join(mirrorDir, 'retailos-latest.sqlite'));
+    await copyFileAtomic(sourceDailyPath, join(mirrorDir, 'retailos-latest.rfbackup'));
+    // Clean up any legacy unencrypted .sqlite mirror files once encrypted .rfbackup exists
+    const mirrorAll = await readdir(mirrorDir);
+    for (const stale of mirrorAll) {
+      if (/^retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite$/.test(stale) || stale === 'retailos-latest.sqlite') {
+        await rm(join(mirrorDir, stale), { force: true }).catch(() => undefined);
+      }
+    }
     const mirrorFiles = (await readdir(mirrorDir))
-      .filter((f) => /^retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite$/.test(f))
+      .filter((f) => /^retailos-daily-\d{4}-\d{2}-\d{2}\.rfbackup$/.test(f))
       .sort()
       .reverse();
     for (const oldFile of mirrorFiles.slice(MAX_DAILY_BACKUPS)) {
@@ -1757,9 +1830,8 @@ async function ensureDailyBackup({ force = false, minAgeMs = AUTO_DAILY_REFRESH_
   if (activeBackupPromise) return activeBackupPromise;
   activeBackupPromise = (async () => {
     await mkdir(dailyBackupDir, { recursive: true });
-    const now = new Date();
-    const localDate = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-    const filename = `retailos-daily-${localDate}.sqlite`;
+    const localDate = businessDateInTimeZone(new Date(), companyConfig.timezone);
+    const filename = `retailos-daily-${localDate}.rfbackup`;
     const targetPath = join(dailyBackupDir, filename);
     const settings = await readBackupSettings();
 
@@ -1773,28 +1845,35 @@ async function ensureDailyBackup({ force = false, minAgeMs = AUTO_DAILY_REFRESH_
             await syncDailyBackupToMirror(targetPath, filename, settings).catch(() => undefined);
           }
         }
-        return { filename, date: localDate, size: fileStat.size, updatedAt: fileStat.mtime.toISOString(), createdNew: false };
+        return { filename, date: localDate, size: fileStat.size, encrypted: true, updatedAt: fileStat.mtime.toISOString(), createdNew: false };
       }
     }
 
-    const tempPath = join(dailyBackupDir, `.tmp-${filename}-${randomUUID().slice(0, 8)}`);
+    const dailyPassphrase = resolveDailyBackupPassphraseSync();
+    let createdBackup = null;
     try {
       database.checkpointPassive();
-      await database.getRawDatabase().backup(tempPath);
-      const quick = checkSqliteFileQuick(tempPath);
-      if (!quick.ok) {
-        throw new Error(`Daily backup integrity check failed: ${quick.messages.join('; ')}`);
-      }
+      createdBackup = await createEncryptedSqliteBackup(database.getRawDatabase(), dailyBackupDir, dailyPassphrase);
       if (existsSync(targetPath)) {
         await rm(targetPath, { force: true }).catch(() => undefined);
       }
-      await rename(tempPath, targetPath);
+      await copyFileAtomic(createdBackup.path, targetPath);
     } finally {
-      if (existsSync(tempPath)) await rm(tempPath, { force: true }).catch(() => undefined);
+      if (createdBackup?.path) {
+        await removeBackupArtifact(createdBackup.path).catch(() => undefined);
+      }
     }
 
-    const files = (await readdir(dailyBackupDir))
-      .filter((f) => /^retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite$/.test(f))
+    // Remove legacy plaintext daily backups once encrypted snapshot is written
+    const allDaily = await readdir(dailyBackupDir);
+    for (const f of allDaily) {
+      if (/^retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite$/.test(f)) {
+        await rm(join(dailyBackupDir, f), { force: true }).catch(() => undefined);
+      }
+    }
+
+    const files = allDaily
+      .filter((f) => /^retailos-daily-\d{4}-\d{2}-\d{2}\.rfbackup$/.test(f))
       .sort()
       .reverse();
     for (const oldFile of files.slice(MAX_DAILY_BACKUPS)) {
@@ -1806,7 +1885,7 @@ async function ensureDailyBackup({ force = false, minAgeMs = AUTO_DAILY_REFRESH_
     }
 
     const fileStat = await stat(targetPath);
-    return { filename, date: localDate, size: fileStat.size, updatedAt: fileStat.mtime.toISOString(), createdNew: true };
+    return { filename, date: localDate, size: fileStat.size, encrypted: true, updatedAt: fileStat.mtime.toISOString(), createdNew: true };
   })();
   try {
     return await activeBackupPromise;
@@ -1872,17 +1951,18 @@ async function getBackupSafetyPayload() {
 async function listDailyBackups() {
   await mkdir(dailyBackupDir, { recursive: true });
   const names = (await readdir(dailyBackupDir))
-    .filter((f) => /^retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite$/.test(f))
+    .filter((f) => /^retailos-daily-\d{4}-\d{2}-\d{2}\.(rfbackup|sqlite)$/.test(f))
     .sort()
     .reverse();
   const backups = [];
   for (const filename of names) {
     try {
       const fileStat = await stat(join(dailyBackupDir, filename));
-      const dateMatch = filename.match(/^retailos-daily-(\d{4}-\d{2}-\d{2})\.sqlite$/);
+      const dateMatch = filename.match(/^retailos-daily-(\d{4}-\d{2}-\d{2})\.(rfbackup|sqlite)$/);
       backups.push({
         filename,
         date: dateMatch ? dateMatch[1] : filename,
+        encrypted: filename.endsWith('.rfbackup'),
         size: fileStat.size,
         sizeBytes: fileStat.size,
         updatedAt: fileStat.mtime.toISOString(),
@@ -3595,7 +3675,8 @@ async function handleApi(req, res, url) {
       const loginCtx = await auth.validateSession(session.token);
       await recordAudit(loginCtx, { storeId: session.user.storeId ?? null, actorUserId: session.user.id, actorUsername: session.user.username, actorRole: session.user.role, action: 'AUTH_LOGIN_SUCCESS', entityType: 'SESSION', entityId: session.user.id, summary: `تسجيل دخول ناجح للمستخدم (${session.user.username})` });
       const maxAge = Math.max(0, Math.floor((Date.parse(session.expiresAt) - Date.now()) / 1000));
-      return json(res, 200, { user: session.user }, { 'Set-Cookie': `retailos_session=${encodeURIComponent(session.token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}` });
+      const isHttps = Boolean(req.socket?.encrypted || req.headers['x-forwarded-proto'] === 'https');
+      return json(res, 200, { user: session.user }, { 'Set-Cookie': `retailos_session=${encodeURIComponent(session.token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${isHttps ? '; Secure' : ''}` });
     } catch {
       const updatedFailure = recordAuthFailure('login', key);
       const tenants = await tenantRepo.listAll();
@@ -3912,7 +3993,11 @@ async function handleApi(req, res, url) {
 
     let preparedRestore;
     try {
-      preparedRestore = await preparePlainSqliteRestore(targetPath, dataDir, currentTenant);
+      if (body.filename.endsWith('.rfbackup')) {
+        preparedRestore = await prepareEncryptedSqliteRestore(targetPath, dataDir, resolveDailyBackupPassphraseSync(), currentTenant);
+      } else {
+        preparedRestore = await preparePlainSqliteRestore(targetPath, dataDir, currentTenant);
+      }
     } catch {
       throw Object.assign(new Error('ملف النسخة اليومية تالف أو لا يخص هذا المتجر'), { status: 400 });
     }
@@ -3931,7 +4016,7 @@ async function handleApi(req, res, url) {
     }
   }
 
-  const dailyDownloadMatch = method === 'GET' ? path.match(/^\/api\/backups\/daily\/(retailos-daily-\d{4}-\d{2}-\d{2}\.sqlite)$/) : null;
+  const dailyDownloadMatch = method === 'GET' ? path.match(/^\/api\/backups\/daily\/(retailos-daily-\d{4}-\d{2}-\d{2}\.(rfbackup|sqlite))$/) : null;
   if (dailyDownloadMatch) {
     ctx.assertPermission(Permissions.SYSTEM_BACKUP_MANAGE);
     const filename = dailyDownloadMatch[1];
@@ -6012,7 +6097,13 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', origin);
     if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
     if (req.method !== 'GET' && req.method !== 'HEAD') throw Object.assign(new Error('الطريقة غير مسموحة'), { status: 405 });
-    const relativePath = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname);
+    let relativePath;
+    try {
+      relativePath = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname);
+    } catch (uriError) {
+      if (uriError instanceof URIError) throw Object.assign(new Error('المسار غير صالح'), { status: 400 });
+      throw uriError;
+    }
     const target = resolve(publicDir, `.${normalize(relativePath)}`);
     if (!target.startsWith(`${publicDir}${sep}`) && target !== join(publicDir, 'index.html')) throw Object.assign(new Error('الملف غير موجود'), { status: 404 });
     if (!existsSync(target)) throw Object.assign(new Error('الملف غير موجود'), { status: 404 });

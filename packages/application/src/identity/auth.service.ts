@@ -13,6 +13,9 @@ export interface AuthServiceConfig {
   sessionTtlHours?: number;
 }
 
+const DUMMY_ARGON2_HASH =
+  '$argon2id$v=19$m=19456,t=2,p=1$McK3MBoF7fb9yCH9Kp1ZBg$PRH2HFG92y22eA+e/WDA2+l9TLF4k3QR8mZVovE7tyU';
+
 export class AuthService {
   private readonly sessionTtlHours: number;
 
@@ -35,6 +38,7 @@ export class AuthService {
   }): Promise<AuthSessionDTO> {
     const tenant = await this.tenantRepo.findByCode(params.tenantCode.trim());
     if (!tenant || !tenant.isActive) {
+      await this.passwordHasher.verify(DUMMY_ARGON2_HASH, params.password);
       throw new Error('AuthenticationError: Invalid tenant or tenant inactive');
     }
 
@@ -43,6 +47,7 @@ export class AuthService {
       params.username.trim().toLowerCase(),
     );
     if (!user || !user.isActive) {
+      await this.passwordHasher.verify(DUMMY_ARGON2_HASH, params.password);
       throw new Error('AuthenticationError: Invalid username or password');
     }
 

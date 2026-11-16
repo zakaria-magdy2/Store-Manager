@@ -99,3 +99,58 @@ describe('Monthly Operating Expense Amortization', () => {
     expect(feb29.reduce((acc, curr) => acc + curr.amount, 0n)).toBe(28000n);
   });
 });
+
+describe('Money.divideBy exactness & deterministic discount tie-breaking', () => {
+  it('handles odd divisors and divisor=1n accurately without integer-half truncation bug', () => {
+    const m = (n: bigint) => Money.fromMinor(n, Currencies.EGP!);
+
+    expect(m(5n).divideBy(1n, 'HALF_EVEN').amount).toBe(5n);
+    expect(m(5n).divideBy(1n, 'HALF_UP').amount).toBe(5n);
+    expect(m(-5n).divideBy(1n, 'HALF_EVEN').amount).toBe(-5n);
+
+    expect(m(4n).divideBy(3n).amount).toBe(1n); // 1.33 -> 1
+    expect(m(5n).divideBy(3n).amount).toBe(2n); // 1.66 -> 2
+    expect(m(7n).divideBy(5n).amount).toBe(1n); // 1.4 -> 1
+    expect(m(10n).divideBy(3n).amount).toBe(3n); // 3.33 -> 3
+    expect(m(-4n).divideBy(3n).amount).toBe(-1n);
+    expect(m(-5n).divideBy(3n).amount).toBe(-2n);
+
+    // True ties (.5) under HALF_EVEN and HALF_UP
+    expect(m(5n).divideBy(2n, 'HALF_EVEN').amount).toBe(2n);
+    expect(m(7n).divideBy(2n, 'HALF_EVEN').amount).toBe(4n);
+    expect(m(5n).divideBy(2n, 'HALF_UP').amount).toBe(3n);
+    expect(m(7n).divideBy(2n, 'HALF_UP').amount).toBe(4n);
+    expect(m(-5n).divideBy(2n, 'HALF_EVEN').amount).toBe(-2n);
+    expect(m(-7n).divideBy(2n, 'HALF_EVEN').amount).toBe(-4n);
+
+    // Exhaustive cross-check across odd and even divisors vs exact doubled-remainder half-even
+    for (let num = -40n; num <= 40n; num += 1n) {
+      for (let div = 1n; div <= 19n; div += 1n) {
+        const absN = num < 0n ? -num : num;
+        const q = absN / div;
+        const r = absN % div;
+        const roundUp = 2n * r > div || (2n * r === div && q % 2n !== 0n);
+        const expected = (num < 0n ? -1n : 1n) * (q + (roundUp ? 1n : 0n));
+        expect(m(num).divideBy(div, 'HALF_EVEN').amount).toBe(expected);
+      }
+    }
+  });
+
+  it('supports exact decimal and rational string factors in Money.multiply', () => {
+    const base = Money.fromDecimal('30.00', Currencies.EGP!);
+    expect(base.multiply('1/3').amount).toBe(1000n);
+    expect(Money.fromMinor(1000n, Currencies.EGP!).multiply('0.125').amount).toBe(125n);
+    expect(Money.fromMinor(1000n, Currencies.EGP!).multiply('0.0000005').amount).toBe(0n);
+  });
+
+  it('breaks equal remainders deterministically by original item index in distributeDiscount', () => {
+    const discount = Money.fromMinor(2n, Currencies.EGP!);
+    const items = [
+      Money.fromMinor(1000n, Currencies.EGP!),
+      Money.fromMinor(1000n, Currencies.EGP!),
+      Money.fromMinor(1000n, Currencies.EGP!),
+    ];
+    const shares = distributeDiscount(discount, items);
+    expect(shares.map((s) => s.amount)).toEqual([1n, 1n, 0n]);
+  });
+});

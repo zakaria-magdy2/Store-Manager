@@ -25,6 +25,7 @@ import * as enterpriseAccountingAndIndexes from './migrations/019_enterprise_acc
 import * as attendanceSchedule from './migrations/020_attendance_schedule.js';
 import * as stocktakeSessions from './migrations/021_stocktake_sessions.js';
 import * as purchaseRetailPricing from './migrations/022_purchase_retail_pricing.js';
+import * as businessTimezoneShiftsSequences from './migrations/023_business_timezone_shifts_sequences.js';
 
 const MIGRATION_REGISTRY: Record<string, Migration> = {
   '001_initial_foundation': {
@@ -114,6 +115,10 @@ const MIGRATION_REGISTRY: Record<string, Migration> = {
   '022_purchase_retail_pricing': {
     up: purchaseRetailPricing.up,
     down: purchaseRetailPricing.down,
+  },
+  '023_business_timezone_shifts_sequences': {
+    up: businessTimezoneShiftsSequences.up,
+    down: businessTimezoneShiftsSequences.down,
   },
 };
 

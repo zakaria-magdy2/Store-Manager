@@ -147,6 +147,16 @@ describe('Phase 3: Weighted Average Cost (WAC)', () => {
     expect(wac.amount).toBe(2n);
   });
 
+  it('rounds WAC accurately with odd incoming total quantities (3004 / 3 -> 1001, not 1002)', () => {
+    const wac = calculateWeightedAverageCost({
+      currentQuantity: 1n,
+      currentWac: usd('10.02'),
+      incomingQuantity: 2n,
+      incomingUnitCost: usd('10.01'),
+    });
+    expect(wac.amount).toBe(1001n);
+  });
+
   it('rejects zero incoming quantity, negative cost and currency mismatch', () => {
     expect(() =>
       calculateWeightedAverageCost({

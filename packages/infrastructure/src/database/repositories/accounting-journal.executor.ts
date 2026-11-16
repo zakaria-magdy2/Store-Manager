@@ -27,6 +27,30 @@ function conflict(message: string): Error {
   return Object.assign(new Error(message), { status: 409 });
 }
 
+export function resolveValidTimeZone(candidate?: string | null): string {
+  const tz = (candidate ?? '').trim() || 'Africa/Cairo';
+  try {
+    Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date(0));
+    return tz;
+  } catch {
+    return 'Africa/Cairo';
+  }
+}
+
+/**
+ * Formats an instant as `YYYY-MM-DD` in the store/tenant's IANA business timezone
+ * (e.g. Africa/Cairo), ensuring late-night sales match business-local periods.
+ */
+export function businessDateInTimeZone(date: Date, timeZone = 'Africa/Cairo'): string {
+  const safeTz = resolveValidTimeZone(timeZone);
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: safeTz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+}
+
 export async function postJournalEntry(
   trx: Kysely<RetailOSDatabase>,
   ctx: ExecutionContext,
@@ -34,6 +58,7 @@ export async function postJournalEntry(
     storeId: string;
     currency: string;
     date: Date;
+    entryDate?: string | undefined;
     sourceType: 'EXPENSE' | 'SALE' | 'PURCHASE' | 'PURCHASE_PAYMENT' | 'SUPPLIER_RETURN' | 'RETURN' | 'TRANSFER' | 'ADJUSTMENT' | 'SESSION_CLOSING';
     sourceId: string;
     idempotencyKey: string;
@@ -47,25 +72,50 @@ export async function postJournalEntry(
     throw new Error('AccountingInvariantError: journal entry is not balanced');
   }
 
-  for (const [accountCode, accountName, accountType, normalBalance] of accountDefaults) {
-    await trx.insertInto('accounts').values({
-      id: ctx.tenantId + ':account:' + accountCode,
-      tenant_id: ctx.tenantId,
-      account_code: accountCode,
-      account_name: accountName,
-      account_type: accountType,
-      normal_balance: normalBalance,
-    }).onConflict((oc) => oc.columns(['tenant_id', 'account_code']).doNothing()).execute();
+  let accounts = await trx
+    .selectFrom('accounts')
+    .select(['id', 'account_code'])
+    .where('tenant_id', '=', ctx.tenantId)
+    .execute();
+  const existingCodes = new Set(accounts.map((a) => a.account_code));
+  const missingDefaults = accountDefaults.filter(([code]) => !existingCodes.has(code));
+  if (missingDefaults.length > 0) {
+    for (const [accountCode, accountName, accountType, normalBalance] of missingDefaults) {
+      await trx.insertInto('accounts').values({
+        id: ctx.tenantId + ':account:' + accountCode,
+        tenant_id: ctx.tenantId,
+        account_code: accountCode,
+        account_name: accountName,
+        account_type: accountType,
+        normal_balance: normalBalance,
+      }).onConflict((oc) => oc.columns(['tenant_id', 'account_code']).doNothing()).execute();
+    }
+    accounts = await trx
+      .selectFrom('accounts')
+      .select(['id', 'account_code'])
+      .where('tenant_id', '=', ctx.tenantId)
+      .execute();
   }
 
-  const date = input.date.toISOString().slice(0, 10);
+  let date: string;
+  if (input.entryDate && /^\d{4}-\d{2}-\d{2}$/.test(input.entryDate)) {
+    date = input.entryDate;
+  } else {
+    const tenantRow = await trx
+      .selectFrom('tenants')
+      .select('timezone')
+      .where('id', '=', ctx.tenantId)
+      .executeTakeFirst();
+    date = businessDateInTimeZone(input.date, tenantRow?.timezone ?? 'Africa/Cairo');
+  }
+
   let period = await trx.selectFrom('accounting_periods').selectAll().where('tenant_id', '=', ctx.tenantId)
     .where('start_date', '<=', date).where('end_date', '>=', date).executeTakeFirst();
   if (period && period.status !== 'OPEN') throw conflict('الفترة المحاسبية مقفلة ولا تقبل قيودًا جديدة');
   if (!period) {
-    const year = input.date.getUTCFullYear();
-    const month = input.date.getUTCMonth() + 1;
-    const ym = `${year}-${String(month).padStart(2, '0')}`;
+    const year = Number.parseInt(date.slice(0, 4), 10);
+    const month = Number.parseInt(date.slice(5, 7), 10);
+    const ym = date.slice(0, 7);
     const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
     const startDate = `${ym}-01`;
     const endDate = `${ym}-${String(daysInMonth).padStart(2, '0')}`;
@@ -80,7 +130,6 @@ export async function postJournalEntry(
     period = await trx.selectFrom('accounting_periods').selectAll().where('id', '=', periodId).executeTakeFirstOrThrow();
   }
 
-  const accounts = await trx.selectFrom('accounts').select(['id', 'account_code']).where('tenant_id', '=', ctx.tenantId).execute();
   const accountIds = new Map(accounts.map((account) => [account.account_code, account.id]));
   const journalId = randomUUID();
   const createdAt = input.date.toISOString();

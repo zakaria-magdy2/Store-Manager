@@ -542,7 +542,8 @@ async function start() {
     }
     render();
   } catch (error) {
-    document.querySelector('#app').innerHTML = `<main class="fatal-state"><div class="brand-mark">ر</div><h1>تعذر تشغيل رَفّ</h1><p>${escapeHtml(error.message)}</p><button class="button button-primary" onclick="location.reload()">إعادة المحاولة</button></main>`;
+    document.querySelector('#app').innerHTML = `<main class="fatal-state"><div class="brand-mark">ر</div><h1>تعذر تشغيل رَفّ</h1><p>${escapeHtml(error.message)}</p><button type="button" class="button button-primary" id="fatal-reload-btn">إعادة المحاولة</button></main>`;
+    document.querySelector('#fatal-reload-btn')?.addEventListener('click', () => window.location.reload());
   }
 }
 
@@ -6411,8 +6412,8 @@ function backupView() {
     <section class="panel compact-panel">
       <div class="panel-heading">
         <div>
-          <h3>النسخ الاحتياطي الخارجي التلقائي (حماية لو الجهاز باظ أو سقط)</h3>
-          <p>اربط مجلد على فلاشة USB أو بارتشن مختلف (مثل D أو E) أو مجلد سحابي (OneDrive / Google Drive) ليحفظ النظام فيه نسخة محدثة تلقائيًا خارج قرص الويندوز.</p>
+          <h3>النسخ الاحتياطي الخارجي التلقائي (مشفر AES-256-GCM)</h3>
+          <p>يتم تشفير النسخ اليومية ونسخ المجلد الخارجي (.rfbackup) تلقائيًا بتشفير AES-256-GCM بمفتاح محلي محفوظ على هذا الجهاز فقط، حتى لو تم حفظها في OneDrive أو Google Drive أو فلاشة USB. لنقل البيانات إلى جهاز آخر بالكامل، احتفظ أيضًا بنسخة يدوية بكلمة مرور بالأسفل.</p>
         </div>
         <span class="status-pill ${mirrorStatus === 'OK' ? 'status-complete' : 'status-low'}">${mirrorBadgeLabel}</span>
       </div>
@@ -6453,7 +6454,7 @@ function backupView() {
     </section>
 
     <section class="panel compact-panel">
-      <div class="panel-heading"><div><h3>النسخ الاحتياطي اليومي التلقائي (حماية تلقائية محدثة)</h3><p>يتم إنشاء وتحديث نسخة اليوم تلقائيًا كل ${daily?.refreshMinutes ?? 30} دقيقة وعند إغلاق الشيفت أو البرنامج، مع الاحتفاظ بآخر ${daily?.retentionDays ?? 30} يومًا والاستعادة بضغطة واحدة.</p></div><span class="status-pill status-complete">مفعّل تلقائيًا</span></div>
+      <div class="panel-heading"><div><h3>النسخ الاحتياطي اليومي التلقائي (مشفر تلقائيًا .rfbackup)</h3><p>يتم إنشاء وتحديث نسخة اليوم المشفرة تلقائيًا كل ${daily?.refreshMinutes ?? 30} دقيقة وعند إغلاق الشيفت أو البرنامج، مع الاحتفاظ بآخر ${daily?.retentionDays ?? 30} يومًا والاستعادة بضغطة واحدة.</p></div><span class="status-pill status-complete">مفعّل ومشفر</span></div>
       ${backupsList.length ? `<div class="table-scroll"><table class="compact-table"><thead><tr><th>تاريخ النسخة اليومية</th><th>اسم الملف</th><th>الحجم</th><th>آخر تحديث</th><th>الإجراءات</th></tr></thead><tbody>${backupsList.map((item) => `<tr><td><strong>${escapeHtml(item.date)}</strong></td><td><span class="sku-code">${escapeHtml(item.filename)}</span></td><td>${formatBytes(item.sizeBytes)}</td><td>${new Date(item.updatedAt ?? item.createdAt).toLocaleString('ar-EG')}</td><td><div class="backup-row-actions"><a class="text-action" href="/api/backups/daily/${encodeURIComponent(item.filename)}" download>تنزيل ↓</a><button type="button" class="button button-secondary button-sm restore-daily-btn" data-restore-daily="${escapeHtml(item.filename)}">استعادة</button></div></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">جاري تجهيز سجل النسخ اليومية التلقائية...</div>'}
     </section>
 

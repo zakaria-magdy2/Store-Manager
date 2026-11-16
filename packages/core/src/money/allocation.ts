@@ -31,8 +31,10 @@ export function distributeDiscount(totalDiscount: Money, itemAmounts: Money[]): 
   const allocatedSum = entries.reduce((acc, curr) => acc + curr.baseShare, 0n);
   let leftover = discountTotal - allocatedSum;
 
-  // Sort by largest remainder descending
-  const sorted = [...entries].sort((a, b) => (b.remainder > a.remainder ? 1 : -1));
+  // Sort by largest remainder descending, deterministic index tie-breaker
+  const sorted = [...entries].sort((a, b) =>
+    b.remainder > a.remainder ? 1 : b.remainder < a.remainder ? -1 : a.index - b.index,
+  );
 
   let i = 0;
   while (leftover > 0n && i < sorted.length) {

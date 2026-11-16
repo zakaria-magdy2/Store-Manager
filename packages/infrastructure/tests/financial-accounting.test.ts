@@ -679,4 +679,97 @@ describe('Financial & Accounting SQLite Integration Tests (Phase 5)', () => {
     expect(febPeriod.start_date).toBe('2027-02-01');
     expect(febPeriod.end_date).toBe('2027-02-28');
   });
+
+  it('posts late-night Cairo sale at 2026-11-30T22:30:00Z into 2026-12-01 (period 2026-12) even when 2026-11 is CLOSED', async () => {
+    const db = dbManager.getDb();
+    const tenantRepo = new SqliteTenantRepository(db);
+    const storeRepo = new SqliteStoreRepository(db);
+    const categoryRepo = new SqliteCategoryRepository(db);
+    const productRepo = new SqliteProductRepository(db);
+    const variantRepo = new SqliteProductVariantRepository(db);
+    const purchasingRepo = new SqlitePurchasingRepository(db);
+    const saleRepo = new SqliteSaleRepository(db);
+    const expenseRepo = new SqliteExpenseRepository(db);
+
+    await db
+      .updateTable('tenants')
+      .set({ timezone: 'Africa/Cairo' })
+      .where('id', '=', 'tenant-fin-1')
+      .execute();
+
+    // Open and close November 2026 period
+    await expenseRepo.record(ctx, {
+      id: 'exp-nov-close-test',
+      idempotencyKey: 'idem-exp-nov-close-test',
+      storeId: 'store-fin-1',
+      categoryCode: 'UTILITIES',
+      amount: 1000n,
+      currency: 'EGP',
+      paymentMethod: 'CASH_DRAWER',
+      expenseDate: '2026-11-15',
+    });
+    await db
+      .updateTable('accounting_periods')
+      .set({
+        status: 'CLOSED',
+        closed_at: '2026-12-01T00:00:00+02:00',
+        closed_by_user_id: 'user-fin-1',
+      })
+      .where('tenant_id', '=', 'tenant-fin-1')
+      .where('name', '=', '2026-11')
+      .execute();
+
+    await purchasingRepo.recordPurchase(ctx, {
+      id: 'pur-midnight-cairo',
+      idempotencyKey: 'idem-pur-midnight-cairo',
+      supplierId: 'sup-1',
+      storeId: 'store-fin-1',
+      totalAmount: egp(10000n),
+      initialPayment: egp(10000n),
+      paymentMethod: 'CASH',
+      purchasedAt: new Date('2026-12-01T12:00:00.000Z'),
+      lines: [{ variantId: 'var-1', quantity: 2n, unitCost: egp(5000n) }],
+    });
+
+    const checkout = new CheckoutService(
+      saleRepo,
+      saleRepo,
+      variantRepo,
+      productRepo,
+      storeRepo,
+      tenantRepo,
+    );
+
+    // 2026-11-30 22:30:00 UTC === 2026-12-01 00:30:00 Africa/Cairo
+    const cart = Cart.empty('EGP').addItem({
+      lineId: 'line-midnight-1',
+      productId: 'prod-1',
+      variantId: 'var-1',
+      productName: 'تيشيرت',
+      sku: 'TEE-1',
+      unitPrice: egp(50000n),
+      quantity: 1n,
+    });
+    const sale = await checkout.checkout(ctx, {
+      saleId: 'sale-cairo-midnight',
+      saleNumber: 'INV-CAIRO-MIDNIGHT',
+      storeId: 'store-fin-1',
+      idempotencyKey: 'idem-sale-cairo-midnight',
+      occurredAt: new Date('2026-11-30T22:30:00.000Z'),
+      cart,
+      payments: [{ method: 'CASH', amount: egp(50000n) }],
+    });
+
+    const entry = await db
+      .selectFrom('journal_entries')
+      .innerJoin('accounting_periods', 'accounting_periods.id', 'journal_entries.period_id')
+      .select(['journal_entries.entry_date as entryDate', 'accounting_periods.name as periodName'])
+      .where('journal_entries.tenant_id', '=', 'tenant-fin-1')
+      .where('journal_entries.source_id', '=', sale.id)
+      .executeTakeFirstOrThrow();
+
+    expect(entry.entryDate).toBe('2026-12-01');
+    expect(entry.periodName).toBe('2026-12');
+    void categoryRepo;
+  });
 });

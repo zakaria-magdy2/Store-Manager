@@ -61,6 +61,7 @@ export class SqliteExpenseRepository {
       const journalIdempotencyKey = `expense:${input.idempotencyKey}`;
       await postJournalEntry(trx, ctx, {
         storeId: input.storeId, currency: input.currency, date: new Date(`${input.expenseDate}T12:00:00.000Z`),
+        entryDate: input.expenseDate,
         sourceType: 'EXPENSE', sourceId: input.id, idempotencyKey: journalIdempotencyKey,
         description: `مصروف ${category[1]}`,
         lines: [

@@ -43,13 +43,10 @@ type SalePaymentRow = Selectable<SalePaymentsTable>;
  * SQLite implementation of both sides of the checkout boundary:
  * `CheckoutRepository` writes an immutable sale, `SaleRepository` reads it back.
  *
- * The whole checkout (stock movements, sale header, lines and tenders) runs in a
- * single transaction. COGS is snapshotted from the live WAC *inside* that
- * transaction, so the sale ledger can never disagree with the stock ledger
- * (ADR-004 / ADR-014).
- *
- * Phase 4 intentionally does not post double-entry journal entries: the chart of
- * accounts and accounting engine arrive in Phase 5.
+ * The whole checkout (stock movements, sale header, lines, tenders, and balanced
+ * double-entry journal posting) runs in a single transaction. COGS is snapshotted
+ * from the live WAC *inside* that transaction, so the sale ledger can never disagree
+ * with the stock ledger (ADR-004 / ADR-014).
  */
 export class SqliteSaleRepository implements CheckoutRepository, SaleRepository {
   constructor(private readonly db: Kysely<RetailOSDatabase>) {}

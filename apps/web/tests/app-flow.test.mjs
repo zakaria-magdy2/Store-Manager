@@ -1,11 +1,20 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
+
+function cairoDateIso(d = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Cairo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d);
+}
 
 const appDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const workspace = dirname(dirname(appDir));
@@ -399,10 +408,11 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.equal(overpayment.response.status, 400);
 
   const now = new Date();
-  const today = now.toISOString().slice(0, 10);
-  const previousMonthDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 4)).toISOString().slice(0, 10);
-  const daysInCurrentMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).getUTCDate();
-  const dayZeroIndex = now.getUTCDate() - 1;
+  const today = cairoDateIso(now);
+  const [cy, cm, cd] = today.split('-').map(Number);
+  const previousMonthDate = new Date(Date.UTC(cy, cm - 2, 4)).toISOString().slice(0, 10);
+  const daysInCurrentMonth = new Date(Date.UTC(cy, cm, 0)).getUTCDate();
+  const dayZeroIndex = cd - 1;
   const expectedDailyMonthlyExpense = (40000n / BigInt(daysInCurrentMonth)) + (dayZeroIndex < Number(40000n % BigInt(daysInCurrentMonth)) ? 1n : 0n);
 
   const expenseBody = { idempotencyKey: '41148f0d-f50c-4f62-8d9c-b3de2c36e7f6', storeId, categoryCode: 'UTILITIES', amount: '1750', paymentMethod: 'CASH_DRAWER', expenseDate: today, notes: 'فاتورة كهرباء' };
@@ -621,13 +631,18 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.ok(dailyBackupsList.payload.backups.length >= 1);
   const runDailyNow = await request('/api/backups/daily/run-now', { method: 'POST', body: {} });
   assert.equal(runDailyNow.response.status, 201, JSON.stringify(runDailyNow.payload));
-  assert.ok(runDailyNow.payload.backup.filename.endsWith('.sqlite'));
+  assert.ok(runDailyNow.payload.backup.filename.endsWith('.rfbackup'));
+  assert.equal(runDailyNow.payload.backup.encrypted, true);
   const downloadDaily = await fetch(`${baseUrl}/api/backups/daily/${encodeURIComponent(runDailyNow.payload.backup.filename)}`, {
     headers: { Origin: baseUrl, Cookie: cookie },
   });
   assert.equal(downloadDaily.status, 200);
   const dailyBytes = Buffer.from(await downloadDaily.arrayBuffer());
-  assert.equal(dailyBytes.subarray(0, 15).toString('utf8'), 'SQLite format 3');
+  assert.notEqual(dailyBytes.subarray(0, 15).toString('utf8'), 'SQLite format 3');
+  assert.equal(dailyBytes.subarray(0, 5).toString('utf8'), 'RFBK1');
+
+  const malformedUriRes = await fetch(`${baseUrl}/%E0%A4%A`);
+  assert.equal(malformedUriRes.status, 400);
 
   const blockedInsideMirror = await request('/api/backups/settings', {
     method: 'POST',
@@ -646,6 +661,9 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
     const syncedMirror = await request('/api/backups/mirror/sync-now', { method: 'POST', body: {} });
     assert.equal(syncedMirror.response.status, 200, JSON.stringify(syncedMirror.payload));
     assert.equal(syncedMirror.payload.mirror.lastMirrorStatus, 'OK');
+    const mirroredLatestBytes = await readFile(join(externalMirrorDir, 'retailos-latest.rfbackup'));
+    assert.equal(mirroredLatestBytes.subarray(0, 5).toString('utf8'), 'RFBK1');
+    assert.notEqual(mirroredLatestBytes.subarray(0, 15).toString('utf8'), 'SQLite format 3');
   } finally {
     await request('/api/backups/settings', { method: 'POST', body: { mirrorPath: '', autoMirror: false } });
     await rm(externalMirrorDir, { recursive: true, force: true });
@@ -1593,7 +1611,7 @@ test('updates all financial views (sales summary, shifts, shift sales, dashboard
     const saleItemId = saleRes.payload.items[0].id;
 
     // Pre-return assertions
-    const today = new Date().toISOString().slice(0, 10);
+    const today = cairoDateIso();
     const preSales = await finReq(`/api/sales?storeId=${storeId}`, { cookieStr: ownerCookie });
     assert.equal(preSales.payload.payload.summary.netSales.amount, '100000');
     assert.equal(preSales.payload.payload.summary.cogs.amount, '40000');
@@ -1850,7 +1868,7 @@ test('keeps /api/sales strictly pure while separating profit-loss expenses and f
     });
     assert.equal(supRetRes.response.status, 201, JSON.stringify(supRetRes.payload));
 
-    const today = new Date().toISOString().slice(0, 10);
+    const today = cairoDateIso();
     const expRes = await sepReq('/api/expenses', {
       method: 'POST',
       cookieStr: ownerCookie,
@@ -2061,7 +2079,7 @@ test('release readiness: full paged history (>200 purchases, journals, returns, 
     assert.equal(retList.response.status, 200);
     assert.equal(retList.payload.payload.total, 0);
 
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = cairoDateIso();
     await rrReq('/api/expenses', {
       method: 'POST',
       cookieStr: ownerCookie,

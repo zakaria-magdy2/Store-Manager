@@ -13,7 +13,7 @@
 - **Universal Product Catalog**: Products, nested categories, and sellable variants with validated JSON attributes — apparel, grocery, electronics, and pharmacy share one schema.
 - **WAC Inventory with Immutable Ledger**: Weighted Average Cost valuation with exact integer arithmetic, immutable cost snapshots on every issue, atomic inter-store transfers, damage/shrinkage write-offs (`DAMAGE_OUT`), physical stock count adjustments (`ADJUSTMENT_IN`/`ADJUSTMENT_OUT`), and a database-enforced append-only `stock_movements` ledger.
 - **Supplier & Financial Sub-Ledger**: Multi-line supplier invoices, supplier payments, supplier returns (with `5090` WAC variance accounting), linked customer returns, direct daily expenses, recurring monthly obligations, 3-tier cash treasury management (`1010` Drawer, `1015` Safe, `1020` Bank), cash drawer Z-Report shift closing, monthly (`YYYY-MM`) accounting period locking, and SQLite trigger-enforced immutable `journal_entries` & `journal_lines` — all posting balanced double-entry journal entries atomically.
-- **Encrypted Disaster Recovery & Tamper-Evident Audit Chain**: AES-256-GCM online SQLite backups, 4-stage atomic swap & rollback recovery, SHA-256 hash-chained append-only `audit_logs`, UTF-8 BOM CSV report exports with formula-injection protection, Outbox CDC sync worker, and Desktop Host security supervisor.
+- **Encrypted Disaster Recovery & Tamper-Evident Audit Chain**: AES-256-GCM backups (both manual passphrase-protected `.rfbackup` exports and automatic daily/mirror `.rfbackup` snapshots using an installation-local key), 4-stage atomic swap & rollback recovery, SHA-256 hash-chained append-only `audit_logs`, UTF-8 BOM CSV report exports with formula-injection protection, and foundational Phase 8 components (`OutboxSyncWorker` and `@retailos/desktop` security policy supervisor, not yet wired into live runtime).
 
 ---
 
@@ -29,7 +29,7 @@ This project is organized as a strict, high-performance monorepo powered by **pn
 │   ├── infrastructure/  # Kysely SQLite, database migrations, Argon2id hasher, repositories
 │   └── tsconfig/        # Strict shared TypeScript configurations
 ├── apps/
-│   ├── desktop/         # Desktop application (Electron) [Phase 8]
+│   ├── desktop/         # Desktop security supervisor & Electron packaging stub [Phase 8 — planned]
 │   └── web/             # Arabic RTL local web UI, SQLite API, and integration flow
 ├── docs/                # Architecture blueprints and Architecture Decision Records (ADRs)
 └── PROJECT_CONTEXT.md   # Master project context and implementation status
@@ -39,13 +39,13 @@ This project is organized as a strict, high-performance monorepo powered by **pn
 
 ## 🛠️ Tech Stack
 
-- **Runtime**: Node.js `>=22` (NodeNext ESM)
-- **Language**: Strict TypeScript 5.8 for domain packages; JavaScript ESM for the local web host and UI
-- **Monorepo**: pnpm 12 + Turborepo 2
+- **Runtime**: Node.js `>=24` (NodeNext ESM)
+- **Language**: Strict TypeScript for domain packages; JavaScript ESM for the local web host and UI
+- **Monorepo**: pnpm `12.21.0` + Turborepo 2
 - **Database**: SQLite (`better-sqlite3` 13) via Kysely query builder
 - **Security**: Argon2id (`@node-rs/argon2`)
-- **Validation**: Zod
-- **Testing**: Vitest
+- **Validation**: Zod 4
+- **Testing**: Vitest & Node.js test runner
 
 ---
 
@@ -62,8 +62,8 @@ This project is organized as a strict, high-performance monorepo powered by **pn
 
 ### Prerequisites
 
-- Node.js `>= 22.0.0`
-- pnpm `>= 10.0.0`
+- Node.js `>= 24.0.0`
+- pnpm `>= 12.0.0`
 
 ### Installation
 
@@ -105,7 +105,7 @@ transaction. Direct operating expenses post to the journal atomically with
 cash drawer, safe, or bank movements. Linked partial customer returns update
 inventory at the original sale cost, refund the original discounted value,
 and post a balancing journal entry. Recurring expense actuals are confirmed once
-per month, then settled as liability payments without double-counting. The system also includes multi-store creation and atomic inter-store stock transfers, 80mm/58mm thermal receipt preview and ESC/POS byte generation, cash drawer Z-Report shift closing, accounting period locking, SHA-256 hash-chained audit logs, Outbox CDC synchronization (`SqliteOutboxRepository` + `OutboxSyncWorker`), and the desktop security supervisor (`@retailos/desktop`).
+per month, then settled as liability payments without double-counting. The system also includes multi-store creation and atomic inter-store stock transfers, 80mm/58mm thermal receipt preview and ESC/POS byte generation, cash drawer Z-Report shift closing, accounting period locking, SHA-256 hash-chained audit logs, automated encrypted daily/mirror backups (`.rfbackup`), and manual passphrase-protected AES-256-GCM exports. (The Outbox CDC `OutboxSyncWorker` and `@retailos/desktop` Electron shell remain foundational Phase 8 modules not yet wired into active store runtime.)
 
 ### Build & Verification Commands
 

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ExecutionContext } from '@retailos/application';
 import type { Kysely } from 'kysely';
 import type { RetailOSDatabase } from '../types.js';
-import { postJournalEntry } from './accounting-journal.executor.js';
+import { businessDateInTimeZone, postJournalEntry } from './accounting-journal.executor.js';
 
 const names = { RENT: 'إيجار المحل', UTILITIES: 'مرافق وفواتير', TRANSPORT: 'نقل ومواصلات', MAINTENANCE: 'صيانة', SUPPLIES: 'مستلزمات تشغيل', OTHER: 'التزامات أخرى' } as const;
 export type MonthlyExpenseCategory = keyof typeof names;
@@ -49,7 +49,7 @@ export class SqliteRecurringExpenseRepository {
       const startDate = `${ym}-01`, date = new Date(`${startDate}T12:00:00.000Z`);
       const daysInMonth = new Date(Date.UTC(input.year, input.month, 0)).getUTCDate();
       const journalKey = `monthly-accrual:${obligation.id}:${ym}`;
-      await postJournalEntry(trx, ctx, { storeId: obligation.store_id!, currency: obligation.currency, date, sourceType: 'EXPENSE', sourceId: `${obligation.id}:${ym}`, idempotencyKey: journalKey, description: `استحقاق ${obligation.name} - ${ym}`, lines: [
+      await postJournalEntry(trx, ctx, { storeId: obligation.store_id!, currency: obligation.currency, date, entryDate: startDate, sourceType: 'EXPENSE', sourceId: `${obligation.id}:${ym}`, idempotencyKey: journalKey, description: `استحقاق ${obligation.name} - ${ym}`, lines: [
         { accountCode: '6090', side: 'DEBIT', amount: input.amount, memo: 'إثبات المصروف الشهري' },
         { accountCode: '2020', side: 'CREDIT', amount: input.amount, memo: 'التزام شهري مستحق' },
       ] });
@@ -76,12 +76,15 @@ export class SqliteRecurringExpenseRepository {
       if (input.amount > outstanding) throw badRequest('مبلغ السداد أكبر من المتبقي على الالتزام');
       const obligation = await trx.selectFrom('recurring_expense_obligations').select(['name', 'category_id']).where('id', '=', actual.obligation_id).where('tenant_id', '=', ctx.tenantId).executeTakeFirstOrThrow();
       const sourceAccount = accountFor(input.paymentMethod), journalKey = `monthly-payment:${input.idempotencyKey}`;
-      await postJournalEntry(trx, ctx, { storeId: actual.store_id!, currency: actual.currency, date: input.paidAt, sourceType: 'EXPENSE', sourceId: input.id, idempotencyKey: journalKey, description: `سداد ${obligation.name} - ${actual.year}/${String(actual.month).padStart(2, '0')}`, lines: [
+      const tenantRow = await trx.selectFrom('tenants').select('timezone').where('id', '=', ctx.tenantId).executeTakeFirst();
+      const resolvedExpenseDate = input.expenseDate && /^\d{4}-\d{2}-\d{2}$/.test(input.expenseDate)
+        ? input.expenseDate
+        : businessDateInTimeZone(input.paidAt, tenantRow?.timezone ?? 'Africa/Cairo');
+      await postJournalEntry(trx, ctx, { storeId: actual.store_id!, currency: actual.currency, date: input.paidAt, entryDate: resolvedExpenseDate, sourceType: 'EXPENSE', sourceId: input.id, idempotencyKey: journalKey, description: `سداد ${obligation.name} - ${actual.year}/${String(actual.month).padStart(2, '0')}`, lines: [
         { accountCode: '2020', side: 'DEBIT', amount: input.amount, memo: 'تسوية مستحق شهري' },
         { accountCode: sourceAccount, side: 'CREDIT', amount: input.amount, memo: 'سداد نقدي أو بنكي' },
       ] });
       const journal = await trx.selectFrom('journal_entries').select('id').where('tenant_id', '=', ctx.tenantId).where('idempotency_key', '=', journalKey).executeTakeFirstOrThrow();
-      const resolvedExpenseDate = input.expenseDate && /^\d{4}-\d{2}-\d{2}$/.test(input.expenseDate) ? input.expenseDate : input.paidAt.toISOString().slice(0, 10);
       await trx.insertInto('operating_expense_records').values({ id: input.id, tenant_id: ctx.tenantId, store_id: actual.store_id, category_id: obligation.category_id, expense_type: 'MONTHLY_RECURRING_PAYMENT', monthly_actual_id: actual.id, expense_date: resolvedExpenseDate, amount: input.amount, currency: actual.currency, payment_method: input.paymentMethod, source_account_code: sourceAccount, notes: null, reference_number: input.referenceNumber ?? null, attachment_path: null, journal_entry_id: journal.id, created_by_user_id: ctx.userId, idempotency_key: input.idempotencyKey }).execute();
       const paidAmount = BigInt(actual.paid_amount) + input.amount;
       const status = paidAmount === BigInt(actual.amount) ? 'PAID' : 'PARTIALLY_PAID';

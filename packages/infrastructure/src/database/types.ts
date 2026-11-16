@@ -5,6 +5,7 @@ export interface TenantsTable {
   name: string;
   code: string;
   currency: string;
+  timezone: Generated<string>;
   is_active: Generated<number>; // SQLite stores booleans as 0/1
   allow_negative_stock: Generated<number>;
   created_at: Generated<string>;
@@ -422,6 +423,38 @@ export interface StocktakeLinesTable {
   updated_at: string;
 }
 
+export interface CashierShiftsTable {
+  id: string;
+  shift_number: string;
+  tenant_id: string;
+  store_id: string;
+  user_id: string;
+  started_at: string;
+  ended_at: string | null;
+  opening_cash: Generated<bigint>;
+  expected_cash: Generated<bigint>;
+  actual_cash: Generated<bigint>;
+  variance: Generated<bigint>;
+  handover_cash: Generated<bigint>;
+  status: Generated<'OPEN' | 'CLOSED'>;
+  notes: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface AuthRateLimitsTable {
+  scope: string;
+  key: string;
+  count: Generated<number>;
+  started_at: number;
+}
+
+export interface DocumentSequencesTable {
+  tenant_id: string;
+  doc_type: string;
+  last_seq: Generated<number>;
+}
+
 export interface RetailOSDatabase {
   tenants: TenantsTable;
   stores: StoresTable;
@@ -455,4 +488,7 @@ export interface RetailOSDatabase {
   audit_logs: AuditLogsTable;
   stocktake_sessions: StocktakeSessionsTable;
   stocktake_lines: StocktakeLinesTable;
+  cashier_shifts: CashierShiftsTable;
+  auth_rate_limits: AuthRateLimitsTable;
+  document_sequences: DocumentSequencesTable;
 }

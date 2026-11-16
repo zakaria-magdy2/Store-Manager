@@ -92,7 +92,7 @@ export class Money extends ValueObject<MoneyProps> {
     });
   }
 
-  public multiply(factor: number | bigint, mode: RoundingMode = 'HALF_EVEN'): Money {
+  public multiply(factor: number | bigint | string, mode: RoundingMode = 'HALF_EVEN'): Money {
     if (typeof factor === 'bigint') {
       return new Money({
         amount: this.amount * factor,
@@ -100,35 +100,33 @@ export class Money extends ValueObject<MoneyProps> {
       });
     }
 
+    if (typeof factor === 'string') {
+      const normalized = factor.trim();
+      const rationalMatch = normalized.match(/^(-?\d+)\s*\/\s*(-?\d+)$/);
+      if (rationalMatch) {
+        const num = BigInt(rationalMatch[1]!);
+        const den = BigInt(rationalMatch[2]!);
+        if (den === 0n) {
+          throw new InvalidMoneyError('Cannot multiply by a rational factor with zero denominator');
+        }
+        return Money.fromMinor(this.amount * num, this.currency).divideBy(den, mode);
+      }
+      const decimalMatch = normalized.match(/^(-?)(\d+)(?:\.(\d+))?$/);
+      if (!decimalMatch) {
+        throw new InvalidMoneyError(`Invalid multiplication factor string: ${factor}`);
+      }
+      const sign = decimalMatch[1] === '-' ? -1n : 1n;
+      const intPart = decimalMatch[2]!;
+      const fracPart = decimalMatch[3] ?? '';
+      const scale = 10n ** BigInt(fracPart.length);
+      const scaledNum = sign * BigInt(`${intPart}${fracPart}`);
+      return Money.fromMinor(this.amount * scaledNum, this.currency).divideBy(scale, mode);
+    }
+
     // High-precision fractional multiplication using scaled integer arithmetic
     // eslint-disable-next-line no-restricted-syntax -- Math.round is safe here: we scale a float factor to a 6-decimal integer ONCE, then all subsequent arithmetic is BigInt-only. This is the designed entry point for fractional multiplication.
     const factorScaled = BigInt(Math.round(factor * 1_000_000));
-    const divisor = 1_000_000n;
-    const numerator = this.amount * factorScaled;
-
-    const quotient = numerator / divisor;
-    const remainder = numerator % divisor;
-    const absRemainder = remainder < 0n ? -remainder : remainder;
-    const half = divisor / 2n;
-
-    let rounded = quotient;
-    if (mode === 'HALF_EVEN') {
-      if (absRemainder > half) {
-        rounded += numerator > 0n ? 1n : -1n;
-      } else if (absRemainder === half) {
-        // Round to nearest even
-        if (quotient % 2n !== 0n) {
-          rounded += numerator > 0n ? 1n : -1n;
-        }
-      }
-    } else {
-      // HALF_UP
-      if (absRemainder >= half) {
-        rounded += numerator > 0n ? 1n : -1n;
-      }
-    }
-
-    return new Money({ amount: rounded, currency: this.currency });
+    return Money.fromMinor(this.amount * factorScaled, this.currency).divideBy(1_000_000n, mode);
   }
 
   /**
@@ -150,12 +148,12 @@ export class Money extends ValueObject<MoneyProps> {
     const absDivisor = divisorBig < 0n ? -divisorBig : divisorBig;
     const quotient = absNumerator / absDivisor;
     const remainder = absNumerator % absDivisor;
-    const half = absDivisor / 2n;
+    const twiceRemainder = remainder * 2n;
 
     let shouldRoundUp = false;
-    if (remainder > half) {
+    if (twiceRemainder > absDivisor) {
       shouldRoundUp = true;
-    } else if (remainder === half) {
+    } else if (twiceRemainder === absDivisor) {
       shouldRoundUp = mode === 'HALF_UP' || quotient % 2n !== 0n;
     }
 

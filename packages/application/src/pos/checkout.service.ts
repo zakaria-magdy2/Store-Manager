@@ -42,11 +42,8 @@ export interface CheckoutParams {
  *
  * The service is responsible for authorization, store scoping, catalog and price
  * validation. Persistence is delegated to `CheckoutRepository`, which applies the
- * stock movements and writes the sale in one database transaction, so a failed
- * line can never leave partial inventory or financial state behind.
- *
- * Double-entry journal posting is intentionally deferred to Phase 5, which owns
- * the chart of accounts and the accounting engine.
+ * stock movements, writes the sale, and posts balanced double-entry journal
+ * entries atomically in one database transaction.
  */
 export class CheckoutService {
   constructor(
