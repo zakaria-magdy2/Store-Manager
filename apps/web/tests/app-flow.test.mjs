@@ -1918,6 +1918,10 @@ test('keeps /api/sales strictly pure while separating profit-loss expenses and f
     for (const expectedType of ['SUPPLIER_PURCHASE', 'SUPPLIER_PAYMENT', 'SALE', 'CUSTOMER_RETURN', 'SUPPLIER_RETURN', 'EXPENSE', 'INVENTORY_EVENT']) {
       assert.ok(types.includes(expectedType), `Expected timeline to include ${expectedType}, got ${types.join(', ')}`);
     }
+    assert.equal(fmReport.payload.timeline[0].stepNumber, fmReport.payload.timeline.length);
+    assert.equal(fmReport.payload.timeline.at(-1).stepNumber, 1);
+    assert.equal(fmReport.payload.timeline[0].runningCash, fmReport.payload.summary.runningFinalCash);
+    assert.ok(fmReport.payload.timeline[0].timestamp >= fmReport.payload.timeline.at(-1).timestamp);
     const supPayEvent = fmReport.payload.timeline.find((e) => e.type === 'SUPPLIER_PAYMENT');
     assert.ok(supPayEvent.title.includes('سددت'));
   } finally {

@@ -3763,7 +3763,7 @@ function financialMapView() {
   return `
     <div class="page-heading-row">
       <div>
-        <p class="page-lead">المسار المالي: سجل شامل لكل الحركات والعمليات بالترتيب الزمني (مبيعات، فواتير وسداد تجار، مصروفات، مرتجعات، جرد، وتحويلات) مع حركة السيولة خطوة بخطوة.</p>
+        <p class="page-lead">المسار المالي: سجل شامل لكل الحركات والعمليات من الأحدث للأقدم (مبيعات، فواتير وسداد تجار، مصروفات، مرتجعات، جرد، وتحويلات) مع حركة السيولة عند كل خطوة.</p>
       </div>
       <div>
         <button type="button" class="button button-secondary" data-page="reports">عرض تقرير الأرباح والخسائر ←</button>
@@ -3835,8 +3835,8 @@ function financialMapView() {
     <section class="panel compact-panel">
       <div class="panel-heading">
         <div>
-          <h3 style="font-size:16px;font-weight:800;color:var(--ink);">المسار المالي خطوة بخطوة (كل الحركات من البداية حتى النهاية)</h3>
-          <p>تسلسل كامل لكل العمليات المسجلة بالترتيب الزمني مع أثر كل خطوة على الرصيد النقدي المتاح (${timeline.length} حركة مسجلة)</p>
+          <h3 style="font-size:16px;font-weight:800;color:var(--ink);">المسار المالي خطوة بخطوة (الأحدث أولاً)</h3>
+          <p>عرض كافة العمليات المسجلة من أحدث حركة نزولاً حتى البداية مع الرصيد بعد كل حركة (${timeline.length} حركة مسجلة)</p>
         </div>
       </div>
 
@@ -3932,7 +3932,7 @@ function financialMapView() {
 
                 return `
                   <tr>
-                    <td style="text-align:center;font-weight:800;color:var(--muted);font-size:11.5px;">#${index + 1}</td>
+                    <td style="text-align:center;font-weight:800;color:var(--muted);font-size:11.5px;">#${item.stepNumber ?? (timeline.length - index)}</td>
                     <td>
                       <span class="fm-badge ${badgeClass}">
                         <span>${badgeIcon}</span> ${escapeHtml(item.category)}
@@ -7900,6 +7900,24 @@ function findStocktakeSmartMatches(queryText, detail) {
   return combined.slice(0, 12);
 }
 
+function renderStocktakeVariantChipsHtml(variantLabel) {
+  if (!variantLabel) return '';
+  return String(variantLabel)
+    .split(' · ')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const colonIdx = part.indexOf(':');
+      if (colonIdx > 0) {
+        const key = part.slice(0, colonIdx).trim();
+        const val = part.slice(colonIdx + 1).trim();
+        return `<span class="stocktake-attr-chip"><em>${escapeHtml(key)}:</em> <b>${escapeHtml(val)}</b></span>`;
+      }
+      return `<span class="stocktake-attr-chip"><b>${escapeHtml(part)}</b></span>`;
+    })
+    .join('');
+}
+
 function renderStocktakeSmartDropdownHtml(queryText, detail) {
   if (!state.stocktakeSmartOpen) return '';
   const hasQuery = String(queryText ?? '').trim().length > 0;
@@ -7932,8 +7950,12 @@ function renderStocktakeSmartDropdownHtml(queryText, detail) {
         <span class="product-avatar ${m.imageProduct?.imagePath ? 'has-image' : ''}">${thumb}</span>
         <div class="stocktake-smart-info">
           <strong class="stocktake-smart-title">${escapeHtml(m.productName)}</strong>
-          ${m.variantLabel ? `<span class="stocktake-variant-sub">${escapeHtml(m.variantLabel)}</span>` : ''}
-          <small><span class="sku-code">${escapeHtml(m.sku)}</span>${m.categoryName ? ` · ${escapeHtml(m.categoryName)}` : ''}${!detail.session.blindHidden ? ` · المتوقع: ${m.expectedQuantity}` : ''}</small>
+          <div class="stocktake-code-row">
+            ${m.variantLabel ? renderStocktakeVariantChipsHtml(m.variantLabel) : ''}
+            <span class="sku-code">${escapeHtml(m.sku)}</span>
+            ${m.categoryName ? `<span class="stocktake-barcode-pill">${escapeHtml(m.categoryName)}</span>` : ''}
+            ${!detail.session.blindHidden ? `<span class="stocktake-barcode-pill">المتوقع: ${m.expectedQuantity}</span>` : ''}
+          </div>
         </div>
         <div class="stocktake-smart-actions">${actionHtml}</div>
       </div>`;
@@ -7971,8 +7993,8 @@ function renderStocktakeCardsHtml(filteredLines, detail, productById, decimals, 
             <span class="product-avatar ${prod?.imagePath ? 'has-image' : ''}">${thumb}</span>
             <div>
               <strong>${escapeHtml(line.productName)}</strong>
-              ${line.variantLabel ? `<small class="stocktake-variant-sub">${escapeHtml(line.variantLabel)}</small>` : ''}
               <div class="stocktake-code-row">
+                ${line.variantLabel ? renderStocktakeVariantChipsHtml(line.variantLabel) : ''}
                 <span class="sku-code">${escapeHtml(line.sku)}</span>
                 ${line.categoryName ? `<span class="stocktake-barcode-pill">${escapeHtml(line.categoryName)}</span>` : ''}
                 ${line.scannedCount > 0 ? `<span class="stocktake-scanned-pill">مسح ×${line.scannedCount}</span>` : ''}
@@ -8145,8 +8167,8 @@ function stocktakeView() {
       <td>
         <div class="stocktake-product-cell">
           <strong>${escapeHtml(line.productName)}</strong>
-          ${line.variantLabel ? `<small class="stocktake-variant-sub">${escapeHtml(line.variantLabel)}</small>` : ''}
           <div class="stocktake-code-row">
+            ${line.variantLabel ? renderStocktakeVariantChipsHtml(line.variantLabel) : ''}
             <span class="sku-code">${escapeHtml(line.sku)}</span>
             ${line.barcode ? `<span class="stocktake-barcode-pill">${escapeHtml(line.barcode)}</span>` : ''}
             ${line.scannedCount > 0 ? `<span class="stocktake-scanned-pill">مسح ×${line.scannedCount}</span>` : ''}

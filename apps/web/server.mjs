@@ -2342,6 +2342,11 @@ async function financialMapReport(ctx, url) {
     item.runningProfit = runningProfitMinor.toString();
   }
 
+  timeline.forEach((item, idx) => {
+    item.stepNumber = idx + 1;
+  });
+  timeline.reverse();
+
   const netSalesMinor = totalSalesMinor - totalRefundsMinor;
   const totalCogsMinor = grossCogsOfSalesMinor - totalReturnedCostMinor + supplierReturnVarianceMinor;
   const netCashFlowMinor = netSalesMinor - totalSupplierPaidMinor - totalExpensesMinor + totalShiftCashVarianceMinor;
@@ -2369,7 +2374,7 @@ async function financialMapReport(ctx, url) {
       runningFinalCash: runningCashMinor.toString(),
       eventsCount: timeline.length,
     },
-    timeline: timeline, // Chronological: oldest first as requested by the user
+    timeline: timeline, // Reversed chronological: newest event first, keeping cumulative runningCash per step
   };
 }
 
