@@ -217,7 +217,6 @@ function matchesCheckoutRequest(
   const cart = params.cart;
   const allocation = cart.allocatedCartDiscounts;
   if (
-    sale.saleNumber !== params.saleNumber.trim() ||
     sale.cashierUserId !== cashierUserId ||
     sale.customerName !== (params.customerName?.trim() || undefined) ||
     sale.currency !== cart.currencyCode ||

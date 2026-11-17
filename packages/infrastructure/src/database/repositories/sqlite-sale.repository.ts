@@ -56,6 +56,21 @@ export class SqliteSaleRepository implements CheckoutRepository, SaleRepository 
     draft: SaleDraft,
     options: CheckoutOptions,
   ): Promise<Sale> {
+    return this.db.transaction().execute((trx) =>
+      this.persistCheckoutInTransaction(trx, ctx, draft, options),
+    );
+  }
+
+  /**
+   * Executes a sale checkout inside an active transaction so compound flows
+   * such as atomic exchanges participate in the same rollback boundary.
+   */
+  public async persistCheckoutInTransaction(
+    trx: Executor,
+    ctx: ExecutionContext,
+    draft: SaleDraft,
+    options: CheckoutOptions,
+  ): Promise<Sale> {
     if (draft.tenantId !== ctx.tenantId) {
       throw new Error(
         'TenantIsolationViolation: Cannot persist a sale for a different tenantId',
@@ -71,23 +86,22 @@ export class SqliteSaleRepository implements CheckoutRepository, SaleRepository 
       throw new InvalidSaleError('A checkout requires at least one payment');
     }
 
-    return this.db.transaction().execute(async (trx) => {
-      // Replay protection: a repeated idempotency key returns the original sale
-      // without touching stock a second time.
-      const replay = await this.findSaleBy(
-        trx,
-        ctx,
-        'idempotency_key',
-        draft.idempotencyKey,
-      );
-      if (replay) {
-        if (!matchesDraft(replay, draft)) {
-          throw new InvalidSaleError(
-            `Idempotency key '${draft.idempotencyKey}' was already used for a different checkout`,
-          );
-        }
-        return replay;
+    // Replay protection: a repeated idempotency key returns the original sale
+    // without touching stock a second time.
+    const replay = await this.findSaleBy(
+      trx,
+      ctx,
+      'idempotency_key',
+      draft.idempotencyKey,
+    );
+    if (replay) {
+      if (!matchesDraft(replay, draft)) {
+        throw new InvalidSaleError(
+          `Idempotency key '${draft.idempotencyKey}' was already used for a different checkout`,
+        );
       }
+      return replay;
+    }
 
       const items: SaleItem[] = [];
       for (const [index, draftItem] of draft.items.entries()) {
@@ -247,7 +261,6 @@ export class SqliteSaleRepository implements CheckoutRepository, SaleRepository 
       });
 
       return sale;
-    });
   }
 
   public async findById(ctx: ExecutionContext, saleId: string): Promise<Sale | null> {
@@ -410,7 +423,6 @@ export class SqliteSaleRepository implements CheckoutRepository, SaleRepository 
 function matchesDraft(sale: Sale, draft: SaleDraft): boolean {
   if (
     sale.storeId !== draft.storeId ||
-    sale.saleNumber !== draft.saleNumber.trim() ||
     sale.cashierUserId !== draft.cashierUserId ||
     sale.customerName !== (draft.customerName?.trim() || undefined) ||
     sale.currency !== draft.currency.trim().toUpperCase() ||

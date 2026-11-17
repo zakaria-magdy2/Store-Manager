@@ -16,7 +16,7 @@ import {
   ScopedExecutionContext,
   TenantService,
 } from '@retailos/application';
-import { Cart, DomainError, Money, Permissions, User } from '@retailos/core';
+import { Cart, DomainError, Money, Permissions, SalePayment, User } from '@retailos/core';
 import {
   Argon2PasswordHasher,
   CryptoTokenService,
@@ -207,50 +207,78 @@ const db = database.getDb();
 const migration = await new DatabaseMigrator(db).migrateToLatest();
 if (!migration.success) throw migration.error ?? new Error('Database migration failed');
 
-/** Allocates a monotonically increasing, collision-free document number inside an IMMEDIATE transaction. */
-function allocateNextDocNumber(tenantId, docType, prefix, existingTable, existingCol) {
-  const rawDb = database.getRawDatabase();
-  const txn = rawDb.transaction(() => {
-    const rows = rawDb.prepare(`SELECT ${existingCol} AS num FROM ${existingTable} WHERE tenant_id = ? AND ${existingCol} IS NOT NULL`).all(tenantId);
+/** Allocates a monotonically increasing, collision-free document number inside Kysely's serialized transaction queue. */
+async function allocateNextDocNumber(tenantId, docType, prefix, existingTable, existingCol, trx = null) {
+  const run = async (executor) => {
+    const existingRows = await executor
+      .selectFrom(existingTable)
+      .select(`${existingCol} as num`)
+      .where('tenant_id', '=', tenantId)
+      .where(existingCol, 'is not', null)
+      .execute();
     let maxExisting = 1000;
     const prefixRe = new RegExp(`^${prefix.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}(\\d+)$`);
-    for (const row of rows) {
+    for (const row of existingRows) {
       const m = String(row.num ?? '').match(prefixRe);
       if (m) {
         const parsed = Number.parseInt(m[1], 10);
         if (Number.isFinite(parsed) && parsed > maxExisting) maxExisting = parsed;
       }
     }
-    rawDb.prepare('INSERT INTO document_sequences (tenant_id, doc_type, last_seq) VALUES (?, ?, ?) ON CONFLICT(tenant_id, doc_type) DO NOTHING').run(tenantId, docType, maxExisting);
-    let row = rawDb.prepare('UPDATE document_sequences SET last_seq = last_seq + 1 WHERE tenant_id = ? AND doc_type = ? RETURNING last_seq').get(tenantId, docType);
-    let seq = Number(row?.last_seq ?? maxExisting + 1);
-    while (rawDb.prepare(`SELECT 1 FROM ${existingTable} WHERE tenant_id = ? AND ${existingCol} = ?`).get(tenantId, `${prefix}${seq}`)) {
-      row = rawDb.prepare('UPDATE document_sequences SET last_seq = last_seq + 1 WHERE tenant_id = ? AND doc_type = ? RETURNING last_seq').get(tenantId, docType);
-      seq = Number(row?.last_seq ?? seq + 1);
+    await executor
+      .insertInto('document_sequences')
+      .values({ tenant_id: tenantId, doc_type: docType, last_seq: maxExisting })
+      .onConflict((oc) => oc.columns(['tenant_id', 'doc_type']).doNothing())
+      .execute();
+
+    const bumped = await executor
+      .updateTable('document_sequences')
+      .set((eb) => ({ last_seq: eb(eb.ref('last_seq'), '+', 1) }))
+      .where('tenant_id', '=', tenantId)
+      .where('doc_type', '=', docType)
+      .returning('last_seq')
+      .executeTakeFirst();
+    let seq = Number(bumped?.last_seq ?? maxExisting + 1);
+    while (
+      await executor
+        .selectFrom(existingTable)
+        .select('id')
+        .where('tenant_id', '=', tenantId)
+        .where(existingCol, '=', `${prefix}${seq}`)
+        .executeTakeFirst()
+    ) {
+      const nextBump = await executor
+        .updateTable('document_sequences')
+        .set((eb) => ({ last_seq: eb(eb.ref('last_seq'), '+', 1) }))
+        .where('tenant_id', '=', tenantId)
+        .where('doc_type', '=', docType)
+        .returning('last_seq')
+        .executeTakeFirst();
+      seq = Number(nextBump?.last_seq ?? seq + 1);
     }
     return `${prefix}${seq}`;
-  });
-  return txn.immediate();
+  };
+  return trx ? run(trx) : db.transaction().execute(run);
 }
 
-function generateNextSaleNumber(tenantId) {
-  return allocateNextDocNumber(tenantId, 'SALE', 'INV-', 'sales', 'sale_number');
+function generateNextSaleNumber(tenantId, trx = null) {
+  return allocateNextDocNumber(tenantId, 'SALE', 'INV-', 'sales', 'sale_number', trx);
 }
 
-function generateNextPurchaseNumber(tenantId) {
-  return allocateNextDocNumber(tenantId, 'PURCHASE', 'PUR-', 'supplier_purchases', 'invoice_number');
+function generateNextPurchaseNumber(tenantId, trx = null) {
+  return allocateNextDocNumber(tenantId, 'PURCHASE', 'PUR-', 'supplier_purchases', 'invoice_number', trx);
 }
 
-function generateNextShiftNumber(tenantId) {
-  return allocateNextDocNumber(tenantId, 'SHIFT', 'SH-', 'cashier_shifts', 'shift_number');
+function generateNextShiftNumber(tenantId, trx = null) {
+  return allocateNextDocNumber(tenantId, 'SHIFT', 'SH-', 'cashier_shifts', 'shift_number', trx);
 }
 
-function generateNextReturnNumber(tenantId) {
-  return allocateNextDocNumber(tenantId, 'RETURN', 'RET-', 'customer_returns', 'return_number');
+function generateNextReturnNumber(tenantId, trx = null) {
+  return allocateNextDocNumber(tenantId, 'RETURN', 'RET-', 'customer_returns', 'return_number', trx);
 }
 
-function generateNextStocktakeNumber(tenantId) {
-  return allocateNextDocNumber(tenantId, 'STOCKTAKE', 'STK-', 'stocktake_sessions', 'session_number');
+function generateNextStocktakeNumber(tenantId, trx = null) {
+  return allocateNextDocNumber(tenantId, 'STOCKTAKE', 'STK-', 'stocktake_sessions', 'session_number', trx);
 }
 if (restoredAfterCrash) {
   await db.updateTable('sessions').set({ is_revoked: 1 }).execute();
@@ -324,8 +352,21 @@ const CheckoutSchema = z.object({
   storeId: z.string().uuid(),
   idempotencyKey: z.string().uuid(),
   customerName: z.string().max(120).trim().optional(),
-  items: z.array(z.object({ variantId: z.string().uuid(), quantity: z.string().regex(/^[1-9]\d{0,8}$/) })).min(1).max(100),
+  cartDiscount: z.string().regex(/^\d{1,15}$/).optional(),
+  items: z.array(z.object({
+    variantId: z.string().uuid(),
+    quantity: z.string().regex(/^[1-9]\d{0,8}$/),
+    lineDiscount: z.string().regex(/^\d{1,15}$/).optional(),
+  })).min(1).max(100),
   payment: z.object({ method: z.enum(['CASH', 'CARD', 'MOBILE', 'OTHER']), amount: z.string().regex(/^\d{1,15}$/) }),
+});
+const SaleExchangeSchema = z.object({
+  idempotencyKey: z.string().uuid(),
+  storeId: z.string().uuid(),
+  paymentMethod: z.enum(['CASH', 'CARD', 'MOBILE', 'OTHER']),
+  returnedItems: z.array(z.object({ originalSaleItemId: z.string().min(1).max(80), quantity: z.string().regex(/^[1-9]\d{0,8}$/) })).min(1).max(100),
+  replacementItems: z.array(z.object({ variantId: z.string().uuid(), quantity: z.string().regex(/^[1-9]\d{0,8}$/) })).min(1).max(100),
+  notes: z.string().max(500).trim().optional(),
 });
 const SupplierSchema = z.object({ name: z.string().min(2).max(120).trim(), phone: z.string().max(40).trim().optional(), notes: z.string().max(500).trim().optional() });
 const PurchaseSchema = z.object({ idempotencyKey: z.string().uuid(), supplierId: z.string().uuid(), storeId: z.string().uuid(), invoiceNumber: z.string().max(80).trim().optional(), totalAmount: z.string().regex(/^[1-9]\d{0,14}$/), paidAmount: z.string().regex(/^\d{1,15}$/), paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'CARD', 'MOBILE']).default('CASH'), targetProfitPercent: z.number().min(0).max(100000).nullable().optional(), referenceNumber: z.string().max(80).trim().optional(), notes: z.string().max(500).trim().optional(), items: z.array(z.object({ variantId: z.string().uuid(), quantity: z.string().regex(/^[1-9]\d{0,8}$/), unitCost: z.string().regex(/^\d{1,15}$/), retailPrice: z.string().regex(/^\d{1,15}$/).nullable().optional() })).min(1).max(100) });
@@ -481,22 +522,7 @@ function localDayUtcBounds(dateMs = Date.now(), tzOffsetMinutes = null, timeZone
   };
 }
 
-function queryRangeBounds(fromStr, toStr, url, timeZone = companyConfig.timezone) {
-  const explicitOffset = normalizeTzOffsetMinutes(url?.searchParams?.get('tzOffset'));
-  if (explicitOffset !== null) {
-    const [fy, fm, fd] = fromStr.split('-').map(Number);
-    const [ty, tm, td] = toStr.split('-').map(Number);
-    const offsetMs = explicitOffset * 60000;
-    const startUtcMs = Date.UTC(fy, fm - 1, fd, 0, 0, 0, 0) + offsetMs;
-    const endExclusiveUtcMs = Date.UTC(ty, tm - 1, td + 1, 0, 0, 0, 0) + offsetMs;
-    return {
-      fromStr,
-      toStr,
-      tzOffsetMinutes: explicitOffset,
-      startIso: new Date(startUtcMs).toISOString(),
-      endExclusiveIso: new Date(endExclusiveUtcMs).toISOString(),
-    };
-  }
+function queryRangeBounds(fromStr, toStr, _url, timeZone = companyConfig.timezone) {
   const safeTz = resolveValidTimeZone(timeZone);
   const startUtcMs = timeZoneStartOfDayUtcMs(fromStr, safeTz);
   const toStartMs = timeZoneStartOfDayUtcMs(toStr, safeTz);
@@ -903,19 +929,26 @@ async function readJson(req, maxBytes = MAX_JSON_BODY_BYTES) {
   const chunks = [];
   let totalBytes = 0;
   let exceeded = false;
-  for await (const chunk of req) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    totalBytes += buf.length;
-    if (totalBytes > maxBytes) {
-      exceeded = true;
-      // Stop reading unbounded payloads above drain cap; below cap, finish draining so keep-alive browsers receive JSON 413 instead of TCP reset ("Failed to fetch").
-      if (totalBytes > MAX_DRAIN_OVERSIZED_BYTES) {
-        req.destroy();
-        break;
+  try {
+    for await (const chunk of req) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buf.length;
+      if (totalBytes > maxBytes) {
+        exceeded = true;
+        // Stop reading unbounded payloads above drain cap; below cap, finish draining so keep-alive browsers receive JSON 413 instead of TCP reset ("Failed to fetch").
+        if (totalBytes > MAX_DRAIN_OVERSIZED_BYTES) {
+          req.destroy();
+          break;
+        }
+        continue;
       }
-      continue;
+      chunks.push(buf);
     }
-    chunks.push(buf);
+  } catch {
+    throw Object.assign(new Error('انقطع الاتصال قبل اكتمال البيانات — لم يتم تنفيذ العملية'), { status: 400 });
+  }
+  if (req.aborted) {
+    throw Object.assign(new Error('تم إلغاء الطلب قبل اكتمال الإرسال — لم يتم تنفيذ العملية'), { status: 400 });
   }
   if (exceeded) {
     throw Object.assign(new Error('حجم البيانات المرسلة كبير جدًا، يرجى تقليل حجم الصورة والمحاولة مرة أخرى'), { status: 413 });
@@ -1460,9 +1493,11 @@ async function profitLossReport(ctx, url) {
     .where('journal_entries.created_at', '<', endExclusive).where('accounts.account_code', 'in', ['6090', '4010']).execute();
   const directExpenses = await db.selectFrom('operating_expense_records').select(['amount', 'payment_method as paymentMethod'])
     .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).where('expense_type', '=', 'DIRECT_DAILY')
+    .where('deleted_at', 'is', null)
     .where('expense_date', '>=', fromStr).where('expense_date', '<=', toStr).execute();
   const monthlyPayments = await db.selectFrom('operating_expense_records').select(['amount', 'expense_date as expenseDate', 'payment_method as paymentMethod'])
     .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).where('expense_type', '=', 'MONTHLY_RECURRING_PAYMENT')
+    .where('deleted_at', 'is', null)
     .where('expense_date', '>=', fromStr).where('expense_date', '<=', toStr).execute();
   const salePayments = await db.selectFrom('sale_payments').innerJoin('sales', 'sales.id', 'sale_payments.sale_id')
     .select(['sale_payments.sale_id as saleId', 'sale_payments.method as method', 'sale_payments.amount as amount', 'sales.change_given as changeGiven'])
@@ -1571,6 +1606,7 @@ async function profitLossReport(ctx, url) {
     LEFT JOIN monthly_expense_actuals mea ON mea.id = oer.monthly_actual_id AND mea.tenant_id = oer.tenant_id
     LEFT JOIN recurring_expense_obligations reo ON reo.id = mea.obligation_id AND reo.tenant_id = oer.tenant_id
     WHERE oer.tenant_id = ? AND oer.store_id = ?
+      AND oer.deleted_at IS NULL
       AND oer.expense_date >= ? AND oer.expense_date <= ?
     ORDER BY oer.expense_date DESC, COALESCE(oer.created_at, oer.expense_date) DESC
   `).all(ctx.tenantId, storeId, fromStr, toStr);
@@ -2291,7 +2327,7 @@ async function financialMapReport(ctx, url) {
     LEFT JOIN expense_categories ec ON ec.id = oer.category_id AND ec.tenant_id = oer.tenant_id
     LEFT JOIN monthly_expense_actuals mea ON mea.id = oer.monthly_actual_id AND mea.tenant_id = oer.tenant_id
     LEFT JOIN recurring_expense_obligations reo ON reo.id = mea.obligation_id AND reo.tenant_id = oer.tenant_id
-    WHERE oer.tenant_id = ? AND oer.store_id = ?
+    WHERE oer.tenant_id = ? AND oer.store_id = ? AND oer.deleted_at IS NULL
   `;
   const expParams = [ctx.tenantId, storeId];
   if (from) { expSql += ` AND substr(oer.expense_date, 1, 10) >= ?`; expParams.push(from); }
@@ -2488,13 +2524,19 @@ async function financialMapReport(ctx, url) {
     });
   }
 
+  const fmTz = resolveValidTimeZone(tenant.timezone);
   for (const e of expRows) {
     const amt = BigInt(e.amount ?? 0);
     const isMonthly = e.expense_type === 'MONTHLY_RECURRING_PAYMENT';
     const label = isMonthly ? `سداد ${e.obligation_name}` : `مصروف: ${e.category_name}`;
+    const createdIso = toIsoTimestamp(e.created_at, e.expense_date);
+    const createdLocalDay = e.created_at ? businessDateInTimeZone(new Date(createdIso), fmTz) : e.expense_date;
+    const expTimestamp = (e.expense_date && createdLocalDay && e.expense_date !== createdLocalDay)
+      ? `${e.expense_date}T23:59:59.000Z`
+      : createdIso;
     timeline.push({
       id: e.id,
-      timestamp: toIsoTimestamp(e.created_at, e.expense_date),
+      timestamp: expTimestamp,
       sortOrder: 5,
       type: 'EXPENSE',
       category: isMonthly ? 'التزام شهري' : 'مصروف يومي',
@@ -3076,7 +3118,7 @@ async function currentData(ctx, url) {
   const canViewExpenses = ctx.hasPermission(Permissions.EXPENSES_DIRECT_CREATE) || canViewAccounting;
   let expenseQuery = canViewExpenses ? db.selectFrom('operating_expense_records').innerJoin('expense_categories', 'expense_categories.id', 'operating_expense_records.category_id')
     .select(['operating_expense_records.id as id', 'operating_expense_records.expense_date as date', 'operating_expense_records.amount as amount', 'operating_expense_records.currency as currency', 'operating_expense_records.payment_method as paymentMethod', 'operating_expense_records.notes as notes', 'operating_expense_records.reference_number as referenceNumber', 'expense_categories.name as category'])
-    .where('operating_expense_records.tenant_id', '=', ctx.tenantId).where('operating_expense_records.store_id', '=', storeId).where('operating_expense_records.expense_type', '=', 'DIRECT_DAILY') : null;
+    .where('operating_expense_records.tenant_id', '=', ctx.tenantId).where('operating_expense_records.store_id', '=', storeId).where('operating_expense_records.expense_type', '=', 'DIRECT_DAILY').where('operating_expense_records.deleted_at', 'is', null) : null;
   if (expenseQuery && hasExplicitMonth) {
     expenseQuery = expenseQuery.where('operating_expense_records.expense_date', 'like', `${monthPrefix}-%`);
   }
@@ -3098,7 +3140,7 @@ async function currentData(ctx, url) {
   const monthlyActualRows = canViewMonthlyExpenses && monthlyObligations.length ? await db.selectFrom('monthly_expense_actuals').selectAll()
     .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).where('year', '=', monthlyYear).where('month', '=', monthlyMonth).execute() : [];
   const monthlyPaymentRows = canViewMonthlyExpenses && monthlyActualRows.length ? await db.selectFrom('operating_expense_records').selectAll()
-    .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).where('expense_type', '=', 'MONTHLY_RECURRING_PAYMENT')
+    .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).where('expense_type', '=', 'MONTHLY_RECURRING_PAYMENT').where('deleted_at', 'is', null)
     .where('monthly_actual_id', 'in', monthlyActualRows.map((actual) => actual.id)).orderBy('expense_date', 'desc').execute() : [];
   const availableMonthsRows = canViewMonthlyExpenses ? await db.selectFrom('monthly_expense_actuals')
     .select(['year', 'month'])
@@ -3200,7 +3242,7 @@ async function currentData(ctx, url) {
   const userCheckInTime = userCheckedInRecord?.createdAt ?? activeShiftRow?.startedAt ?? null;
 
   return {
-    company: { name: tenant.name, currency: tenant.currency },
+    company: { name: tenant.name, currency: tenant.currency, timezone: resolveValidTimeZone(tenant.timezone) },
     user: { id: ctx.userId, fullName: signedInUser?.fullName ?? '', role: ctx.roleId, storeId: ctx.storeId ?? null, shiftStartTime: signedInUser?.shiftStartTime ?? null, lateGraceMinutes: signedInUser?.lateGraceMinutes ?? 0 },
     activeShift: activeShiftRow ? {
       id: activeShiftRow.id,
@@ -3234,6 +3276,8 @@ async function currentData(ctx, url) {
       canViewAccounting,
       canViewCogs,
       canViewExpenses,
+      canDiscount: ctx.hasPermission(Permissions.POS_DISCOUNT),
+      canDeleteExpenses: ctx.roleId === 'OWNER' || ctx.roleId === 'STORE_MANAGER',
       canCreateExpenses: ctx.hasPermission(Permissions.EXPENSES_DIRECT_CREATE),
       canConfirmMonthlyExpenses: ctx.hasPermission(Permissions.EXPENSES_MONTHLY_CONFIRM) || ctx.roleId === 'OWNER' || ctx.roleId === 'STORE_MANAGER',
       canPayMonthlyExpenses: ctx.hasPermission(Permissions.EXPENSES_MONTHLY_PAY) || ctx.roleId === 'OWNER' || ctx.roleId === 'STORE_MANAGER',
@@ -3541,7 +3585,7 @@ async function handleApi(req, res, url) {
     const { offset, limit } = parsePaging(url, 100);
     const { from, to } = parseHistoryRange(url);
     const search = (url.searchParams.get('search') ?? '').trim().slice(0, 120);
-    const conds = ['e.tenant_id = ?', 'e.store_id = ?', "e.expense_type = 'DIRECT_DAILY'"];
+    const conds = ['e.tenant_id = ?', 'e.store_id = ?', "e.expense_type = 'DIRECT_DAILY'", 'e.deleted_at IS NULL'];
     const args = [ctx.tenantId, storeId];
     if (from && to) { conds.push('e.expense_date >= ?', 'e.expense_date <= ?'); args.push(from, to); }
     if (search) {
@@ -4128,7 +4172,7 @@ async function handleApi(req, res, url) {
     `).all(ctx.tenantId, storeId, ctx.userId, openShift.started_at);
 
     const returnsDuringShift = rawDb.prepare(`
-      SELECT cr.id, cr.refund_amount, cr.payment_method
+      SELECT cr.id, cr.refund_amount, cr.payment_method, cr.idempotency_key
       FROM customer_returns cr
       WHERE cr.tenant_id = ? AND cr.store_id = ? AND cr.created_at >= ?
         AND (cr.created_by_user_id = ? OR cr.original_sale_id IN (
@@ -4136,15 +4180,6 @@ async function handleApi(req, res, url) {
           WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED' AND s.created_at >= ?
         ))
     `).all(ctx.tenantId, storeId, openShift.started_at, ctx.userId, ctx.tenantId, storeId, ctx.userId, openShift.started_at);
-
-    const linkedReturnsRow = rawDb.prepare(`
-      SELECT COALESCE(SUM(cr.refund_amount), 0) AS returned_total
-      FROM customer_returns cr
-      WHERE cr.tenant_id = ? AND cr.store_id = ? AND cr.original_sale_id IN (
-        SELECT s.id FROM sales s
-        WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED' AND s.created_at >= ?
-      )
-    `).get(ctx.tenantId, storeId, ctx.tenantId, storeId, ctx.userId, openShift.started_at);
 
     let grossSalesMinor = 0n;
     let cashSalesMinor = 0n;
@@ -4154,12 +4189,13 @@ async function handleApi(req, res, url) {
       cashSalesMinor += BigInt(s.cash_paid ?? 0) - BigInt(s.change_given ?? 0);
       electronicSalesMinor += BigInt(s.electronic_paid ?? 0);
     }
-    const returnsLinkedMinor = BigInt(linkedReturnsRow?.returned_total ?? 0);
-    const totalSalesMinor = grossSalesMinor > returnsLinkedMinor ? grossSalesMinor - returnsLinkedMinor : 0n;
+    const returnsLinkedMinor = returnsDuringShift.reduce((sum, r) => sum + BigInt(r.refund_amount ?? 0), 0n);
+    const totalSalesMinor = grossSalesMinor - returnsLinkedMinor;
 
     let cashReturnsMinor = 0n;
     for (const r of returnsDuringShift) {
       if (r.payment_method === 'CASH') cashReturnsMinor += BigInt(r.refund_amount ?? 0);
+      else if (String(r.idempotency_key ?? '').startsWith('exchange-ret:')) electronicSalesMinor -= BigInt(r.refund_amount ?? 0);
     }
 
     const openingCashMinor = BigInt(openShift.opening_cash ?? 0);
@@ -4193,139 +4229,242 @@ async function handleApi(req, res, url) {
     if (!storeId || !stores.some((s) => s.id === storeId)) {
       throw Object.assign(new Error('الفرع غير متاح'), { status: 403 });
     }
-    const rawDb = database.getRawDatabase();
-    const existing = rawDb.prepare(
-      "SELECT id FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' LIMIT 1"
-    ).get(ctx.tenantId, ctx.userId);
-    if (existing) {
-      throw Object.assign(new Error('يوجد شيفت مفتوح بالفعل لك. يجب إنهاؤه أولاً.'), { status: 409 });
-    }
-
-    const shiftId = randomUUID();
-    const shiftNumber = generateNextShiftNumber(ctx.tenantId);
-    const nowIso = new Date().toISOString();
+    const startIdempotencyKey = typeof body.idempotencyKey === 'string' && body.idempotencyKey.trim()
+      ? body.idempotencyKey.trim().slice(0, 100)
+      : null;
     const openingCash = parseNonNegativeMinorInput(body.openingCash ?? '0', 'الرصيد الافتتاحي');
     const notes = body.notes?.trim() || null;
+    const nowIso = new Date().toISOString();
 
-    rawDb.prepare(`
-      INSERT INTO cashier_shifts (id, shift_number, tenant_id, store_id, user_id, started_at, opening_cash, status, notes, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?)
-    `).run(shiftId, shiftNumber, ctx.tenantId, storeId, ctx.userId, nowIso, openingCash.toString(), notes, nowIso, nowIso);
+    const txResult = await db.transaction().execute(async (trx) => {
+      if (startIdempotencyKey) {
+        const replayed = await trx
+          .selectFrom('cashier_shifts')
+          .selectAll()
+          .where('tenant_id', '=', ctx.tenantId)
+          .where('start_idempotency_key', '=', startIdempotencyKey)
+          .executeTakeFirst();
+        if (replayed) {
+          return {
+            replay: true,
+            shift: {
+              id: replayed.id,
+              shiftNumber: replayed.shift_number,
+              startedAt: replayed.started_at,
+              openingCash: String(replayed.opening_cash ?? 0),
+              status: replayed.status,
+            },
+          };
+        }
+      }
 
-    const tzOffsetMinutes = normalizeTzOffsetMinutes(body?.tzOffset);
-    const todayBounds = localDayUtcBounds(Date.now(), tzOffsetMinutes);
-    const alreadyCheckedInToday = ctx.roleId === 'OWNER'
-      ? true
-      : Boolean(rawDb.prepare(
-          "SELECT id FROM audit_logs WHERE tenant_id = ? AND actor_user_id = ? AND action = 'ATTENDANCE_CHECK_IN' AND created_at >= ? AND created_at < ? LIMIT 1"
-        ).get(ctx.tenantId, ctx.userId, todayBounds.startIso, todayBounds.endIso));
+      const existing = await trx
+        .selectFrom('cashier_shifts')
+        .select('id')
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('user_id', '=', ctx.userId)
+        .where('status', '=', 'OPEN')
+        .executeTakeFirst();
+      if (existing) {
+        throw Object.assign(new Error('يوجد شيفت مفتوح بالفعل لك. يجب إنهاؤه أولاً.'), { status: 409 });
+      }
 
-    await recordAudit(ctx, {
-      storeId,
-      action: alreadyCheckedInToday ? 'SHIFT_STARTED' : 'ATTENDANCE_CHECK_IN',
-      entityType: 'SHIFT',
-      entityId: shiftId,
-      summary: `بدء الشيفت (${shiftNumber}) برصيد افتتاحي ${openingCash.toString()}`,
-      metadata: { shiftNumber, openingCash: openingCash.toString(), occurredAt: nowIso }
+      const shiftId = randomUUID();
+      const shiftNumber = await generateNextShiftNumber(ctx.tenantId, trx);
+      await trx
+        .insertInto('cashier_shifts')
+        .values({
+          id: shiftId,
+          shift_number: shiftNumber,
+          tenant_id: ctx.tenantId,
+          store_id: storeId,
+          user_id: ctx.userId,
+          started_at: nowIso,
+          opening_cash: openingCash,
+          status: 'OPEN',
+          notes,
+          start_idempotency_key: startIdempotencyKey,
+          created_at: nowIso,
+          updated_at: nowIso,
+        })
+        .execute();
+
+      return {
+        replay: false,
+        shift: { id: shiftId, shiftNumber, startedAt: nowIso, openingCash: openingCash.toString(), status: 'OPEN' },
+      };
     });
 
-    return json(res, 201, {
-      shift: { id: shiftId, shiftNumber, startedAt: nowIso, openingCash: openingCash.toString(), status: 'OPEN' }
-    });
+    if (!txResult.replay) {
+      const tzOffsetMinutes = normalizeTzOffsetMinutes(body?.tzOffset);
+      const todayBounds = localDayUtcBounds(Date.now(), tzOffsetMinutes);
+      const rawDb = database.getRawDatabase();
+      const alreadyCheckedInToday = ctx.roleId === 'OWNER'
+        ? true
+        : Boolean(rawDb.prepare(
+            "SELECT id FROM audit_logs WHERE tenant_id = ? AND actor_user_id = ? AND action = 'ATTENDANCE_CHECK_IN' AND created_at >= ? AND created_at < ? LIMIT 1"
+          ).get(ctx.tenantId, ctx.userId, todayBounds.startIso, todayBounds.endIso));
+
+      await recordAudit(ctx, {
+        storeId,
+        action: alreadyCheckedInToday ? 'SHIFT_STARTED' : 'ATTENDANCE_CHECK_IN',
+        entityType: 'SHIFT',
+        entityId: txResult.shift.id,
+        summary: `بدء الشيفت (${txResult.shift.shiftNumber}) برصيد افتتاحي ${openingCash.toString()}`,
+        metadata: { shiftNumber: txResult.shift.shiftNumber, openingCash: openingCash.toString(), occurredAt: nowIso },
+      });
+    }
+
+    return json(res, txResult.replay ? 200 : 201, { shift: txResult.shift });
   }
 
   if (method === 'POST' && path === '/api/shifts/end') {
     const body = await readJson(req);
     const shiftId = body.shiftId;
     if (!shiftId) throw Object.assign(new Error('معرف الشفت مطلوب'), { status: 400 });
-    const rawDb = database.getRawDatabase();
-    const shift = rawDb.prepare("SELECT * FROM cashier_shifts WHERE id = ? AND tenant_id = ?").get(shiftId, ctx.tenantId);
-    if (!shift) throw Object.assign(new Error('الشفت غير موجود'), { status: 404 });
-    if (ctx.storeId && shift.store_id !== ctx.storeId) throw Object.assign(new Error('غير مصرح بالوصول لشيفت فرع آخر'), { status: 403 });
-    if (shift.status !== 'OPEN') throw Object.assign(new Error('هذا الشفت مغلق بالفعل'), { status: 409 });
-    if (shift.user_id !== ctx.userId && ctx.roleId !== 'OWNER' && ctx.roleId !== 'STORE_MANAGER') {
-      throw Object.assign(new Error('غير مصرح بإغلاق شفت موظف آخر'), { status: 403 });
-    }
-
-    const nowIso = new Date().toISOString();
+    const closeIdempotencyKey = typeof body.idempotencyKey === 'string' && body.idempotencyKey.trim()
+      ? body.idempotencyKey.trim().slice(0, 100)
+      : null;
     const actualCash = parseNonNegativeMinorInput(body.actualCash ?? '0', 'النقدية الفعلية');
     const handoverCash = parseNonNegativeMinorInput(body.handoverCash ?? '0', 'مبلغ التسليم');
-    const notes = body.notes?.trim() || shift.notes || null;
+    const nowIso = new Date().toISOString();
 
-    const salesDuringShift = rawDb.prepare(`
-      SELECT s.id,
-        COALESCE((SELECT SUM(si.net_revenue) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS total_amount,
-        COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id AND sp.method = 'CASH'), 0) AS cash_paid,
-        s.change_given
-      FROM sales s
-      WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
-        AND s.created_at >= ? AND s.created_at <= ?
-    `).all(ctx.tenantId, shift.store_id, shift.user_id, shift.started_at, nowIso);
-
-    const returnsDuringShift = rawDb.prepare(`
-      SELECT cr.id, cr.refund_amount, cr.payment_method
-      FROM customer_returns cr
-      WHERE cr.tenant_id = ? AND cr.store_id = ?
-        AND cr.created_at >= ? AND cr.created_at <= ?
-        AND (cr.created_by_user_id = ? OR cr.original_sale_id IN (
-          SELECT s.id FROM sales s
-          WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
-            AND s.created_at >= ? AND s.created_at <= ?
-        ))
-    `).all(ctx.tenantId, shift.store_id, shift.started_at, nowIso, shift.user_id, ctx.tenantId, shift.store_id, shift.user_id, shift.started_at, nowIso);
-
-    let cashSalesMinor = 0n;
-    for (const s of salesDuringShift) {
-      cashSalesMinor += BigInt(s.cash_paid ?? 0) - BigInt(s.change_given ?? 0);
-    }
-    let cashReturnsMinor = 0n;
-    for (const r of returnsDuringShift) {
-      if (r.payment_method === 'CASH') cashReturnsMinor += BigInt(r.refund_amount ?? 0);
-    }
-
-    const openingCashMinor = BigInt(shift.opening_cash ?? 0);
-    const expectedCashMinor = openingCashMinor + cashSalesMinor - cashReturnsMinor;
-    const varianceMinor = actualCash - expectedCashMinor;
-
-    rawDb.prepare(`
-      UPDATE cashier_shifts SET
-        ended_at = ?,
-        expected_cash = ?,
-        actual_cash = ?,
-        variance = ?,
-        handover_cash = ?,
-        status = 'CLOSED',
-        notes = ?,
-        updated_at = ?
-      WHERE id = ? AND tenant_id = ?
-    `).run(nowIso, expectedCashMinor.toString(), actualCash.toString(), varianceMinor.toString(), handoverCash.toString(), notes, nowIso, shift.id, ctx.tenantId);
-
-    await recordAudit(ctx, {
-      storeId: shift.store_id,
-      action: 'SHIFT_CLOSED',
-      entityType: 'SHIFT',
-      entityId: shift.id,
-      summary: `إنهاء الشيفت (${shift.shift_number}): متوقع ${expectedCashMinor.toString()}، فعلي ${actualCash.toString()}، الفارق ${varianceMinor.toString()}`,
-      metadata: { shiftNumber: shift.shift_number, expectedCash: expectedCashMinor.toString(), actualCash: actualCash.toString(), variance: varianceMinor.toString(), handoverCash: handoverCash.toString() }
-    });
-
-    void ensureDailyBackup({ force: false, minAgeMs: 60_000, syncMirror: true }).catch(() => undefined);
-
-    return json(res, 200, {
-      shift: {
-        id: shift.id,
-        shiftNumber: shift.shift_number,
-        startedAt: shift.started_at,
-        endedAt: nowIso,
-        openingCash: openingCashMinor.toString(),
-        expectedCash: expectedCashMinor.toString(),
-        actualCash: actualCash.toString(),
-        variance: varianceMinor.toString(),
-        handoverCash: handoverCash.toString(),
-        salesCount: salesDuringShift.length,
-        status: 'CLOSED',
+    const txResult = await db.transaction().execute(async (trx) => {
+      if (closeIdempotencyKey) {
+        const replayed = await trx
+          .selectFrom('cashier_shifts')
+          .selectAll()
+          .where('tenant_id', '=', ctx.tenantId)
+          .where('close_idempotency_key', '=', closeIdempotencyKey)
+          .executeTakeFirst();
+        if (replayed) {
+          if (replayed.id !== shiftId) {
+            throw Object.assign(new Error('مفتاح العملية مستخدم لإغلاق شيفت مختلف'), { status: 409 });
+          }
+          return {
+            replay: true,
+            storeId: replayed.store_id,
+            shift: {
+              id: replayed.id,
+              shiftNumber: replayed.shift_number,
+              startedAt: replayed.started_at,
+              endedAt: replayed.ended_at,
+              openingCash: String(replayed.opening_cash ?? 0),
+              expectedCash: String(replayed.expected_cash ?? 0),
+              actualCash: String(replayed.actual_cash ?? 0),
+              variance: String(replayed.variance ?? 0),
+              handoverCash: String(replayed.handover_cash ?? 0),
+              salesCount: 0,
+              status: replayed.status,
+            },
+          };
+        }
       }
+
+      const shift = await trx
+        .selectFrom('cashier_shifts')
+        .selectAll()
+        .where('id', '=', shiftId)
+        .where('tenant_id', '=', ctx.tenantId)
+        .executeTakeFirst();
+      if (!shift) throw Object.assign(new Error('الشفت غير موجود'), { status: 404 });
+      if (ctx.storeId && shift.store_id !== ctx.storeId) throw Object.assign(new Error('غير مصرح بالوصول لشيفت فرع آخر'), { status: 403 });
+      if (shift.status !== 'OPEN') throw Object.assign(new Error('هذا الشفت مغلق بالفعل'), { status: 409 });
+      if (shift.user_id !== ctx.userId && ctx.roleId !== 'OWNER' && ctx.roleId !== 'STORE_MANAGER') {
+        throw Object.assign(new Error('غير مصرح بإغلاق شفت موظف آخر'), { status: 403 });
+      }
+
+      const notes = body.notes?.trim() || shift.notes || null;
+      const rawDb = database.getRawDatabase();
+      const salesDuringShift = rawDb.prepare(`
+        SELECT s.id,
+          COALESCE((SELECT SUM(si.net_revenue) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS total_amount,
+          COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id AND sp.method = 'CASH'), 0) AS cash_paid,
+          s.change_given
+        FROM sales s
+        WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
+          AND s.created_at >= ? AND s.created_at <= ?
+      `).all(ctx.tenantId, shift.store_id, shift.user_id, shift.started_at, nowIso);
+
+      const returnsDuringShift = rawDb.prepare(`
+        SELECT cr.id, cr.refund_amount, cr.payment_method
+        FROM customer_returns cr
+        WHERE cr.tenant_id = ? AND cr.store_id = ?
+          AND cr.created_at >= ? AND cr.created_at <= ?
+          AND (cr.created_by_user_id = ? OR cr.original_sale_id IN (
+            SELECT s.id FROM sales s
+            WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
+              AND s.created_at >= ? AND s.created_at <= ?
+          ))
+      `).all(ctx.tenantId, shift.store_id, shift.started_at, nowIso, shift.user_id, ctx.tenantId, shift.store_id, shift.user_id, shift.started_at, nowIso);
+
+      let cashSalesMinor = 0n;
+      for (const s of salesDuringShift) {
+        cashSalesMinor += BigInt(s.cash_paid ?? 0) - BigInt(s.change_given ?? 0);
+      }
+      let cashReturnsMinor = 0n;
+      for (const r of returnsDuringShift) {
+        if (r.payment_method === 'CASH') cashReturnsMinor += BigInt(r.refund_amount ?? 0);
+      }
+
+      const openingCashMinor = BigInt(shift.opening_cash ?? 0);
+      const expectedCashMinor = openingCashMinor + cashSalesMinor - cashReturnsMinor;
+      const varianceMinor = actualCash - expectedCashMinor;
+
+      const updateRes = await trx
+        .updateTable('cashier_shifts')
+        .set({
+          ended_at: nowIso,
+          expected_cash: expectedCashMinor,
+          actual_cash: actualCash,
+          variance: varianceMinor,
+          handover_cash: handoverCash,
+          status: 'CLOSED',
+          notes,
+          close_idempotency_key: closeIdempotencyKey,
+          updated_at: nowIso,
+        })
+        .where('id', '=', shift.id)
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('status', '=', 'OPEN')
+        .executeTakeFirst();
+
+      if (updateRes.numUpdatedRows !== 1n) {
+        throw Object.assign(new Error('هذا الشفت مغلق بالفعل'), { status: 409 });
+      }
+
+      return {
+        replay: false,
+        storeId: shift.store_id,
+        shift: {
+          id: shift.id,
+          shiftNumber: shift.shift_number,
+          startedAt: shift.started_at,
+          endedAt: nowIso,
+          openingCash: openingCashMinor.toString(),
+          expectedCash: expectedCashMinor.toString(),
+          actualCash: actualCash.toString(),
+          variance: varianceMinor.toString(),
+          handoverCash: handoverCash.toString(),
+          salesCount: salesDuringShift.length,
+          status: 'CLOSED',
+        },
+      };
     });
+
+    if (!txResult.replay) {
+      await recordAudit(ctx, {
+        storeId: txResult.storeId,
+        action: 'SHIFT_CLOSED',
+        entityType: 'SHIFT',
+        entityId: txResult.shift.id,
+        summary: `إنهاء الشيفت (${txResult.shift.shiftNumber}): متوقع ${txResult.shift.expectedCash}، فعلي ${txResult.shift.actualCash}، الفارق ${txResult.shift.variance}`,
+        metadata: { shiftNumber: txResult.shift.shiftNumber, expectedCash: txResult.shift.expectedCash, actualCash: txResult.shift.actualCash, variance: txResult.shift.variance, handoverCash: txResult.shift.handoverCash },
+      });
+      void ensureDailyBackup({ force: false, minAgeMs: 60_000, syncMirror: true }).catch(() => undefined);
+    }
+
+    return json(res, 200, { shift: txResult.shift });
   }
 
   if (method === 'GET' && path === '/api/shifts') {
@@ -4396,21 +4535,33 @@ async function handleApi(req, res, url) {
 
       const shiftReturnsQuery = rawDb.prepare(`
         SELECT COALESCE(SUM(cr.refund_amount), 0) AS returnedAmount,
-          COALESCE(SUM(CASE WHEN cr.payment_method = 'CASH' AND cr.created_at >= ? AND cr.created_at <= ? THEN cr.refund_amount ELSE 0 END), 0) AS cashReturnsInShift,
+          COALESCE(SUM(CASE WHEN cr.payment_method = 'CASH' THEN cr.refund_amount ELSE 0 END), 0) AS cashReturnsInShift,
           COALESCE(SUM((SELECT SUM(cri.cost_amount) FROM customer_return_items cri WHERE cri.tenant_id = cr.tenant_id AND cri.return_id = cr.id)), 0) AS returnedCost
         FROM customer_returns cr
-        WHERE cr.tenant_id = ? AND cr.store_id = ? AND cr.original_sale_id IN (
-          SELECT s.id FROM sales s
-          WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
-            AND s.created_at >= ? AND s.created_at <= ?
-        )
-      `).get(row.started_at, endTime, ctx.tenantId, row.store_id, ctx.tenantId, row.store_id, row.user_id, row.started_at, endTime);
+        WHERE cr.tenant_id = ? AND cr.store_id = ?
+          AND (
+            (cr.created_at >= ? AND cr.created_at <= ? AND (cr.created_by_user_id = ? OR cr.original_sale_id IN (
+              SELECT s.id FROM sales s
+              WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
+                AND s.created_at >= ? AND s.created_at <= ?
+            )))
+            OR (COALESCE(cr.is_exchange, 0) = 0 AND cr.created_at > ? AND cr.original_sale_id IN (
+              SELECT s.id FROM sales s
+              WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
+                AND s.created_at >= ? AND s.created_at <= ?
+            ))
+          )
+      `).get(
+        ctx.tenantId, row.store_id,
+        row.started_at, endTime, row.user_id, ctx.tenantId, row.store_id, row.user_id, row.started_at, endTime,
+        endTime, ctx.tenantId, row.store_id, row.user_id, row.started_at, endTime,
+      );
 
       const grossRev = BigInt(salesQuery?.totalRevenue ?? 0);
       const grossProf = BigInt(salesQuery?.grossProfit ?? 0);
       const returnedAmt = BigInt(shiftReturnsQuery?.returnedAmount ?? 0);
       const returnedCost = BigInt(shiftReturnsQuery?.returnedCost ?? 0);
-      const salesRev = grossRev > returnedAmt ? grossRev - returnedAmt : 0n;
+      const salesRev = grossRev - returnedAmt;
       const salesProfit = grossProf - returnedAmt + returnedCost;
       const salesCount = Number(salesQuery?.salesCount ?? 0);
 
@@ -4504,14 +4655,14 @@ async function handleApi(req, res, url) {
         COALESCE((SELECT SUM(si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS total_cogs,
         COALESCE((SELECT SUM(si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS sold_qty,
         (SELECT COUNT(si.id) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id) as items_count,
-        COALESCE((SELECT SUM(cr.refund_amount) FROM customer_returns cr WHERE cr.tenant_id = s.tenant_id AND cr.store_id = s.store_id AND cr.original_sale_id = s.id), 0) AS returned_amount,
-        COALESCE((SELECT SUM(cri.cost_amount) FROM customer_return_items cri INNER JOIN customer_returns cr ON cr.id = cri.return_id AND cr.tenant_id = cri.tenant_id WHERE cr.tenant_id = s.tenant_id AND cr.store_id = s.store_id AND cr.original_sale_id = s.id), 0) AS returned_cost,
-        COALESCE((SELECT SUM(cri.quantity) FROM customer_return_items cri INNER JOIN customer_returns cr ON cr.id = cri.return_id AND cr.tenant_id = cri.tenant_id WHERE cr.tenant_id = s.tenant_id AND cr.store_id = s.store_id AND cr.original_sale_id = s.id), 0) AS returned_qty
+        COALESCE((SELECT SUM(cr.refund_amount) FROM customer_returns cr WHERE cr.tenant_id = s.tenant_id AND cr.store_id = s.store_id AND cr.original_sale_id = s.id AND cr.created_at >= ? AND (cr.created_at <= ? OR COALESCE(cr.is_exchange, 0) = 0)), 0) AS returned_amount,
+        COALESCE((SELECT SUM(cri.cost_amount) FROM customer_return_items cri INNER JOIN customer_returns cr ON cr.id = cri.return_id AND cr.tenant_id = cri.tenant_id WHERE cr.tenant_id = s.tenant_id AND cr.store_id = s.store_id AND cr.original_sale_id = s.id AND cr.created_at >= ? AND (cr.created_at <= ? OR COALESCE(cr.is_exchange, 0) = 0)), 0) AS returned_cost,
+        COALESCE((SELECT SUM(cri.quantity) FROM customer_return_items cri INNER JOIN customer_returns cr ON cr.id = cri.return_id AND cr.tenant_id = cri.tenant_id WHERE cr.tenant_id = s.tenant_id AND cr.store_id = s.store_id AND cr.original_sale_id = s.id AND cr.created_at >= ? AND (cr.created_at <= ? OR COALESCE(cr.is_exchange, 0) = 0)), 0) AS returned_qty
       FROM sales s
       WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
         AND s.created_at >= ? AND s.created_at <= ?
       ORDER BY s.created_at DESC
-    `).all(ctx.tenantId, shift.store_id, shift.user_id, shift.started_at, endTime);
+    `).all(shift.started_at, endTime, shift.started_at, endTime, shift.started_at, endTime, ctx.tenantId, shift.store_id, shift.user_id, shift.started_at, endTime);
 
     return json(res, 200, {
       currency,
@@ -4785,8 +4936,25 @@ async function handleApi(req, res, url) {
     const tenant = await tenantRepo.findById(ctx.tenantId);
     if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
     const id = randomUUID();
-    await expenses.record(ctx, { ...body, id, amount: BigInt(body.amount), currency: tenant.currency });
-    return json(res, 201, { id });
+    const savedId = await expenses.record(ctx, { ...body, id, amount: BigInt(body.amount), currency: tenant.currency });
+    return json(res, 201, { id: savedId });
+  }
+
+  const deleteExpenseMatch = method === 'DELETE' ? path.match(/^\/api\/expenses\/([0-9a-f-]+)$/i) : null;
+  if (deleteExpenseMatch) {
+    if (!['OWNER', 'STORE_MANAGER'].includes(ctx.roleId)) {
+      throw Object.assign(new Error('غير مصرح بحذف المصروفات'), { status: 403 });
+    }
+    const deleted = await expenses.softDelete(ctx, { expenseId: deleteExpenseMatch[1], deletedAt: new Date() });
+    await recordAudit(ctx, {
+      storeId: deleted.storeId,
+      action: 'EXPENSE_DELETED',
+      entityType: 'EXPENSE',
+      entityId: deleted.id,
+      summary: `حذف وعكس مصروف (${deleted.categoryName}) بقيمة ${deleted.amount.toString()}`,
+      metadata: { expenseDate: deleted.expenseDate, amount: deleted.amount.toString(), paymentMethod: deleted.paymentMethod },
+    });
+    return json(res, 200, { id: deleted.id, deleted: true });
   }
 
   if (method === 'POST' && path === '/api/recurring-expenses') {
@@ -4831,7 +4999,7 @@ async function handleApi(req, res, url) {
       ctx.assertPermission(Permissions.POS_REFUND);
     }
     const body = validate(CustomerReturnSchema, await readJson(req));
-    const returnNumber = generateNextReturnNumber(ctx.tenantId);
+    const returnNumber = await generateNextReturnNumber(ctx.tenantId);
     const result = await returns.record(ctx, {
       id: randomUUID(),
       returnNumber,
@@ -4845,13 +5013,293 @@ async function handleApi(req, res, url) {
     return json(res, 201, { id: result.id, returnNumber, refundAmount: result.refundAmount.toString() });
   }
 
+  const exchangeMatch = method === 'POST' ? path.match(/^\/api\/sales\/([0-9a-f-]+)\/exchange$/i) : null;
+  if (exchangeMatch) {
+    if (!ctx.hasPermission(Permissions.POS_REFUND) && ctx.roleId !== 'CASHIER') {
+      ctx.assertPermission(Permissions.POS_REFUND);
+    }
+    const body = validate(SaleExchangeSchema, await readJson(req));
+    if (ctx.storeId && ctx.storeId !== body.storeId) {
+      throw Object.assign(new Error('الفرع غير متاح لهذا المستخدم'), { status: 403 });
+    }
+    const rawDb = database.getRawDatabase();
+    const openShift = rawDb.prepare(
+      "SELECT id, store_id FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' LIMIT 1"
+    ).get(ctx.tenantId, ctx.userId);
+    if (!openShift) {
+      throw Object.assign(new Error('يجب بدء الشيفت أولاً قبل إجراء الاستبدال'), { status: 403 });
+    }
+    if (openShift.store_id !== body.storeId) {
+      throw Object.assign(new Error('الشيفت المفتوح مسجل على فرع آخر'), { status: 403 });
+    }
+
+    const originalSaleId = exchangeMatch[1];
+    const tenant = await tenantRepo.findById(ctx.tenantId);
+    if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
+
+    const returnIdempotencyKey = `exchange-ret:${body.idempotencyKey}`;
+    const saleIdempotencyKey = `exchange-sale:${body.idempotencyKey}`;
+    const now = new Date();
+
+    const exchangeResult = await db.transaction().execute(async (trx) => {
+      const existingSale = await trx
+        .selectFrom('sales')
+        .selectAll()
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('idempotency_key', '=', saleIdempotencyKey)
+        .executeTakeFirst();
+      const existingRet = await trx
+        .selectFrom('customer_returns')
+        .selectAll()
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('idempotency_key', '=', returnIdempotencyKey)
+        .executeTakeFirst();
+      if (existingSale && existingRet) {
+        const retAmt = BigInt(existingRet.refund_amount);
+        const repTotal = BigInt(existingSale.total);
+        const netDiff = repTotal - retAmt;
+        return {
+          replay: true,
+          returnId: existingRet.id,
+          returnNumber: existingRet.return_number,
+          saleId: existingSale.id,
+          saleNumber: existingSale.sale_number,
+          returnedAmount: retAmt.toString(),
+          replacementTotal: repTotal.toString(),
+          netDifference: netDiff.toString(),
+          direction: netDiff > 0n ? 'CUSTOMER_PAYS' : netDiff < 0n ? 'STORE_REFUNDS' : 'EVEN',
+        };
+      }
+      if (existingSale || existingRet) {
+        throw Object.assign(new Error('مفتاح الاستبدال مستخدم جزئيًا في عملية أخرى'), { status: 409 });
+      }
+
+      const originalSale = await trx
+        .selectFrom('sales')
+        .select(['id', 'sale_number', 'customer_name', 'total'])
+        .where('id', '=', originalSaleId)
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('store_id', '=', body.storeId)
+        .executeTakeFirst();
+      if (!originalSale || BigInt(originalSale.total) <= 0n) {
+        throw Object.assign(new Error('الفاتورة الأصلية غير متاحة للاستبدال'), { status: 404 });
+      }
+
+      if (new Set(body.returnedItems.map((line) => line.originalSaleItemId)).size !== body.returnedItems.length) {
+        throw Object.assign(new Error('لا تكرر نفس بند الفاتورة في الاستبدال'), { status: 400 });
+      }
+
+      let returnedCreditMinor = 0n;
+      const returnLines = [];
+      for (const reqLine of body.returnedItems) {
+        const reqQty = BigInt(reqLine.quantity);
+        const originalItem = await trx
+          .selectFrom('sale_items')
+          .select(['id', 'quantity', 'item_type', 'net_revenue'])
+          .where('id', '=', reqLine.originalSaleItemId)
+          .where('sale_id', '=', originalSaleId)
+          .where('tenant_id', '=', ctx.tenantId)
+          .executeTakeFirst();
+        if (!originalItem || originalItem.item_type !== 'SALE') {
+          throw Object.assign(new Error('الصنف المختار للاستبدال غير موجود في الفاتورة'), { status: 400 });
+        }
+        const previousReturns = await trx
+          .selectFrom('customer_return_items')
+          .innerJoin('customer_returns', 'customer_returns.id', 'customer_return_items.return_id')
+          .select(['customer_return_items.quantity as quantity', 'customer_return_items.refund_amount as amount'])
+          .where('customer_returns.original_sale_id', '=', originalSaleId)
+          .where('customer_return_items.original_sale_item_id', '=', originalItem.id)
+          .execute();
+        const soldQty = BigInt(originalItem.quantity);
+        const returnedQty = previousReturns.reduce((s, r) => s + BigInt(r.quantity), 0n);
+        const remainingQty = soldQty - returnedQty;
+        if (reqQty > remainingQty) {
+          throw Object.assign(new Error('كمية الاستبدال أكبر من الكمية المتبقية من الفاتورة'), { status: 400 });
+        }
+        const alreadyRefunded = previousReturns.reduce((s, r) => s + BigInt(r.amount), 0n);
+        const origNet = BigInt(originalItem.net_revenue);
+        const credit = reqQty === remainingQty ? origNet - alreadyRefunded : (origNet * reqQty) / soldQty;
+        if (credit <= 0n) {
+          throw Object.assign(new Error('قيمة الصنف لا تسمح بالاستبدال'), { status: 400 });
+        }
+        returnedCreditMinor += credit;
+        returnLines.push({ originalSaleItemId: originalItem.id, quantity: reqQty });
+      }
+
+      let replacementCart = Cart.empty(tenant.currency);
+      const draftItems = [];
+      const replacementSaleId = randomUUID();
+      for (const [index, repItem] of body.replacementItems.entries()) {
+        const variantRow = await trx
+          .selectFrom('product_variants as pv')
+          .innerJoin('products as p', (join) =>
+            join.onRef('p.id', '=', 'pv.product_id').onRef('p.tenant_id', '=', 'pv.tenant_id'),
+          )
+          .select([
+            'pv.id as id',
+            'pv.product_id as productId',
+            'pv.sku as sku',
+            'pv.retail_price as retailPrice',
+            'pv.currency as currency',
+            'pv.attributes_json as attributesJson',
+            'pv.is_active as variantActive',
+            'p.name as productName',
+            'p.options_json as optionsJson',
+            'p.item_kind as itemKind',
+            'p.is_active as productActive',
+          ])
+          .where('pv.tenant_id', '=', ctx.tenantId)
+          .where('pv.id', '=', repItem.variantId)
+          .executeTakeFirst();
+        if (!variantRow || !variantRow.variantActive || !variantRow.productActive) {
+          throw Object.assign(new Error('الصنف البديل المختار غير نشط أو غير متاح'), { status: 400 });
+        }
+        const unitPriceMinor = BigInt(variantRow.retailPrice ?? 0);
+        if (unitPriceMinor <= 0n) {
+          throw Object.assign(new Error(`الصنف البديل "${variantRow.productName}" لم يُسعّر للبيع بعد`), { status: 400 });
+        }
+        const unitPriceMoney = Money.fromMinor(unitPriceMinor, tenant.currency);
+        const attrs = variantRow.attributesJson ? JSON.parse(variantRow.attributesJson) : {};
+        const options = variantRow.optionsJson ? JSON.parse(variantRow.optionsJson) : [];
+        const optionLabel = Object.entries(attrs)
+          .map(([k, v]) => `${options.find((o) => o.key === k)?.name ?? k}: ${String(v)}`)
+          .join(' - ');
+        const productName = optionLabel ? `${variantRow.productName} - ${optionLabel}` : variantRow.productName;
+        const qtyBig = BigInt(repItem.quantity);
+        const lineId = `ex-line-${index}-${randomUUID()}`;
+        replacementCart = replacementCart.addItem({
+          lineId,
+          variantId: variantRow.id,
+          productId: variantRow.productId,
+          productName,
+          sku: variantRow.sku,
+          unitPrice: unitPriceMoney,
+          quantity: qtyBig,
+        });
+        draftItems.push({
+          id: `${replacementSaleId}:item:${index}`,
+          variantId: variantRow.id,
+          productId: variantRow.productId,
+          productName,
+          sku: variantRow.sku,
+          variantAttributes: attrs,
+          type: 'SALE',
+          quantity: qtyBig,
+          unitPrice: unitPriceMoney,
+          lineDiscount: Money.zero(tenant.currency),
+          cartDiscountShare: Money.zero(tenant.currency),
+          stockTracked: variantRow.itemKind === 'PRODUCT',
+        });
+      }
+
+      const replacementTotalMinor = replacementCart.total.amount;
+      const netDifferenceMinor = replacementTotalMinor - returnedCreditMinor;
+
+      // Net accounting & drawer delta:
+      // - If customer pays extra or even swap (>= 0): offset the returned credit via 'OTHER'
+      //   so cash drawer (1010) and current shift only receive the net price difference.
+      // - If store refunds difference (< 0): record both return and replacement using the refund
+      //   channel so the net drawer/electronic outflow equals the refunded difference cleanly.
+      const returnPaymentMethod = netDifferenceMinor >= 0n ? 'OTHER' : body.paymentMethod;
+      const paymentTenders = netDifferenceMinor > 0n
+        ? [
+            { method: 'OTHER', amount: Money.fromMinor(returnedCreditMinor, tenant.currency) },
+            { method: body.paymentMethod, amount: Money.fromMinor(netDifferenceMinor, tenant.currency) },
+          ]
+        : netDifferenceMinor === 0n
+          ? [{ method: 'OTHER', amount: Money.fromMinor(replacementTotalMinor, tenant.currency) }]
+          : [{ method: body.paymentMethod, amount: Money.fromMinor(replacementTotalMinor, tenant.currency) }];
+
+      const returnNumber = await generateNextReturnNumber(ctx.tenantId, trx);
+      const returnRes = await returns.recordInTransaction(trx, ctx, {
+        id: randomUUID(),
+        returnNumber,
+        idempotencyKey: returnIdempotencyKey,
+        storeId: body.storeId,
+        originalSaleId,
+        paymentMethod: returnPaymentMethod,
+        occurredAt: now,
+        lines: returnLines,
+        isExchange: true,
+      });
+
+      const saleNumber = await generateNextSaleNumber(ctx.tenantId, trx);
+      const saleDraft = {
+        id: replacementSaleId,
+        tenantId: ctx.tenantId,
+        storeId: body.storeId,
+        saleNumber,
+        idempotencyKey: saleIdempotencyKey,
+        cashierUserId: ctx.userId,
+        customerName: originalSale.customer_name ?? undefined,
+        currency: tenant.currency,
+        items: draftItems,
+        payments: paymentTenders.map(
+          (tender, pIdx) => new SalePayment(`${replacementSaleId}:payment:${pIdx}`, tender),
+        ),
+        subtotal: replacementCart.grossSubtotal,
+        discountTotal: replacementCart.discountTotal,
+        total: replacementCart.total,
+        createdAt: now,
+      };
+      const replacementSale = await saleRepo.persistCheckoutInTransaction(trx, ctx, saleDraft, {
+        allowNegativeStock: tenant.allowNegativeStock,
+      });
+
+      return {
+        replay: false,
+        originalSaleNumber: originalSale.sale_number,
+        returnId: returnRes.id,
+        returnNumber,
+        saleId: replacementSale.id,
+        saleNumber: replacementSale.saleNumber,
+        returnedAmount: returnRes.refundAmount.toString(),
+        replacementTotal: replacementSale.total.amount.toString(),
+        netDifference: netDifferenceMinor.toString(),
+        direction: netDifferenceMinor > 0n ? 'CUSTOMER_PAYS' : netDifferenceMinor < 0n ? 'STORE_REFUNDS' : 'EVEN',
+      };
+    });
+
+    if (!exchangeResult.replay) {
+      await recordAudit(ctx, {
+        storeId: body.storeId,
+        action: 'SALE_EXCHANGED',
+        entityType: 'SALE',
+        entityId: exchangeResult.saleId,
+        summary: `استبدال من فاتورة (${exchangeResult.originalSaleNumber}) إلى (${exchangeResult.saleNumber}) بفارق ${exchangeResult.netDifference}`,
+        metadata: {
+          originalSaleId,
+          returnId: exchangeResult.returnId,
+          returnNumber: exchangeResult.returnNumber,
+          replacementSaleNumber: exchangeResult.saleNumber,
+          returnedAmount: exchangeResult.returnedAmount,
+          replacementTotal: exchangeResult.replacementTotal,
+          netDifference: exchangeResult.netDifference,
+          paymentMethod: body.paymentMethod,
+          notes: body.notes ?? '',
+        },
+      });
+    }
+
+    return json(res, exchangeResult.replay ? 200 : 201, {
+      returnId: exchangeResult.returnId,
+      returnNumber: exchangeResult.returnNumber,
+      saleId: exchangeResult.saleId,
+      saleNumber: exchangeResult.saleNumber,
+      returnedAmount: exchangeResult.returnedAmount,
+      replacementTotal: exchangeResult.replacementTotal,
+      netDifference: exchangeResult.netDifference,
+      direction: exchangeResult.direction,
+    });
+  }
+
   if (method === 'POST' && path === '/api/purchases') {
     ctx.assertPermission(Permissions.CATALOG_MANAGE);
     const body = validate(PurchaseSchema, await readJson(req));
     const tenant = await tenantRepo.findById(ctx.tenantId);
     if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
     const id = randomUUID();
-    const invoiceNumber = body.invoiceNumber?.trim() || generateNextPurchaseNumber(ctx.tenantId);
+    const invoiceNumber = body.invoiceNumber?.trim() || await generateNextPurchaseNumber(ctx.tenantId);
     let hasAnyRetailPrice = false;
     let computedRetailTotalMinor = 0n;
     const lines = body.items.map((line) => {
@@ -4869,7 +5317,7 @@ async function handleApi(req, res, url) {
       };
     });
     const expectedRetailTotal = hasAnyRetailPrice ? Money.fromMinor(computedRetailTotalMinor, tenant.currency) : undefined;
-    await purchasing.recordPurchase(ctx, {
+    const savedId = await purchasing.recordPurchase(ctx, {
       id, idempotencyKey: body.idempotencyKey, storeId: body.storeId, supplierId: body.supplierId,
       invoiceNumber,
       totalAmount: Money.fromMinor(BigInt(body.totalAmount), tenant.currency),
@@ -4881,8 +5329,10 @@ async function handleApi(req, res, url) {
       notes: body.notes, purchasedAt: new Date(),
       lines,
     });
-    await recordAudit(ctx, { storeId: body.storeId, action: 'PURCHASE_RECORDED', entityType: 'PURCHASE', entityId: id, summary: `تسجيل فاتورة شراء (${invoiceNumber})`, metadata: { invoiceNumber, totalAmount: body.totalAmount, paidAmount: body.paidAmount, targetProfitPercent: body.targetProfitPercent ?? null, expectedRetailTotal: expectedRetailTotal?.amount.toString() ?? null } });
-    return json(res, 201, { id });
+    if (savedId === id) {
+      await recordAudit(ctx, { storeId: body.storeId, action: 'PURCHASE_RECORDED', entityType: 'PURCHASE', entityId: savedId, summary: `تسجيل فاتورة شراء (${invoiceNumber})`, metadata: { invoiceNumber, totalAmount: body.totalAmount, paidAmount: body.paidAmount, targetProfitPercent: body.targetProfitPercent ?? null, expectedRetailTotal: expectedRetailTotal?.amount.toString() ?? null } });
+    }
+    return json(res, 201, { id: savedId });
   }
 
   const supplierReturnMatch = method === 'POST' ? path.match(/^\/api\/purchases\/([0-9a-f-]+)\/returns$/i) : null;
@@ -4903,13 +5353,15 @@ async function handleApi(req, res, url) {
     const tenant = await tenantRepo.findById(ctx.tenantId);
     if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
     const id = randomUUID();
-    await purchasing.recordSupplierPayment(ctx, {
+    const savedId = await purchasing.recordSupplierPayment(ctx, {
       id, idempotencyKey: body.idempotencyKey, purchaseId: paymentMatch[1],
       amount: Money.fromMinor(BigInt(body.amount), tenant.currency),
       paymentMethod: body.paymentMethod, referenceNumber: body.referenceNumber, paidAt: new Date(),
     });
-    await recordAudit(ctx, { action: 'SUPPLIER_PAYMENT_RECORDED', entityType: 'SUPPLIER_PAYMENT', entityId: id, summary: `تسجيل دفعة لمورد (${body.amount})`, metadata: { purchaseId: paymentMatch[1], amount: body.amount, paymentMethod: body.paymentMethod } });
-    return json(res, 201, { id });
+    if (savedId === id) {
+      await recordAudit(ctx, { action: 'SUPPLIER_PAYMENT_RECORDED', entityType: 'SUPPLIER_PAYMENT', entityId: savedId, summary: `تسجيل دفعة لمورد (${body.amount})`, metadata: { purchaseId: paymentMatch[1], amount: body.amount, paymentMethod: body.paymentMethod } });
+    }
+    return json(res, 201, { id: savedId });
   }
 
   if (method === 'POST' && (path === '/api/inventory/receive' || path === '/api/inventory/receive-batch')) {
@@ -5177,6 +5629,11 @@ async function handleApi(req, res, url) {
     }
     const tenant = await tenantRepo.findById(ctx.tenantId);
     if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
+    const cartDiscountMinor = body.cartDiscount ? BigInt(body.cartDiscount) : 0n;
+    const hasDiscounts = cartDiscountMinor > 0n || body.items.some((item) => item.lineDiscount && BigInt(item.lineDiscount) > 0n);
+    if (hasDiscounts) {
+      ctx.assertPermission(Permissions.POS_DISCOUNT);
+    }
     let cart = Cart.empty(tenant.currency);
     for (const [index, item] of body.items.entries()) {
       const variant = await variantRepo.findById(ctx, item.variantId);
@@ -5185,17 +5642,31 @@ async function handleApi(req, res, url) {
       if (!product) throw Object.assign(new Error('أحد المنتجات لم يعد متاحًا'), { status: 400 });
       if (variant.retailPrice.amount <= 0n) throw Object.assign(new Error(`الصنف "${product.name}" لم يتم تسعيره للبيع بعد — حدّد سعر البيع عند الشراء من التاجر أو من تعديل المنتج`), { status: 400 });
       const optionLabel = Object.entries(variant.attributes).map(([key, value]) => `${product.options.find((option) => option.key === key)?.name ?? key}: ${String(value)}`).join(' - ');
-      cart = cart.addItem({ lineId: `line-${index}-${randomUUID()}`, variantId: variant.id, productId: product.id, productName: optionLabel ? `${product.name} - ${optionLabel}` : product.name, sku: variant.sku, unitPrice: variant.retailPrice, quantity: BigInt(item.quantity) });
+      const lineId = `line-${index}-${randomUUID()}`;
+      cart = cart.addItem({ lineId, variantId: variant.id, productId: product.id, productName: optionLabel ? `${product.name} - ${optionLabel}` : product.name, sku: variant.sku, unitPrice: variant.retailPrice, quantity: BigInt(item.quantity) });
+      if (item.lineDiscount && BigInt(item.lineDiscount) > 0n) {
+        cart = cart.setLineDiscount(lineId, Money.fromMinor(BigInt(item.lineDiscount), tenant.currency));
+      }
+    }
+    if (cartDiscountMinor > 0n) {
+      cart = cart.setCartDiscount(Money.fromMinor(cartDiscountMinor, tenant.currency));
+    }
+    if (cart.total.amount <= 0n) {
+      throw Object.assign(new Error('صافي الفاتورة بعد الخصم يجب أن يكون أكبر من صفر'), { status: 400 });
     }
     const now = new Date();
-    const saleNumber = generateNextSaleNumber(ctx.tenantId);
+    const existingReplay = await saleRepo.findByIdempotencyKey(ctx, body.idempotencyKey);
+    const saleNumber = existingReplay?.saleNumber ?? await generateNextSaleNumber(ctx.tenantId);
+    const tentativeSaleId = randomUUID();
     const sale = await checkout.checkout(ctx, {
-      saleId: randomUUID(), saleNumber,
+      saleId: tentativeSaleId, saleNumber,
       storeId: body.storeId, cart,
       payments: [{ method: body.payment.method, amount: Money.fromMinor(BigInt(body.payment.amount), tenant.currency) }],
       idempotencyKey: body.idempotencyKey, customerName: body.customerName, occurredAt: now,
     });
-    await recordAudit(ctx, { storeId: body.storeId, action: 'SALE_COMPLETED', entityType: 'SALE', entityId: sale.id, summary: `إتمام عملية بيع (${sale.saleNumber})`, metadata: { saleNumber: sale.saleNumber, total: sale.total.amount.toString(), paymentMethod: body.payment.method } });
+    if (sale.id === tentativeSaleId) {
+      await recordAudit(ctx, { storeId: body.storeId, action: 'SALE_COMPLETED', entityType: 'SALE', entityId: sale.id, summary: `إتمام عملية بيع (${sale.saleNumber})`, metadata: { saleNumber: sale.saleNumber, total: sale.total.amount.toString(), paymentMethod: body.payment.method } });
+    }
     const cashierUser = await userRepo.findById(ctx, ctx.userId);
     return json(res, 201, { ...saleJson(sale), cashierName: cashierUser?.fullName ?? cashierUser?.username ?? 'كاشير' });
   }
@@ -5237,7 +5708,7 @@ async function handleApi(req, res, url) {
       categoryName = category.name;
     }
 
-    const sessionNumber = generateNextStocktakeNumber(ctx.tenantId);
+    const sessionNumber = await generateNextStocktakeNumber(ctx.tenantId);
     const sessionId = randomUUID();
     const nowIso = new Date().toISOString();
     const todayLabel = nowIso.slice(0, 10);
@@ -6104,21 +6575,31 @@ const server = createServer(async (req, res) => {
       if (uriError instanceof URIError) throw Object.assign(new Error('المسار غير صالح'), { status: 400 });
       throw uriError;
     }
-    const target = resolve(publicDir, `.${normalize(relativePath)}`);
-    if (!target.startsWith(`${publicDir}${sep}`) && target !== join(publicDir, 'index.html')) throw Object.assign(new Error('الملف غير موجود'), { status: 404 });
-    if (!existsSync(target)) throw Object.assign(new Error('الملف غير موجود'), { status: 404 });
+    let target = resolve(publicDir, `.${normalize(relativePath)}`);
+    const isCleanSpaRoute = /^\/(pos|sales|inventory|products|stocktake|suppliers|expenses|monthly-expenses|financial-map|accounting|reports|profit-loss|top-products|shifts|users|audit-logs|backups)\/?$/i.test(url.pathname);
+    if (isCleanSpaRoute) {
+      target = join(publicDir, 'index.html');
+    } else {
+      if (!target.startsWith(`${publicDir}${sep}`) && target !== join(publicDir, 'index.html')) throw Object.assign(new Error('الملف غير موجود'), { status: 404 });
+      if (!existsSync(target)) throw Object.assign(new Error('الملف غير موجود'), { status: 404 });
+    }
     const content = await readFile(target);
     res.writeHead(200, { 'Content-Type': mimeType(target), 'Cache-Control': 'no-store', ...securityHeaders() });
     res.end(content);
   } catch (error) {
     if (res.headersSent) return res.destroy();
     const databaseConflict = typeof error?.code === 'string' && error.code.startsWith('SQLITE_CONSTRAINT');
+    const isInsufficientStock = error instanceof DomainError && error.code === 'INSUFFICIENT_STOCK';
     const isDomainClientError = error instanceof DomainError;
     const status = Number.isInteger(error?.status) ? error.status : error?.message?.startsWith('UnauthorizedError') ? 403 : databaseConflict ? 409 : isDomainClientError ? 400 : 500;
     if (status >= 500) {
       console.error('Request failed with status:', Number(status));
     }
-    const message = status >= 500 ? 'حصل خطأ داخلي. لم يتم تنفيذ العملية.' : error?.message ?? 'حدث خطأ غير متوقع';
+    const message = status >= 500
+      ? 'حصل خطأ داخلي. لم يتم تنفيذ العملية.'
+      : isInsufficientStock
+        ? 'الكمية المطلوبة غير متوفرة في المخزون (تم بيعها أو نفد الرصيد)'
+        : (error?.message ?? 'حدث خطأ غير متوقع');
     json(res, status, { error: message });
   }
 });

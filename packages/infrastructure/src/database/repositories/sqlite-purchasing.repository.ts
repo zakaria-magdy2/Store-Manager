@@ -50,7 +50,7 @@ function conflict(message: string): Error {
 export class SqlitePurchasingRepository {
   constructor(private readonly db: Kysely<RetailOSDatabase>) {}
 
-  public async recordPurchase(ctx: ExecutionContext, input: RecordPurchaseInput): Promise<void> {
+  public async recordPurchase(ctx: ExecutionContext, input: RecordPurchaseInput): Promise<string> {
     if (ctx.storeId && ctx.storeId !== input.storeId) throw Object.assign(new Error('Store scope mismatch'), { status: 403 });
     if (input.totalAmount.currency.code !== input.initialPayment.currency.code) throw badRequest('Purchase currency mismatch');
     if (input.initialPayment.amount > input.totalAmount.amount) throw badRequest('Initial payment exceeds purchase total');
@@ -71,7 +71,7 @@ export class SqlitePurchasingRepository {
     const calculatedLinesTotal = input.lines.reduce((sum, line) => sum + line.unitCost.amount * line.quantity, 0n);
     if (calculatedLinesTotal !== input.totalAmount.amount) throw badRequest('قيمة الفاتورة لازم تساوي مجموع أصنافها');
 
-    await this.db.transaction().execute(async (trx) => {
+    return this.db.transaction().execute(async (trx) => {
       const replay = await trx.selectFrom('supplier_purchases').selectAll()
         .where('tenant_id', '=', ctx.tenantId).where('idempotency_key', '=', input.idempotencyKey).executeTakeFirst();
       if (replay) {
@@ -94,7 +94,7 @@ export class SqlitePurchasingRepository {
           && BigInt(existingInitialPayment?.amount ?? 0) === input.initialPayment.amount
           && (!existingInitialPayment || existingInitialPayment.payment_method === input.paymentMethod);
         if (!sameRequest) throw conflict('مفتاح العملية مستخدم لفاتورة مشتريات مختلفة');
-        return;
+        return replay.id;
       }
       const supplier = await trx.selectFrom('suppliers').select('id').where('id', '=', input.supplierId).where('tenant_id', '=', ctx.tenantId).executeTakeFirst();
       const store = await trx.selectFrom('stores').select('id').where('id', '=', input.storeId).where('tenant_id', '=', ctx.tenantId).executeTakeFirst();
@@ -212,6 +212,7 @@ export class SqlitePurchasingRepository {
           ...(input.totalAmount.amount > input.initialPayment.amount ? [{ accountCode: '2010', side: 'CREDIT' as const, amount: input.totalAmount.amount - input.initialPayment.amount, memo: 'رصيد مستحق للتاجر' }] : []),
         ],
       });
+      return input.id;
     });
   }
 

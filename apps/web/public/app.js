@@ -1,10 +1,47 @@
+function readRequestedPageFromLocation() {
+  try {
+    const url = new URL(window.location.href);
+    const paramPage = url.searchParams.get('page')?.trim().toLowerCase() || '';
+    const hashPage = url.hash.replace(/^#\/?/, '').trim().toLowerCase();
+    const pathPage = url.pathname.replace(/^\/+|\/+$/g, '').trim().toLowerCase();
+    const candidate = paramPage || hashPage || pathPage;
+    if (!candidate) return null;
+    if (candidate === 'profit-loss') return 'reports';
+    return candidate;
+  } catch {
+    return null;
+  }
+}
+
+function isPageAuthorized(page) {
+  const caps = state.data?.capabilities;
+  if (!caps) return false;
+  if (caps.cashierMode) return ['pos', 'inventory', 'sales'].includes(page);
+  if (['reports', 'financial-map', 'accounting'].includes(page)) return Boolean(caps.canViewAccounting);
+  if (page === 'expenses') return Boolean(caps.canViewExpenses);
+  if (page === 'monthly-expenses') return Boolean(caps.canViewMonthlyExpenses);
+  if (page === 'top-products') return Boolean(caps.canViewSales);
+  if (page === 'stocktake') return Boolean(caps.canAdjustInventory);
+  if (page === 'backups') return Boolean(caps.canManageBackups);
+  if (page === 'users') return Boolean(caps.canManageUsers);
+  if (page === 'audit-logs') return Boolean(caps.canViewAuditLogs);
+  if (page === 'shifts') return !caps.cashierMode;
+  return ['dashboard', 'pos', 'products', 'inventory', 'sales', 'suppliers'].includes(page);
+}
+
 const state = {
   bootstrap: null,
   user: null,
   data: null,
   page: 'dashboard',
+  requestedPage: readRequestedPageFromLocation(),
+  accessDeniedNotice: '',
   query: '',
   cart: [],
+  cartDiscountRaw: '',
+  cartIdempotencyKey: null,
+  posInputError: '',
+  posDirtyInvalid: false,
   paymentMethod: 'CASH',
   isSaving: false,
   report: null,
@@ -57,13 +94,34 @@ const state = {
   stocktakeCreating: false,
 };
 
+function businessTimeZone() {
+  return state.data?.company?.timezone || 'Africa/Cairo';
+}
+
 function localDateIso(date = new Date()) {
   const d = date instanceof Date ? date : new Date(date);
   if (Number.isNaN(d.getTime())) return '';
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: businessTimeZone(),
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(d);
+    const y = parts.find((p) => p.type === 'year')?.value;
+    const m = parts.find((p) => p.type === 'month')?.value;
+    const day = parts.find((p) => p.type === 'day')?.value;
+    if (y && m && day) return `${y}-${m}-${day}`;
+  } catch {}
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+}
+
+function shiftIsoDays(isoDate, deltaDays) {
+  const [y, m, d] = isoDate.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + deltaDays)).toISOString().slice(0, 10);
 }
 
 function ensureSalesDefaultFilter() {
@@ -367,7 +425,10 @@ function showConfirmModal({ title = 'تأكيد العملية', message = '', c
         </section>
       </div>
     `;
+    let settled = false;
     const cleanup = (accepted) => {
+      if (settled) return;
+      settled = true;
       document.removeEventListener('keydown', onKeyDown);
       root.innerHTML = '';
       resolve(accepted);
@@ -377,7 +438,10 @@ function showConfirmModal({ title = 'تأكيد العملية', message = '', c
     };
     document.addEventListener('keydown', onKeyDown);
     root.querySelector('[data-confirm-cancel]')?.addEventListener('click', () => cleanup(false));
-    root.querySelector('[data-confirm-accept]')?.addEventListener('click', () => cleanup(true));
+    root.querySelector('[data-confirm-accept]')?.addEventListener('click', (event) => {
+      event.currentTarget.disabled = true;
+      cleanup(true);
+    });
     root.querySelector('[data-confirm-accept]')?.focus();
   });
 }
@@ -406,7 +470,9 @@ function mutationLabel(path, method) {
   if (path === '/api/shifts/end') return 'إنهاء الشيفت وتقفيل الدرج';
   if (path.startsWith('/api/purchases')) return 'حفظ عملية المشتريات أو السداد';
   if (path.startsWith('/api/suppliers')) return 'حفظ بيانات التاجر';
-  if (path.startsWith('/api/returns')) return 'تسجيل المرتجع';
+  if (/^\/api\/sales\/[^/?]+\/exchange$/.test(path)) return 'تنفيذ استبدال الصنف وحساب فرق السعر';
+  if (path.startsWith('/api/returns') || /^\/api\/sales\/[^/?]+\/returns$/.test(path)) return 'تسجيل المرتجع';
+  if (/^\/api\/expenses\/[^/?]+$/.test(path) && method === 'DELETE') return 'حذف المصروف وعكس أثره المالي';
   if (path.startsWith('/api/expenses') || path.startsWith('/api/recurring-expenses')) return 'تسجيل المصروف';
   if (path === '/api/users/shift-schedule') return 'حفظ مواعيد بدء الشيفت';
   if (path === '/api/attendance/check-in') return 'تسجيل الحضور اليومي';
@@ -528,7 +594,41 @@ async function loadData(storeId, year = state.selectedExpenseYear, month = state
   state.returnsHistory = null;
 }
 
+function applyRequestedRoute(fallbackDefault = 'dashboard') {
+  const reqPage = state.requestedPage ?? readRequestedPageFromLocation();
+  state.requestedPage = null;
+  if (!reqPage) return;
+  if (isPageAuthorized(reqPage)) {
+    state.page = reqPage;
+    state.accessDeniedNotice = '';
+    return;
+  }
+  state.accessDeniedNotice = 'غير مصرح بالوصول إلى هذه الصفحة المالية — تم تحويلك إلى نقطة البيع';
+  state.page = state.data?.capabilities?.cashierMode ? 'pos' : fallbackDefault;
+  try {
+    window.history.replaceState(null, '', '/');
+  } catch {}
+  toast(state.accessDeniedNotice, 'error');
+}
+
 async function start() {
+  window.addEventListener('hashchange', () => {
+    if (!state.user || !state.data) {
+      state.requestedPage = readRequestedPageFromLocation();
+      return;
+    }
+    const req = readRequestedPageFromLocation();
+    if (!req) return;
+    if (isPageAuthorized(req)) {
+      state.page = req;
+      state.accessDeniedNotice = '';
+    } else {
+      state.accessDeniedNotice = 'غير مصرح بالوصول إلى هذه الصفحة المالية — تم تحويلك إلى نقطة البيع';
+      state.page = state.data?.capabilities?.cashierMode ? 'pos' : 'dashboard';
+      toast(state.accessDeniedNotice, 'error');
+    }
+    render();
+  });
   try {
     state.bootstrap = await api('/api/bootstrap');
     if (state.bootstrap.configured) {
@@ -536,6 +636,8 @@ async function start() {
         const session = await api(`/api/data?tzOffset=${encodeURIComponent(String(new Date().getTimezoneOffset()))}`);
         state.user = session.user;
         state.data = session;
+        state.page = session.capabilities?.cashierMode ? 'pos' : 'dashboard';
+        applyRequestedRoute(state.page);
       } catch (error) {
         if (!String(error.message).includes('تسجيل الدخول') && !String(error.message).includes('انتهت الجلسة')) throw error;
       }
@@ -558,8 +660,8 @@ function render() {
     root.innerHTML = loginView();
     bindLogin();
   } else {
-    if (state.data.capabilities.cashierMode && !['pos', 'inventory', 'sales'].includes(state.page)) {
-      state.page = 'pos';
+    if (!isPageAuthorized(state.page)) {
+      state.page = state.data.capabilities.cashierMode ? 'pos' : 'dashboard';
     }
     root.innerHTML = shellView();
     bindShell();
@@ -604,6 +706,7 @@ function bindLogin() {
       state.user = session.user;
       state.page = session.capabilities?.cashierMode ? 'pos' : 'dashboard';
       await loadData();
+      applyRequestedRoute(state.page);
       render();
     } catch (error) {
       toast(error.message, 'error');
@@ -630,7 +733,10 @@ function shellView() {
   `;
   const { totalCount: totalAlertsCount } = computeSystemAlerts(state.data);
 
-  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'financial-map' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'stocktake' || state.data.capabilities.canAdjustInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item account-menu-whatsapp" role="menuitem" href="https://wa.me/201200562966" target="_blank" rel="noopener noreferrer">${icon('message', 17)}<span>تواصل مع الدعم (واتساب)<small class="support-phone-sub">01200562966</small></span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${shiftControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>⌘ K</kbd></label><button type="button" class="icon-button notification-button ${totalAlertsCount > 0 ? 'has-alerts' : ''}" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount > 0 ? `<span class="notif-count-badge">${totalAlertsCount > 99 ? '99+' : totalAlertsCount}</span>` : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${pageView()}</section></main>`;
+  const deniedBanner = state.accessDeniedNotice
+    ? `<div role="alert" style="margin-bottom:14px;padding:12px 16px;border-radius:12px;background:rgba(190,18,60,0.09);border:1px solid rgba(190,18,60,0.3);color:#be123c;font-weight:700;display:flex;justify-content:space-between;align-items:center;gap:12px;"><span>${escapeHtml(state.accessDeniedNotice)}</span><button type="button" class="text-action" id="dismiss-access-denied">إغلاق</button></div>`
+    : '';
+  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'financial-map' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'stocktake' || state.data.capabilities.canAdjustInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item account-menu-whatsapp" role="menuitem" href="https://wa.me/201200562966" target="_blank" rel="noopener noreferrer">${icon('message', 17)}<span>تواصل مع الدعم (واتساب)<small class="support-phone-sub">01200562966</small></span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${shiftControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>⌘ K</kbd></label><button type="button" class="icon-button notification-button ${totalAlertsCount > 0 ? 'has-alerts' : ''}" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount > 0 ? `<span class="notif-count-badge">${totalAlertsCount > 99 ? '99+' : totalAlertsCount}</span>` : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${deniedBanner}${pageView()}</section></main>`;
 }
 
 function roleLabel(role) {
@@ -733,8 +839,7 @@ function formatYearMonthAr(ym) {
 }
 
 function currentLocalMonthStr() {
-  const d = new Date(Date.now() - new Date().getTimezoneOffset() * 60000);
-  return d.toISOString().slice(0, 7);
+  return localDateIso().slice(0, 7);
 }
 
 function formatLocalDayDateAr(dateStr, createdAtIso) {
@@ -2262,8 +2367,12 @@ function showStartShiftModal() {
   inputEl?.focus();
   inputEl?.select();
 
+  let startSubmitting = false;
+  const startIdempotencyKey = crypto.randomUUID();
   root.querySelector('#start-shift-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (startSubmitting) return;
+    startSubmitting = true;
     const form = e.currentTarget;
     const submitBtn = form.querySelector('[type=submit]');
     submitBtn.disabled = true;
@@ -2273,6 +2382,7 @@ function showStartShiftModal() {
       const res = await api('/api/shifts/start', {
         method: 'POST',
         body: JSON.stringify({
+          idempotencyKey: startIdempotencyKey,
           storeId: state.data.selectedStoreId,
           openingCash: openingCashMinor,
           notes: '',
@@ -2285,6 +2395,7 @@ function showStartShiftModal() {
       await loadData(state.data.selectedStoreId);
       render();
     } catch (err) {
+      startSubmitting = false;
       toast(err.message, 'error');
       submitBtn.disabled = false;
     }
@@ -2413,8 +2524,12 @@ async function showEndShiftModal() {
         }
       });
 
+      let cashierEndSubmitting = false;
+      const cashierCloseKey = crypto.randomUUID();
       modalBody.querySelector('#end-shift-form')?.addEventListener('submit', async (e) => {
         e.preventDefault();
+        if (cashierEndSubmitting) return;
+        cashierEndSubmitting = true;
         const form = e.currentTarget;
         const submitBtn = form.querySelector('[type=submit]');
         submitBtn.disabled = true;
@@ -2424,6 +2539,7 @@ async function showEndShiftModal() {
           const res = await api('/api/shifts/end', {
             method: 'POST',
             body: JSON.stringify({
+              idempotencyKey: cashierCloseKey,
               shiftId: currentShift.id,
               actualCash: enteredMinor,
               handoverCash: enteredMinor,
@@ -2436,6 +2552,7 @@ async function showEndShiftModal() {
           await loadData(state.data.selectedStoreId);
           render();
         } catch (err) {
+          cashierEndSubmitting = false;
           toast(err.message, 'error');
           submitBtn.disabled = false;
         }
@@ -2497,8 +2614,12 @@ async function showEndShiftModal() {
       }
     });
 
+    let endSubmitting = false;
+    const closeKey = crypto.randomUUID();
     modalBody.querySelector('#end-shift-form')?.addEventListener('submit', async (e) => {
       e.preventDefault();
+      if (endSubmitting) return;
+      endSubmitting = true;
       const form = e.currentTarget;
       const submitBtn = form.querySelector('[type=submit]');
       submitBtn.disabled = true;
@@ -2509,6 +2630,7 @@ async function showEndShiftModal() {
         const res = await api('/api/shifts/end', {
           method: 'POST',
           body: JSON.stringify({
+            idempotencyKey: closeKey,
             shiftId: currentShift.id,
             actualCash: actualMinor,
             handoverCash: handoverMinor,
@@ -2521,6 +2643,7 @@ async function showEndShiftModal() {
         await loadData(state.data.selectedStoreId);
         render();
       } catch (err) {
+        endSubmitting = false;
         toast(err.message, 'error');
         submitBtn.disabled = false;
       }
@@ -3252,7 +3375,7 @@ function topProductsView() {
   const stats = state.productStats;
   const vendors = state.supplierStats;
   const today = localDateIso();
-  const from = state.analyticsFrom ?? (() => { const date = new Date(); date.setDate(date.getDate() - 29); return localDateIso(date); })();
+  const from = state.analyticsFrom ?? shiftIsoDays(today, -29);
   const to = state.analyticsTo ?? today;
   const activeAnalyticsRange = syncPresetWithDates(state.analyticsRange, from, to, ['7d', '30d', 'month', 'year'], null, '30d');
   const section = state.analyticsSection ?? 'all';
@@ -4281,6 +4404,7 @@ function expensesView() {
                 <th>البيان والملاحظات</th>
                 <th>طريقة الدفع</th>
                 <th style="text-align:left;">المبلغ</th>
+                ${state.data.capabilities.canDeleteExpenses ? '<th style="text-align:center;">إجراء</th>' : ''}
               </tr>
             </thead>
             <tbody>
@@ -4291,6 +4415,7 @@ function expensesView() {
                   <td><strong>${escapeHtml(expense.notes || 'مصروف مباشر')}</strong>${expense.referenceNumber ? ` · <span class="sku-code">${escapeHtml(expense.referenceNumber)}</span>` : ''}</td>
                   <td>${expense.paymentMethod === 'CASH_DRAWER' ? 'درج النقدية' : expense.paymentMethod === 'CASH_SAFE' ? 'الخزينة' : 'تحويل بنكي'}</td>
                   <td class="table-total expense-table-amount">${money(expense.amount)}</td>
+                  ${state.data.capabilities.canDeleteExpenses ? `<td style="text-align:center;"><button type="button" class="text-action delete-expense-btn" data-delete-expense="${expense.id}" aria-label="حذف مصروف ${escapeHtml(expense.notes || expense.category)}" style="color:var(--rose, #be123c);font-weight:700;">حذف</button></td>` : ''}
                 </tr>
               `).join('')}
             </tbody>
@@ -4305,6 +4430,65 @@ function expensesView() {
   `;
 }
 
+function computePosCartState() {
+  const currency = state.data?.company?.currency ?? 'EGP';
+  const decimals = state.cart[0]?.price.decimals ?? currencyDecimals(currency);
+  let subtotalMinor = 0n;
+  const qtyErrors = [];
+  let totalPieces = 0n;
+
+  for (const item of state.cart) {
+    const raw = String(item.rawQuantity !== undefined ? item.rawQuantity : item.quantity).trim();
+    if (/^\d{12,14}$/.test(raw)) {
+      qtyErrors.push('تم مسح باركود بالخطأ داخل حقل الكمية — استخدم خانة البحث لقراءة الباركود');
+      continue;
+    }
+    if (!/^[1-9]\d{0,5}$/.test(raw)) {
+      qtyErrors.push(`كمية الصنف "${item.name}" غير صالحة (أدخل رقماً صحيحاً أكبر من صفر بدون كسور أو رموز)`);
+      continue;
+    }
+    const qBig = BigInt(raw);
+    if (item.stockTracked && qBig > BigInt(item.available)) {
+      qtyErrors.push(`الكمية المطلوبة من "${item.name}" (${raw}) أكبر من الرصيد المتاح (${item.available})`);
+      continue;
+    }
+    totalPieces += qBig;
+    subtotalMinor += BigInt(item.price.amount) * qBig;
+  }
+
+  let discountMinor = 0n;
+  let discountError = '';
+  const rawDisc = String(state.cartDiscountRaw ?? '').trim();
+  if (rawDisc && state.cart.length > 0 && state.data?.capabilities?.canDiscount) {
+    if (/^\d{12,14}$/.test(rawDisc)) {
+      discountError = 'يبدو أنه تم مسح باركود بالخطأ داخل حقل الخصم — يرجى المسح في خانة البحث';
+    } else {
+      try {
+        discountMinor = BigInt(toMinor(rawDisc, decimals));
+        if (discountMinor < 0n) discountError = 'الخصم لا يمكن أن يكون سالباً';
+        else if (discountMinor >= subtotalMinor && subtotalMinor > 0n) discountError = 'الخصم يجب أن يكون أقل من إجمالي الفاتورة';
+      } catch (err) {
+        discountError = err.message || 'قيمة الخصم غير صالحة';
+      }
+    }
+  } else if (rawDisc && state.cart.length > 0 && !state.data?.capabilities?.canDiscount) {
+    discountError = 'غير مصرح بتطبيق خصم على الفاتورة';
+  }
+
+  const totalMinor = subtotalMinor > discountMinor ? subtotalMinor - discountMinor : 0n;
+  const errorMessage = qtyErrors[0] || discountError || '';
+  return {
+    currency,
+    decimals,
+    subtotalMinor,
+    discountMinor,
+    totalMinor,
+    totalPieces,
+    errorMessage,
+    hasError: Boolean(errorMessage),
+  };
+}
+
 function posView() {
   const selectedCategory = state.posCategory ?? null;
   const query = state.query.trim().toLowerCase();
@@ -4313,12 +4497,13 @@ function posView() {
     .filter((product) => !selectedCategory || product.categoryId === selectedCategory)
     .map((product) => ({ ...product, matrix: extractProductMatrix(product), variants: product.variants.filter((variant) => variant.isActive) }))
     .filter((product) => product.variants.length && (!query || `${product.name} ${product.sku} ${product.brand ?? ''} ${product.variants.map((variant) => `${variant.sku} ${variant.barcode ?? ''} ${Object.values(variant.attributes ?? {}).join(' ')}`).join(' ')}`.toLowerCase().includes(query)));
-  const totalMinor = state.cart.reduce((sum, item) => sum + BigInt(item.price.amount) * BigInt(item.quantity), 0n);
-  const currency = state.data.company.currency;
-  const decimals = state.cart[0]?.price.decimals ?? currencyDecimals(currency);
+  const cartState = computePosCartState();
+  const { currency, decimals, subtotalMinor, discountMinor, totalMinor, totalPieces, errorMessage, hasError } = cartState;
   const total = { amount: totalMinor.toString(), currency, decimals };
+  const discountMoneyObj = { amount: discountMinor.toString(), currency, decimals };
   const activeShift = state.data.activeShift;
   const mustStartShift = !activeShift;
+  const canDiscount = Boolean(state.data.capabilities?.canDiscount);
   const shiftBanner = activeShift ? `
     <div class="pos-shift-banner pos-shift-banner-active">
       <div class="pos-shift-meta">
@@ -4350,7 +4535,7 @@ function posView() {
   for (const prod of state.data.products ?? []) {
     for (const v of prod.variants ?? []) productByVariantId.set(v.id, prod);
   }
-  return `<div class="pos-layout"><section class="pos-catalog">${shiftBanner}<div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>${mustStartShift ? 'ابدأ الشيفت أولاً لإتاحة اختيار المنتجات وإتمام البيع.' : 'ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.'}</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="${mustStartShift ? 'ابدأ الشيفت أولاً لتفعيل نقطة البيع...' : 'ابحث باسم الموديل أو كود الموديل أو الباركود'}" value="${escapeHtml(state.query)}" ${mustStartShift ? 'disabled' : 'autofocus'}><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="">كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}">${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products" style="${mustStartShift ? 'opacity:0.55;' : ''}">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const pricingSummary = summarizeProductPricing(product); const price = pricingSummary.labelText; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${(mustStartShift || (product.itemKind === 'PRODUCT' && stock <= 0n)) ? 'disabled' : ''}><span class="pos-product-art ${product.imagePath ? 'has-image' : `art-${index % 6}`}">${product.imagePath ? renderProductThumb(product, '', 'pos-product-thumb') : icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${escapeHtml(price)}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${mustStartShift ? `<div class="cart-empty"><span class="cart-empty-icon cart-empty-icon-shift">${icon('clock', 23)}</span><strong>يجب بدء الشيفت أولاً</strong><p>لا يمكن إجراء أي عملية بيع قبل تسجيل بدء الشيفت واستلام الدرج.</p><button type="button" id="cart-start-shift-btn" class="button button-sm shift-start-cta" style="margin-top:12px;">${icon('play', 15)}<span>بدء الشيفت الآن</span></button></div>` : state.cart.length ? state.cart.map((item) => { const matchedProd = productByVariantId.get(item.variantId); return `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art ${matchedProd?.imagePath ? 'has-image' : ''}">${matchedProd?.imagePath ? renderProductThumb(matchedProd, icon('box', 16), 'cart-line-thumb') : icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button type="button" aria-label="إنقاص الكمية" data-qty="${item.variantId}" data-delta="-1">−</button><span>${item.quantity}</span><button type="button" aria-label="زيادة الكمية" data-qty="${item.variantId}" data-delta="1">+</button></div><strong>${money({ ...item.price, amount: (BigInt(item.price.amount) * BigInt(item.quantity)).toString() })}</strong></div></div>`; }).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة بالبحث أو اللمس (أو بالباركود إن وجد) عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong>${state.cart.reduce((sum, item) => sum + item.quantity, 0)}</strong></div><div><span>الخصم</span><strong>${money({ ...total, amount: '0' })}</strong></div><div class="cart-grand-total"><span>الإجمالي المستحق</span><strong>${money(total)}</strong></div></div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}" ${mustStartShift ? 'disabled' : ''}><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button ${mustStartShift ? 'checkout-button-locked' : ''}" ${(!mustStartShift && state.cart.length && !state.isSaving) ? '' : 'disabled'}><span>${mustStartShift ? 'ابدأ الشيفت أولاً' : 'إتمام البيع'}</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
+  return `<div class="pos-layout"><section class="pos-catalog">${shiftBanner}<div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>${mustStartShift ? 'ابدأ الشيفت أولاً لإتاحة اختيار المنتجات وإتمام البيع.' : 'ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.'}</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="${mustStartShift ? 'ابدأ الشيفت أولاً لتفعيل نقطة البيع...' : 'ابحث باسم الموديل أو كود الموديل أو الباركود'}" value="${escapeHtml(state.query)}" ${mustStartShift ? 'disabled' : 'autofocus'}><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="">كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}">${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products" style="${mustStartShift ? 'opacity:0.55;' : ''}">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const pricingSummary = summarizeProductPricing(product); const price = pricingSummary.labelText; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${(mustStartShift || (product.itemKind === 'PRODUCT' && stock <= 0n)) ? 'disabled' : ''}><span class="pos-product-art ${product.imagePath ? 'has-image' : `art-${index % 6}`}">${product.imagePath ? renderProductThumb(product, '', 'pos-product-thumb') : icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${escapeHtml(price)}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${mustStartShift ? `<div class="cart-empty"><span class="cart-empty-icon cart-empty-icon-shift">${icon('clock', 23)}</span><strong>يجب بدء الشيفت أولاً</strong><p>لا يمكن إجراء أي عملية بيع قبل تسجيل بدء الشيفت واستلام الدرج.</p><button type="button" id="cart-start-shift-btn" class="button button-sm shift-start-cta" style="margin-top:12px;">${icon('play', 15)}<span>بدء الشيفت الآن</span></button></div>` : state.cart.length ? state.cart.map((item) => { const matchedProd = productByVariantId.get(item.variantId); const valAttr = item.rawQuantity !== undefined ? item.rawQuantity : String(item.quantity); const lineTotalMinor = (/^[1-9]\d{0,5}$/.test(String(valAttr).trim())) ? (BigInt(item.price.amount) * BigInt(String(valAttr).trim())).toString() : '0'; return `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art ${matchedProd?.imagePath ? 'has-image' : ''}">${matchedProd?.imagePath ? renderProductThumb(matchedProd, icon('box', 16), 'cart-line-thumb') : icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button type="button" aria-label="إنقاص الكمية" data-qty="${item.variantId}" data-delta="-1">−</button><input type="text" inputmode="numeric" class="cart-qty-input" data-qty-input="${item.variantId}" aria-label="كمية ${escapeHtml(item.name)}" value="${escapeHtml(valAttr)}" style="width:46px;text-align:center;font-weight:800;border:1px solid var(--line);border-radius:7px;padding:2px 4px;background:var(--surface);color:var(--ink);font-size:13px;"><button type="button" aria-label="زيادة الكمية" data-qty="${item.variantId}" data-delta="1">+</button></div><strong data-line-total="${item.variantId}">${money({ ...item.price, amount: lineTotalMinor })}</strong></div></div>`; }).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة بالبحث أو اللمس (أو بالباركود إن وجد) عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong id="pos-total-pieces">${totalPieces.toString()}</strong></div><div><span>الإجمالي الفرعي</span><strong id="pos-subtotal-summary">${money({ amount: subtotalMinor.toString(), currency, decimals })}</strong></div>${canDiscount ? `<div style="align-items:center;"><span>خصم الفاتورة (${currency})</span><input type="text" id="pos-discount-input" inputmode="decimal" aria-label="خصم الفاتورة" placeholder="0.00" value="${escapeHtml(state.cartDiscountRaw)}" ${(!mustStartShift && state.cart.length) ? '' : 'disabled'} style="width:110px;text-align:left;font-weight:700;border:1px solid var(--line);border-radius:8px;padding:4px 8px;background:var(--surface);color:var(--ink);"></div>` : `<div><span>الخصم</span><strong id="pos-discount-summary">${money(discountMoneyObj)}</strong></div>`}<div class="cart-grand-total"><span>الإجمالي المستحق</span><strong id="pos-grand-total">${money(total)}</strong></div></div><div id="pos-input-error" role="alert" style="${hasError ? 'display:block;' : 'display:none;'}margin-bottom:10px;padding:8px 10px;border-radius:8px;background:rgba(190,18,60,0.09);border:1px solid rgba(190,18,60,0.3);color:#be123c;font-size:12px;font-weight:700;">${escapeHtml(errorMessage)}</div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}" ${mustStartShift ? 'disabled' : ''}><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button ${mustStartShift ? 'checkout-button-locked' : ''}" ${(!mustStartShift && state.cart.length && !state.isSaving && !hasError) ? '' : 'disabled'}><span>${mustStartShift ? 'ابدأ الشيفت أولاً' : 'إتمام البيع'}</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
 }
 
 function supplierModal(html, formId, endpoint, convert = (data) => data, successMessage = 'تم حفظ الحركة في سجل التاجر') {
@@ -4360,8 +4545,11 @@ function supplierModal(html, formId, endpoint, convert = (data) => data, success
   root.innerHTML = `<div class="modal-backdrop"><section class="modal-card ${formId === 'purchase-form' ? 'product-variants-modal' : ''}" role="dialog" aria-modal="true"><div class="modal-heading"><h2>${formId === 'supplier-form' ? 'إضافة تاجر' : formId === 'purchase-form' ? 'تسجيل فاتورة شراء من تاجر (نظام الموديل والألوان والمقاسات)' : formId === 'expense-form' ? 'تسجيل مصروف' : formId === 'return-form' ? 'تسجيل مرتجع مرتبط بالفاتورة' : formId === 'supplier-return-form' ? 'تسجيل مرتجع للمورد' : formId === 'monthly-obligation-form' ? 'إضافة التزام شهري' : formId === 'monthly-actual-form' ? 'تأكيد المصروف الفعلي' : 'تسجيل سداد'}</h2><button type="button" class="modal-close" data-close-modal aria-label="إغلاق">×</button></div><form id="${formId}" class="form-stack modal-form">${html}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">${submitText}</button></div></form></section></div>`;
   root.querySelectorAll('[data-close-modal]').forEach((button) => button.addEventListener('click', () => { root.innerHTML = ''; }));
   // Modal backdrop click dismissal disabled: tapping outside does NOT discard the popup.
+  let isSubmitting = false;
   root.querySelector(`#${formId}`).addEventListener('submit', async (event) => {
     event.preventDefault();
+    if (isSubmitting) return;
+    isSubmitting = true;
     const button = event.currentTarget.querySelector('[type=submit]'); button.disabled = true;
     try {
       const data = convert(Object.fromEntries(new FormData(event.currentTarget)));
@@ -4371,7 +4559,7 @@ function supplierModal(html, formId, endpoint, convert = (data) => data, success
       await loadData(state.data.selectedStoreId);
       render();
       toast(successMessage);
-    } catch (error) { toast(error.message, 'error'); button.disabled = false; }
+    } catch (error) { isSubmitting = false; toast(error.message, 'error'); button.disabled = false; }
   });
 }
 
@@ -4429,6 +4617,21 @@ function bindExpenses() {
 
   document.querySelector('#new-expense')?.addEventListener('click', openExpenseModal);
   document.querySelector('#new-expense-table-btn')?.addEventListener('click', openExpenseModal);
+  document.querySelectorAll('.delete-expense-btn').forEach((btn) => btn.addEventListener('click', async () => {
+    const expenseId = btn.dataset.deleteExpense;
+    if (!expenseId) return;
+    btn.disabled = true;
+    try {
+      await api(`/api/expenses/${encodeURIComponent(expenseId)}`, { method: 'DELETE' });
+      invalidateFinancialCaches();
+      await loadData(state.data.selectedStoreId);
+      render();
+      toast('تم حذف المصروف وإعادة احتساب الأرباح والمسار المالي بنجاح');
+    } catch (err) {
+      btn.disabled = false;
+      toast(err.message, 'error');
+    }
+  }));
 }
 
 async function fetchPurchasesHistory(offset, append, button = null) {
@@ -5555,6 +5758,7 @@ function showSaleDetails(sale) {
         <div class="modal-actions" style="display:flex;justify-content:space-between;align-items:center;">
           <button class="button button-secondary" data-close-modal>إغلاق</button>
           <div style="display:flex;align-items:center;gap:10px;">
+            ${canReturn ? '<button class="button button-secondary" type="button" id="invoice-start-exchange-btn" style="color:var(--purple);border-color:var(--purple);font-weight:700;">استبدال صنف / مقاس</button>' : ''}
             ${canReturn ? '<button class="button button-secondary" type="button" id="invoice-start-return-btn" style="color:var(--rose,var(--rose, #be123c));border-color:var(--rose,var(--rose, #be123c));font-weight:700;">عمل مرتجع من هذه الفاتورة</button>' : ''}
             <button class="button button-primary" type="button" data-print-invoice>طباعة الفاتورة</button>
           </div>
@@ -5564,8 +5768,235 @@ function showSaleDetails(sale) {
   `;
   root.querySelectorAll('[data-close-modal]').forEach((button) => button.addEventListener('click', () => { root.innerHTML = ''; }));
   root.querySelector('[data-print-invoice]')?.addEventListener('click', () => void showThermalReceiptModal(sale.id));
+  root.querySelector('#invoice-start-exchange-btn')?.addEventListener('click', () => {
+    void showSaleExchangeModal(sale);
+  });
   root.querySelector('#invoice-start-return-btn')?.addEventListener('click', () => {
     openSaleReturnModal(sale);
+  });
+}
+
+async function showSaleExchangeModal(saleOrId) {
+  if (!state.data?.activeShift) {
+    toast('يجب بدء الشيفت أولاً قبل إجراء الاستبدال', 'error');
+    showStartShiftModal();
+    return;
+  }
+  let sale = typeof saleOrId === 'object' && saleOrId ? saleOrId : null;
+  const saleId = typeof saleOrId === 'string' ? saleOrId : sale?.id;
+  if (!sale || !sale.items || !sale.items[0] || sale.items[0].returnableQuantity === undefined) {
+    try {
+      const res = await api(`/api/sales/${encodeURIComponent(saleId)}`);
+      sale = res.payload;
+    } catch (err) {
+      toast(err.message, 'error');
+      return;
+    }
+  }
+
+  const returnableItems = (sale.items ?? []).filter((item) => BigInt(item.returnableQuantity ?? '0') > 0n);
+  if (!returnableItems.length) {
+    toast('جميع أصناف هذه الفاتورة تم إرجاعها أو استبدالها بالفعل', 'error');
+    return;
+  }
+
+  const replacementChoices = [];
+  for (const prod of state.data.products ?? []) {
+    if (!prod.isActive) continue;
+    for (const v of prod.variants ?? []) {
+      if (!v.isActive) continue;
+      const priceMinor = BigInt(v.retailPrice?.amount ?? v.price?.amount ?? '0');
+      const avail = BigInt(v.quantity ?? '0');
+      if (priceMinor <= 0n) continue;
+      if (prod.itemKind === 'PRODUCT' && avail <= 0n) continue;
+      const attrLabel = formatVariantAttributes(prod, v.attributes, '');
+      replacementChoices.push({
+        variantId: v.id,
+        label: `${prod.name}${attrLabel ? ` (${attrLabel})` : ''} · ${v.sku}`,
+        priceMinor,
+        available: avail,
+        stockTracked: prod.itemKind === 'PRODUCT',
+      });
+    }
+  }
+  if (!replacementChoices.length) {
+    toast('لا توجد أصناف بديلة متاحة بالمخزون وسعر البيع حالياً', 'error');
+    return;
+  }
+
+  const root = getModalRoot();
+  const currency = sale.total?.currency || state.data.company.currency;
+  const decimals = sale.total?.decimals ?? currencyDecimals(currency);
+  const fmt = (minor) => money({ amount: minor.toString(), currency, decimals });
+
+  root.innerHTML = `
+    <div class="modal-backdrop">
+      <section class="modal-card invoice-detail-card" role="dialog" aria-modal="true" aria-labelledby="exchange-modal-title">
+        <div class="modal-heading" style="padding:18px 26px; border-bottom:1px solid var(--line);">
+          <div>
+            <span class="eyebrow eyebrow-dark">استبدال صنف / مقاس مع حفظ تاريخ الشيفتات السابقة</span>
+            <div style="display:flex;align-items:center;gap:8px;margin-top:2px;">
+              <h2 id="exchange-modal-title" style="margin:0;font-size:18px;font-weight:800;">استبدال صنف من فاتورة</h2>
+              <span class="invoice-number-chip">#${escapeHtml(sale.saleNumber)}</span>
+            </div>
+          </div>
+          <button type="button" class="modal-close" data-close-exchange aria-label="إغلاق">×</button>
+        </div>
+
+        <form id="sale-exchange-form" class="modal-form" style="padding:22px 26px; display:flex; flex-direction:column; gap:14px;">
+          <div class="form-grid">
+            <label>الصنف المرجع من الفاتورة
+              <select name="originalSaleItemId" id="ex-old-item">
+                ${returnableItems.map((it) => `<option value="${it.id}">${escapeHtml(it.name)} (متاح: ${it.returnableQuantity})</option>`).join('')}
+              </select>
+            </label>
+            <label>كمية الاسترجاع
+              <input type="number" name="returnQuantity" id="ex-old-qty" min="1" max="${returnableItems[0].returnableQuantity}" step="1" value="1" required>
+            </label>
+          </div>
+
+          <div class="form-grid">
+            <label>الصنف / المقاس / اللون البديل
+              <select name="replacementVariantId" id="ex-new-variant">
+                ${replacementChoices.map((c) => `<option value="${c.variantId}">${escapeHtml(c.label)} — ${escapeHtml(fmt(c.priceMinor))} (${c.stockTracked ? `متاح ${c.available}` : 'خدمة'})</option>`).join('')}
+              </select>
+            </label>
+            <label>الكمية البديلة
+              <input type="number" name="replacementQuantity" id="ex-new-qty" min="1" max="${replacementChoices[0].stockTracked ? replacementChoices[0].available.toString() : '999'}" step="1" value="1" required>
+            </label>
+          </div>
+
+          <div class="invoice-clean-summary" style="margin:0; padding:16px 20px; border-radius:12px;">
+            <div class="summary-line"><span>قيمة الرصيد المرجع (صافي الفاتورة):</span><strong id="ex-old-credit">0.00 ${currency}</strong></div>
+            <div class="summary-line"><span>سعر الصنف البديل:</span><strong id="ex-new-total">0.00 ${currency}</strong></div>
+            <div class="summary-line main-total"><span>فرق السعر في الدرج:</span><strong id="ex-diff-label">0.00 ${currency}</strong></div>
+          </div>
+
+          <div class="form-grid">
+            <label>طريقة تسوية الفرق بالشيفت الحالي
+              <select name="paymentMethod">
+                <option value="CASH">نقدي (درج النقدية)</option>
+                <option value="CARD">بطاقة</option>
+                <option value="MOBILE">محفظة إلكترونية</option>
+              </select>
+            </label>
+            <label>ملاحظات (اختياري)
+              <input name="notes" maxlength="300" placeholder="تبديل مقاس أو لون">
+            </label>
+          </div>
+
+          <div id="ex-error-box" role="alert" style="display:none;padding:8px 12px;border-radius:8px;background:rgba(190,18,60,0.09);color:#be123c;font-weight:700;font-size:12.5px;"></div>
+
+          <div class="modal-actions" style="margin:0; padding:16px 0 0; border-top:1px solid var(--line); display:flex; justify-content:space-between; align-items:center;">
+            <button type="button" class="button button-secondary" data-close-exchange>إلغاء</button>
+            <button type="submit" class="button button-primary" id="confirm-exchange-btn">تأكيد الاستبدال</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  `;
+
+  const close = () => { root.innerHTML = ''; };
+  root.querySelectorAll('[data-close-exchange]').forEach((b) => b.addEventListener('click', close));
+
+  const form = root.querySelector('#sale-exchange-form');
+  const oldSel = form.querySelector('#ex-old-item');
+  const oldQtyEl = form.querySelector('#ex-old-qty');
+  const newSel = form.querySelector('#ex-new-variant');
+  const newQtyEl = form.querySelector('#ex-new-qty');
+  const oldCreditEl = form.querySelector('#ex-old-credit');
+  const newTotalEl = form.querySelector('#ex-new-total');
+  const diffLabelEl = form.querySelector('#ex-diff-label');
+  const errBox = form.querySelector('#ex-error-box');
+  const confirmBtn = form.querySelector('#confirm-exchange-btn');
+
+  const itemRefundFor = (item, qtyBig) => {
+    const soldQty = BigInt(item.quantity ?? '0');
+    const remQty = BigInt(item.returnableQuantity ?? '0');
+    const origNet = BigInt(item.netRevenue?.amount ?? (BigInt(item.unitPrice.amount) * soldQty).toString());
+    const netAfter = BigInt(item.netRevenueAfterReturn?.amount ?? origNet.toString());
+    const alreadyRef = origNet - netAfter;
+    if (qtyBig <= 0n || qtyBig > remQty) return 0n;
+    return qtyBig === remQty ? (origNet - alreadyRef) : ((origNet * qtyBig) / soldQty);
+  };
+
+  const syncExchange = () => {
+    const oldItem = returnableItems.find((i) => i.id === oldSel.value) ?? returnableItems[0];
+    const newChoice = replacementChoices.find((c) => c.variantId === newSel.value) ?? replacementChoices[0];
+    if (oldItem) oldQtyEl.max = oldItem.returnableQuantity;
+    if (newChoice && newChoice.stockTracked) newQtyEl.max = newChoice.available.toString();
+
+    const oldStr = String(oldQtyEl.value ?? '').trim();
+    const newStr = String(newQtyEl.value ?? '').trim();
+    let errMsg = '';
+    if (!/^[1-9]\d{0,5}$/.test(oldStr) || BigInt(oldStr) > BigInt(oldItem.returnableQuantity)) {
+      errMsg = 'كمية الاسترجاع غير صالحة';
+    } else if (!/^[1-9]\d{0,5}$/.test(newStr) || (newChoice.stockTracked && BigInt(newStr) > newChoice.available)) {
+      errMsg = 'الكمية البديلة غير صالحة أو تتجاوز المتاح في المخزون';
+    }
+
+    if (errMsg) {
+      errBox.textContent = errMsg;
+      errBox.style.display = 'block';
+      confirmBtn.disabled = true;
+      return;
+    }
+    errBox.style.display = 'none';
+    confirmBtn.disabled = false;
+
+    const oldCredit = itemRefundFor(oldItem, BigInt(oldStr));
+    const newTotal = newChoice.priceMinor * BigInt(newStr);
+    const diff = newTotal - oldCredit;
+    oldCreditEl.textContent = fmt(oldCredit);
+    newTotalEl.textContent = fmt(newTotal);
+    if (diff > 0n) {
+      diffLabelEl.textContent = `يدفع العميل فرق: +${fmt(diff)}`;
+      diffLabelEl.style.color = 'var(--green, #15803d)';
+    } else if (diff < 0n) {
+      diffLabelEl.textContent = `يُرد للعميل فرق: -${fmt(-diff)}`;
+      diffLabelEl.style.color = 'var(--rose, #be123c)';
+    } else {
+      diffLabelEl.textContent = `استبدال متكافئ (0.00 ${currency})`;
+      diffLabelEl.style.color = 'var(--ink)';
+    }
+  };
+
+  oldSel.addEventListener('change', syncExchange);
+  oldQtyEl.addEventListener('input', syncExchange);
+  newSel.addEventListener('change', syncExchange);
+  newQtyEl.addEventListener('input', syncExchange);
+  syncExchange();
+
+  let isSubmitting = false;
+  const exchangeIdempotencyKey = crypto.randomUUID();
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (isSubmitting) return;
+    isSubmitting = true;
+    confirmBtn.disabled = true;
+    try {
+      const fd = new FormData(form);
+      const res = await api(`/api/sales/${encodeURIComponent(sale.id)}/exchange`, {
+        method: 'POST',
+        body: JSON.stringify({
+          idempotencyKey: exchangeIdempotencyKey,
+          storeId: state.data.selectedStoreId,
+          paymentMethod: String(fd.get('paymentMethod') || 'CASH'),
+          returnedItems: [{ originalSaleItemId: String(fd.get('originalSaleItemId')), quantity: String(fd.get('returnQuantity')).trim() }],
+          replacementItems: [{ variantId: String(fd.get('replacementVariantId')), quantity: String(fd.get('replacementQuantity')).trim() }],
+          notes: String(fd.get('notes') || '').trim() || undefined,
+        }),
+      });
+      invalidateFinancialCaches();
+      await loadData(state.data.selectedStoreId);
+      close();
+      render();
+      toast(`تم الاستبدال بنجاح: مرتجع ${res.returnNumber} وفاتورة بديلة ${res.saleNumber}`);
+    } catch (err) {
+      isSubmitting = false;
+      confirmBtn.disabled = false;
+      toast(err.message, 'error');
+    }
   });
 }
 
@@ -5691,28 +6122,69 @@ async function openSaleReturnModal(saleOrId) {
   const totalPiecesEl = root.querySelector('#return-total-pieces');
   const totalAmountEl = root.querySelector('#return-total-amount');
 
+  const calcItemReturnMinor = (item, qtyBig) => {
+    if (qtyBig <= 0n) return 0n;
+    const soldQty = BigInt(item.quantity ?? '0');
+    const remQty = BigInt(item.returnableQuantity ?? '0');
+    const origNet = BigInt(item.netRevenue?.amount ?? (BigInt(item.unitPrice.amount) * soldQty).toString());
+    const netAfter = BigInt(item.netRevenueAfterReturn?.amount ?? origNet.toString());
+    const alreadyRefunded = origNet - netAfter;
+    return qtyBig === remQty ? (origNet - alreadyRefunded) : ((origNet * qtyBig) / soldQty);
+  };
+
+  let dirtyErrorEl = root.querySelector('#return-dirty-error');
+  if (!dirtyErrorEl) {
+    dirtyErrorEl = document.createElement('div');
+    dirtyErrorEl.id = 'return-dirty-error';
+    dirtyErrorEl.setAttribute('role', 'alert');
+    dirtyErrorEl.style.cssText = 'display:none;padding:8px 12px;border-radius:8px;background:rgba(190,18,60,0.09);color:#be123c;font-weight:700;font-size:12.5px;';
+    confirmBtn?.parentElement?.before(dirtyErrorEl);
+  }
+
   const updateCalculations = () => {
     let totalPieces = 0n;
     let totalMinor = 0n;
+    let dirtyErr = '';
     returnableItems.forEach((item) => {
       const input = form.querySelector(`input[name="qty:${item.id}"]`);
-      const val = Math.max(0, Math.min(Number(item.returnableQuantity), Math.floor(Number(input.value) || 0)));
-      input.value = val;
-      const qty = BigInt(val);
-      const price = BigInt(item.unitPrice.amount);
-      const lineMinor = qty * price;
-      totalPieces += qty;
-      totalMinor += lineMinor;
+      const raw = String(input.value ?? '').trim();
       const lineRefundEl = root.querySelector(`[data-item-refund="${item.id}"]`);
+      if (raw === '' || raw === '0') {
+        if (lineRefundEl) lineRefundEl.textContent = money({ amount: '0', currency, decimals });
+        return;
+      }
+      if (/^\d{12,14}$/.test(raw)) {
+        dirtyErr = 'تم مسح باركود بالخطأ داخل خانة كمية المرتجع';
+        if (lineRefundEl) lineRefundEl.textContent = '—';
+        return;
+      }
+      if (!/^\d{1,6}$/.test(raw)) {
+        dirtyErr = `الكمية المدخلة للصنف "${item.name}" غير صالحة (أدخل رقماً صحيحاً فقط بدون كسور أو رموز)`;
+        if (lineRefundEl) lineRefundEl.textContent = '—';
+        return;
+      }
+      const valBig = BigInt(raw);
+      if (valBig > BigInt(item.returnableQuantity)) {
+        dirtyErr = `الكمية المطلوب إرجاعها من "${item.name}" تتجاوز المتاح (${item.returnableQuantity})`;
+        if (lineRefundEl) lineRefundEl.textContent = '—';
+        return;
+      }
+      const lineMinor = calcItemReturnMinor(item, valBig);
+      totalPieces += valBig;
+      totalMinor += lineMinor;
       if (lineRefundEl) lineRefundEl.textContent = money({ amount: lineMinor.toString(), currency, decimals });
     });
 
+    dirtyErrorEl.textContent = dirtyErr;
+    dirtyErrorEl.style.display = dirtyErr ? 'block' : 'none';
     totalPiecesEl.textContent = `${totalPieces} قطعة`;
     totalAmountEl.textContent = money({ amount: totalMinor.toString(), currency, decimals });
-    confirmBtn.disabled = totalPieces <= 0n;
-    confirmBtn.textContent = totalPieces > 0n
-      ? `↩️ تأكيد إرجاع (${totalPieces} قطعة) بمبلغ ${money({ amount: totalMinor.toString(), currency, decimals })}`
-      : 'حدد قطعة واحدة على الأقل للإرجاع';
+    confirmBtn.disabled = Boolean(dirtyErr) || totalPieces <= 0n;
+    confirmBtn.textContent = dirtyErr
+      ? 'تحقق من الكمية المدخلة'
+      : totalPieces > 0n
+        ? `↩️ تأكيد إرجاع (${totalPieces} قطعة) بمبلغ ${money({ amount: totalMinor.toString(), currency, decimals })}`
+        : 'حدد قطعة واحدة على الأقل للإرجاع';
   };
 
   root.querySelectorAll('[data-return-step]').forEach((btn) => {
@@ -5728,21 +6200,27 @@ async function openSaleReturnModal(saleOrId) {
     input.addEventListener('input', updateCalculations);
   });
 
+  let returnSubmitting = false;
+  const returnIdempotencyKey = crypto.randomUUID();
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (returnSubmitting) return;
+    updateCalculations();
+    if (confirmBtn.disabled) return;
+    returnSubmitting = true;
     confirmBtn.disabled = true;
     try {
       const items = returnableItems
         .map((item) => ({
           originalSaleItemId: item.id,
-          quantity: form.querySelector(`input[name="qty:${item.id}"]`).value,
+          quantity: String(form.querySelector(`input[name="qty:${item.id}"]`).value ?? '').trim() || '0',
         }))
-        .filter((item) => BigInt(item.quantity) > 0n);
+        .filter((item) => /^\d+$/.test(item.quantity) && BigInt(item.quantity) > 0n);
 
       if (!items.length) throw new Error('حدد صنفًا واحدًا على الأقل للمرتجع');
 
       const body = {
-        idempotencyKey: crypto.randomUUID(),
+        idempotencyKey: returnIdempotencyKey,
         storeId: state.data.selectedStoreId,
         paymentMethod: form.elements.namedItem('paymentMethod').value,
         items,
@@ -5759,6 +6237,7 @@ async function openSaleReturnModal(saleOrId) {
       render();
       toast('تم تسجيل المرتجع بنجاح وتحديث أرصدة المخزون وكافة الحسابات');
     } catch (err) {
+      returnSubmitting = false;
       toast(err.message, 'error');
       confirmBtn.disabled = false;
     }
@@ -6110,9 +6589,21 @@ function bindShell() {
       btn.disabled = false;
     }
   });
+  document.querySelector('#dismiss-access-denied')?.addEventListener('click', () => {
+    state.accessDeniedNotice = '';
+    render();
+  });
   document.querySelectorAll('[data-page]').forEach((button) => button.addEventListener('click', async () => {
     closeAccountMenu();
-    state.page = button.dataset.page;
+    const targetPage = button.dataset.page;
+    if (!isPageAuthorized(targetPage)) {
+      state.accessDeniedNotice = 'غير مصرح بالوصول إلى هذه الصفحة بهذه الصلاحية';
+      toast(state.accessDeniedNotice, 'error');
+      render();
+      return;
+    }
+    state.accessDeniedNotice = '';
+    state.page = targetPage;
     state.query = '';
     render();
   }));
@@ -6144,6 +6635,9 @@ function bindShell() {
     state.user = null;
     state.data = null;
     state.cart = [];
+    state.cartDiscountRaw = '';
+    state.cartIdempotencyKey = null;
+    state.accessDeniedNotice = '';
     state.shiftPreset = 'today';
     state.shiftFrom = null;
     state.shiftTo = null;
@@ -6631,11 +7125,10 @@ function bindBackups() {
 }
 
 function computePresetRange(preset) {
-  const now = new Date();
-  const to = localDateIso(now);
+  const to = localDateIso();
   if (preset === 'today') return { from: to, to };
-  if (preset === '7d') { const d = new Date(now); d.setDate(d.getDate() - 6); return { from: localDateIso(d), to }; }
-  if (preset === '30d') { const d = new Date(now); d.setDate(d.getDate() - 29); return { from: localDateIso(d), to }; }
+  if (preset === '7d') return { from: shiftIsoDays(to, -6), to };
+  if (preset === '30d') return { from: shiftIsoDays(to, -29), to };
   if (preset === 'month') return { from: `${to.slice(0, 7)}-01`, to };
   if (preset === 'year') return { from: `${to.slice(0, 4)}-01-01`, to };
   return { from: to, to };
@@ -6643,20 +7136,16 @@ function computePresetRange(preset) {
 
 function computeHistoryPresetRange(preset, weekStyle = 'rolling7') {
   if (preset === 'all' || !preset) return { from: '', to: '' };
-  const now = new Date();
-  const to = localDateIso(now);
+  const to = localDateIso();
   if (preset === 'today') return { from: to, to };
   if (preset === 'week') {
-    const d = new Date(now);
-    if (weekStyle === 'weekMonday') {
-      const day = d.getDay();
-      d.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
-    } else if (weekStyle === 'weekSunday') {
-      d.setDate(d.getDate() - d.getDay());
-    } else {
-      d.setDate(d.getDate() - 7);
-    }
-    return { from: localDateIso(d), to };
+    const dow = new Date(`${to}T12:00:00Z`).getUTCDay();
+    const delta = weekStyle === 'weekMonday'
+      ? -(dow === 0 ? 6 : dow - 1)
+      : weekStyle === 'weekSunday'
+        ? -dow
+        : -7;
+    return { from: shiftIsoDays(to, delta), to };
   }
   if (preset === 'month') return { from: `${to.slice(0, 7)}-01`, to };
   if (preset === 'year') return { from: `${to.slice(0, 4)}-01-01`, to };
@@ -6753,7 +7242,7 @@ function bindTopProducts() {
   });
   const today = localDateIso();
   state.analyticsTo ??= today;
-  if (!state.analyticsFrom) { const start = new Date(); start.setDate(start.getDate() - 29); state.analyticsFrom = localDateIso(start); }
+  if (!state.analyticsFrom) { state.analyticsFrom = shiftIsoDays(today, -29); }
   const key = `${state.data.selectedStoreId}:${state.analyticsFrom}:${state.analyticsTo}`;
   if (state.analyticsKey === key) return;
   state.analyticsKey = key;
@@ -7882,9 +8371,43 @@ function showPosProductPickerModal(product) {
   }));
 }
 
+function syncPosTotalsDom() {
+  const cartState = computePosCartState();
+  const { currency, decimals, subtotalMinor, discountMinor, totalMinor, totalPieces, errorMessage, hasError } = cartState;
+  const piecesEl = document.querySelector('#pos-total-pieces');
+  const subtotalEl = document.querySelector('#pos-subtotal-summary');
+  const discSummaryEl = document.querySelector('#pos-discount-summary');
+  const grandEl = document.querySelector('#pos-grand-total');
+  const errEl = document.querySelector('#pos-input-error');
+  const checkoutBtn = document.querySelector('#checkout-button');
+  if (piecesEl) piecesEl.textContent = totalPieces.toString();
+  if (subtotalEl) subtotalEl.textContent = money({ amount: subtotalMinor.toString(), currency, decimals });
+  if (discSummaryEl) discSummaryEl.textContent = money({ amount: discountMinor.toString(), currency, decimals });
+  if (grandEl) grandEl.textContent = money({ amount: totalMinor.toString(), currency, decimals });
+  if (checkoutBtn) {
+    const strong = checkoutBtn.querySelector('strong');
+    if (strong) strong.textContent = money({ amount: totalMinor.toString(), currency, decimals });
+    checkoutBtn.disabled = Boolean(!state.data?.activeShift || !state.cart.length || state.isSaving || hasError);
+  }
+  if (errEl) {
+    errEl.textContent = errorMessage;
+    errEl.style.display = hasError ? 'block' : 'none';
+  }
+  for (const item of state.cart) {
+    const raw = String(item.rawQuantity !== undefined ? item.rawQuantity : item.quantity).trim();
+    const lineEl = document.querySelector(`[data-line-total="${item.variantId}"]`);
+    if (lineEl) {
+      const lineMinor = /^[1-9]\d{0,5}$/.test(raw) ? (BigInt(item.price.amount) * BigInt(raw)).toString() : '0';
+      lineEl.textContent = money({ ...item.price, amount: lineMinor });
+    }
+  }
+}
+
 function bindPos() {
   const search = document.querySelector('#pos-search');
-  search?.focus();
+  if (search && document.activeElement?.tagName !== 'INPUT') {
+    search.focus();
+  }
   search?.addEventListener('input', (event) => { state.query = event.target.value; const cursor = event.target.selectionStart; render(); const next = document.querySelector('#pos-search'); next?.focus(); next?.setSelectionRange(cursor, cursor); });
   search?.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter') return;
@@ -7905,8 +8428,47 @@ function bindPos() {
     showPosProductPickerModal(product);
   }));
   document.querySelectorAll('[data-qty]').forEach((button) => button.addEventListener('click', () => changeQuantity(button.dataset.qty, Number(button.dataset.delta))));
-  document.querySelectorAll('[data-remove]').forEach((button) => button.addEventListener('click', () => { state.cart = state.cart.filter((item) => item.variantId !== button.dataset.remove); render(); }));
-  document.querySelector('#clear-cart')?.addEventListener('click', () => { state.cart = []; render(); });
+  document.querySelectorAll('[data-qty-input]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const item = state.cart.find((l) => l.variantId === input.dataset.qtyInput);
+      if (!item) return;
+      state.cartIdempotencyKey = null;
+      const val = input.value;
+      item.rawQuantity = val;
+      const trimmed = String(val).trim();
+      if (/^[1-9]\d{0,5}$/.test(trimmed)) {
+        const parsed = Number(trimmed);
+        if (!item.stockTracked || BigInt(parsed) <= BigInt(item.available)) {
+          item.quantity = parsed;
+        }
+      }
+      syncPosTotalsDom();
+    });
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        syncPosTotalsDom();
+        const cartState = computePosCartState();
+        if (cartState.hasError) toast(cartState.errorMessage, 'error');
+      }
+    });
+  });
+  const discountInput = document.querySelector('#pos-discount-input');
+  discountInput?.addEventListener('input', () => {
+    state.cartIdempotencyKey = null;
+    state.cartDiscountRaw = discountInput.value;
+    syncPosTotalsDom();
+  });
+  discountInput?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      syncPosTotalsDom();
+      const cartState = computePosCartState();
+      if (cartState.hasError) toast(cartState.errorMessage, 'error');
+    }
+  });
+  document.querySelectorAll('[data-remove]').forEach((button) => button.addEventListener('click', () => { state.cartIdempotencyKey = null; state.cart = state.cart.filter((item) => item.variantId !== button.dataset.remove); if (!state.cart.length) state.cartDiscountRaw = ''; render(); }));
+  document.querySelector('#clear-cart')?.addEventListener('click', () => { state.cart = []; state.cartDiscountRaw = ''; state.cartIdempotencyKey = null; render(); });
   document.querySelectorAll('[data-method]').forEach((button) => button.addEventListener('click', () => { state.paymentMethod = button.dataset.method; render(); }));
   document.querySelector('#checkout-button')?.addEventListener('click', doCheckout);
   document.querySelector('#pos-start-shift-now-btn')?.addEventListener('click', () => {
@@ -7935,10 +8497,12 @@ function addToCart(variantId) {
     toast('لم يتم تسعير هذا الصنف للبيع بعد — حدّد سعر البيع عند الشراء من التاجر أو من تعديل المنتج', 'error');
     return;
   }
+  state.cartIdempotencyKey = null;
   const existing = state.cart.find((item) => item.variantId === variantId);
   if (existing) {
     if (stockTracked && BigInt(existing.quantity) >= BigInt(variant.quantity)) { toast('الكمية المطلوبة أكبر من الرصيد المتاح', 'error'); return; }
     existing.quantity += 1;
+    existing.rawQuantity = undefined;
   } else {
     const optionLabel = formatVariantAttributes(product, variant.attributes, '');
     state.cart.push({ variantId, productId: product.id, name: optionLabel ? `${product.name} · ${optionLabel}` : product.name, sku: variant.sku, price: variant.price, quantity: 1, available: variant.quantity, stockTracked });
@@ -7950,9 +8514,13 @@ function addToCart(variantId) {
 function changeQuantity(variantId, delta) {
   const item = state.cart.find((line) => line.variantId === variantId);
   if (!item) return;
-  if (delta > 0 && item.stockTracked && BigInt(item.quantity) >= BigInt(item.available)) { toast('الكمية المطلوبة أكبر من الرصيد المتاح', 'error'); return; }
-  item.quantity += delta;
+  const curQty = (item.rawQuantity !== undefined && !/^[1-9]\d{0,5}$/.test(String(item.rawQuantity).trim())) ? item.quantity : Number(item.rawQuantity ?? item.quantity);
+  if (delta > 0 && item.stockTracked && BigInt(curQty) >= BigInt(item.available)) { toast('الكمية المطلوبة أكبر من الرصيد المتاح', 'error'); return; }
+  state.cartIdempotencyKey = null;
+  item.rawQuantity = undefined;
+  item.quantity = curQty + delta;
   if (item.quantity < 1) state.cart = state.cart.filter((line) => line.variantId !== variantId);
+  if (!state.cart.length) state.cartDiscountRaw = '';
   render();
 }
 
@@ -7963,13 +8531,33 @@ async function doCheckout() {
     return;
   }
   if (!state.cart.length || state.isSaving) return;
+  const cartState = computePosCartState();
+  if (cartState.hasError) {
+    syncPosTotalsDom();
+    toast(cartState.errorMessage, 'error');
+    return;
+  }
   const button = document.querySelector('#checkout-button');
-  button.disabled = true;
+  if (button) button.disabled = true;
   state.isSaving = true;
+  if (!state.cartIdempotencyKey) {
+    state.cartIdempotencyKey = crypto.randomUUID();
+  }
+  const currentKey = state.cartIdempotencyKey;
   try {
-    const totalMinor = state.cart.reduce((sum, item) => sum + BigInt(item.price.amount) * BigInt(item.quantity), 0n).toString();
-    const result = await api('/api/checkout', { method: 'POST', body: JSON.stringify({ storeId: state.data.selectedStoreId, idempotencyKey: crypto.randomUUID(), items: state.cart.map((item) => ({ variantId: item.variantId, quantity: String(item.quantity) })), payment: { method: state.paymentMethod, amount: totalMinor } }) });
+    const payload = {
+      storeId: state.data.selectedStoreId,
+      idempotencyKey: currentKey,
+      items: state.cart.map((item) => ({ variantId: item.variantId, quantity: String(item.quantity) })),
+      payment: { method: state.paymentMethod, amount: cartState.totalMinor.toString() },
+    };
+    if (cartState.discountMinor > 0n) {
+      payload.cartDiscount = cartState.discountMinor.toString();
+    }
+    const result = await api('/api/checkout', { method: 'POST', body: JSON.stringify(payload) });
     state.cart = [];
+    state.cartDiscountRaw = '';
+    state.cartIdempotencyKey = null;
     state.isSaving = false;
     invalidateFinancialCaches();
     state.salesHistoryTotal = undefined;
@@ -7980,6 +8568,15 @@ async function doCheckout() {
     toast(`تم حفظ الفاتورة ${result.saleNumber} بنجاح`); void showThermalReceiptModal(result.id);
   } catch (error) {
     state.isSaving = false;
+    if (!error?.isCancelled) {
+      state.cartIdempotencyKey = null;
+      await loadData(state.data.selectedStoreId).catch(() => {});
+      for (const item of state.cart) {
+        const latestProd = state.data?.products?.find((p) => p.variants?.some((v) => v.id === item.variantId));
+        const latestVar = latestProd?.variants?.find((v) => v.id === item.variantId);
+        if (latestVar) item.available = latestVar.quantity;
+      }
+    }
     toast(error.message, 'error');
     render();
   }

@@ -26,6 +26,8 @@ import * as attendanceSchedule from './migrations/020_attendance_schedule.js';
 import * as stocktakeSessions from './migrations/021_stocktake_sessions.js';
 import * as purchaseRetailPricing from './migrations/022_purchase_retail_pricing.js';
 import * as businessTimezoneShiftsSequences from './migrations/023_business_timezone_shifts_sequences.js';
+import * as stressHardeningExpensesAndShifts from './migrations/024_stress_hardening_expenses_and_shifts.js';
+import * as customerReturnExchangeFlag from './migrations/025_customer_return_exchange_flag.js';
 
 const MIGRATION_REGISTRY: Record<string, Migration> = {
   '001_initial_foundation': {
@@ -119,6 +121,14 @@ const MIGRATION_REGISTRY: Record<string, Migration> = {
   '023_business_timezone_shifts_sequences': {
     up: businessTimezoneShiftsSequences.up,
     down: businessTimezoneShiftsSequences.down,
+  },
+  '024_stress_hardening_expenses_and_shifts': {
+    up: stressHardeningExpensesAndShifts.up,
+    down: stressHardeningExpensesAndShifts.down,
+  },
+  '025_customer_return_exchange_flag': {
+    up: customerReturnExchangeFlag.up,
+    down: customerReturnExchangeFlag.down,
   },
 };
 

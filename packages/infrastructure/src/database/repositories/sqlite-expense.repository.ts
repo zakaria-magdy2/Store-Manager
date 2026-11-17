@@ -81,5 +81,96 @@ export class SqliteExpenseRepository {
       return input.id;
     });
   }
+
+  /**
+   * Soft-voids a direct operating expense by posting a balanced reversal journal entry
+   * and marking `deleted_at` so historical reports and Financial Path running balances recalculate cleanly.
+   */
+  public async softDelete(
+    ctx: ExecutionContext,
+    input: { expenseId: string; deletedAt: Date },
+  ): Promise<{ id: string; storeId: string; amount: bigint; expenseDate: string; paymentMethod: string; categoryName: string }> {
+    return this.db.transaction().execute(async (trx) => {
+      const row = await trx
+        .selectFrom('operating_expense_records as oer')
+        .leftJoin('expense_categories as ec', (join) =>
+          join.onRef('ec.id', '=', 'oer.category_id').onRef('ec.tenant_id', '=', 'oer.tenant_id'),
+        )
+        .select([
+          'oer.id as id',
+          'oer.store_id as storeId',
+          'oer.expense_type as expenseType',
+          'oer.expense_date as expenseDate',
+          'oer.amount as amount',
+          'oer.currency as currency',
+          'oer.payment_method as paymentMethod',
+          'oer.source_account_code as sourceAccountCode',
+          'oer.deleted_at as deletedAt',
+          'ec.name as categoryName',
+        ])
+        .where('oer.tenant_id', '=', ctx.tenantId)
+        .where('oer.id', '=', input.expenseId)
+        .executeTakeFirst();
+
+      if (!row || (ctx.storeId && row.storeId !== ctx.storeId)) {
+        throw Object.assign(new Error('سجل المصروف غير موجود'), { status: 404 });
+      }
+      if (row.deletedAt) {
+        throw Object.assign(new Error('تم حذف هذا المصروف بالفعل'), { status: 409 });
+      }
+      if (row.expenseType !== 'DIRECT_DAILY' || !row.storeId) {
+        throw Object.assign(new Error('الالتزامات الشهرية المسددة لا يمكن حذفها من هنا'), { status: 400 });
+      }
+
+      const amountMinor = BigInt(row.amount);
+      const reversalKey = `expense-void:${row.id}`;
+      const categoryLabel = row.categoryName || 'مصروف تشغيلي';
+      await postJournalEntry(trx, ctx, {
+        storeId: row.storeId,
+        currency: row.currency,
+        date: input.deletedAt,
+        entryDate: row.expenseDate,
+        sourceType: 'EXPENSE',
+        sourceId: row.id,
+        idempotencyKey: reversalKey,
+        description: `إلغاء / عكس ${categoryLabel}`,
+        lines: [
+          { accountCode: row.sourceAccountCode, side: 'DEBIT', amount: amountMinor, memo: 'رد قيمة مصروف ملغى' },
+          { accountCode: '6090', side: 'CREDIT', amount: amountMinor, memo: `عكس ${categoryLabel}` },
+        ],
+      });
+      const reversalJournal = await trx
+        .selectFrom('journal_entries')
+        .select('id')
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('idempotency_key', '=', reversalKey)
+        .executeTakeFirstOrThrow();
+
+      const updateRes = await trx
+        .updateTable('operating_expense_records')
+        .set({
+          deleted_at: input.deletedAt.toISOString(),
+          deleted_by_user_id: ctx.userId,
+          reversal_journal_entry_id: reversalJournal.id,
+        })
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('id', '=', row.id)
+        .where('deleted_at', 'is', null)
+        .executeTakeFirst();
+
+      if (updateRes.numUpdatedRows !== 1n) {
+        throw Object.assign(new Error('تعذر حذف المصروف لتزامن طلب آخر'), { status: 409 });
+      }
+
+      return {
+        id: row.id,
+        storeId: row.storeId,
+        amount: amountMinor,
+        expenseDate: row.expenseDate,
+        paymentMethod: row.paymentMethod,
+        categoryName: categoryLabel,
+      };
+    });
+  }
 }
 

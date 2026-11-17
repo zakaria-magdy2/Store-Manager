@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { createServer } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
@@ -2311,5 +2311,452 @@ test('multi-unit sale with line and cart discounts keeps P&L, Financial Map, Sal
   } finally {
     await stopChild(discServer);
     await rm(discDataDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test('adversarial POS stress suite: race conditions, dirty inputs, discounted partial return, cross-shift swap, last-item concurrency, crash rollback, RBAC & expense soft-delete', async () => {
+  const sDir = await mkdtemp(join(appDir, '.test-stress-'));
+  let sPort = await reservePort();
+  let sUrl = `http://127.0.0.1:${sPort}`;
+  let sLog = '';
+
+  const stopSrv = async (child) => {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    child.kill('SIGTERM');
+    await Promise.race([once(child, 'exit'), new Promise((resolve) => setTimeout(resolve, 3000))]).catch(() => {});
+  };
+
+  const startSrv = async () => {
+    const child = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        PORT: String(sPort),
+        RETAILOS_DATA_DIR: sDir,
+        RETAILOS_COMPANY_NAME: 'متجر الضغط',
+        RETAILOS_COMPANY_CODE: 'STRESS',
+        RETAILOS_CURRENCY: 'EGP',
+        RETAILOS_STORE_NAME: 'فرع الضغط',
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    child.stderr.on('data', (chunk) => { sLog += chunk.toString(); });
+    for (let i = 0; i < 240; i += 1) {
+      if (child.exitCode !== null) throw new Error(`stressServer exited (${child.exitCode}): ${sLog}`);
+      try {
+        const res = await fetch(`${sUrl}/api/bootstrap`);
+        if (res.ok) return child;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 125));
+    }
+    throw new Error(`stressServer did not become ready: ${sLog}`);
+  };
+
+  let sServer = await startSrv();
+  const sReq = async (path, { method = 'GET', body, cookieStr } = {}) => {
+    const headers = { Origin: sUrl };
+    if (body) headers['Content-Type'] = 'application/json';
+    if (cookieStr) headers.Cookie = cookieStr;
+    const response = await fetch(`${sUrl}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const text = await response.text();
+    let payload = text;
+    try { payload = JSON.parse(text); } catch {}
+    return { response, payload };
+  };
+
+  try {
+    assert.equal((await sReq('/api/setup', {
+      method: 'POST',
+      body: { ownerUsername: 'st_owner', ownerName: 'مدير الاختبار الشاق', password: 'Stress-Owner-Password-2026' },
+    })).response.status, 201, sLog);
+
+    const ownerLogin = await sReq('/api/login', {
+      method: 'POST',
+      body: { username: 'st_owner', password: 'Stress-Owner-Password-2026' },
+    });
+    assert.equal(ownerLogin.response.status, 200);
+    const ownerCookie = ownerLogin.response.headers.get('set-cookie').split(';')[0];
+
+    const data0 = await sReq('/api/data', { cookieStr: ownerCookie });
+    const storeId = data0.payload.selectedStoreId;
+
+    // Create Cashier user for Scenario 5 & Scenario 7
+    const cashierCreate = await sReq('/api/users', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { username: 'st_cashier', password: 'Cashier-Password-2026', fullName: 'كاشير اختبار', role: 'CASHIER', storeId },
+    });
+    assert.equal(cashierCreate.response.status, 201);
+    const cashierLogin = await sReq('/api/login', {
+      method: 'POST',
+      body: { username: 'st_cashier', password: 'Cashier-Password-2026' },
+    });
+    assert.equal(cashierLogin.response.status, 200);
+    const cashierCookie = cashierLogin.response.headers.get('set-cookie').split(';')[0];
+
+    const cat = await sReq('/api/categories', { method: 'POST', cookieStr: ownerCookie, body: { name: 'أحذية وحقائب' } });
+    const shoeProd = await sReq('/api/products', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        name: 'حذاء جلدي',
+        sku: 'ST-SHOE',
+        categoryId: cat.payload.id,
+        hasVariants: true,
+        options: [{ key: 'size', name: 'المقاس', values: ['42', '44'] }],
+        variants: [
+          { sku: 'ST-SHOE-42', barcode: '6221000000042', retailPrice: '50000', reorderPoint: '1', attributes: { size: '42' } },
+          { sku: 'ST-SHOE-44', barcode: '6221000000044', retailPrice: '65000', reorderPoint: '1', attributes: { size: '44' } },
+        ],
+      },
+    });
+    assert.equal(shoeProd.response.status, 201);
+    const bagProd = await sReq('/api/products', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        name: 'حقيبة يد',
+        sku: 'ST-BAG',
+        categoryId: cat.payload.id,
+        hasVariants: false,
+        options: [],
+        variants: [{ sku: 'ST-BAG-1', barcode: '6221000000999', retailPrice: '50000', reorderPoint: '1', attributes: {} }],
+      },
+    });
+    assert.equal(bagProd.response.status, 201);
+    const scarceProd = await sReq('/api/products', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        name: 'حذاء قطعة أخيرة',
+        sku: 'ST-LAST',
+        categoryId: cat.payload.id,
+        hasVariants: false,
+        options: [],
+        variants: [{ sku: 'ST-LAST-1', retailPrice: '20000', reorderPoint: '0', attributes: {} }],
+      },
+    });
+    assert.equal(scarceProd.response.status, 201);
+
+    const d1 = await sReq('/api/data', { cookieStr: ownerCookie });
+    const shoeVariants = d1.payload.products.find((p) => p.id === shoeProd.payload.id).variants;
+    const varShoe42 = shoeVariants.find((v) => v.sku === 'ST-SHOE-42').id;
+    const varShoe44 = shoeVariants.find((v) => v.sku === 'ST-SHOE-44').id;
+    const varBag = d1.payload.products.find((p) => p.id === bagProd.payload.id).variants[0].id;
+    const varLast = d1.payload.products.find((p) => p.id === scarceProd.payload.id).variants[0].id;
+
+    const sup = await sReq('/api/suppliers', { method: 'POST', cookieStr: ownerCookie, body: { name: 'مورد الضغط' } });
+    const purchaseId = randomUUID();
+    const purRes = await sReq('/api/purchases', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: 'eeeeeeee-0001-4001-8001-000000000001',
+        supplierId: sup.payload.id,
+        storeId,
+        invoiceNumber: 'SPUR-1',
+        // 4*30000 + 2*35000 + 2*30000 + 1*10000 = 260000; initial paid 60000 -> due 200000
+        totalAmount: '260000',
+        paidAmount: '60000',
+        paymentMethod: 'CASH',
+        items: [
+          { variantId: varShoe42, quantity: '4', unitCost: '30000' },
+          { variantId: varShoe44, quantity: '2', unitCost: '35000' },
+          { variantId: varBag, quantity: '2', unitCost: '30000' },
+          { variantId: varLast, quantity: '1', unitCost: '10000' },
+        ],
+      },
+    });
+    assert.equal(purRes.response.status, 201, JSON.stringify(purRes.payload));
+    const purDbId = purRes.payload.id;
+
+    // -------------------------------------------------------------------------
+    // SCENARIO 1: 5 parallel requests in <1s (Start Shift, Checkout, Payment, Close Shift)
+    // -------------------------------------------------------------------------
+    const startKey = randomUUID();
+    const startBurst = await Promise.all(
+      Array.from({ length: 5 }, () => sReq('/api/shifts/start', {
+        method: 'POST',
+        cookieStr: ownerCookie,
+        body: { storeId, idempotencyKey: startKey, openingCash: '10000' },
+      })),
+    );
+    const createdShifts = startBurst.filter((r) => r.response.status === 201);
+    const replayedShifts = startBurst.filter((r) => r.response.status === 200 || r.response.status === 201);
+    assert.equal(createdShifts.length, 1, 'Exactly one shift start should create');
+    assert.equal(replayedShifts.length, 5, 'All identical idempotency retries should succeed');
+    const shift1Id = createdShifts[0].payload.shift.id;
+    assert.ok(startBurst.every((r) => r.payload.shift.id === shift1Id));
+
+    // Also verify cashier starts shift concurrently with different keys (distinct shift, 1 per user max)
+    const cashierStartBurst = await Promise.all(
+      Array.from({ length: 5 }, () => sReq('/api/shifts/start', {
+        method: 'POST',
+        cookieStr: cashierCookie,
+        body: { storeId, openingCash: '0' },
+      })),
+    );
+    assert.equal(cashierStartBurst.filter((r) => r.response.status === 201).length, 1);
+    assert.equal(cashierStartBurst.filter((r) => r.response.status === 409).length, 4);
+
+    // 5 parallel identical supplier payments with SAME idempotencyKey -> 1 payment applied
+    const payKey = randomUUID();
+    const payBurst = await Promise.all(
+      Array.from({ length: 5 }, () => sReq(`/api/purchases/${purDbId}/payments`, {
+        method: 'POST',
+        cookieStr: ownerCookie,
+        body: { idempotencyKey: payKey, amount: '40000', paymentMethod: 'CASH' },
+      })),
+    );
+    assert.ok(payBurst.every((r) => r.response.status === 201));
+    assert.equal(new Set(payBurst.map((r) => r.payload.id)).size, 1, 'Only 1 supplier payment record created');
+
+    // -------------------------------------------------------------------------
+    // SCENARIO 2 & 3: Dirty input rejection + Discounted 2-item sale -> Partial Return
+    // -------------------------------------------------------------------------
+    for (const dirtyBody of [
+      { storeId, idempotencyKey: randomUUID(), items: [{ variantId: varShoe42, quantity: '6221000000042' }], payment: { method: 'CASH', amount: '50000' } },
+      { storeId, idempotencyKey: randomUUID(), items: [{ variantId: varShoe42, quantity: "' OR 1=1" }], payment: { method: 'CASH', amount: '50000' } },
+      { storeId, idempotencyKey: randomUUID(), items: [{ variantId: varShoe42, quantity: '-1' }], payment: { method: 'CASH', amount: '50000' } },
+      { storeId, idempotencyKey: randomUUID(), items: [{ variantId: varShoe42, quantity: '19.99999' }], payment: { method: 'CASH', amount: '50000' } },
+      { storeId, idempotencyKey: randomUUID(), items: [{ variantId: varShoe42, quantity: '1' }], cartDiscount: '19.99999', payment: { method: 'CASH', amount: '50000' } },
+      { storeId, idempotencyKey: randomUUID(), items: [{ variantId: varShoe42, quantity: '1' }], cartDiscount: '6221000000042', payment: { method: 'CASH', amount: '50000' } },
+      { storeId, idempotencyKey: randomUUID(), items: [{ variantId: varShoe42, quantity: '1' }], cartDiscount: '50000', payment: { method: 'CASH', amount: '0' } },
+    ]) {
+      const dirtyRes = await sReq('/api/checkout', { method: 'POST', cookieStr: ownerCookie, body: dirtyBody });
+      assert.equal(dirtyRes.response.status, 400, `Dirty checkout should fail 400: ${JSON.stringify(dirtyBody)}`);
+    }
+
+    // 5 parallel identical discounted checkouts: 1 Shoe42 (50000) + 1 Bag (50000) with 10000 cartDiscount = 90000
+    const sale1Key = randomUUID();
+    const checkoutBurst = await Promise.all(
+      Array.from({ length: 5 }, () => sReq('/api/checkout', {
+        method: 'POST',
+        cookieStr: ownerCookie,
+        body: {
+          storeId,
+          idempotencyKey: sale1Key,
+          cartDiscount: '10000',
+          items: [
+            { variantId: varShoe42, quantity: '1' },
+            { variantId: varBag, quantity: '1' },
+          ],
+          payment: { method: 'CASH', amount: '90000' },
+        },
+      })),
+    );
+    assert.ok(checkoutBurst.every((r) => r.response.status === 201), JSON.stringify(checkoutBurst.map((r) => r.payload)));
+    assert.equal(new Set(checkoutBurst.map((r) => r.payload.id)).size, 1, 'Race burst must produce exactly 1 invoice');
+    const sale1 = checkoutBurst[0].payload;
+    assert.equal(sale1.total.amount, '90000');
+    assert.equal(sale1.discountTotal.amount, '10000');
+
+    // Return 1 discounted Bag (allocated discount 5000 -> netRevenue 45000, COGS 30000)
+    const bagLineId = sale1.items.find((i) => i.sku === 'ST-BAG-1').id;
+    const partialRet = await sReq(`/api/sales/${sale1.id}/returns`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: randomUUID(),
+        storeId,
+        paymentMethod: 'CASH',
+        items: [{ originalSaleItemId: bagLineId, quantity: '1' }],
+      },
+    });
+    assert.equal(partialRet.response.status, 201, JSON.stringify(partialRet.payload));
+    assert.equal(partialRet.payload.refundAmount, '45000', 'Pro-rata refund must equal 450.00 EGP (not 500.00)');
+
+    // -------------------------------------------------------------------------
+    // Close Shift #1 concurrently 5 times -> only 1 closes with expectedCash = 10000 + 90000 - 45000 = 55000
+    // -------------------------------------------------------------------------
+    const closeKey = randomUUID();
+    const closeBurst = await Promise.all(
+      Array.from({ length: 5 }, () => sReq('/api/shifts/end', {
+        method: 'POST',
+        cookieStr: ownerCookie,
+        body: { idempotencyKey: closeKey, shiftId: shift1Id, actualCash: '55000', handoverCash: '55000' },
+      })),
+    );
+    assert.ok(closeBurst.every((r) => r.response.status === 200));
+    assert.equal(closeBurst[0].payload.shift.expectedCash, '55000');
+
+    // Snapshot Shift #1 before cross-shift exchange
+    const shiftsBeforeSwap = await sReq(`/api/shifts?storeId=${storeId}`, { cookieStr: ownerCookie });
+    const sh1Before = shiftsBeforeSwap.payload.shifts.find((s) => s.id === shift1Id);
+    assert.equal(sh1Before.status, 'CLOSED');
+    assert.equal(sh1Before.expectedCash, '55000');
+    assert.equal(sh1Before.salesRevenue, '45000');
+    assert.equal(sh1Before.returnedTotal, '45000');
+
+    // -------------------------------------------------------------------------
+    // SCENARIO 4: Cross-Closed-Shift Variant Swap (Shoe42 worth 45000 -> Shoe44 priced 65000, +20000 CASH diff)
+    // -------------------------------------------------------------------------
+    const sh2Res = await sReq('/api/shifts/start', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { storeId, idempotencyKey: randomUUID(), openingCash: '20000' },
+    });
+    assert.equal(sh2Res.response.status, 201);
+    const shift2Id = sh2Res.payload.shift.id;
+
+    const shoe42LineId = sale1.items.find((i) => i.sku === 'ST-SHOE-42').id;
+    const swapRes = await sReq(`/api/sales/${sale1.id}/exchange`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: randomUUID(),
+        storeId,
+        paymentMethod: 'CASH',
+        returnedItems: [{ originalSaleItemId: shoe42LineId, quantity: '1' }],
+        replacementItems: [{ variantId: varShoe44, quantity: '1' }],
+        notes: 'استبدال مقاس 42 إلى 44',
+      },
+    });
+    assert.equal(swapRes.response.status, 201, JSON.stringify(swapRes.payload));
+    assert.equal(swapRes.payload.returnedAmount, '45000');
+    assert.equal(swapRes.payload.replacementTotal, '65000');
+    assert.equal(swapRes.payload.netDifference, '20000');
+    assert.equal(swapRes.payload.direction, 'CUSTOMER_PAYS');
+
+    // Closed Shift #1 MUST remain completely unchanged; Shift #2 drawer MUST reflect +20000 (opening 20000 -> 40000)
+    const shiftsAfterSwap = await sReq(`/api/shifts?storeId=${storeId}`, { cookieStr: ownerCookie });
+    const sh1After = shiftsAfterSwap.payload.shifts.find((s) => s.id === shift1Id);
+    const sh2After = shiftsAfterSwap.payload.shifts.find((s) => s.id === shift2Id);
+    assert.equal(sh1After.expectedCash, sh1Before.expectedCash);
+    assert.equal(sh1After.salesRevenue, sh1Before.salesRevenue);
+    assert.equal(sh1After.returnedTotal, sh1Before.returnedTotal);
+    assert.equal(sh1After.grossProfit, sh1Before.grossProfit);
+    assert.equal(sh2After.expectedCash, '40000', 'Shift #2 drawer must gain only +200.00 EGP price diff');
+
+    // Also test out-of-stock exchange rolls back return cleanly (try swapping remaining 0 qty or 3 qty Shoe44 when only 1 left)
+    const saleSwap2 = swapRes.payload.saleId;
+    const dAfterSwap = await sReq(`/api/sales/${saleSwap2}`, { cookieStr: ownerCookie });
+    const shoe44LineId = dAfterSwap.payload.payload.items[0].id;
+    const failSwap = await sReq(`/api/sales/${saleSwap2}/exchange`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        idempotencyKey: randomUUID(),
+        storeId,
+        paymentMethod: 'CASH',
+        returnedItems: [{ originalSaleItemId: shoe44LineId, quantity: '1' }],
+        replacementItems: [{ variantId: varShoe44, quantity: '5' }], // exceeds available stock!
+      },
+    });
+    assert.ok([400, 409].includes(failSwap.response.status));
+    const checkShoe44Inv = (await sReq('/api/data', { cookieStr: ownerCookie })).payload.products
+      .find((p) => p.id === shoeProd.payload.id).variants.find((v) => v.id === varShoe44);
+    assert.equal(checkShoe44Inv.quantity, '1', 'Failed exchange must roll back Shoe44 & return completely');
+
+    // -------------------------------------------------------------------------
+    // SCENARIO 5: Concurrent Last-Item Sale between 2 separate tabs/sessions (Owner & Cashier)
+    // -------------------------------------------------------------------------
+    const [tab1, tab2] = await Promise.all([
+      sReq('/api/checkout', {
+        method: 'POST',
+        cookieStr: ownerCookie,
+        body: { storeId, idempotencyKey: randomUUID(), items: [{ variantId: varLast, quantity: '1' }], payment: { method: 'CASH', amount: '20000' } },
+      }),
+      sReq('/api/checkout', {
+        method: 'POST',
+        cookieStr: cashierCookie,
+        body: { storeId, idempotencyKey: randomUUID(), items: [{ variantId: varLast, quantity: '1' }], payment: { method: 'CASH', amount: '20000' } },
+      }),
+    ]);
+    const statuses = [tab1.response.status, tab2.response.status].sort((a, b) => a - b);
+    assert.ok(statuses[0] === 201 && (statuses[1] === 400 || statuses[1] === 409), `Expected one winner (201) and one stock rejection (400/409), got ${JSON.stringify(statuses)}`);
+    const lastInv = (await sReq('/api/data', { cookieStr: ownerCookie })).payload.products
+      .find((p) => p.id === scarceProd.payload.id).variants[0];
+    assert.equal(lastInv.quantity, '0', 'Stock must never go negative');
+
+    // -------------------------------------------------------------------------
+    // SCENARIO 6: Mid-transaction abort (TCP reset mid-checkout + multi-line atomicity rollback)
+    // -------------------------------------------------------------------------
+    const dBeforeCrash = await sReq(`/api/reports/financial-map?storeId=${storeId}`, { cookieStr: ownerCookie });
+    // (a) Premature TCP abort mid-checkout JSON
+    await new Promise((resolve) => {
+      const sock = createConnection({ host: '127.0.0.1', port: sPort }, () => {
+        sock.write(`POST /api/checkout HTTP/1.1\r\nHost: 127.0.0.1:${sPort}\r\nCookie: ${ownerCookie}\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n{"storeId":"${storeId}","items":[`);
+        setTimeout(() => { sock.destroy(); resolve(); }, 30);
+      });
+      sock.on('error', () => resolve());
+    });
+    // (b) Multi-line checkout failing on line 2 (varLast has 0 stock) -> rolls back line 1 (varShoe42 stock) completely
+    const shoe42BeforeCrash = (await sReq('/api/data', { cookieStr: ownerCookie })).payload.products
+      .find((p) => p.id === shoeProd.payload.id).variants.find((v) => v.id === varShoe42).quantity;
+    const partialCrashSale = await sReq('/api/checkout', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        storeId,
+        idempotencyKey: randomUUID(),
+        items: [
+          { variantId: varShoe42, quantity: '1' },
+          { variantId: varLast, quantity: '1' },
+        ],
+        payment: { method: 'CASH', amount: '70000' },
+      },
+    });
+    assert.ok([400, 409].includes(partialCrashSale.response.status));
+    const shoe42AfterCrash = (await sReq('/api/data', { cookieStr: ownerCookie })).payload.products
+      .find((p) => p.id === shoeProd.payload.id).variants.find((v) => v.id === varShoe42).quantity;
+    assert.equal(shoe42AfterCrash, shoe42BeforeCrash, 'Rolled-back multi-line checkout must leave line 1 stock untouched');
+    const dAfterCrash = await sReq(`/api/reports/financial-map?storeId=${storeId}`, { cookieStr: ownerCookie });
+    assert.equal(dAfterCrash.payload.summary.netSales, dBeforeCrash.payload.summary.netSales);
+    assert.equal(dAfterCrash.payload.summary.netCashFlow, dBeforeCrash.payload.summary.netCashFlow);
+
+    // -------------------------------------------------------------------------
+    // SCENARIO 7: Unauthorized Cashier RBAC + Older Expense Soft-Delete & Financial Path Recalculation
+    // -------------------------------------------------------------------------
+    assert.equal((await sReq(`/api/reports/profit-loss?from=${cairoDateIso()}&to=${cairoDateIso()}`, { cookieStr: cashierCookie })).response.status, 403);
+    assert.equal((await sReq(`/api/reports/financial-map?storeId=${storeId}`, { cookieStr: cashierCookie })).response.status, 403);
+    assert.equal((await sReq('/api/reports/export.csv?type=accounting', { cookieStr: cashierCookie })).response.status, 403);
+    assert.equal((await sReq('/api/expenses', { cookieStr: cashierCookie })).response.status, 403);
+    const spaRouteRes = await fetch(`${sUrl}/profit-loss`);
+    assert.equal(spaRouteRes.status, 200);
+    assert.ok((await spaRouteRes.text()).includes('id="app"'));
+
+    // Record older expense E1 (10000 minor) on yesterday & newer expense E2 (5000 minor) today
+    const todayStr = cairoDateIso();
+    const olderDate = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const e1 = await sReq('/api/expenses', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { idempotencyKey: randomUUID(), storeId, categoryCode: 'UTILITIES', amount: '10000', paymentMethod: 'CASH_DRAWER', expenseDate: olderDate, notes: 'مصروف قديم للحذف' },
+    });
+    assert.equal(e1.response.status, 201);
+    const e2 = await sReq('/api/expenses', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { idempotencyKey: randomUUID(), storeId, categoryCode: 'TRANSPORT', amount: '5000', paymentMethod: 'CASH_DRAWER', expenseDate: todayStr, notes: 'مصروف نقل باقي' },
+    });
+    assert.equal(e2.response.status, 201);
+
+    // Cashier cannot delete expense
+    assert.equal((await sReq(`/api/expenses/${e1.payload.id}`, { method: 'DELETE', cookieStr: cashierCookie })).response.status, 403);
+
+    const fmWithE1 = await sReq(`/api/reports/financial-map?storeId=${storeId}`, { cookieStr: ownerCookie });
+    assert.equal(fmWithE1.payload.summary.totalExpensesPaid, '15000');
+    const cashWithE1 = BigInt(fmWithE1.payload.summary.netCashFlow);
+    const e2StepWithE1 = fmWithE1.payload.timeline.find((t) => t.id === e2.payload.id);
+
+    // Owner deletes older expense E1
+    const delE1 = await sReq(`/api/expenses/${e1.payload.id}`, { method: 'DELETE', cookieStr: ownerCookie });
+    assert.equal(delE1.response.status, 200);
+    // Double delete returns 409
+    assert.equal((await sReq(`/api/expenses/${e1.payload.id}`, { method: 'DELETE', cookieStr: ownerCookie })).response.status, 409);
+
+    const fmAfterDel = await sReq(`/api/reports/financial-map?storeId=${storeId}`, { cookieStr: ownerCookie });
+    assert.equal(fmAfterDel.payload.summary.totalExpensesPaid, '5000');
+    assert.equal(BigInt(fmAfterDel.payload.summary.netCashFlow), cashWithE1 + 10000n, 'Net cash flow increases by 100.00 after deleting older expense');
+    const e2StepAfterDel = fmAfterDel.payload.timeline.find((t) => t.id === e2.payload.id);
+    assert.equal(BigInt(e2StepAfterDel.runningCash), BigInt(e2StepWithE1.runningCash) + 10000n, 'Subsequent runningCash in Financial Path must recalculate cleanly');
+
+    const plAfterDel = await sReq(`/api/reports/profit-loss?from=${olderDate}&to=${todayStr}`, { cookieStr: ownerCookie });
+    assert.equal(plAfterDel.payload.profitLoss.directExpenses.amount, '5000');
+    assert.equal(plAfterDel.payload.profitLoss.operatingProfit.amount, fmAfterDel.payload.summary.operatingProfit);
+  } finally {
+    await stopSrv(sServer);
+    await rm(sDir, { recursive: true, force: true }).catch(() => {});
   }
 });

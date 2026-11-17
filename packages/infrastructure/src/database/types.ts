@@ -150,6 +150,9 @@ export interface OperatingExpenseRecordsTable {
   created_at: Generated<string>;
   created_by_user_id: string;
   idempotency_key: string;
+  deleted_at: Generated<string | null>;
+  deleted_by_user_id: Generated<string | null>;
+  reversal_journal_entry_id: Generated<string | null>;
 }
 
 export interface OutboxEventsTable {
@@ -327,6 +330,7 @@ export interface CustomerReturnsTable {
   id: string; tenant_id: string; store_id: string; original_sale_id: string;
   return_number: string; idempotency_key: string; refund_amount: bigint; currency: string;
   payment_method: 'CASH' | 'CARD' | 'MOBILE' | 'OTHER'; journal_entry_id: string;
+  is_exchange?: number;
   created_by_user_id: string; created_at: string;
 }
 
@@ -438,6 +442,8 @@ export interface CashierShiftsTable {
   handover_cash: Generated<bigint>;
   status: Generated<'OPEN' | 'CLOSED'>;
   notes: string | null;
+  start_idempotency_key: Generated<string | null>;
+  close_idempotency_key: Generated<string | null>;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }
