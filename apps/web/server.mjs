@@ -2947,39 +2947,75 @@ async function trialBalanceReport(ctx, url) {
   const conds = ['je.tenant_id = ?'];
   const args = [ctx.tenantId];
   if (storeId) { conds.push('je.store_id = ?'); args.push(storeId); }
-  if (from && to) { conds.push('je.entry_date >= ?', 'je.entry_date <= ?'); args.push(from, to); }
-  const sumRows = rawDb.prepare(`
-    SELECT a.account_code AS accountCode,
-      COALESCE(SUM(CASE WHEN jl.entry_type = 'DEBIT' THEN jl.amount ELSE 0 END), 0) AS debitTotal,
-      COALESCE(SUM(CASE WHEN jl.entry_type = 'CREDIT' THEN jl.amount ELSE 0 END), 0) AS creditTotal
-    FROM accounts a
-    INNER JOIN journal_lines jl ON jl.account_id = a.id
-    INNER JOIN journal_entries je ON je.id = jl.journal_entry_id
-    WHERE ${conds.join(' AND ')}
-    GROUP BY a.account_code
-  `).all(...args);
-  const totalsByCode = new Map(sumRows.map((r) => [r.accountCode, { debit: BigInt(r.debitTotal ?? 0), credit: BigInt(r.creditTotal ?? 0) }]));
+  const queryAccountSums = (extraConds = [], extraArgs = []) => {
+    const rows = rawDb.prepare(`
+      SELECT a.account_code AS accountCode,
+        COALESCE(SUM(CASE WHEN jl.entry_type = 'DEBIT' THEN jl.amount ELSE 0 END), 0) AS debitTotal,
+        COALESCE(SUM(CASE WHEN jl.entry_type = 'CREDIT' THEN jl.amount ELSE 0 END), 0) AS creditTotal
+      FROM accounts a
+      INNER JOIN journal_lines jl ON jl.account_id = a.id
+      INNER JOIN journal_entries je ON je.id = jl.journal_entry_id
+      WHERE ${[...conds, ...extraConds].join(' AND ')}
+      GROUP BY a.account_code
+    `).all(...args, ...extraArgs);
+    return new Map(rows.map((r) => [r.accountCode, { debit: BigInt(r.debitTotal ?? 0), credit: BigInt(r.creditTotal ?? 0) }]));
+  };
+
+  const periodByCode = (from && to)
+    ? queryAccountSums(['je.entry_date >= ?', 'je.entry_date <= ?'], [from, to])
+    : queryAccountSums();
+  const openingByCode = (from && to) ? queryAccountSums(['je.entry_date < ?'], [from]) : new Map();
 
   const sortedCodes = [...accountMeta.keys()].sort((a, b) => a.localeCompare(b));
+  let totalOpeningDebit = 0n;
+  let totalOpeningCredit = 0n;
+  let totalOpeningDebitBalance = 0n;
+  let totalOpeningCreditBalance = 0n;
   let totalDebit = 0n;
   let totalCredit = 0n;
+  let totalClosingDebit = 0n;
+  let totalClosingCredit = 0n;
   let totalDebitBalance = 0n;
   let totalCreditBalance = 0n;
 
   const accounts = sortedCodes.map((code) => {
     const meta = accountMeta.get(code);
-    const sums = totalsByCode.get(code) ?? { debit: 0n, credit: 0n };
-    totalDebit += sums.debit;
-    totalCredit += sums.credit;
-    const netSigned = sums.debit - sums.credit;
+    const open = openingByCode.get(code) ?? { debit: 0n, credit: 0n };
+    const period = periodByCode.get(code) ?? { debit: 0n, credit: 0n };
+    const closingDebit = open.debit + period.debit;
+    const closingCredit = open.credit + period.credit;
+
+    totalOpeningDebit += open.debit;
+    totalOpeningCredit += open.credit;
+    const openSigned = open.debit - open.credit;
+    const openingDebitBalance = openSigned > 0n ? openSigned : 0n;
+    const openingCreditBalance = openSigned < 0n ? -openSigned : 0n;
+    totalOpeningDebitBalance += openingDebitBalance;
+    totalOpeningCreditBalance += openingCreditBalance;
+
+    totalDebit += period.debit;
+    totalCredit += period.credit;
+    totalClosingDebit += closingDebit;
+    totalClosingCredit += closingCredit;
+
+    const netSigned = closingDebit - closingCredit;
     const debitBalance = netSigned > 0n ? netSigned : 0n;
     const creditBalance = netSigned < 0n ? -netSigned : 0n;
     totalDebitBalance += debitBalance;
     totalCreditBalance += creditBalance;
+
     return {
       ...meta,
-      debitTotal: moneyJson(Money.fromMinor(sums.debit, currency)),
-      creditTotal: moneyJson(Money.fromMinor(sums.credit, currency)),
+      openingDebit: moneyJson(Money.fromMinor(open.debit, currency)),
+      openingCredit: moneyJson(Money.fromMinor(open.credit, currency)),
+      openingDebitBalance: moneyJson(Money.fromMinor(openingDebitBalance, currency)),
+      openingCreditBalance: moneyJson(Money.fromMinor(openingCreditBalance, currency)),
+      periodDebit: moneyJson(Money.fromMinor(period.debit, currency)),
+      periodCredit: moneyJson(Money.fromMinor(period.credit, currency)),
+      closingDebit: moneyJson(Money.fromMinor(closingDebit, currency)),
+      closingCredit: moneyJson(Money.fromMinor(closingCredit, currency)),
+      debitTotal: moneyJson(Money.fromMinor(period.debit, currency)),
+      creditTotal: moneyJson(Money.fromMinor(period.credit, currency)),
       debitBalance: moneyJson(Money.fromMinor(debitBalance, currency)),
       creditBalance: moneyJson(Money.fromMinor(creditBalance, currency)),
     };
@@ -2992,11 +3028,21 @@ async function trialBalanceReport(ctx, url) {
     to,
     accounts,
     totals: {
+      openingDebitTotal: moneyJson(Money.fromMinor(totalOpeningDebit, currency)),
+      openingCreditTotal: moneyJson(Money.fromMinor(totalOpeningCredit, currency)),
+      openingDebitBalanceTotal: moneyJson(Money.fromMinor(totalOpeningDebitBalance, currency)),
+      openingCreditBalanceTotal: moneyJson(Money.fromMinor(totalOpeningCreditBalance, currency)),
       debitTotal: moneyJson(Money.fromMinor(totalDebit, currency)),
       creditTotal: moneyJson(Money.fromMinor(totalCredit, currency)),
+      closingDebitTotal: moneyJson(Money.fromMinor(totalClosingDebit, currency)),
+      closingCreditTotal: moneyJson(Money.fromMinor(totalClosingCredit, currency)),
       debitBalanceTotal: moneyJson(Money.fromMinor(totalDebitBalance, currency)),
       creditBalanceTotal: moneyJson(Money.fromMinor(totalCreditBalance, currency)),
-      isBalanced: totalDebit === totalCredit && totalDebitBalance === totalCreditBalance,
+      isBalanced:
+        totalOpeningDebit === totalOpeningCredit
+        && totalDebit === totalCredit
+        && totalClosingDebit === totalClosingCredit
+        && totalDebitBalance === totalCreditBalance,
     },
   };
 }
@@ -3531,6 +3577,16 @@ async function currentData(ctx, url) {
   const todayAttendance = [...todayAttendanceMap.values()];
   const userCheckedInToday = Boolean(userCheckedInRecord || activeShiftRow);
   const userCheckInTime = userCheckedInRecord?.createdAt ?? activeShiftRow?.startedAt ?? null;
+  const existingOpeningEntry = canViewAccounting
+    ? await db.selectFrom('journal_entries')
+        .select(['id', 'entry_number as entryNumber', 'entry_date as entryDate'])
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('store_id', '=', storeId)
+        .where('idempotency_key', 'like', 'opening-balance:%')
+        .where('reversed_by_entry_id', 'is', null)
+        .where('status', '=', 'POSTED')
+        .executeTakeFirst()
+    : null;
 
   return {
     company: { name: tenant.name, currency: tenant.currency, timezone: resolveValidTimeZone(tenant.timezone) },
@@ -3545,6 +3601,7 @@ async function currentData(ctx, url) {
     todayAttendance,
     userCheckedInToday,
     userCheckInTime,
+    openingBalanceEntry: existingOpeningEntry ? { id: existingOpeningEntry.id, entryNumber: existingOpeningEntry.entryNumber, entryDate: existingOpeningEntry.entryDate } : null,
     stores: stores.map((store) => ({ id: store.id, name: store.name, code: store.code, address: store.address ?? null, phone: store.phone ?? null })),
     users: managedUsers.map((user) => ({ id: user.id, username: user.username, fullName: user.fullName, phone: user.phone ?? null, employmentStartDate: user.employmentStartDate, shiftStartTime: user.shiftStartTime ?? null, lateGraceMinutes: user.lateGraceMinutes ?? 0, role: user.role, storeId: user.storeId ?? null, isActive: user.isActive, createdAt: user.createdAt.toISOString() })),
     selectedStoreId: storeId,
@@ -6126,6 +6183,22 @@ async function handleApi(req, res, url) {
 
       const store = await trx.selectFrom('stores').select('id').where('id', '=', body.storeId).where('tenant_id', '=', ctx.tenantId).executeTakeFirst();
       if (!store) throw Object.assign(new Error('الفرع غير موجود'), { status: 404 });
+
+      const existingOpening = await trx
+        .selectFrom('journal_entries')
+        .select(['id', 'entry_number as entryNumber', 'entry_date as entryDate'])
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('store_id', '=', body.storeId)
+        .where('idempotency_key', 'like', 'opening-balance:%')
+        .where('reversed_by_entry_id', 'is', null)
+        .where('status', '=', 'POSTED')
+        .executeTakeFirst();
+      if (existingOpening) {
+        throw Object.assign(
+          new Error(`تم تسجيل الأرصدة الافتتاحية لهذا الفرع مسبقًا بالقيد (${existingOpening.entryNumber}) بتاريخ ${existingOpening.entryDate} — لا يمكن تكرار الأرصدة الافتتاحية لنفس الفرع`),
+          { status: 409 },
+        );
+      }
 
       await postJournalEntry(trx, ctx, {
         storeId: body.storeId,

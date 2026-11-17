@@ -383,9 +383,9 @@ async function api(path, options = {}) {
     });
   } catch (networkError) {
     if (networkError instanceof TypeError) {
-      throw new Error('تعذر الاتصال بالخادم المحلي — تأكد من تشغيل البرنامج وحاول مرة أخرى', { cause: networkError });
+      throw Object.assign(new Error('تعذر الاتصال بالخادم المحلي — تأكد من تشغيل البرنامج وحاول مرة أخرى'), { cause: networkError, isNetworkError: true });
     }
-    throw networkError;
+    throw Object.assign(networkError, { isNetworkError: true });
   }
   const result = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -394,7 +394,7 @@ async function api(path, options = {}) {
       state.data = null;
       render();
     }
-    throw new Error(result.error || 'حصل خطأ، حاول مرة تانية');
+    throw Object.assign(new Error(result.error || 'حصل خطأ، حاول مرة تانية'), { status: response.status, payload: result });
   }
   return result;
 }
@@ -3347,11 +3347,12 @@ function profitLossView() {
         <button type="button" class="button button-secondary" id="btn-open-trial-balance">
           ${icon('chart', 16)} ميزان المراجعة
         </button>
-        ${state.data.capabilities.canClosePeriod ? `
-          <button type="button" class="button button-secondary" id="btn-open-opening-balances">
-            ${icon('plus', 16)} الأرصدة الافتتاحية
-          </button>
-        ` : ''}
+        ${state.data.capabilities.canClosePeriod ? (() => {
+          const postedOpening = state.data.openingBalanceEntry;
+          return postedOpening
+            ? `<button type="button" class="button button-secondary" id="btn-open-opening-balances" disabled title="تم تسجيل الأرصدة الافتتاحية مسبقًا بالقيد ${escapeHtml(postedOpening.entryNumber)} بتاريخ ${escapeHtml(postedOpening.entryDate)}">${icon('check', 16)} الأرصدة الافتتاحية مسجلة (${escapeHtml(postedOpening.entryDate)})</button>`
+            : `<button type="button" class="button button-secondary" id="btn-open-opening-balances">${icon('plus', 16)} الأرصدة الافتتاحية</button>`;
+        })() : ''}
         <button type="button" class="button button-secondary" id="btn-open-journal-ledger">
           ${icon('box', 16)} دفتر القيود المحاسبية
         </button>
@@ -7477,13 +7478,21 @@ async function showTrialBalanceModal() {
   const draw = () => {
     const accounts = payload?.accounts ?? [];
     const totals = payload?.totals;
+    const hasRange = Boolean(payload?.from && payload?.to);
+    const fmtOpening = (acc) => {
+      const dr = BigInt(acc.openingDebitBalance?.amount ?? 0);
+      const cr = BigInt(acc.openingCreditBalance?.amount ?? 0);
+      if (dr > 0n) return `${money(acc.openingDebitBalance)} <small style="color:var(--muted);">مدين</small>`;
+      if (cr > 0n) return `${money(acc.openingCreditBalance)} <small style="color:var(--muted);">دائن</small>`;
+      return '—';
+    };
     modal.innerHTML = `
       <div class="modal-backdrop">
         <section class="panel modal-card modal-wide">
           <div class="panel-heading">
             <div>
               <h3>ميزان المراجعة (Trial Balance)</h3>
-              <p>أرصدة جميع الحسابات المحاسبية ومجموع الأرصدة المدينة والدائنة للتحقق من توازن الدفاتر.</p>
+              <p>${hasRange ? `الرصيد التراكمي حتى ${escapeHtml(payload.to)} (شاملًا أرصدة أول المدة قبل ${escapeHtml(payload.from)} + حركة الفترة المحددة).` : 'أرصدة جميع الحسابات المحاسبية ومجموع الأرصدة المدينة والدائنة للتحقق من توازن الدفاتر.'}</p>
             </div>
             <div class="table-actions-inline">
               ${totals ? `<span class="status-pill ${totals.isBalanced ? 'status-complete' : 'status-low'}">${totals.isBalanced ? 'متزن 100% ✓' : 'يوجد فرق!'}</span>` : ''}
@@ -7502,13 +7511,22 @@ async function showTrialBalanceModal() {
             <div class="table-scroll analytics-scroll-box">
               <table class="compact-table zebra-table">
                 <thead>
-                  <tr><th>الكود</th><th>اسم الحساب</th><th>حركة مدين</th><th>حركة دائن</th><th>رصيد مدين</th><th>رصيد دائن</th></tr>
+                  <tr>
+                    <th>الكود</th>
+                    <th>اسم الحساب</th>
+                    ${hasRange ? '<th>رصيد أول المدة</th>' : ''}
+                    <th>${hasRange ? 'حركة الفترة (مدين)' : 'إجمالي مدين'}</th>
+                    <th>${hasRange ? 'حركة الفترة (دائن)' : 'إجمالي دائن'}</th>
+                    <th>الرصيد التراكمي (مدين)</th>
+                    <th>الرصيد التراكمي (دائن)</th>
+                  </tr>
                 </thead>
                 <tbody>
                   ${accounts.map((acc) => `
                     <tr>
                       <td><span class="sku-code">${escapeHtml(acc.accountCode)}</span></td>
                       <td><strong>${escapeHtml(acc.accountName)}</strong></td>
+                      ${hasRange ? `<td class="table-total">${fmtOpening(acc)}</td>` : ''}
                       <td class="table-total">${money(acc.debitTotal)}</td>
                       <td class="table-total">${money(acc.creditTotal)}</td>
                       <td class="table-total">${BigInt(acc.debitBalance.amount) > 0n ? money(acc.debitBalance) : '—'}</td>
@@ -7519,7 +7537,7 @@ async function showTrialBalanceModal() {
                 ${totals ? `
                   <tfoot>
                     <tr style="background:var(--surface-soft);font-weight:800;">
-                      <td colspan="2">الإجمالي العام (${escapeHtml(currency)})</td>
+                      <td colspan="${hasRange ? 3 : 2}">الإجمالي العام (${escapeHtml(currency)})</td>
                       <td class="table-total">${money(totals.debitTotal)}</td>
                       <td class="table-total">${money(totals.creditTotal)}</td>
                       <td class="table-total">${money(totals.debitBalanceTotal)}</td>
@@ -7555,6 +7573,10 @@ async function showTrialBalanceModal() {
 }
 
 function showOpeningBalancesModal() {
+  if (state.data.openingBalanceEntry) {
+    toast(`تم تسجيل الأرصدة الافتتاحية لهذا الفرع مسبقًا بتاريخ ${state.data.openingBalanceEntry.entryDate}`, 'error');
+    return;
+  }
   const decimals = currencyDecimals(state.data.company.currency);
   const currency = state.data.company.currency;
   const today = localDateIso();
@@ -8637,9 +8659,33 @@ function bindPos() {
   search?.addEventListener('input', (event) => { state.query = event.target.value; const cursor = event.target.selectionStart; render(); const next = document.querySelector('#pos-search'); next?.focus(); next?.setSelectionRange(cursor, cursor); });
   search?.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter') return;
+    event.preventDefault();
     const term = event.target.value.trim().toLowerCase();
-    const match = state.data.products.flatMap((product) => product.variants.map((variant) => ({ ...variant, productName: product.name, productId: product.id }))).find((variant) => variant.barcode?.toLowerCase() === term || variant.sku.toLowerCase() === term);
-    if (match) { addToCart(match.id); }
+    if (!term) {
+      search.focus();
+      return;
+    }
+    const match = (state.data.products ?? [])
+      .filter((product) => product.isActive)
+      .flatMap((product) =>
+        (product.variants ?? [])
+          .filter((variant) => variant.isActive)
+          .map((variant) => ({ ...variant, productName: product.name, productId: product.id })),
+      )
+      .find((variant) => variant.barcode?.toLowerCase() === term || variant.sku.toLowerCase() === term);
+    if (match) {
+      addToCart(match.id);
+      document.querySelector('#pos-search')?.focus();
+      return;
+    }
+    state.query = '';
+    toast('الباركود غير مسجل في النظام', 'error');
+    render();
+    const nextSearch = document.querySelector('#pos-search');
+    if (nextSearch) {
+      nextSearch.value = '';
+      nextSearch.focus();
+    }
   });
   document.querySelectorAll('[data-pos-cat]').forEach((chip) => chip.addEventListener('click', () => {
     state.posCategory = chip.dataset.posCat || null;
@@ -8695,7 +8741,11 @@ function bindPos() {
   });
   document.querySelectorAll('[data-remove]').forEach((button) => button.addEventListener('click', () => { state.cartIdempotencyKey = null; state.cart = state.cart.filter((item) => item.variantId !== button.dataset.remove); if (!state.cart.length) state.cartDiscountRaw = ''; render(); }));
   document.querySelector('#clear-cart')?.addEventListener('click', () => { state.cart = []; state.cartDiscountRaw = ''; state.cartIdempotencyKey = null; render(); });
-  document.querySelectorAll('[data-method]').forEach((button) => button.addEventListener('click', () => { state.paymentMethod = button.dataset.method; render(); }));
+  document.querySelectorAll('[data-method]').forEach((button) => button.addEventListener('click', () => {
+    if (state.paymentMethod !== button.dataset.method) state.cartIdempotencyKey = null;
+    state.paymentMethod = button.dataset.method;
+    render();
+  }));
   document.querySelector('#checkout-button')?.addEventListener('click', doCheckout);
   document.querySelector('#pos-start-shift-now-btn')?.addEventListener('click', () => {
     showStartShiftModal();
@@ -8794,7 +8844,9 @@ async function doCheckout() {
     toast(`تم حفظ الفاتورة ${result.saleNumber} بنجاح`); void showThermalReceiptModal(result.id);
   } catch (error) {
     state.isSaving = false;
-    if (!error?.isCancelled) {
+    const isClientRejection = !error?.isCancelled && Number.isInteger(error?.status) && error.status >= 400 && error.status < 500;
+    const isAmbiguousFailure = !error?.isCancelled && (!Number.isInteger(error?.status) || error.status >= 500);
+    if (isClientRejection) {
       state.cartIdempotencyKey = null;
       await loadData(state.data.selectedStoreId).catch(() => {});
       for (const item of state.cart) {
@@ -8803,7 +8855,7 @@ async function doCheckout() {
         if (latestVar) item.available = latestVar.quantity;
       }
     }
-    toast(error.message, 'error');
+    toast(isAmbiguousFailure ? `${error.message} — يمكنك إعادة المحاولة بأمان بنفس المفتاح دون تكرار الفاتورة` : error.message, 'error');
     render();
   }
 }

@@ -3137,3 +3137,127 @@ test('Stage 1 supplier balance regression: search+refunds, pagination+search, le
     await rm(sDir, { recursive: true, force: true }).catch(() => {});
   }
 });
+
+test('Pre-launch hardening: duplicate opening balances 409 guard and Trial Balance cumulative balances across date boundaries', async () => {
+  const port = await reservePort();
+  const hUrl = `http://127.0.0.1:${port}`;
+  const hDir = await mkdtemp(join(appDir, '.test-data-harden-'));
+  let log = '';
+  let srv = null;
+
+  const startServer = async () => {
+    const proc = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+      cwd: workspace,
+      env: { ...process.env, PORT: String(port), RETAILOS_DATA_DIR: hDir, RETAILOS_COMPANY_NAME: 'شركة التحصين', RETAILOS_COMPANY_CODE: 'HARDEN_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    proc.stdout.on('data', (c) => { log += c.toString(); });
+    proc.stderr.on('data', (c) => { log += c.toString(); });
+    for (let i = 0; i < 600; i += 1) {
+      if (proc.exitCode !== null) throw new Error(`Server exited ${proc.exitCode}\n${log}`);
+      try { if ((await fetch(`${hUrl}/api/bootstrap`)).ok) return proc; } catch { /* wait */ }
+      await new Promise((r) => setTimeout(r, 125));
+    }
+    throw new Error(`Timeout\n${log}`);
+  };
+
+  const stopServer = async (proc) => {
+    if (proc && proc.exitCode === null) {
+      proc.kill('SIGTERM');
+      await Promise.race([once(proc, 'exit'), new Promise((r) => setTimeout(r, 4000))]);
+    }
+  };
+
+  const hReq = async (path, { method = 'GET', body, cookieStr } = {}) => {
+    const headers = { Origin: hUrl };
+    if (body) headers['Content-Type'] = 'application/json';
+    if (cookieStr) headers.Cookie = cookieStr;
+    const response = await fetch(`${hUrl}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const payload = await response.json();
+    return { response, payload };
+  };
+
+  try {
+    srv = await startServer();
+    const setup = await hReq('/api/setup', { method: 'POST', body: { ownerName: 'مالك التحصين', ownerUsername: 'harden_owner', password: 'Harden-Owner-Password-2026' } });
+    assert.equal(setup.response.status, 201, JSON.stringify(setup.payload));
+    const login = await hReq('/api/login', { method: 'POST', body: { username: 'harden_owner', password: 'Harden-Owner-Password-2026' } });
+    assert.equal(login.response.status, 200);
+    const ownerCookie = login.response.headers.get('set-cookie').split(';')[0];
+
+    const dataBefore = await hReq('/api/data', { cookieStr: ownerCookie });
+    const storeId = dataBefore.payload.stores[0].id;
+    assert.equal(dataBefore.payload.openingBalanceEntry, null);
+
+    // 1. Initial Opening Balance on 2026-10-01 -> 201 Created
+    const obKey1 = randomUUID();
+    const obPayload1 = { storeId, idempotencyKey: obKey1, entryDate: '2026-10-01', cashDrawer: '100000', cashSafe: '200000', bank: '0', inventory: '0', supplierPayables: '0', notes: 'أول تشغيل' };
+    const ob1 = await hReq('/api/accounting/opening-balances', { method: 'POST', cookieStr: ownerCookie, body: obPayload1 });
+    assert.equal(ob1.response.status, 201, JSON.stringify(ob1.payload));
+
+    // Replaying exact same idempotencyKey stays idempotent (201, same entry id)
+    const obReplay = await hReq('/api/accounting/opening-balances', { method: 'POST', cookieStr: ownerCookie, body: obPayload1 });
+    assert.equal(obReplay.response.status, 201);
+    assert.equal(obReplay.payload.id, ob1.payload.id);
+
+    // Submitting a second opening balance with a new key for the same store must fail with 409 Conflict
+    const obDup = await hReq('/api/accounting/opening-balances', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { ...obPayload1, idempotencyKey: randomUUID(), cashDrawer: '50000' },
+    });
+    assert.equal(obDup.response.status, 409, JSON.stringify(obDup.payload));
+    assert.match(obDup.payload.error ?? '', /مسبق/);
+
+    const dataAfterOb = await hReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie });
+    assert.equal(dataAfterOb.payload.openingBalanceEntry?.id, ob1.payload.id);
+    assert.equal(dataAfterOb.payload.openingBalanceEntry?.entryDate, '2026-10-01');
+
+    // 2. Trial Balance cumulative closing balance across date boundaries
+    // Oct movement: direct expense 25000 from CASH_DRAWER (1010 -> 75000, 6090 -> 25000)
+    assert.equal((await hReq('/api/expenses', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { idempotencyKey: randomUUID(), storeId, categoryCode: 'UTILITIES', amount: '25000', paymentMethod: 'CASH_DRAWER', expenseDate: '2026-10-15', notes: 'مصروف أكتوبر' },
+    })).response.status, 201);
+
+    // Nov movement: direct expense 15000 from CASH_SAFE (1015 -> 185000, 6090 -> 40000)
+    assert.equal((await hReq('/api/expenses', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { idempotencyKey: randomUUID(), storeId, categoryCode: 'SUPPLIES', amount: '15000', paymentMethod: 'CASH_SAFE', expenseDate: '2026-11-10', notes: 'مصروف نوفمبر' },
+    })).response.status, 201);
+
+    // Filtered query strictly on November 2026 must carry forward October cumulative balances!
+    const novTb = await hReq(`/api/reports/trial-balance?storeId=${storeId}&from=2026-11-01&to=2026-11-30`, { cookieStr: ownerCookie });
+    assert.equal(novTb.response.status, 200);
+    assert.equal(novTb.payload.totals.isBalanced, true);
+    const acc = (code) => novTb.payload.accounts.find((a) => a.accountCode === code);
+
+    assert.equal(acc('1010').openingDebitBalance.amount, '75000');
+    assert.equal(acc('1010').periodDebit.amount, '0');
+    assert.equal(acc('1010').debitBalance.amount, '75000', '1010 cumulative closing balance must include prior months');
+
+    assert.equal(acc('1015').openingDebitBalance.amount, '200000');
+    assert.equal(acc('1015').periodCredit.amount, '15000');
+    assert.equal(acc('1015').debitBalance.amount, '185000');
+
+    assert.equal(acc('3010').openingCreditBalance.amount, '300000');
+    assert.equal(acc('3010').periodCredit.amount, '0');
+    assert.equal(acc('3010').creditBalance.amount, '300000');
+
+    assert.equal(acc('6090').openingDebitBalance.amount, '25000');
+    assert.equal(acc('6090').periodDebit.amount, '15000');
+    assert.equal(acc('6090').debitBalance.amount, '40000');
+
+    assert.equal(novTb.payload.totals.openingDebitBalanceTotal.amount, '300000');
+    assert.equal(novTb.payload.totals.openingCreditBalanceTotal.amount, '300000');
+    assert.equal(novTb.payload.totals.debitTotal.amount, '15000');
+    assert.equal(novTb.payload.totals.creditTotal.amount, '15000');
+    assert.equal(novTb.payload.totals.debitBalanceTotal.amount, '300000');
+    assert.equal(novTb.payload.totals.creditBalanceTotal.amount, '300000');
+  } finally {
+    await stopServer(srv);
+    await rm(hDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
