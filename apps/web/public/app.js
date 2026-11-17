@@ -2850,8 +2850,6 @@ function currentPurchasesFilterKey() {
 
 function suppliersView() {
   const bootstrapSuppliers = state.data.suppliers ?? [];
-  const suppliers = state.purchasesSuppliers ?? bootstrapSuppliers;
-  const currency = state.data.company.currency;
   const today = localDateIso();
   if (state.supplierFrom === null || state.supplierFrom === undefined || state.supplierTo === null || state.supplierTo === undefined) {
     state.supplierDatePreset = state.supplierDatePreset || 'today';
@@ -2862,6 +2860,8 @@ function suppliersView() {
   const to = state.supplierTo ?? '';
   const searchQuery = (state.supplierSearch ?? '').trim();
   const hasServerPurchases = state.purchasesKey === currentPurchasesFilterKey() && Array.isArray(state.purchasesHistory);
+  const suppliers = (hasServerPurchases && Array.isArray(state.purchasesSuppliers)) ? state.purchasesSuppliers : bootstrapSuppliers;
+  const currency = state.data.company.currency;
   const preset = syncPresetWithDates(state.supplierDatePreset, from, to, ['all', 'today', 'week', 'month', 'year'], 'weekSunday', 'all');
 
   const filterPurchaseFallback = (p) => {

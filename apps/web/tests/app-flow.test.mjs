@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { SqliteDatabaseManager } from '@retailos/infrastructure';
 
 function cairoDateIso(d = new Date()) {
   return new Intl.DateTimeFormat('en-CA', {
@@ -2932,6 +2933,207 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
     sServer = null;
   } finally {
     await stopSrv(sServer);
+    await rm(sDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test('Stage 1 supplier balance regression: search+refunds, pagination+search, legacy initial_paid_amount deduplication, isolation, and settlement', async () => {
+  const port = await reservePort();
+  const sUrl = `http://127.0.0.1:${port}`;
+  const sDir = await mkdtemp(join(appDir, '.test-data-supreg-'));
+  let log = '';
+  let srv = null;
+
+  const startTestServer = async () => {
+    const proc = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+      cwd: workspace,
+      env: { ...process.env, PORT: String(port), RETAILOS_DATA_DIR: sDir, RETAILOS_COMPANY_NAME: 'شركة الموردين', RETAILOS_COMPANY_CODE: 'SUP_REG', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    proc.stdout.on('data', (c) => { log += c.toString(); });
+    proc.stderr.on('data', (c) => { log += c.toString(); });
+    for (let i = 0; i < 600; i += 1) {
+      if (proc.exitCode !== null) throw new Error(`Server exited ${proc.exitCode}\n${log}`);
+      try { if ((await fetch(`${sUrl}/api/bootstrap`)).ok) return proc; } catch { /* wait */ }
+      await new Promise((r) => setTimeout(r, 125));
+    }
+    throw new Error(`Timeout\n${log}`);
+  };
+
+  const stopTestServer = async (proc) => {
+    if (proc && proc.exitCode === null) {
+      proc.kill('SIGTERM');
+      await Promise.race([once(proc, 'exit'), new Promise((r) => setTimeout(r, 4000))]);
+    }
+  };
+
+  const sReq = async (path, { method = 'GET', body, cookieStr } = {}) => {
+    const headers = { Origin: sUrl };
+    if (body) headers['Content-Type'] = 'application/json';
+    if (cookieStr) headers.Cookie = cookieStr;
+    const response = await fetch(`${sUrl}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const payload = await response.json();
+    return { response, payload };
+  };
+
+  try {
+    srv = await startTestServer();
+    const setup = await sReq('/api/setup', { method: 'POST', body: { ownerName: 'مالك الموردين', ownerUsername: 'sup_owner', password: 'Supplier-Owner-Password-2026' } });
+    assert.equal(setup.response.status, 201, JSON.stringify(setup.payload));
+    const login = await sReq('/api/login', { method: 'POST', body: { username: 'sup_owner', password: 'Supplier-Owner-Password-2026' } });
+    assert.equal(login.response.status, 200, JSON.stringify(login.payload));
+    const ownerCookie = login.response.headers.get('set-cookie').split(';')[0];
+
+    const dataBoot = await sReq('/api/data', { cookieStr: ownerCookie });
+    const storeId = dataBoot.payload.stores[0].id;
+    const prod = await sReq('/api/products', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { name: 'تيشيرت قطن', sku: 'SUP-TEE', hasVariants: true, options: [{ key: 'size', name: 'المقاس', values: ['M'] }], variants: [{ sku: 'SUP-TEE-M', attributes: { size: 'M' }, retailPrice: '20000', reorderPoint: '1' }] },
+    });
+    assert.equal(prod.response.status, 201);
+    const variantId = (await sReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie })).payload.products[0].variants[0].id;
+
+    const supRefunds = (await sReq('/api/suppliers', { method: 'POST', cookieStr: ownerCookie, body: { name: 'تاجر الاسترداد' } })).payload.id;
+    const supMulti = (await sReq('/api/suppliers', { method: 'POST', cookieStr: ownerCookie, body: { name: 'تاجر الدفعات المتعددة' } })).payload.id;
+    const supLegacy = (await sReq('/api/suppliers', { method: 'POST', cookieStr: ownerCookie, body: { name: 'تاجر الرصيد التراكمي' } })).payload.id;
+
+    // 1. Purchase without initial payment (10000 due) -> 2. partial payment (3000) -> 3. multiple payments (4000) -> 11. zero after settlement (3000)
+    const pNoInit = await sReq('/api/purchases', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { storeId, supplierId: supMulti, idempotencyKey: randomUUID(), invoiceNumber: 'SM-NOINIT-1', totalAmount: '10000', paidAmount: '0', paymentMethod: 'CASH', items: [{ variantId, quantity: '1', unitCost: '10000' }] },
+    });
+    assert.equal(pNoInit.response.status, 201);
+    assert.equal((await sReq(`/api/purchases/${pNoInit.payload.id}/payments`, { method: 'POST', cookieStr: ownerCookie, body: { idempotencyKey: randomUUID(), amount: '3000', paymentMethod: 'CASH' } })).response.status, 201);
+    assert.equal((await sReq(`/api/purchases/${pNoInit.payload.id}/payments`, { method: 'POST', cookieStr: ownerCookie, body: { idempotencyKey: randomUUID(), amount: '4000', paymentMethod: 'BANK_TRANSFER' } })).response.status, 201);
+    // 12. Payment exceeding remaining 3000 must fail
+    assert.equal((await sReq(`/api/purchases/${pNoInit.payload.id}/payments`, { method: 'POST', cookieStr: ownerCookie, body: { idempotencyKey: randomUUID(), amount: '3001', paymentMethod: 'CASH' } })).response.status, 400);
+    // Settle final 3000 -> zero due
+    assert.equal((await sReq(`/api/purchases/${pNoInit.payload.id}/payments`, { method: 'POST', cookieStr: ownerCookie, body: { idempotencyKey: randomUUID(), amount: '3000', paymentMethod: 'CASH' } })).response.status, 201);
+
+    // Purchase with initial payment (10000 billed, 6000 paid -> 4000 due) for pagination + search
+    for (let i = 1; i <= 3; i += 1) {
+      const pr = await sReq('/api/purchases', {
+        method: 'POST',
+        cookieStr: ownerCookie,
+        body: { storeId, supplierId: supMulti, idempotencyKey: randomUUID(), invoiceNumber: `SM-PAGE-${i}`, totalAmount: '10000', paidAmount: '6000', paymentMethod: 'CASH', items: [{ variantId, quantity: '1', unitCost: '10000' }] },
+      });
+      assert.equal(pr.response.status, 201);
+    }
+
+    // 5 & 6. Supplier return + excess credit + partial refund + over-refund block (supplier refunds)
+    const pRetTarget = await sReq('/api/purchases', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { storeId, supplierId: supRefunds, idempotencyKey: randomUUID(), invoiceNumber: 'SR-FLOW-1', totalAmount: '20000', paidAmount: '20000', paymentMethod: 'CASH', items: [{ variantId, quantity: '2', unitCost: '10000' }] },
+    });
+    assert.equal(pRetTarget.response.status, 201);
+    const bootMid = await sReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie });
+    const retPur = bootMid.payload.suppliers.find((s) => s.id === supRefunds).purchases[0];
+    const supRetRes = await sReq(`/api/purchases/${retPur.id}/returns`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { idempotencyKey: randomUUID(), storeId, items: [{ purchaseItemId: retPur.items[0].id, quantity: '2' }] },
+    });
+    assert.equal(supRetRes.response.status, 201);
+    // Refund 15000 out of 20000 excess credit -> remaining credit 5000 (balanceDue = -5000)
+    const supRfRes = await sReq(`/api/suppliers/${supRefunds}/refunds`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { storeId, idempotencyKey: randomUUID(), amount: '15000', paymentMethod: 'CASH', referenceNumber: 'RF-777', notes: 'استرداد جزئي' },
+    });
+    assert.equal(supRfRes.response.status, 201);
+    assert.equal(supRfRes.payload.remainingCredit, '5000');
+    // 12. Refund exceeding remaining 5000 must fail
+    assert.equal((await sReq(`/api/suppliers/${supRefunds}/refunds`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { storeId, idempotencyKey: randomUUID(), amount: '5001', paymentMethod: 'CASH' },
+    })).response.status, 400);
+
+    // 7, 8, 9, 10: Compare normal listing, search by supplier name (with refunds), search without refunds (supMulti), pagination+search!
+    const allList = await sReq(`/api/purchases?storeId=${storeId}&offset=0&limit=50`, { cookieStr: ownerCookie });
+    const searchWithRefunds = await sReq(`/api/purchases?storeId=${storeId}&search=${encodeURIComponent('تاجر الاسترداد')}`, { cookieStr: ownerCookie });
+    const searchByRefundRef = await sReq(`/api/purchases?storeId=${storeId}&search=RF-777`, { cookieStr: ownerCookie });
+    const searchByInvoice = await sReq(`/api/purchases?storeId=${storeId}&search=SR-FLOW-1`, { cookieStr: ownerCookie });
+    const searchNoRefunds = await sReq(`/api/purchases?storeId=${storeId}&search=${encodeURIComponent('تاجر الدفعات المتعددة')}&offset=1&limit=2`, { cookieStr: ownerCookie });
+
+    const normSupRef = allList.payload.payload.suppliers.find((s) => s.id === supRefunds);
+    const searchedSupRef = searchWithRefunds.payload.payload.suppliers.find((s) => s.id === supRefunds);
+    const searchedByInvSup = searchByInvoice.payload.payload.suppliers.find((s) => s.id === supRefunds);
+    const searchedByRfRefSup = searchByRefundRef.payload.payload.suppliers.find((s) => s.id === supRefunds);
+
+    assert.equal(normSupRef.balanceDue, '-5000');
+    assert.equal(normSupRef.refundedToStore, '15000');
+    assert.equal(searchedSupRef.balanceDue, normSupRef.balanceDue, 'Searching for supplier must NOT change balance');
+    assert.equal(searchedSupRef.refundedToStore, '15000', 'Refunds must not be omitted under search');
+    assert.equal(searchedByInvSup.balanceDue, '-5000');
+    assert.equal(searchedByRfRefSup.balanceDue, '-5000');
+
+    // Pagination + search must preserve complete totals for supMulti (0 on SM-NOINIT-1 + 3*4000 = 12000 due)
+    assert.equal(searchNoRefunds.payload.payload.total, 4);
+    assert.equal(searchNoRefunds.payload.payload.purchases.length, 2);
+    const searchedMulti = searchNoRefunds.payload.payload.suppliers.find((s) => s.id === supMulti);
+    assert.equal(searchedMulti.balanceDue, '12000');
+    assert.equal(searchedMulti.refundedToStore, '0');
+    // Unrelated supRefunds must not leak into supMulti search
+    assert.equal(searchNoRefunds.payload.payload.suppliers.some((s) => s.id === supRefunds), false);
+
+    // Issue 2 check against server HTTP endpoints: stop server briefly to seed BOTH legacy initial_paid_amount patterns
+    await stopTestServer(srv);
+    srv = null;
+    const mgr = new SqliteDatabaseManager({ filename: join(sDir, 'retailos.sqlite') });
+    mgr.connect();
+    const raw = mgr.getRawDatabase();
+    const tenantId = raw.prepare('SELECT id FROM tenants LIMIT 1').get().id;
+    const ownerId = raw.prepare("SELECT id FROM users WHERE role = 'OWNER' LIMIT 1").get().id;
+    const periodId = raw.prepare("SELECT id FROM accounting_periods WHERE status = 'OPEN' LIMIT 1").get().id;
+    const acc1300 = raw.prepare("SELECT id FROM accounts WHERE tenant_id = ? AND account_code = '1300'").get(tenantId).id;
+    const acc1010 = raw.prepare("SELECT id FROM accounts WHERE tenant_id = ? AND account_code = '1010'").get(tenantId).id;
+    const acc2010 = raw.prepare("SELECT id FROM accounts WHERE tenant_id = ? AND account_code = '2010'").get(tenantId).id;
+    const txTime = new Date().toISOString();
+    const txDay = cairoDateIso();
+
+    // Legacy row 1: ONLY initial_paid_amount = 4000 (no :payment:initial row in supplier_payments)
+    const legOnlyId = randomUUID();
+    const legOnlyKey = randomUUID();
+    raw.prepare(`INSERT INTO supplier_purchases (id, tenant_id, store_id, supplier_id, idempotency_key, invoice_number, purchased_at, total_amount, initial_paid_amount, currency, notes, created_by_user_id) VALUES (?, ?, ?, ?, ?, 'LEG-HTTP-1', ?, 10000, 4000, 'EGP', NULL, ?)`).run(legOnlyId, tenantId, storeId, supLegacy, legOnlyKey, txTime, ownerId);
+    const je1 = randomUUID();
+    raw.prepare(`INSERT INTO journal_entries (id, tenant_id, store_id, period_id, entry_number, entry_date, source_type, source_id, idempotency_key, status, created_by_user_id) VALUES (?, ?, ?, ?, 'J-LEG-1', ?, 'PURCHASE', ?, ?, 'POSTED', ?)`).run(je1, tenantId, storeId, periodId, txDay, legOnlyId, `purchase:${legOnlyKey}`, ownerId);
+    raw.prepare(`INSERT INTO journal_lines (id, journal_entry_id, account_id, entry_type, amount, currency, memo) VALUES (?, ?, ?, 'DEBIT', 10000, 'EGP', 'leg'), (?, ?, ?, 'CREDIT', 4000, 'EGP', 'leg'), (?, ?, ?, 'CREDIT', 6000, 'EGP', 'leg')`).run(randomUUID(), je1, acc1300, randomUUID(), je1, acc1010, randomUUID(), je1, acc2010);
+
+    // Legacy row 2: initial_paid_amount = 5000 AND duplicate :payment:initial row = 5000 (must count ONCE = 5000, NOT 10000)
+    const legDupId = randomUUID();
+    const legDupKey = randomUUID();
+    raw.prepare(`INSERT INTO supplier_purchases (id, tenant_id, store_id, supplier_id, idempotency_key, invoice_number, purchased_at, total_amount, initial_paid_amount, currency, notes, created_by_user_id) VALUES (?, ?, ?, ?, ?, 'LEG-HTTP-2', ?, 12000, 5000, 'EGP', NULL, ?)`).run(legDupId, tenantId, storeId, supLegacy, legDupKey, txTime, ownerId);
+    raw.prepare(`INSERT INTO supplier_payments (id, tenant_id, supplier_id, purchase_id, amount, currency, payment_method, idempotency_key, paid_at, created_by_user_id) VALUES (?, ?, ?, ?, 5000, 'EGP', 'CASH', ?, ?, ?)`).run(`${legDupId}:payment:initial`, tenantId, supLegacy, legDupId, `${legDupKey}:initial`, txTime, ownerId);
+    const je2 = randomUUID();
+    raw.prepare(`INSERT INTO journal_entries (id, tenant_id, store_id, period_id, entry_number, entry_date, source_type, source_id, idempotency_key, status, created_by_user_id) VALUES (?, ?, ?, ?, 'J-LEG-2', ?, 'PURCHASE', ?, ?, 'POSTED', ?)`).run(je2, tenantId, storeId, periodId, txDay, legDupId, `purchase:${legDupKey}`, ownerId);
+    raw.prepare(`INSERT INTO journal_lines (id, journal_entry_id, account_id, entry_type, amount, currency, memo) VALUES (?, ?, ?, 'DEBIT', 12000, 'EGP', 'dup'), (?, ?, ?, 'CREDIT', 5000, 'EGP', 'dup'), (?, ?, ?, 'CREDIT', 7000, 'EGP', 'dup')`).run(randomUUID(), je2, acc1300, randomUUID(), je2, acc1010, randomUUID(), je2, acc2010);
+    await mgr.close();
+
+    srv = await startTestServer();
+    const bootAfterLegacy = await sReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie });
+    const legSupData = bootAfterLegacy.payload.suppliers.find((s) => s.id === supLegacy);
+    // Total billed = 10000 + 12000 = 22000; paid = 4000 + 5000 = 9000 (NOT 14000!); due = 13000 (matches GL 2010 = 6000 + 7000!)
+    assert.equal(legSupData.totalPurchased, '22000');
+    assert.equal(legSupData.totalPaid, '9000', 'Must not double-count legacy initial_paid_amount');
+    assert.equal(legSupData.balanceDue, '13000');
+
+    const legList = await sReq(`/api/purchases?storeId=${storeId}&search=${encodeURIComponent('تاجر الرصيد التراكمي')}`, { cookieStr: ownerCookie });
+    const legListSup = legList.payload.payload.suppliers.find((s) => s.id === supLegacy);
+    assert.equal(legListSup.totalPaid, '9000');
+    assert.equal(legListSup.balanceDue, '13000');
+
+    // Reconcile GL Accounts Payable 2010 === total supplier balanceDue across all suppliers!
+    const tb = await sReq(`/api/reports/trial-balance?storeId=${storeId}`, { cookieStr: ownerCookie });
+    const acc2010Tb = tb.payload.accounts.find((a) => a.accountCode === '2010');
+    const net2010Credit = BigInt(acc2010Tb.creditTotal.amount) - BigInt(acc2010Tb.debitTotal.amount);
+    const totalDueAcrossAllSuppliers = bootAfterLegacy.payload.suppliers.reduce((s, sup) => s + BigInt(sup.balanceDue), 0n);
+    assert.equal(totalDueAcrossAllSuppliers, net2010Credit, 'Total supplier balances must equal GL Account 2010 payable');
+  } finally {
+    await stopTestServer(srv);
     await rm(sDir, { recursive: true, force: true }).catch(() => {});
   }
 });

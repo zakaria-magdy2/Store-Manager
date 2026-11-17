@@ -655,6 +655,29 @@ async function tenantUserNameMap(tenantId) {
   return new Map(rows.map((u) => [u.id, u.fullName || u.username]));
 }
 
+function unrepresentedInitialPaidSql(alias = 'p') {
+  return `(CASE WHEN ${alias}.initial_paid_amount > 0 AND NOT EXISTS (
+    SELECT 1 FROM supplier_payments sp_init
+    WHERE sp_init.tenant_id = ${alias}.tenant_id
+      AND sp_init.purchase_id = ${alias}.id
+      AND (
+        sp_init.id = ${alias}.id || ':payment:initial'
+        OR sp_init.idempotency_key = ${alias}.idempotency_key || ':initial'
+      )
+  ) THEN ${alias}.initial_paid_amount ELSE 0 END)`;
+}
+
+function effectiveLegacyInitialPaid(purchase, purchasePayments) {
+  const legacyInitial = BigInt(purchase.initial_paid_amount ?? 0);
+  if (legacyInitial <= 0n) return 0n;
+  const alreadyRepresented = purchasePayments.some(
+    (payment) =>
+      payment.id === `${purchase.id}:payment:initial` ||
+      payment.idempotency_key === `${purchase.idempotency_key}:initial`,
+  );
+  return alreadyRepresented ? 0n : legacyInitial;
+}
+
 function purchaseFilterSql({ tenantId, storeId, bounds = null, supplierId = null, search = '' }) {
   const conds = ['p.tenant_id = ?', 'p.store_id = ?'];
   const args = [tenantId, storeId];
@@ -664,41 +687,91 @@ function purchaseFilterSql({ tenantId, storeId, bounds = null, supplierId = null
   }
   if (supplierId) { conds.push('p.supplier_id = ?'); args.push(supplierId); }
   if (search) {
-    conds.push(`(instr(lower(coalesce(p.invoice_number, '')), lower(?)) > 0 OR instr(lower(coalesce(p.notes, '')), lower(?)) > 0 OR EXISTS (SELECT 1 FROM supplier_purchase_items i WHERE i.tenant_id = p.tenant_id AND i.purchase_id = p.id AND (instr(lower(i.product_name), lower(?)) > 0 OR instr(lower(i.sku), lower(?)) > 0)))`);
-    args.push(search, search, search, search);
+    conds.push(`(instr(lower(coalesce(p.invoice_number, '')), lower(?)) > 0 OR instr(lower(coalesce(p.notes, '')), lower(?)) > 0 OR EXISTS (SELECT 1 FROM suppliers sup WHERE sup.id = p.supplier_id AND sup.tenant_id = p.tenant_id AND instr(lower(sup.name), lower(?)) > 0) OR EXISTS (SELECT 1 FROM supplier_purchase_items i WHERE i.tenant_id = p.tenant_id AND i.purchase_id = p.id AND (instr(lower(i.product_name), lower(?)) > 0 OR instr(lower(i.sku), lower(?)) > 0)))`);
+    args.push(search, search, search, search, search);
   }
   return { where: conds.join(' AND '), args };
 }
 
-/** Full-history (or filtered) supplier totals computed in SQL: never limited by a page window. */
-function supplierPurchaseAggregates(filter) {
+/**
+ * Finds all supplier IDs matching a text search across supplier names,
+ * matching purchases/items, or supplier refund references/notes.
+ */
+function findMatchingSupplierIds(filter) {
+  const searchLower = (filter.search ?? '').trim().toLowerCase();
+  if (!searchLower) return null;
+  const rawDb = database.getRawDatabase();
+  const matched = new Set();
+
   const { where, args } = purchaseFilterSql(filter);
+  const purSuppliers = rawDb.prepare(`SELECT DISTINCT p.supplier_id AS supplierId FROM supplier_purchases p WHERE ${where}`).all(...args);
+  for (const row of purSuppliers) matched.add(row.supplierId);
+
+  const rConds = ['sr.tenant_id = ?', 'sr.store_id = ?'];
+  const rArgs = [filter.tenantId, filter.storeId];
+  if (filter.supplierId) { rConds.push('sr.supplier_id = ?'); rArgs.push(filter.supplierId); }
+  if (filter.bounds) {
+    rConds.push("replace(COALESCE(sr.refunded_at, sr.created_at), ' ', 'T') >= ?", "replace(COALESCE(sr.refunded_at, sr.created_at), ' ', 'T') < ?");
+    rArgs.push(filter.bounds.startIso, filter.bounds.endExclusiveIso);
+  }
+  rConds.push(`(instr(lower(coalesce(sup.name, '')), lower(?)) > 0 OR instr(lower(coalesce(sr.reference_number, '')), lower(?)) > 0 OR instr(lower(coalesce(sr.notes, '')), lower(?)) > 0)`);
+  rArgs.push(searchLower, searchLower, searchLower);
+  const refSuppliers = rawDb.prepare(`
+    SELECT DISTINCT sr.supplier_id AS supplierId
+    FROM supplier_refunds sr
+    INNER JOIN suppliers sup ON sup.id = sr.supplier_id AND sup.tenant_id = sr.tenant_id
+    WHERE ${rConds.join(' AND ')}
+  `).all(...rArgs);
+  for (const row of refSuppliers) matched.add(row.supplierId);
+
+  const nameSuppliers = rawDb.prepare(`
+    SELECT id FROM suppliers WHERE tenant_id = ? AND is_active = 1 AND instr(lower(name), lower(?)) > 0
+  `).all(filter.tenantId, searchLower);
+  for (const row of nameSuppliers) matched.add(row.id);
+
+  return matched;
+}
+
+/** Full-history (or date-bounded) supplier totals computed in SQL: never distorted by text search or page window. */
+function supplierPurchaseAggregates(filter) {
+  const { where, args } = purchaseFilterSql({
+    tenantId: filter.tenantId,
+    storeId: filter.storeId,
+    bounds: filter.bounds,
+    supplierId: filter.supplierId,
+    search: '',
+  });
   const rawDb = database.getRawDatabase();
   const rows = rawDb.prepare(`
     SELECT p.supplier_id AS supplierId,
       COUNT(*) AS purchaseCount,
       COALESCE(SUM(p.total_amount), 0) AS totalAmount,
-      COALESCE(SUM(p.initial_paid_amount), 0) AS initialPaid,
+      COALESCE(SUM(${unrepresentedInitialPaidSql('p')}), 0) AS initialPaid,
       COALESCE(SUM((SELECT COALESCE(SUM(sp.amount), 0) FROM supplier_payments sp WHERE sp.tenant_id = p.tenant_id AND sp.purchase_id = p.id)), 0) AS laterPaid,
       COALESCE(SUM((SELECT COALESCE(SUM(sr.credit_amount), 0) FROM supplier_returns sr WHERE sr.tenant_id = p.tenant_id AND sr.purchase_id = p.id)), 0) AS returnedCredit
     FROM supplier_purchases p
     WHERE ${where}
     GROUP BY p.supplier_id
   `).all(...args);
-  const refundedBySupplier = new Map();
-  if (!filter.search) {
-    const rConds = ['tenant_id = ?', 'store_id = ?'];
-    const rArgs = [filter.tenantId, filter.storeId];
-    if (filter.supplierId) { rConds.push('supplier_id = ?'); rArgs.push(filter.supplierId); }
-    if (filter.bounds) {
-      rConds.push("replace(COALESCE(refunded_at, created_at), ' ', 'T') >= ?", "replace(COALESCE(refunded_at, created_at), ' ', 'T') < ?");
-      rArgs.push(filter.bounds.startIso, filter.bounds.endExclusiveIso);
-    }
-    const rRows = rawDb.prepare(`SELECT supplier_id AS supplierId, COALESCE(SUM(amount), 0) AS refundedAmount FROM supplier_refunds WHERE ${rConds.join(' AND ')} GROUP BY supplier_id`).all(...rArgs);
-    for (const r of rRows) {
-      refundedBySupplier.set(r.supplierId, BigInt(r.refundedAmount ?? 0));
-    }
+
+  const rConds = ['sr.tenant_id = ?', 'sr.store_id = ?'];
+  const rArgs = [filter.tenantId, filter.storeId];
+  if (filter.supplierId) { rConds.push('sr.supplier_id = ?'); rArgs.push(filter.supplierId); }
+  if (filter.bounds) {
+    rConds.push("replace(COALESCE(sr.refunded_at, sr.created_at), ' ', 'T') >= ?", "replace(COALESCE(sr.refunded_at, sr.created_at), ' ', 'T') < ?");
+    rArgs.push(filter.bounds.startIso, filter.bounds.endExclusiveIso);
   }
+  const rRows = rawDb.prepare(`
+    SELECT sr.supplier_id AS supplierId, sr.amount AS amount
+    FROM supplier_refunds sr
+    WHERE ${rConds.join(' AND ')}
+  `).all(...rArgs);
+
+  const refundedBySupplier = new Map();
+  for (const r of rRows) {
+    refundedBySupplier.set(r.supplierId, (refundedBySupplier.get(r.supplierId) ?? 0n) + BigInt(r.amount ?? 0));
+  }
+
   const map = new Map();
   for (const row of rows) {
     const total = BigInt(row.totalAmount ?? 0);
@@ -706,6 +779,11 @@ function supplierPurchaseAggregates(filter) {
     const returned = BigInt(row.returnedCredit ?? 0);
     const refundedToStore = refundedBySupplier.get(row.supplierId) ?? 0n;
     map.set(row.supplierId, { purchaseCount: Number(row.purchaseCount ?? 0), total, paid, returned, refundedToStore, due: total - paid - returned + refundedToStore });
+  }
+  for (const [supplierId, refundedToStore] of refundedBySupplier.entries()) {
+    if (!map.has(supplierId)) {
+      map.set(supplierId, { purchaseCount: 0, total: 0n, paid: 0n, returned: 0n, refundedToStore, due: refundedToStore });
+    }
   }
   return map;
 }
@@ -762,7 +840,7 @@ async function loadPurchaseEntries(tenantId, purchaseRows, userMap) {
   return purchaseRows.map((purchase) => {
     const purchasePayments = paymentsByPurchase.get(purchase.id) ?? [];
     const purchaseReturns = returnsByPurchase.get(purchase.id) ?? [];
-    const paid = BigInt(purchase.initial_paid_amount) + purchasePayments.reduce((sum, payment) => sum + BigInt(payment.amount), 0n);
+    const paid = effectiveLegacyInitialPaid(purchase, purchasePayments) + purchasePayments.reduce((sum, payment) => sum + BigInt(payment.amount), 0n);
     const returnCredit = purchaseReturns.reduce((sum, item) => sum + BigInt(item.credit_amount), 0n);
     return {
       id: purchase.id,
@@ -1570,7 +1648,7 @@ async function profitLossReport(ctx, url) {
       s.id AS supplier_id, s.name AS supplier_name
     FROM supplier_purchases p
     INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
-    WHERE p.tenant_id = ? AND p.store_id = ? AND p.initial_paid_amount > 0
+    WHERE p.tenant_id = ? AND p.store_id = ? AND ${unrepresentedInitialPaidSql('p')} > 0
       AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') >= ?
       AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') < ?
     ORDER BY COALESCE(p.purchased_at, p.created_at) DESC
@@ -2218,7 +2296,7 @@ async function purchaseSupplierReport(ctx, url) {
   if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
   const rows = database.getRawDatabase().prepare(`
     SELECT s.id AS supplierId, s.name AS supplierName, COUNT(p.id) AS invoiceCount, SUM(p.total_amount) AS totalAmount,
-      SUM(p.initial_paid_amount + COALESCE((SELECT SUM(pay.amount) FROM supplier_payments pay WHERE pay.tenant_id = p.tenant_id AND pay.purchase_id = p.id), 0)) AS paidAmount,
+      SUM(${unrepresentedInitialPaidSql('p')} + COALESCE((SELECT SUM(pay.amount) FROM supplier_payments pay WHERE pay.tenant_id = p.tenant_id AND pay.purchase_id = p.id), 0)) AS paidAmount,
       SUM(COALESCE((SELECT SUM(sr.credit_amount) FROM supplier_returns sr WHERE sr.tenant_id = p.tenant_id AND sr.purchase_id = p.id), 0)) AS returnedCredit,
       SUM(COALESCE((SELECT SUM(spi.quantity) FROM supplier_purchase_items spi WHERE spi.tenant_id = p.tenant_id AND spi.purchase_id = p.id), 0)) AS unitsOrdered
     FROM supplier_purchases p
@@ -2333,7 +2411,7 @@ async function financialMapReport(ctx, url) {
     SELECT p.id, p.invoice_number, COALESCE(p.purchased_at, p.created_at) as created_at, p.initial_paid_amount as amount, p.notes, p.created_by_user_id, s.name as supplier_name
     FROM supplier_purchases p
     INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
-    WHERE p.tenant_id = ? AND p.store_id = ? AND p.initial_paid_amount > 0
+    WHERE p.tenant_id = ? AND p.store_id = ? AND ${unrepresentedInitialPaidSql('p')} > 0
   `;
   const supInitParams = [ctx.tenantId, storeId];
   if (bounds) { supInitSql += ` AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') >= ? AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') < ?`; supInitParams.push(bounds.startIso, bounds.endExclusiveIso); }
@@ -3741,15 +3819,50 @@ async function handleApi(req, res, url) {
     const userMap = await tenantUserNameMap(ctx.tenantId);
     const entries = await loadPurchaseEntries(ctx.tenantId, rows, userMap);
     const totals = supplierPurchaseAggregates(filter);
+    const matchedSupplierIds = findMatchingSupplierIds(filter);
     const supplierRows = await db.selectFrom('suppliers').selectAll().where('tenant_id', '=', ctx.tenantId).where('is_active', '=', 1).orderBy('name').execute();
-    const visibleSuppliers = filter.supplierId ? supplierRows.filter((s) => s.id === filter.supplierId) : supplierRows;
-    let sumTotal = 0n; let sumPaid = 0n; let sumReturned = 0n; let sumDue = 0n;
-    for (const t of totals.values()) { sumTotal += t.total; sumPaid += t.paid; sumReturned += t.returned; sumDue += t.due; }
+    const visibleSuppliers = filter.supplierId
+      ? supplierRows.filter((s) => s.id === filter.supplierId && (!matchedSupplierIds || matchedSupplierIds.has(s.id)))
+      : matchedSupplierIds
+        ? supplierRows.filter((s) => matchedSupplierIds.has(s.id))
+        : supplierRows;
+    const refundRows = visibleSuppliers.length
+      ? await db.selectFrom('supplier_refunds').selectAll()
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('store_id', '=', storeId)
+        .where('supplier_id', 'in', visibleSuppliers.map((s) => s.id))
+        .orderBy('refunded_at', 'desc')
+        .execute()
+      : [];
+    const refundsBySupplier = new Map();
+    for (const r of refundRows) {
+      if (bounds) {
+        const ts = String(r.refunded_at || r.created_at || '').replace(' ', 'T');
+        if (ts < bounds.startIso || ts >= bounds.endExclusiveIso) continue;
+      }
+      const bucket = refundsBySupplier.get(r.supplier_id) ?? [];
+      bucket.push({
+        id: r.id,
+        amount: moneyJson(Money.fromMinor(BigInt(r.amount), r.currency)),
+        paymentMethod: r.payment_method,
+        referenceNumber: r.reference_number,
+        notes: r.notes,
+        refundedAt: r.refunded_at,
+        createdByName: userMap.get(r.created_by_user_id) || 'المسؤول',
+      });
+      refundsBySupplier.set(r.supplier_id, bucket);
+    }
+    let sumTotal = 0n; let sumPaid = 0n; let sumReturned = 0n; let sumRefunded = 0n; let sumDue = 0n;
+    for (const s of visibleSuppliers) {
+      const t = totals.get(s.id);
+      if (!t) continue;
+      sumTotal += t.total; sumPaid += t.paid; sumReturned += t.returned; sumRefunded += t.refundedToStore ?? 0n; sumDue += t.due;
+    }
     const asMoney = (minor) => moneyJson(Money.fromMinor(minor, currency));
     return json(res, 200, {
       payload: {
         purchases: entries,
-        suppliers: visibleSuppliers.map((supplier) => serializeSupplierSummary(supplier, totals.get(supplier.id), currency, [])),
+        suppliers: visibleSuppliers.map((supplier) => serializeSupplierSummary(supplier, totals.get(supplier.id), currency, [], refundsBySupplier.get(supplier.id) ?? [])),
         total,
         offset,
         limit,
@@ -3759,6 +3872,7 @@ async function handleApi(req, res, url) {
           totalPurchased: asMoney(sumTotal),
           totalPaid: asMoney(sumPaid),
           returnedCredit: asMoney(sumReturned),
+          refundedToStore: asMoney(sumRefunded),
           balanceDue: asMoney(sumDue),
           from, to, hasSearch: Boolean(search),
         },
@@ -5645,21 +5759,27 @@ async function handleApi(req, res, url) {
       const store = await trx.selectFrom('stores').select('id').where('id', '=', body.storeId).where('tenant_id', '=', ctx.tenantId).executeTakeFirst();
       if (!supplier || !store) throw Object.assign(new Error('التاجر أو الفرع غير متاح'), { status: 404 });
 
-      const purchasesForSup = await trx.selectFrom('supplier_purchases').select(['id', 'total_amount', 'initial_paid_amount'])
+      const purchasesForSup = await trx.selectFrom('supplier_purchases').select(['id', 'idempotency_key', 'total_amount', 'initial_paid_amount'])
         .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', body.storeId).where('supplier_id', '=', supplierId).execute();
       const purchaseIds = purchasesForSup.map((p) => p.id);
+      const paymentsByPurchase = new Map();
       let totalBilled = 0n;
       let totalPaid = 0n;
       let totalReturned = 0n;
-      for (const p of purchasesForSup) {
-        totalBilled += BigInt(p.total_amount);
-        totalPaid += BigInt(p.initial_paid_amount);
-      }
       if (purchaseIds.length > 0) {
-        const payRows = await trx.selectFrom('supplier_payments').select('amount').where('tenant_id', '=', ctx.tenantId).where('purchase_id', 'in', purchaseIds).execute();
-        for (const row of payRows) totalPaid += BigInt(row.amount);
+        const payRows = await trx.selectFrom('supplier_payments').select(['id', 'purchase_id', 'idempotency_key', 'amount']).where('tenant_id', '=', ctx.tenantId).where('purchase_id', 'in', purchaseIds).execute();
+        for (const row of payRows) {
+          totalPaid += BigInt(row.amount);
+          const bucket = paymentsByPurchase.get(row.purchase_id) ?? [];
+          bucket.push(row);
+          paymentsByPurchase.set(row.purchase_id, bucket);
+        }
         const retRows = await trx.selectFrom('supplier_returns').select('credit_amount').where('tenant_id', '=', ctx.tenantId).where('purchase_id', 'in', purchaseIds).execute();
         for (const row of retRows) totalReturned += BigInt(row.credit_amount);
+      }
+      for (const p of purchasesForSup) {
+        totalBilled += BigInt(p.total_amount);
+        totalPaid += effectiveLegacyInitialPaid(p, paymentsByPurchase.get(p.id) ?? []);
       }
       const priorRefundRows = await trx.selectFrom('supplier_refunds').select('amount')
         .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', body.storeId).where('supplier_id', '=', supplierId).execute();

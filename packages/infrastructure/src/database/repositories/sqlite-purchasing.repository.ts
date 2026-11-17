@@ -251,14 +251,23 @@ export class SqlitePurchasingRepository {
         .where('id', '=', input.purchaseId).where('tenant_id', '=', ctx.tenantId).executeTakeFirst();
       if (!purchase || (ctx.storeId && ctx.storeId !== purchase.store_id)) throw Object.assign(new Error('فاتورة التاجر غير متاحة'), { status: 404 });
       if (input.amount.currency.code !== purchase.currency) throw badRequest('عملة السداد لا تطابق عملة الفاتورة');
-      const payments = await trx.selectFrom('supplier_payments').select('amount')
+      const payments = await trx.selectFrom('supplier_payments').select(['id', 'idempotency_key', 'amount'])
         .where('tenant_id', '=', ctx.tenantId).where('purchase_id', '=', purchase.id).execute();
       // Supplier returns reduce the payable for this invoice, so the remaining
       // balance is total - paid - returned. Paying past that would over-settle
       // the invoice and distort the supplier ledger.
+      // Legacy purchases may hold an upfront payment in `initial_paid_amount` without
+      // a `:initial` row in `supplier_payments`; if an `:initial` payment row already
+      // exists, count it only once via `supplier_payments`.
       const supplierReturns = await trx.selectFrom('supplier_returns').select('credit_amount')
         .where('tenant_id', '=', ctx.tenantId).where('purchase_id', '=', purchase.id).execute();
-      const paid = BigInt(purchase.initial_paid_amount) + payments.reduce((sum, payment) => sum + BigInt(payment.amount), 0n);
+      const hasInitialPaymentRow = payments.some(
+        (payment) =>
+          payment.id === `${purchase.id}:payment:initial` ||
+          payment.idempotency_key === `${purchase.idempotency_key}:initial`,
+      );
+      const legacyInitialPaid = hasInitialPaymentRow ? 0n : BigInt(purchase.initial_paid_amount);
+      const paid = legacyInitialPaid + payments.reduce((sum, payment) => sum + BigInt(payment.amount), 0n);
       const returned = supplierReturns.reduce((sum, row) => sum + BigInt(row.credit_amount), 0n);
       const outstanding = BigInt(purchase.total_amount) - paid - returned;
       if (input.amount.amount > outstanding) {

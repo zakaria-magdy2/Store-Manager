@@ -782,4 +782,97 @@ describe('Financial & Accounting SQLite Integration Tests (Phase 5)', () => {
     expect(entry.periodName).toBe('2026-12');
     void categoryRepo;
   });
+
+  it('prevents legacy initial_paid_amount double-counting across recordSupplierPayment', async () => {
+    const db = dbManager.getDb();
+    const purchasingRepo = new SqlitePurchasingRepository(db);
+    await db
+      .insertInto('suppliers')
+      .values({ id: 'sup-legacy', tenant_id: 'tenant-fin-1', name: 'Legacy Sup', phone: null, notes: null })
+      .execute();
+
+    // Case A: legacy row with initial_paid_amount = 4000 and NO :payment:initial row -> 6000 remaining
+    await db
+      .insertInto('supplier_purchases')
+      .values({
+        id: 'pur-legacy-only',
+        tenant_id: 'tenant-fin-1',
+        store_id: 'store-fin-1',
+        supplier_id: 'sup-legacy',
+        idempotency_key: 'idem-pur-legacy-only',
+        invoice_number: 'LEG-ONLY',
+        purchased_at: '2026-11-05T10:00:00.000Z',
+        total_amount: 10000n,
+        initial_paid_amount: 4000n,
+        currency: 'EGP',
+        notes: null,
+        created_by_user_id: 'user-fin-1',
+      })
+      .execute();
+
+    await expect(
+      purchasingRepo.recordSupplierPayment(ctx, {
+        id: 'pay-leg-over',
+        idempotencyKey: 'idem-pay-leg-over',
+        purchaseId: 'pur-legacy-only',
+        amount: egp(7000n),
+        paymentMethod: 'CASH',
+        paidAt: new Date('2026-11-06T10:00:00.000Z'),
+      }),
+    ).rejects.toThrow(/المبلغ أكبر من المديونية المتبقية/);
+
+    await purchasingRepo.recordSupplierPayment(ctx, {
+      id: 'pay-leg-exact',
+      idempotencyKey: 'idem-pay-leg-exact',
+      purchaseId: 'pur-legacy-only',
+      amount: egp(6000n),
+      paymentMethod: 'CASH',
+      paidAt: new Date('2026-11-06T11:00:00.000Z'),
+    });
+
+    // Case B: dual-written legacy row with initial_paid_amount = 4000 AND :payment:initial = 4000 -> STILL 6000 remaining (NOT 2000)
+    await db
+      .insertInto('supplier_purchases')
+      .values({
+        id: 'pur-legacy-dup',
+        tenant_id: 'tenant-fin-1',
+        store_id: 'store-fin-1',
+        supplier_id: 'sup-legacy',
+        idempotency_key: 'idem-pur-legacy-dup',
+        invoice_number: 'LEG-DUP',
+        purchased_at: '2026-11-05T10:00:00.000Z',
+        total_amount: 10000n,
+        initial_paid_amount: 4000n,
+        currency: 'EGP',
+        notes: null,
+        created_by_user_id: 'user-fin-1',
+      })
+      .execute();
+    await db
+      .insertInto('supplier_payments')
+      .values({
+        id: 'pur-legacy-dup:payment:initial',
+        tenant_id: 'tenant-fin-1',
+        supplier_id: 'sup-legacy',
+        purchase_id: 'pur-legacy-dup',
+        idempotency_key: 'idem-pur-legacy-dup:initial',
+        amount: 4000n,
+        currency: 'EGP',
+        payment_method: 'CASH',
+        reference_number: null,
+        paid_at: '2026-11-05T10:00:00.000Z',
+        created_by_user_id: 'user-fin-1',
+      })
+      .execute();
+
+    // Paying all remaining 6000 succeeds (would wrongly fail at >2000 if initial_paid_amount were double-counted!)
+    await purchasingRepo.recordSupplierPayment(ctx, {
+      id: 'pay-leg-dup-ok',
+      idempotencyKey: 'idem-pay-leg-dup-ok',
+      purchaseId: 'pur-legacy-dup',
+      amount: egp(6000n),
+      paymentMethod: 'CASH',
+      paidAt: new Date('2026-11-06T12:00:00.000Z'),
+    });
+  });
 });
