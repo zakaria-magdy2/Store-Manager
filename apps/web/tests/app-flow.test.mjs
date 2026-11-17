@@ -4,7 +4,6 @@ import { once } from 'node:events';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createConnection, createServer } from 'node:net';
 import { dirname, join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -2245,38 +2244,23 @@ test('multi-unit sale with line and cart discounts keeps P&L, Financial Map, Sal
     });
     assert.equal(saleRes.response.status, 201, JSON.stringify(saleRes.payload));
 
-    // Append a second multi-unit sale (qty=2, line_discount=3000, cart_discount_share=1000, net_revenue=16000)
+    // Record a second multi-unit sale (qty=2, line_discount=3000, cart_discount_share=1000, net_revenue=16000)
     // alongside sale #1 (qty=2, net_revenue=20000). Combined netSales=36000, cogs=16000, profit=20000
     // (buggy qty*discount SQL would yield 32000 instead of 36000).
-    await stopChild(discServer);
-    const rawDb = new DatabaseSync(join(discDataDir, 'retailos.sqlite'));
-    const s1 = rawDb.prepare('SELECT * FROM sales WHERE id = ?').get(saleRes.payload.id);
-    const si1 = rawDb.prepare('SELECT * FROM sale_items WHERE sale_id = ?').get(saleRes.payload.id);
-    const sale2Id = randomUUID();
-    const sale2Time = new Date(Date.parse(s1.created_at) + 1000).toISOString();
-    rawDb.prepare(`
-      INSERT INTO sales (id, tenant_id, store_id, sale_number, idempotency_key, customer_name, currency, subtotal, discount_total, total, paid_total, change_given, cashier_user_id, status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(sale2Id, s1.tenant_id, s1.store_id, 'INV-DISC-2', randomUUID(), null, s1.currency, 20000, 4000, 16000, 16000, 0, s1.cashier_user_id, 'COMPLETED', sale2Time);
-    rawDb.prepare(`
-      INSERT INTO sale_items (id, sale_id, tenant_id, store_id, variant_id, product_id, product_name, sku, item_type, quantity, unit_price, line_discount, cart_discount_share, net_revenue, unit_cost_snapshot, cost_of_goods_sold, currency, created_at, variant_attributes_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(randomUUID(), sale2Id, si1.tenant_id, si1.store_id, si1.variant_id, si1.product_id, si1.product_name, si1.sku, si1.item_type, 2, 10000, 3000, 1000, 16000, 4000, 8000, si1.currency, sale2Time, si1.variant_attributes_json ?? null);
-    rawDb.prepare(`
-      INSERT INTO sale_payments (id, sale_id, tenant_id, method, amount, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(randomUUID(), sale2Id, s1.tenant_id, 'CASH', 16000, sale2Time);
-    rawDb.close();
-
-    discPort = await reservePort();
-    discUrl = `http://127.0.0.1:${discPort}`;
-    discServer = await startSrv();
-    const reLogin = await dReq('/api/login', {
+    const sale2Res = await dReq('/api/checkout', {
       method: 'POST',
-      body: { username: 'disc_owner', password: 'Discount-Password-2026' },
+      cookieStr: ownerCookie,
+      body: {
+        storeId,
+        idempotencyKey: 'dddddddd-3333-4333-8333-000000000003',
+        cartDiscount: '1000',
+        items: [{ variantId, quantity: '2', lineDiscount: '3000' }],
+        payment: { method: 'CASH', amount: '16000' },
+      },
     });
-    assert.equal(reLogin.response.status, 200);
-    ownerCookie = reLogin.response.headers.get('set-cookie').split(';')[0];
+    assert.equal(sale2Res.response.status, 201, JSON.stringify(sale2Res.payload));
+    assert.equal(sale2Res.payload.total.amount, '16000');
+    assert.equal(sale2Res.payload.discountTotal.amount, '4000');
 
     const todayStr = cairoDateIso();
     const [pl, fm, salesPage, shiftsRes] = await Promise.all([
@@ -2718,7 +2702,7 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
 
     // Record older expense E1 (10000 minor) on yesterday & newer expense E2 (5000 minor) today
     const todayStr = cairoDateIso();
-    const olderDate = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const olderDate = cairoDateIso(new Date(Date.now() - 24 * 60 * 60 * 1000));
     const e1 = await sReq('/api/expenses', {
       method: 'POST',
       cookieStr: ownerCookie,
