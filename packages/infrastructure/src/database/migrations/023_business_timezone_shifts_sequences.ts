@@ -79,13 +79,14 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   `.execute(db);
 
   await sql`
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_supplier_purchases_tenant_invoice
-    ON supplier_purchases(tenant_id, invoice_number)
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_supplier_purchases_supplier_invoice
+    ON supplier_purchases(tenant_id, supplier_id, invoice_number)
     WHERE invoice_number IS NOT NULL;
   `.execute(db);
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
+  await sql`DROP INDEX IF EXISTS idx_supplier_purchases_supplier_invoice;`.execute(db);
   await sql`DROP INDEX IF EXISTS idx_supplier_purchases_tenant_invoice;`.execute(db);
   await sql`DROP TABLE IF EXISTS document_sequences;`.execute(db);
   await sql`DROP TABLE IF EXISTS auth_rate_limits;`.execute(db);

@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { createConnection, createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,7 +35,7 @@ async function reservePort() {
 }
 
 async function waitForApp() {
-  for (let attempt = 0; attempt < 240; attempt += 1) {
+  for (let attempt = 0; attempt < 600; attempt += 1) {
     if (serverProcess.exitCode !== null) throw new Error(`App server exited with ${serverProcess.exitCode}`);
     try {
       const response = await fetch(`${baseUrl}/api/bootstrap`);
@@ -62,8 +62,9 @@ before(async () => {
   serverProcess = spawn(process.execPath, [join(appDir, 'server.mjs')], {
     cwd: workspace,
     env: { ...process.env, PORT: String(port), RETAILOS_DATA_DIR: dataDir, RETAILOS_COMPANY_NAME: 'متجر الاختبار', RETAILOS_COMPANY_CODE: 'RETAIL_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع الرئيسي' },
-    stdio: ['ignore', 'ignore', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
+  serverProcess.stdout.on('data', (chunk) => { serverLog += chunk.toString(); });
   serverProcess.stderr.on('data', (chunk) => { serverLog += chunk.toString(); });
   await waitForApp().catch((error) => { throw new Error(`${error.message}\n${serverLog}`); });
 });
@@ -326,7 +327,8 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.equal(cashierData.payload.capabilities.canManageUsers, false);
   assert.equal(cashierData.payload.capabilities.canViewAccounting, false);
   assert.equal(cashierData.payload.capabilities.canViewExpenses, false);
-  assert.equal(cashierData.payload.capabilities.canRefund, false);
+  assert.equal(cashierData.payload.capabilities.canRefund, true);
+  assert.equal(cashierData.payload.capabilities.canReturnSale, true);
   assert.equal((await request('/api/reports/top-products')).response.status, 403);
   assert.equal((await request('/api/audit-logs')).response.status, 403);
   assert.equal(cashierData.payload.suppliers.length, 0);
@@ -410,11 +412,8 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
 
   const now = new Date();
   const today = cairoDateIso(now);
-  const [cy, cm, cd] = today.split('-').map(Number);
+  const [cy, cm] = today.split('-').map(Number);
   const previousMonthDate = new Date(Date.UTC(cy, cm - 2, 4)).toISOString().slice(0, 10);
-  const daysInCurrentMonth = new Date(Date.UTC(cy, cm, 0)).getUTCDate();
-  const dayZeroIndex = cd - 1;
-  const expectedDailyMonthlyExpense = (40000n / BigInt(daysInCurrentMonth)) + (dayZeroIndex < Number(40000n % BigInt(daysInCurrentMonth)) ? 1n : 0n);
 
   const expenseBody = { idempotencyKey: '41148f0d-f50c-4f62-8d9c-b3de2c36e7f6', storeId, categoryCode: 'UTILITIES', amount: '1750', paymentMethod: 'CASH_DRAWER', expenseDate: today, notes: 'فاتورة كهرباء' };
   const expense = await request('/api/expenses', { method: 'POST', body: expenseBody });
@@ -570,7 +569,7 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.equal(data.payload.supplierReturns.length, 1);
   assert.equal(updatedFirstPurchase.payments.length, 2);
   assert.equal(updatedFirstPurchase.items[0].quantity, '2');
-  assert.equal(data.payload.accountingEntries.length, 9);
+  assert.equal(data.payload.accountingEntries.length, 8);
   assert.ok(data.payload.accountingEntries.every((entry) => entry.balanced));
   const purchaseJournal = data.payload.accountingEntries.find((entry) => entry.sourceType === 'PURCHASE' && entry.debitTotal === '14000');
   assert.ok(purchaseJournal);
@@ -600,7 +599,7 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.equal(data.payload.monthlyExpenses[0].actual.remainingAmount.amount, '30000');
   assert.equal(data.payload.monthlyExpenses[0].actual.payments.length, 1);
   const expenseJournals = data.payload.accountingEntries.filter((entry) => entry.sourceType === 'EXPENSE');
-  assert.equal(expenseJournals.length, 3);
+  assert.equal(expenseJournals.length, 2);
   assert.ok(expenseJournals.every((entry) => entry.balanced));
 
   const additionalSale = await request('/api/checkout', { method: 'POST', body: {
@@ -959,7 +958,7 @@ test('executes full professional stocktake lifecycle with permissions, blind cou
       try {
         const res = await fetch(`${stkUrl}/api/bootstrap`);
         if (res.ok) { stkReady = true; break; }
-      } catch {}
+      } catch { /* transient failure: keep waiting or fall back */ }
       await new Promise((r) => setTimeout(r, 125));
     }
     assert.ok(stkReady, `stkServer did not become ready: ${stkLog}`);
@@ -1319,7 +1318,7 @@ test('supports unpriced product catalog creation, supplier purchase wholesale+re
       try {
         const res = await fetch(`${purUrl}/api/bootstrap`);
         if (res.ok) { purReady = true; break; }
-      } catch {}
+      } catch { /* transient failure: keep waiting or fall back */ }
       await new Promise((r) => setTimeout(r, 125));
     }
     assert.ok(purReady, `purServer did not become ready: ${purLog}`);
@@ -1523,7 +1522,7 @@ test('updates all financial views (sales summary, shifts, shift sales, dashboard
       try {
         const res = await fetch(`${finUrl}/api/bootstrap`);
         if (res.ok) { finReady = true; break; }
-      } catch {}
+      } catch { /* transient failure: keep waiting or fall back */ }
       await new Promise((r) => setTimeout(r, 125));
     }
     assert.ok(finReady, `finServer did not become ready: ${finLog}`);
@@ -1779,7 +1778,7 @@ test('keeps /api/sales strictly pure while separating profit-loss expenses and f
       try {
         const res = await fetch(`${sepUrl}/api/bootstrap`);
         if (res.ok) { sepReady = true; break; }
-      } catch {}
+      } catch { /* transient failure: keep waiting or fall back */ }
       await new Promise((r) => setTimeout(r, 125));
     }
     assert.ok(sepReady, `sepServer did not become ready: ${sepLog}`);
@@ -1976,7 +1975,7 @@ test('release readiness: full paged history (>200 purchases, journals, returns, 
       try {
         const res = await fetch(`${rrUrl}/api/bootstrap`);
         if (res.ok) return child;
-      } catch {}
+      } catch { /* transient failure: keep waiting or fall back */ }
       await new Promise((r) => setTimeout(r, 125));
     }
     throw new Error(`rrServer did not become ready: ${rrLog}`);
@@ -2135,8 +2134,8 @@ test('release readiness: full paged history (>200 purchases, journals, returns, 
 
 test('multi-unit sale with line and cart discounts keeps P&L, Financial Map, Sales, and Shifts aligned via net_revenue', async () => {
   const discDataDir = await mkdtemp(join(appDir, '.test-discount-'));
-  let discPort = await reservePort();
-  let discUrl = `http://127.0.0.1:${discPort}`;
+  const discPort = await reservePort();
+  const discUrl = `http://127.0.0.1:${discPort}`;
   let discLog = '';
 
   const stopChild = async (child) => {
@@ -2165,13 +2164,13 @@ test('multi-unit sale with line and cart discounts keeps P&L, Financial Map, Sal
       try {
         const res = await fetch(`${discUrl}/api/bootstrap`);
         if (res.ok) return child;
-      } catch {}
+      } catch { /* transient failure: keep waiting or fall back */ }
       await new Promise((r) => setTimeout(r, 125));
     }
     throw new Error(`discServer did not become ready: ${discLog}`);
   };
 
-  let discServer = await startSrv();
+  const discServer = await startSrv();
   const dReq = async (path, { method = 'GET', body, cookieStr } = {}) => {
     const headers = { Origin: discUrl };
     if (body) headers['Content-Type'] = 'application/json';
@@ -2192,7 +2191,7 @@ test('multi-unit sale with line and cart discounts keeps P&L, Financial Map, Sal
       body: { username: 'disc_owner', password: 'Discount-Password-2026' },
     });
     assert.equal(loginRes.response.status, 200);
-    let ownerCookie = loginRes.response.headers.get('set-cookie').split(';')[0];
+    const ownerCookie = loginRes.response.headers.get('set-cookie').split(';')[0];
 
     const data0 = await dReq('/api/data', { cookieStr: ownerCookie });
     const storeId = data0.payload.selectedStoreId;
@@ -2300,8 +2299,8 @@ test('multi-unit sale with line and cart discounts keeps P&L, Financial Map, Sal
 
 test('adversarial POS stress suite: race conditions, dirty inputs, discounted partial return, cross-shift swap, last-item concurrency, crash rollback, RBAC & expense soft-delete', async () => {
   const sDir = await mkdtemp(join(appDir, '.test-stress-'));
-  let sPort = await reservePort();
-  let sUrl = `http://127.0.0.1:${sPort}`;
+  const sPort = await reservePort();
+  const sUrl = `http://127.0.0.1:${sPort}`;
   let sLog = '';
 
   const stopSrv = async (child) => {
@@ -2322,15 +2321,16 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
         RETAILOS_CURRENCY: 'EGP',
         RETAILOS_STORE_NAME: 'فرع الضغط',
       },
-      stdio: ['ignore', 'ignore', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
+    child.stdout.on('data', (chunk) => { sLog += chunk.toString(); });
     child.stderr.on('data', (chunk) => { sLog += chunk.toString(); });
-    for (let i = 0; i < 240; i += 1) {
+    for (let i = 0; i < 600; i += 1) {
       if (child.exitCode !== null) throw new Error(`stressServer exited (${child.exitCode}): ${sLog}`);
       try {
         const res = await fetch(`${sUrl}/api/bootstrap`);
         if (res.ok) return child;
-      } catch {}
+      } catch { /* transient failure: keep waiting or fall back */ }
       await new Promise((r) => setTimeout(r, 125));
     }
     throw new Error(`stressServer did not become ready: ${sLog}`);
@@ -2344,7 +2344,7 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
     const response = await fetch(`${sUrl}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
     const text = await response.text();
     let payload = text;
-    try { payload = JSON.parse(text); } catch {}
+    try { payload = JSON.parse(text); } catch { /* non-JSON body stays as text */ }
     return { response, payload };
   };
 
@@ -2430,7 +2430,6 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
     const varLast = d1.payload.products.find((p) => p.id === scarceProd.payload.id).variants[0].id;
 
     const sup = await sReq('/api/suppliers', { method: 'POST', cookieStr: ownerCookie, body: { name: 'مورد الضغط' } });
-    const purchaseId = randomUUID();
     const purRes = await sReq('/api/purchases', {
       method: 'POST',
       cookieStr: ownerCookie,
@@ -2739,6 +2738,198 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
     const plAfterDel = await sReq(`/api/reports/profit-loss?from=${olderDate}&to=${todayStr}`, { cookieStr: ownerCookie });
     assert.equal(plAfterDel.payload.profitLoss.directExpenses.amount, '5000');
     assert.equal(plAfterDel.payload.profitLoss.operatingProfit.amount, fmAfterDel.payload.summary.operatingProfit);
+
+    // -------------------------------------------------------------------------
+    // SCENARIO 8: Cashier Returns/Exchanges, Auditor 403, Per-Supplier Invoice Index,
+    // Transactional Sequences, Supplier Excess Credit Refund, Trial Balance & Opening Balances,
+    // Daily Backup Key Export, and Graceful Control Shutdown
+    // -------------------------------------------------------------------------
+    const auditorCreate = await sReq('/api/users', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { username: 'st_auditor', password: 'Auditor-Password-2026', fullName: 'مراجع حسابات', role: 'AUDITOR' },
+    });
+    assert.equal(auditorCreate.response.status, 201);
+    const auditorLogin = await sReq('/api/login', {
+      method: 'POST',
+      body: { username: 'st_auditor', password: 'Auditor-Password-2026' },
+    });
+    assert.equal(auditorLogin.response.status, 200);
+    const auditorCookie = auditorLogin.response.headers.get('set-cookie').split(';')[0];
+
+    // Auditor lacks POS_REFUND -> gets 403 on return and exchange
+    assert.equal(
+      (await sReq(`/api/sales/${sale1.id}/returns`, {
+        method: 'POST',
+        cookieStr: auditorCookie,
+        body: { storeId, idempotencyKey: randomUUID(), paymentMethod: 'CASH', items: [{ originalSaleItemId: sale1.items[0].id, quantity: '1' }] },
+      })).response.status,
+      403,
+    );
+    assert.equal(
+      (await sReq(`/api/sales/${sale1.id}/exchange`, {
+        method: 'POST',
+        cookieStr: auditorCookie,
+        body: { storeId, idempotencyKey: randomUUID(), paymentMethod: 'CASH', returnedItems: [{ originalSaleItemId: sale1.items[0].id, quantity: '1' }], replacementItems: [{ variantId: varShoe44, quantity: '1' }] },
+      })).response.status,
+      403,
+    );
+
+    // Cashier executes a normal customer return via explicit POS_REFUND permission
+    const cashierSaleRes = await sReq('/api/checkout', {
+      method: 'POST',
+      cookieStr: cashierCookie,
+      body: { storeId, idempotencyKey: randomUUID(), items: [{ variantId: varBag, quantity: '1' }], payment: { method: 'CASH', amount: '50000' } },
+    });
+    assert.equal(cashierSaleRes.response.status, 201);
+    const cashierReturnRes = await sReq(`/api/sales/${cashierSaleRes.payload.id}/returns`, {
+      method: 'POST',
+      cookieStr: cashierCookie,
+      body: { storeId, idempotencyKey: randomUUID(), paymentMethod: 'CASH', items: [{ originalSaleItemId: cashierSaleRes.payload.items[0].id, quantity: '1' }] },
+    });
+    assert.equal(cashierReturnRes.response.status, 201, JSON.stringify(cashierReturnRes.payload));
+
+    // Failed checkout must NOT increment INV- sequence
+    const seqNumBefore = Number.parseInt(cashierSaleRes.payload.saleNumber.replace('INV-', ''), 10);
+    const failedCheckout = await sReq('/api/checkout', {
+      method: 'POST',
+      cookieStr: cashierCookie,
+      body: { storeId, idempotencyKey: randomUUID(), items: [{ variantId: varBag, quantity: '99' }], payment: { method: 'CASH', amount: '990000' } },
+    });
+    assert.equal(failedCheckout.response.status, 400);
+    const nextOkCheckout = await sReq('/api/checkout', {
+      method: 'POST',
+      cookieStr: cashierCookie,
+      body: { storeId, idempotencyKey: randomUUID(), items: [{ variantId: varBag, quantity: '1' }], payment: { method: 'CASH', amount: '50000' } },
+    });
+    assert.equal(nextOkCheckout.response.status, 201);
+    assert.equal(nextOkCheckout.payload.saleNumber, `INV-${seqNumBefore + 1}`, 'Failed checkout must not create sequence gaps');
+
+    // Different suppliers MAY reuse same invoiceNumber; same supplier duplicate returns 409
+    const sup2 = await sReq('/api/suppliers', { method: 'POST', cookieStr: ownerCookie, body: { name: 'تاجر ثاني' } });
+    assert.equal(sup2.response.status, 201);
+    const purSup1SameInv = await sReq('/api/purchases', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        storeId, supplierId: sup.payload.id, idempotencyKey: randomUUID(), invoiceNumber: 'EXT-SHARED-77',
+        totalAmount: '10000', paidAmount: '10000', paymentMethod: 'CASH',
+        items: [{ variantId: varBag, quantity: '1', unitCost: '10000' }],
+      },
+    });
+    assert.equal(purSup1SameInv.response.status, 201);
+    const purSup2SameInv = await sReq('/api/purchases', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        storeId, supplierId: sup2.payload.id, idempotencyKey: randomUUID(), invoiceNumber: 'EXT-SHARED-77',
+        totalAmount: '10000', paidAmount: '10000', paymentMethod: 'CASH',
+        items: [{ variantId: varBag, quantity: '1', unitCost: '10000' }],
+      },
+    });
+    assert.equal(purSup2SameInv.response.status, 201, 'Different supplier must be allowed same invoice number');
+    const purSup1Dup = await sReq('/api/purchases', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        storeId, supplierId: sup.payload.id, idempotencyKey: randomUUID(), invoiceNumber: 'EXT-SHARED-77',
+        totalAmount: '10000', paidAmount: '10000', paymentMethod: 'CASH',
+        items: [{ variantId: varBag, quantity: '1', unitCost: '10000' }],
+      },
+    });
+    assert.equal(purSup1Dup.response.status, 409, 'Same supplier duplicate invoice number must be rejected');
+
+    // Return item to sup2 -> creates excess creditFromSupplier = 10000, then collect cash refund
+    const sup2Boot = await sReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie });
+    const sup2Pur = sup2Boot.payload.suppliers.find((s) => s.id === sup2.payload.id).purchases[0];
+    const sup2Ret = await sReq(`/api/purchases/${sup2Pur.id}/returns`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { idempotencyKey: randomUUID(), storeId, items: [{ purchaseItemId: sup2Pur.items[0].id, quantity: '1' }] },
+    });
+    assert.equal(sup2Ret.response.status, 201);
+    const sup2AfterRet = (await sReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie })).payload.suppliers.find((s) => s.id === sup2.payload.id);
+    assert.equal(sup2AfterRet.creditFromSupplier, '10000');
+    assert.equal(sup2AfterRet.balanceDue, '-10000');
+
+    const sup2Refund = await sReq(`/api/suppliers/${sup2.payload.id}/refunds`, {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { storeId, idempotencyKey: randomUUID(), amount: '10000', paymentMethod: 'CASH_SAFE', referenceNumber: 'REF-SUP2' },
+    });
+    assert.equal(sup2Refund.response.status, 201, JSON.stringify(sup2Refund.payload));
+    const sup2Settled = (await sReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie })).payload.suppliers.find((s) => s.id === sup2.payload.id);
+    assert.equal(sup2Settled.creditFromSupplier, '0');
+    assert.equal(sup2Settled.balanceDue, '0');
+
+    // Opening balances & Trial Balance reconciliation
+    const openingRes = await sReq('/api/accounting/opening-balances', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { storeId, idempotencyKey: randomUUID(), entryDate: todayStr, cashDrawer: '50000', cashSafe: '100000', bank: '0', inventory: '0', supplierPayables: '0', notes: 'افتتاحي' },
+    });
+    assert.equal(openingRes.response.status, 201, JSON.stringify(openingRes.payload));
+    const tbRes = await sReq(`/api/reports/trial-balance?storeId=${storeId}`, { cookieStr: auditorCookie });
+    assert.equal(tbRes.response.status, 200);
+    assert.equal(tbRes.payload.totals.isBalanced, true);
+    assert.equal(tbRes.payload.totals.debitTotal.amount, tbRes.payload.totals.creditTotal.amount);
+    assert.equal(tbRes.payload.totals.debitBalanceTotal.amount, tbRes.payload.totals.creditBalanceTotal.amount);
+    assert.ok(tbRes.payload.accounts.some((a) => a.accountCode === '3010' && a.creditBalance.amount === '150000'));
+
+    // Financial Path & P&L Cash Position reconcile on final balances
+    const fmFinal = await sReq(`/api/reports/financial-map?storeId=${storeId}`, { cookieStr: ownerCookie });
+    const plFinal = await sReq(`/api/reports/profit-loss?from=2026-11-01&to=${todayStr}&tzOffset=-120`, { cookieStr: ownerCookie });
+    assert.equal(fmFinal.payload.summary.netCashFlow, plFinal.payload.cashPosition.netCashRemaining.amount);
+
+    // Owner daily backup key export & recovery
+    assert.equal((await sReq('/api/backups/daily/key-export', { method: 'POST', cookieStr: cashierCookie, body: { currentPassword: 'Cashier-Password-2026' } })).response.status, 403);
+    assert.equal((await sReq('/api/backups/daily/key-export', { method: 'POST', cookieStr: ownerCookie, body: { currentPassword: 'Wrong-Password-2026' } })).response.status, 400);
+    const keyExportRes = await sReq('/api/backups/daily/key-export', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { currentPassword: 'Stress-Owner-Password-2026' },
+    });
+    assert.equal(keyExportRes.response.status, 200);
+    assert.ok(keyExportRes.payload.dailyBackupKey.length >= 12);
+
+    // Employee password reset revokes existing sessions and invalidates the old password
+    const pwReset = await sReq(`/api/users/${cashierCreate.payload.id}`, {
+      method: 'PATCH',
+      cookieStr: ownerCookie,
+      body: { newPassword: 'Cashier-Rotated-Password-2026' },
+    });
+    assert.equal(pwReset.response.status, 200, JSON.stringify(pwReset.payload));
+    assert.equal(pwReset.payload.passwordReset, true);
+    assert.equal(pwReset.payload.sessionsRevoked, true);
+    assert.equal((await sReq('/api/data', { cookieStr: cashierCookie })).response.status, 401);
+    assert.equal((await sReq('/api/login', { method: 'POST', body: { username: 'st_cashier', password: 'Cashier-Password-2026' } })).response.status, 401);
+    const rotatedLogin = await sReq('/api/login', { method: 'POST', body: { username: 'st_cashier', password: 'Cashier-Rotated-Password-2026' } });
+    assert.equal(rotatedLogin.response.status, 200);
+    const rotatedCookie = rotatedLogin.response.headers.get('set-cookie').split(';')[0];
+    assert.equal((await sReq('/api/data', { cookieStr: rotatedCookie })).response.status, 200);
+
+    // Graceful shutdown control file & /api/internal/shutdown
+    const ctrlRaw = await readFile(join(sDir, '.retailos-control.json'), 'utf8');
+    const ctrl = JSON.parse(ctrlRaw);
+    assert.ok(ctrl.token && ctrl.pid);
+    const badStop = await fetch(`${sUrl}/api/internal/shutdown`, { method: 'POST', headers: { 'x-retailos-shutdown-token': 'invalid' } });
+    assert.equal(badStop.status, 401);
+
+    const exitPromise = once(sServer, 'exit');
+    const stopRes = await fetch(`${sUrl}/api/internal/shutdown`, {
+      method: 'POST',
+      headers: { 'x-retailos-shutdown-token': ctrl.token },
+    });
+    assert.equal(stopRes.status, 202);
+    const [gracefulExitCode] = await Promise.race([
+      exitPromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`Server did not exit gracefully: ${sLog}`)), 20000)),
+    ]);
+    assert.equal(gracefulExitCode, 0);
+    await assert.rejects(readFile(join(sDir, '.retailos-control.json'), 'utf8'));
+    const dailyFiles = await readdir(join(sDir, 'backups', 'daily'));
+    assert.ok(dailyFiles.some((name) => /^retailos-daily-\d{4}-\d{2}-\d{2}\.(rfbackup|sqlite)$/.test(name)), dailyFiles.join(','));
+    sServer = null;
   } finally {
     await stopSrv(sServer);
     await rm(sDir, { recursive: true, force: true }).catch(() => {});

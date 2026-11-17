@@ -9,9 +9,43 @@ import { sql } from 'kysely';
  *    `reversal_journal_entry_id`) on direct operating expenses while locking all
  *    other financial columns via an immutable update trigger.
  */
+async function hasColumn(db: Kysely<unknown>, table: string, column: string): Promise<boolean> {
+  const info = await sql<{ name: string }>`PRAGMA table_info(${sql.raw(table)})`.execute(db);
+  return info.rows.some((row) => row.name === column);
+}
+
+async function addColumnIfMissing(db: Kysely<unknown>, table: string, column: string): Promise<void> {
+  if (await hasColumn(db, table, column)) return;
+  await sql`ALTER TABLE ${sql.raw(table)} ADD COLUMN ${sql.raw(column)} TEXT;`.execute(db);
+}
+
 export async function up(db: Kysely<unknown>): Promise<void> {
-  await sql`ALTER TABLE cashier_shifts ADD COLUMN start_idempotency_key TEXT;`.execute(db);
-  await sql`ALTER TABLE cashier_shifts ADD COLUMN close_idempotency_key TEXT;`.execute(db);
+  // Preflight runs before any schema change so a blocked upgrade leaves the
+  // database exactly as it was.
+  const duplicateOpenShifts = await sql<{
+    tenant_id: string;
+    user_id: string;
+    cnt: number | bigint;
+  }>`
+    SELECT tenant_id, user_id, COUNT(*) AS cnt
+    FROM cashier_shifts
+    WHERE status = 'OPEN'
+    GROUP BY tenant_id, user_id
+    HAVING COUNT(*) > 1
+    LIMIT 10;
+  `.execute(db);
+  if (duplicateOpenShifts.rows.length > 0) {
+    const details = duplicateOpenShifts.rows
+      .map((r) => `tenant=${r.tenant_id} user=${r.user_id} open_count=${String(r.cnt)}`)
+      .join('; ');
+    throw new Error(
+      `Migration024PreflightError: Found users with multiple OPEN cashier_shifts (${details}). Close duplicate open shifts cleanly before upgrading to Migration 024.`,
+    );
+  }
+
+  await addColumnIfMissing(db, 'cashier_shifts', 'start_idempotency_key');
+  await addColumnIfMissing(db, 'cashier_shifts', 'close_idempotency_key');
+
   await sql`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_cashier_shifts_one_open
     ON cashier_shifts(tenant_id, user_id)
@@ -28,9 +62,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     WHERE close_idempotency_key IS NOT NULL;
   `.execute(db);
 
-  await sql`ALTER TABLE operating_expense_records ADD COLUMN deleted_at TEXT;`.execute(db);
-  await sql`ALTER TABLE operating_expense_records ADD COLUMN deleted_by_user_id TEXT;`.execute(db);
-  await sql`ALTER TABLE operating_expense_records ADD COLUMN reversal_journal_entry_id TEXT;`.execute(db);
+  await addColumnIfMissing(db, 'operating_expense_records', 'deleted_at');
+  await addColumnIfMissing(db, 'operating_expense_records', 'deleted_by_user_id');
+  await addColumnIfMissing(db, 'operating_expense_records', 'reversal_journal_entry_id');
 
   await sql`DROP TRIGGER IF EXISTS trg_operating_expense_records_immutable_update;`.execute(db);
   await sql`

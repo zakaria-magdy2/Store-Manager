@@ -283,6 +283,29 @@ describe('Financial & Accounting SQLite Integration Tests (Phase 5)', () => {
           BigInt(l.amount) === 10000n,
       ),
     ).toBe(true);
+
+    // The return cuts the payable: outstanding is 200000 - 110000 paid - 40000 returned = 50000.
+    await expect(
+      purchasingRepo.recordSupplierPayment(ctx, {
+        id: 'spay-after-return-over',
+        idempotencyKey: 'idem-spay-after-return-over',
+        purchaseId: 'pur-1',
+        amount: egp(60000n),
+        paymentMethod: 'CASH',
+        paidAt: new Date('2026-11-04T11:00:00.000Z'),
+      }),
+    ).rejects.toThrow(/بعد خصم مرتجعات المورد/);
+
+    await expect(
+      purchasingRepo.recordSupplierPayment(ctx, {
+        id: 'spay-after-return',
+        idempotencyKey: 'idem-spay-after-return',
+        purchaseId: 'pur-1',
+        amount: egp(50000n),
+        paymentMethod: 'CASH',
+        paidAt: new Date('2026-11-04T11:05:00.000Z'),
+      }),
+    ).resolves.toBe('spay-after-return');
   });
 
   it('processes linked customer sales returns, restores WAC inventory, reverses COGS, and prevents over-returns', async () => {
@@ -452,38 +475,25 @@ describe('Financial & Accounting SQLite Integration Tests (Phase 5)', () => {
     });
     expect(confirmed.amount).toBe(900000n);
 
-    // Verify full 9000.00 EGP is recognized in 6090 and 2020
-    const recJournal = await db
+    // Verify pure cash-basis policy: confirming the monthly commitment schedules it with
+    // NO 6090/2020 accrual entry yet; expense recognition only happens upon actual payment.
+    const accrualJournal = await db
       .selectFrom('journal_entries')
       .selectAll()
       .where('tenant_id', '=', 'tenant-fin-1')
       .where('idempotency_key', '=', 'monthly-accrual:rec-1:2026-11')
-      .executeTakeFirstOrThrow();
+      .executeTakeFirst();
+    expect(accrualJournal).toBeUndefined();
 
-    const recLines = await db
-      .selectFrom('journal_lines')
+    const actualRow = await db
+      .selectFrom('monthly_expense_actuals')
       .selectAll()
-      .where('journal_entry_id', '=', recJournal.id)
-      .execute();
+      .where('id', '=', confirmed.id)
+      .executeTakeFirstOrThrow();
+    expect(actualRow.journal_entry_id).toBeNull();
+    expect(actualRow.status).toBe('DUE');
 
-    expect(
-      recLines.some(
-        (l) =>
-          l.account_id === 'tenant-fin-1:account:6090' &&
-          l.entry_type === 'DEBIT' &&
-          BigInt(l.amount) === 900000n,
-      ),
-    ).toBe(true);
-    expect(
-      recLines.some(
-        (l) =>
-          l.account_id === 'tenant-fin-1:account:2020' &&
-          l.entry_type === 'CREDIT' &&
-          BigInt(l.amount) === 900000n,
-      ),
-    ).toBe(true);
-
-    // 4. Pay partial 4000.00 EGP then remaining 5000.00 EGP; must debit 2020 and credit 1015 (NOT 6090 again)
+    // 4. Pay partial 4000.00 EGP then remaining 5000.00 EGP; each payment must debit 6090 and credit 1015 (pure cash basis)
     const partialPay = await recurringRepo.pay(ctx, {
       id: 'occ-pay-1',
       idempotencyKey: 'idem-occ-pay-1',
@@ -520,7 +530,7 @@ describe('Financial & Accounting SQLite Integration Tests (Phase 5)', () => {
     expect(
       settleLines.some(
         (l) =>
-          l.account_id === 'tenant-fin-1:account:2020' &&
+          l.account_id === 'tenant-fin-1:account:6090' &&
           l.entry_type === 'DEBIT' &&
           BigInt(l.amount) === 500000n,
       ),
@@ -533,7 +543,7 @@ describe('Financial & Accounting SQLite Integration Tests (Phase 5)', () => {
           BigInt(l.amount) === 500000n,
       ),
     ).toBe(true);
-    expect(settleLines.some((l) => l.account_id === 'tenant-fin-1:account:6090')).toBe(false);
+    expect(settleLines.some((l) => l.account_id === 'tenant-fin-1:account:2020')).toBe(false);
 
     // Any further settlement on a fully paid occurrence must reject
     await expect(

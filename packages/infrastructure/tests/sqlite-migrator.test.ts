@@ -7,6 +7,7 @@ import { SqliteUnitOfWork } from '../src/database/unit-of-work.js';
 import { SqliteAuditLogRepository } from '../src/database/repositories/sqlite-audit-log.repository.js';
 import { SqliteUserRepository } from '../src/database/repositories/sqlite-user.repository.js';
 import { User } from '@retailos/core';
+import { sql } from 'kysely';
 import { up as employeeProfileMigration } from '../src/database/migrations/015_employee_profiles.js';
 import { up as attendanceScheduleMigration } from '../src/database/migrations/020_attendance_schedule.js';
 
@@ -556,5 +557,157 @@ describe('SQLite Database & Migration Engine', () => {
     await expect(
       db.deleteFrom('stocktake_sessions').where('id', '=', 'stk-session-1').execute(),
     ).rejects.toThrow('cannot be deleted');
+  });
+
+  it('fails Migration 024 cleanly when duplicate OPEN shifts exist and upgrades safely when clean', async () => {
+    const migrator = new DatabaseMigrator(dbManager.getDb());
+    const pre = await migrator.migrateToLatest('023_business_timezone_shifts_sequences');
+    expect(pre.success).toBe(true);
+
+    const db = dbManager.getDb();
+    await db.insertInto('tenants').values({ id: 'ten-shift-up', name: 'Shift Co', code: 'SH_UP', currency: 'EGP' }).execute();
+    await db.insertInto('stores').values({ id: 'st-shift-up', tenant_id: 'ten-shift-up', name: 'S1', code: 'S1' }).execute();
+    await db.insertInto('users').values({
+      id: 'usr-shift-up', tenant_id: 'ten-shift-up', store_id: 'st-shift-up',
+      username: 'cash1', password_hash: 'hash', full_name: 'Cashier', role: 'CASHIER',
+    }).execute();
+
+    await sql`
+      INSERT INTO cashier_shifts (id, tenant_id, store_id, user_id, shift_number, status, opening_cash, started_at)
+      VALUES
+        ('sh-1', 'ten-shift-up', 'st-shift-up', 'usr-shift-up', 'SH-1001', 'OPEN', 0, '2026-11-10T09:00:00.000Z'),
+        ('sh-2', 'ten-shift-up', 'st-shift-up', 'usr-shift-up', 'SH-1002', 'OPEN', 0, '2026-11-10T10:00:00.000Z');
+    `.execute(db);
+
+    const blocked = await migrator.migrateToLatest();
+    expect(blocked.success).toBe(false);
+    expect(blocked.error?.message).toMatch(/Migration024PreflightError/);
+
+    await sql`UPDATE cashier_shifts SET status = 'CLOSED', ended_at = '2026-11-10T18:00:00.000Z' WHERE id = 'sh-1';`.execute(db);
+    const recovered = await migrator.migrateToLatest();
+    expect(recovered.success, recovered.error?.message).toBe(true);
+  });
+
+  it('Migration 026 scopes invoice uniqueness per supplier and reconciles unpaid legacy accruals to cash basis', async () => {
+    const migrator = new DatabaseMigrator(dbManager.getDb());
+    const pre = await migrator.migrateToLatest('023_business_timezone_shifts_sequences');
+    expect(pre.success).toBe(true);
+    const db = dbManager.getDb();
+
+    // Simulate an existing pre-fix 023 installation with the old tenant-wide invoice index
+    await sql`DROP INDEX IF EXISTS idx_supplier_purchases_supplier_invoice;`.execute(db);
+    await sql`
+      CREATE UNIQUE INDEX idx_supplier_purchases_tenant_invoice
+      ON supplier_purchases(tenant_id, invoice_number)
+      WHERE invoice_number IS NOT NULL;
+    `.execute(db);
+
+    await db.insertInto('tenants').values({ id: 'ten-m26', name: 'M26', code: 'M26', currency: 'EGP' }).execute();
+    await db.insertInto('stores').values({ id: 'st-m26', tenant_id: 'ten-m26', name: 'Main', code: 'M1' }).execute();
+    await db.insertInto('users').values({
+      id: 'usr-m26', tenant_id: 'ten-m26', store_id: null,
+      username: 'owner26', password_hash: 'hash', full_name: 'Owner', role: 'OWNER',
+    }).execute();
+    await db.insertInto('suppliers').values([
+      { id: 'sup-a', tenant_id: 'ten-m26', name: 'Supplier A', phone: null, notes: null },
+      { id: 'sup-b', tenant_id: 'ten-m26', name: 'Supplier B', phone: null, notes: null },
+    ]).execute();
+    await db.insertInto('supplier_purchases').values({
+      id: 'pur-a1', tenant_id: 'ten-m26', store_id: 'st-m26', supplier_id: 'sup-a',
+      invoice_number: 'INV-888', purchased_at: '2026-11-05T10:00:00.000Z',
+      total_amount: 10000n, initial_paid_amount: 0n, currency: 'EGP',
+      notes: null, created_by_user_id: 'usr-m26', idempotency_key: 'pur-a1',
+    }).execute();
+
+    // Before 026, different supplier reusing INV-888 failed
+    await expect(
+      db.insertInto('supplier_purchases').values({
+        id: 'pur-b1', tenant_id: 'ten-m26', store_id: 'st-m26', supplier_id: 'sup-b',
+        invoice_number: 'INV-888', purchased_at: '2026-11-05T10:00:00.000Z',
+        total_amount: 10000n, initial_paid_amount: 0n, currency: 'EGP',
+        notes: null, created_by_user_id: 'usr-m26', idempotency_key: 'pur-b1',
+      }).execute(),
+    ).rejects.toThrow();
+
+    // Seed legacy accrued monthly rent: 4000 EGP accrued, 133 EGP paid -> open period 2026-11
+    await db.insertInto('accounts').values([
+      { id: 'acc-1010', tenant_id: 'ten-m26', account_code: '1010', account_name: 'Cash', account_type: 'ASSET', normal_balance: 'DEBIT' },
+      { id: 'acc-2020', tenant_id: 'ten-m26', account_code: '2020', account_name: 'Accrued', account_type: 'LIABILITY', normal_balance: 'CREDIT' },
+      { id: 'acc-6090', tenant_id: 'ten-m26', account_code: '6090', account_name: 'Expense', account_type: 'EXPENSE', normal_balance: 'DEBIT' },
+    ]).execute();
+    await db.insertInto('accounting_periods').values({
+      id: 'ten-m26:period:2026-11', tenant_id: 'ten-m26', name: '2026-11',
+      start_date: '2026-11-01', end_date: '2026-11-30', status: 'OPEN', closed_at: null, closed_by_user_id: null,
+    }).execute();
+    await db.insertInto('expense_categories').values({
+      id: 'cat-rent', tenant_id: 'ten-m26', code: 'MONTHLY_RENT', name: 'Rent', expense_type: 'MONTHLY_RECURRING', account_code: '6090',
+    }).execute();
+    await db.insertInto('recurring_expense_obligations').values({
+      id: 'obl-rent', tenant_id: 'ten-m26', store_id: 'st-m26', category_id: 'cat-rent',
+      name: 'Shop Rent', due_day_of_month: 1, currency: 'EGP', idempotency_key: 'obl-rent',
+    }).execute();
+    await db.insertInto('journal_entries').values([
+      {
+        id: 'je-accrual', tenant_id: 'ten-m26', store_id: 'st-m26', period_id: 'ten-m26:period:2026-11',
+        entry_number: 'J-OLD-ACC', entry_date: '2026-11-01', source_type: 'EXPENSE',
+        source_id: 'obl-rent:2026-11', idempotency_key: 'monthly-accrual:obl-rent:2026-11',
+        status: 'POSTED', reversed_by_entry_id: null, created_at: '2026-11-01T12:00:00.000Z', created_by_user_id: 'usr-m26',
+      },
+      {
+        id: 'je-pay-1', tenant_id: 'ten-m26', store_id: 'st-m26', period_id: 'ten-m26:period:2026-11',
+        entry_number: 'J-OLD-PAY', entry_date: '2026-11-02', source_type: 'EXPENSE',
+        source_id: 'oer-1', idempotency_key: 'monthly-payment:pay-1',
+        status: 'POSTED', reversed_by_entry_id: null, created_at: '2026-11-02T12:00:00.000Z', created_by_user_id: 'usr-m26',
+      },
+    ]).execute();
+    await db.insertInto('journal_lines').values([
+      { id: 'jl-1', journal_entry_id: 'je-accrual', account_id: 'acc-6090', entry_type: 'DEBIT', amount: 400000n, currency: 'EGP', memo: 'Accrual DR' },
+      { id: 'jl-2', journal_entry_id: 'je-accrual', account_id: 'acc-2020', entry_type: 'CREDIT', amount: 400000n, currency: 'EGP', memo: 'Accrual CR' },
+      { id: 'jl-3', journal_entry_id: 'je-pay-1', account_id: 'acc-2020', entry_type: 'DEBIT', amount: 13300n, currency: 'EGP', memo: 'Pay DR' },
+      { id: 'jl-4', journal_entry_id: 'je-pay-1', account_id: 'acc-1010', entry_type: 'CREDIT', amount: 13300n, currency: 'EGP', memo: 'Pay CR' },
+    ]).execute();
+    await db.insertInto('monthly_expense_actuals').values({
+      id: 'act-rent', tenant_id: 'ten-m26', store_id: 'st-m26', obligation_id: 'obl-rent',
+      period_id: 'ten-m26:period:2026-11', year: 2026, month: 11, days_in_month: 30,
+      amount: 400000n, currency: 'EGP', status: 'PARTIALLY_PAID', paid_amount: 13300n,
+      journal_entry_id: 'je-accrual', confirmed_by_user_id: 'usr-m26', confirmed_at: '2026-11-01T12:00:00.000Z',
+    }).execute();
+
+    // Run upgrade through 026
+    const upgraded = await migrator.migrateToLatest();
+    expect(upgraded.success).toBe(true);
+    expect(upgraded.executedMigrations).toContain('026_accounting_cash_basis_and_supplier_invoice_index');
+
+    // Different supplier MAY use the same invoice_number
+    await db.insertInto('supplier_purchases').values({
+      id: 'pur-b1', tenant_id: 'ten-m26', store_id: 'st-m26', supplier_id: 'sup-b',
+      invoice_number: 'INV-888', purchased_at: '2026-11-05T10:00:00.000Z',
+      total_amount: 10000n, initial_paid_amount: 0n, currency: 'EGP',
+      notes: null, created_by_user_id: 'usr-m26', idempotency_key: 'pur-b1',
+    }).execute();
+
+    // Same supplier reusing INV-888 is still rejected
+    await expect(
+      db.insertInto('supplier_purchases').values({
+        id: 'pur-a2', tenant_id: 'ten-m26', store_id: 'st-m26', supplier_id: 'sup-a',
+        invoice_number: 'INV-888', purchased_at: '2026-11-06T10:00:00.000Z',
+        total_amount: 5000n, initial_paid_amount: 0n, currency: 'EGP',
+        notes: null, created_by_user_id: 'usr-m26', idempotency_key: 'pur-a2',
+      }).execute(),
+    ).rejects.toThrow();
+
+    // General Ledger must show Account 6090 = 133.00 EGP (13300) and Account 2020 = 0
+    const netRows = await sql<{ account_code: string; net: number | bigint }>`
+      SELECT a.account_code, SUM(CASE WHEN jl.entry_type = 'DEBIT' THEN jl.amount ELSE -jl.amount END) AS net
+      FROM journal_lines jl
+      INNER JOIN accounts a ON a.id = jl.account_id
+      INNER JOIN journal_entries je ON je.id = jl.journal_entry_id
+      WHERE je.tenant_id = 'ten-m26'
+      GROUP BY a.account_code;
+    `.execute(db);
+    const netMap = new Map(netRows.rows.map((r) => [r.account_code, BigInt(r.net)]));
+    expect(netMap.get('6090')).toBe(13300n);
+    expect(netMap.get('2020')).toBe(0n);
+    expect(netMap.get('1010')).toBe(-13300n);
   });
 });

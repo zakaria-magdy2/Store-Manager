@@ -183,4 +183,49 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
       await active.close();
     }
   });
+
+  it('produces consistent verified backups concurrently alongside continuous WAL write transactions', async () => {
+    workingDirectory = await mkdtemp(join(tmpdir(), 'retailos-concurrent-backup-'));
+    const dbPath = join(workingDirectory, 'live-wal.sqlite');
+    const manager = await makeMigratedDatabase(dbPath, 'initial');
+    try {
+      const raw = manager.getRawDatabase();
+      raw.exec('CREATE TABLE IF NOT EXISTS concurrent_writes (seq INTEGER PRIMARY KEY, marker TEXT NOT NULL);');
+      const insertStmt = raw.prepare('INSERT INTO concurrent_writes (seq, marker) VALUES (?, ?)');
+
+      let keepWriting = true;
+      let writtenCount = 0;
+      const writerTask = (async () => {
+        for (let i = 1; i <= 150 && keepWriting; i += 1) {
+          insertStmt.run(i, `row-${i}`);
+          writtenCount = i;
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+      })();
+
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      const backup = await createEncryptedSqliteBackup(raw, workingDirectory, restorePassphrase);
+      backupPath = backup.path;
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      keepWriting = false;
+      await writerTask;
+
+      expect(writtenCount).toBeGreaterThan(10);
+      expect(checkSqliteFileQuick(prepared.candidatePath).ok).toBe(true);
+
+      const snapshotDb = new Database(prepared.candidatePath, { readonly: true, fileMustExist: true });
+      try {
+        const integrity = snapshotDb.pragma('integrity_check') as Array<{ integrity_check?: string }>;
+        expect(integrity.every((row) => row.integrity_check === 'ok')).toBe(true);
+        const maxSeqRow = snapshotDb.prepare('SELECT COUNT(*) AS cnt, COALESCE(MAX(seq), 0) AS maxSeq FROM concurrent_writes').get() as { cnt: number; maxSeq: number };
+        expect(maxSeqRow.cnt).toBe(maxSeqRow.maxSeq);
+        expect(maxSeqRow.cnt).toBeGreaterThan(0);
+      } finally {
+        snapshotDb.close();
+      }
+      await rm(prepared.workspace, { recursive: true, force: true });
+    } finally {
+      await manager.close();
+    }
+  });
 });

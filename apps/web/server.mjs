@@ -1,9 +1,9 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { homedir } from 'node:os';
 import { Transform } from 'node:stream';
-import { createReadStream, createWriteStream, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, join, normalize, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,12 +46,13 @@ import {
   preparePlainSqliteRestore,
   recoverPendingSqliteRestore,
   checkSqliteFileQuick,
-  verifySqliteFile,
   EscPosReceiptPrinter,
   businessDateInTimeZone,
   resolveValidTimeZone,
+  accountDefaults,
   postJournalEntry,
   applyStockMovementInTransaction,
+  allocateDocumentNumberInTransaction,
 } from '@retailos/infrastructure';
 import { CreateProductSchema, CreateUserSchema, UpdateProductSchema } from '@retailos/shared';
 import { z } from 'zod';
@@ -209,64 +210,14 @@ if (!migration.success) throw migration.error ?? new Error('Database migration f
 
 /** Allocates a monotonically increasing, collision-free document number inside Kysely's serialized transaction queue. */
 async function allocateNextDocNumber(tenantId, docType, prefix, existingTable, existingCol, trx = null) {
-  const run = async (executor) => {
-    const existingRows = await executor
-      .selectFrom(existingTable)
-      .select(`${existingCol} as num`)
-      .where('tenant_id', '=', tenantId)
-      .where(existingCol, 'is not', null)
-      .execute();
-    let maxExisting = 1000;
-    const prefixRe = new RegExp(`^${prefix.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}(\\d+)$`);
-    for (const row of existingRows) {
-      const m = String(row.num ?? '').match(prefixRe);
-      if (m) {
-        const parsed = Number.parseInt(m[1], 10);
-        if (Number.isFinite(parsed) && parsed > maxExisting) maxExisting = parsed;
-      }
-    }
-    await executor
-      .insertInto('document_sequences')
-      .values({ tenant_id: tenantId, doc_type: docType, last_seq: maxExisting })
-      .onConflict((oc) => oc.columns(['tenant_id', 'doc_type']).doNothing())
-      .execute();
-
-    const bumped = await executor
-      .updateTable('document_sequences')
-      .set((eb) => ({ last_seq: eb(eb.ref('last_seq'), '+', 1) }))
-      .where('tenant_id', '=', tenantId)
-      .where('doc_type', '=', docType)
-      .returning('last_seq')
-      .executeTakeFirst();
-    let seq = Number(bumped?.last_seq ?? maxExisting + 1);
-    while (
-      await executor
-        .selectFrom(existingTable)
-        .select('id')
-        .where('tenant_id', '=', tenantId)
-        .where(existingCol, '=', `${prefix}${seq}`)
-        .executeTakeFirst()
-    ) {
-      const nextBump = await executor
-        .updateTable('document_sequences')
-        .set((eb) => ({ last_seq: eb(eb.ref('last_seq'), '+', 1) }))
-        .where('tenant_id', '=', tenantId)
-        .where('doc_type', '=', docType)
-        .returning('last_seq')
-        .executeTakeFirst();
-      seq = Number(nextBump?.last_seq ?? seq + 1);
-    }
-    return `${prefix}${seq}`;
-  };
-  return trx ? run(trx) : db.transaction().execute(run);
+  const config = { tenantId, docType, prefix, existingTable, existingCol };
+  return trx
+    ? allocateDocumentNumberInTransaction(trx, config)
+    : db.transaction().execute((executor) => allocateDocumentNumberInTransaction(executor, config));
 }
 
 function generateNextSaleNumber(tenantId, trx = null) {
   return allocateNextDocNumber(tenantId, 'SALE', 'INV-', 'sales', 'sale_number', trx);
-}
-
-function generateNextPurchaseNumber(tenantId, trx = null) {
-  return allocateNextDocNumber(tenantId, 'PURCHASE', 'PUR-', 'supplier_purchases', 'invoice_number', trx);
 }
 
 function generateNextShiftNumber(tenantId, trx = null) {
@@ -412,6 +363,7 @@ const CommitStocktakeSchema = z.object({
 });
 const BackupSettingsSchema = z.object({ mirrorPath: z.string().max(500).trim().default(''), autoMirror: z.boolean().default(true) });
 const DailyRestoreSchema = z.object({ filename: z.string().regex(/^retailos-daily-\d{4}-\d{2}-\d{2}\.(rfbackup|sqlite)$/) });
+const DailyKeyExportSchema = z.object({ currentPassword: z.string().min(1).max(128) });
 const PasswordChangeSchema = z.object({ currentPassword: z.string().min(1).max(128), newPassword: z.string().min(12).max(128) });
 const EmployeeDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
   const date = new Date(`${value}T00:00:00.000Z`);
@@ -419,7 +371,7 @@ const EmployeeDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value
 });
 const EmployeePhoneSchema = z.string().trim().max(32).regex(/^[+0-9().\-\s]*$/);
 const ShiftStartTimeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'صيغة موعد بدء الشيفت يجب أن تكون HH:MM');
-const UpdateUserSchema = z.object({ fullName: z.string().min(2).max(100).trim().optional(), phone: EmployeePhoneSchema.nullable().optional(), employmentStartDate: EmployeeDateSchema.optional(), shiftStartTime: ShiftStartTimeSchema.nullable().optional(), lateGraceMinutes: z.number().int().min(0).max(180).optional(), role: z.enum(['OWNER', 'STORE_MANAGER', 'CASHIER', 'AUDITOR']).optional(), storeId: z.string().uuid().nullable().optional(), isActive: z.boolean().optional() }).refine((body) => Object.keys(body).length > 0);
+const UpdateUserSchema = z.object({ fullName: z.string().min(2).max(100).trim().optional(), phone: EmployeePhoneSchema.nullable().optional(), employmentStartDate: EmployeeDateSchema.optional(), shiftStartTime: ShiftStartTimeSchema.nullable().optional(), lateGraceMinutes: z.number().int().min(0).max(180).optional(), role: z.enum(['OWNER', 'STORE_MANAGER', 'CASHIER', 'AUDITOR']).optional(), storeId: z.string().uuid().nullable().optional(), isActive: z.boolean().optional(), newPassword: z.string().min(12).max(128).optional() }).refine((body) => Object.keys(body).length > 0);
 const BulkShiftScheduleSchema = z.object({
   userIds: z.array(z.string().uuid()).max(200).optional(),
   shiftStartTime: ShiftStartTimeSchema.nullable(),
@@ -435,6 +387,25 @@ const TreasuryTransferSchema = z.object({
   fromAccount: z.enum(['1010', '1015', '1020']),
   toAccount: z.enum(['1010', '1015', '1020']),
   amount: z.string().regex(/^[1-9]\d{0,14}$/),
+  notes: z.string().max(300).trim().optional(),
+});
+const SupplierRefundSchema = z.object({
+  storeId: z.string().uuid(),
+  idempotencyKey: z.string().uuid(),
+  amount: z.string().regex(/^[1-9]\d{0,14}$/),
+  paymentMethod: z.enum(['CASH', 'CASH_SAFE', 'BANK_TRANSFER']),
+  referenceNumber: z.string().max(80).trim().optional(),
+  notes: z.string().max(300).trim().optional(),
+});
+const OpeningBalancesSchema = z.object({
+  storeId: z.string().uuid(),
+  idempotencyKey: z.string().uuid(),
+  entryDate: EmployeeDateSchema,
+  cashDrawer: z.string().regex(/^\d{1,15}$/).default('0'),
+  cashSafe: z.string().regex(/^\d{1,15}$/).default('0'),
+  bank: z.string().regex(/^\d{1,15}$/).default('0'),
+  inventory: z.string().regex(/^\d{1,15}$/).default('0'),
+  supplierPayables: z.string().regex(/^\d{1,15}$/).default('0'),
   notes: z.string().max(300).trim().optional(),
 });
 const InventoryDamageSchema = z.object({
@@ -702,7 +673,8 @@ function purchaseFilterSql({ tenantId, storeId, bounds = null, supplierId = null
 /** Full-history (or filtered) supplier totals computed in SQL: never limited by a page window. */
 function supplierPurchaseAggregates(filter) {
   const { where, args } = purchaseFilterSql(filter);
-  const rows = database.getRawDatabase().prepare(`
+  const rawDb = database.getRawDatabase();
+  const rows = rawDb.prepare(`
     SELECT p.supplier_id AS supplierId,
       COUNT(*) AS purchaseCount,
       COALESCE(SUM(p.total_amount), 0) AS totalAmount,
@@ -713,29 +685,50 @@ function supplierPurchaseAggregates(filter) {
     WHERE ${where}
     GROUP BY p.supplier_id
   `).all(...args);
+  const refundedBySupplier = new Map();
+  if (!filter.search) {
+    const rConds = ['tenant_id = ?', 'store_id = ?'];
+    const rArgs = [filter.tenantId, filter.storeId];
+    if (filter.supplierId) { rConds.push('supplier_id = ?'); rArgs.push(filter.supplierId); }
+    if (filter.bounds) {
+      rConds.push("replace(COALESCE(refunded_at, created_at), ' ', 'T') >= ?", "replace(COALESCE(refunded_at, created_at), ' ', 'T') < ?");
+      rArgs.push(filter.bounds.startIso, filter.bounds.endExclusiveIso);
+    }
+    const rRows = rawDb.prepare(`SELECT supplier_id AS supplierId, COALESCE(SUM(amount), 0) AS refundedAmount FROM supplier_refunds WHERE ${rConds.join(' AND ')} GROUP BY supplier_id`).all(...rArgs);
+    for (const r of rRows) {
+      refundedBySupplier.set(r.supplierId, BigInt(r.refundedAmount ?? 0));
+    }
+  }
   const map = new Map();
   for (const row of rows) {
     const total = BigInt(row.totalAmount ?? 0);
     const paid = BigInt(row.initialPaid ?? 0) + BigInt(row.laterPaid ?? 0);
     const returned = BigInt(row.returnedCredit ?? 0);
-    map.set(row.supplierId, { purchaseCount: Number(row.purchaseCount ?? 0), total, paid, returned, due: total - paid - returned });
+    const refundedToStore = refundedBySupplier.get(row.supplierId) ?? 0n;
+    map.set(row.supplierId, { purchaseCount: Number(row.purchaseCount ?? 0), total, paid, returned, refundedToStore, due: total - paid - returned + refundedToStore });
   }
   return map;
 }
 
-function serializeSupplierSummary(supplier, totals, currency, purchases) {
-  const t = totals ?? { purchaseCount: 0, total: 0n, paid: 0n, returned: 0n, due: 0n };
+function serializeSupplierSummary(supplier, totals, currency, purchases, supplierRefunds = []) {
+  const t = totals ?? { purchaseCount: 0, total: 0n, paid: 0n, returned: 0n, refundedToStore: 0n, due: 0n };
+  const creditFromSupplier = t.due < 0n ? (-t.due).toString() : '0';
+  const amountOwed = t.due > 0n ? t.due.toString() : '0';
   return {
     id: supplier.id,
     name: supplier.name,
     phone: supplier.phone,
     notes: supplier.notes,
     purchases,
+    supplierRefunds,
     purchaseCount: t.purchaseCount,
     purchasesComplete: purchases.length >= t.purchaseCount,
     totalPurchased: t.total.toString(),
     totalPaid: t.paid.toString(),
     returnedCredit: t.returned.toString(),
+    refundedToStore: (t.refundedToStore ?? 0n).toString(),
+    creditFromSupplier,
+    amountOwed,
     balanceDue: t.due.toString(),
     currency,
   };
@@ -881,6 +874,23 @@ function pruneFailedLogins() {
 
 function pruneFailedPasswordChanges() {
   pruneAuthRateLimits('pwd_change');
+}
+
+async function verifyCurrentUserPasswordOrThrow(ctx, currentPassword) {
+  pruneFailedPasswordChanges();
+  const rateLimitKey = `${ctx.tenantId}:${ctx.userId}`;
+  const failures = getAuthFailures('pwd_change', rateLimitKey);
+  if (Date.now() - failures.startedAt < LOCK_WINDOW_MS && failures.count >= MAX_FAILED_PASSWORD_CHANGES) {
+    throw Object.assign(new Error('محاولات كثيرة خاطئة. يرجى الانتظار 10 دقائق قبل المحاولة مجدداً.'), { status: 429 });
+  }
+  const currentUser = await userRepo.findById(ctx, ctx.userId);
+  const validCurrent = currentUser && await passwordHasher.verify(currentUser.passwordHash, currentPassword);
+  if (!validCurrent) {
+    recordAuthFailure('pwd_change', rateLimitKey);
+    throw Object.assign(new Error('Current password is incorrect'), { status: 400 });
+  }
+  clearAuthFailures('pwd_change', rateLimitKey);
+  return currentUser;
 }
 
 function escapeCsvCell(value) {
@@ -1299,7 +1309,7 @@ function loadStocktakeSessionDetail(ctx, sessionId, { includeBlindReview = false
   const isDraft = session.status === 'DRAFT';
   const hideBlind = isDraft && Number(session.blind_mode) === 1 && !includeBlindReview;
 
-  let totalLines = lineRows.length;
+  const totalLines = lineRows.length;
   let countedLines = 0;
   let matchedLines = 0;
   let discrepancyLines = 0;
@@ -1440,16 +1450,6 @@ function reportDay(value) {
   const parsed = new Date(`${value}T00:00:00.000Z`);
   if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) throw Object.assign(new Error('Invalid report date'), { status: 400 });
   return parsed;
-}
-
-function dailyMonthlyShare(amount, daysInMonth, monthStart, from, to) {
-  const first = Math.max(0, Math.floor((from.getTime() - monthStart.getTime()) / 86_400_000));
-  const last = Math.min(daysInMonth - 1, Math.floor((to.getTime() - monthStart.getTime()) / 86_400_000));
-  if (last < first) return 0n;
-  const base = amount / BigInt(daysInMonth), remainder = Number(amount % BigInt(daysInMonth));
-  let total = base * BigInt(last - first + 1);
-  total += BigInt(Math.max(0, Math.min(last, remainder - 1) - first + 1));
-  return total;
 }
 
 async function profitLossReport(ctx, url) {
@@ -1672,9 +1672,28 @@ async function profitLossReport(ctx, url) {
 
   const totalSupplierPaid = supplierInitialPaid + supplierInstallmentPaid;
   const supplierReturnsCreditTotal = BigInt(supRetCreditRow?.total_credit ?? 0);
+  const supRefundRow = rawDb.prepare(`
+    SELECT COALESCE(SUM(amount), 0) AS total_refunded
+    FROM supplier_refunds
+    WHERE tenant_id = ? AND store_id = ?
+      AND replace(COALESCE(refunded_at, created_at), ' ', 'T') >= ?
+      AND replace(COALESCE(refunded_at, created_at), ' ', 'T') < ?
+  `).get(ctx.tenantId, storeId, start, endExclusive);
+  const totalSupplierRefunded = BigInt(supRefundRow?.total_refunded ?? 0);
+  const openingCashRow = rawDb.prepare(`
+    SELECT COALESCE(SUM(CASE WHEN jl.entry_type = 'DEBIT' THEN jl.amount ELSE -jl.amount END), 0) AS cash_in
+    FROM journal_entries je
+    INNER JOIN journal_lines jl ON jl.journal_entry_id = je.id
+    INNER JOIN accounts a ON a.id = jl.account_id
+    WHERE je.tenant_id = ? AND je.store_id = ?
+      AND je.idempotency_key LIKE 'opening-balance:%'
+      AND a.account_code IN ('1010', '1015', '1020')
+      AND je.entry_date >= ? AND je.entry_date <= ?
+  `).get(ctx.tenantId, storeId, fromStr, toStr);
+  const openingCashIn = BigInt(openingCashRow?.cash_in ?? 0);
   const netCollections = cashSales + electronicSales;
   const totalCashOutflows = directCashOutflow + monthlyCashOutflow + totalSupplierPaid;
-  const netCashRemaining = netCollections - totalCashOutflows;
+  const netCashRemaining = netCollections + totalSupplierRefunded + openingCashIn - totalCashOutflows;
 
   return { storeId, from: fromStr, to: toStr, currency: tenant.currency, missingMonthlyActuals,
     profitLoss: {
@@ -1697,6 +1716,7 @@ async function profitLossReport(ctx, url) {
       installmentPaid: money(supplierInstallmentPaid),
       totalPaid: money(totalSupplierPaid),
       supplierReturnsCredit: money(supplierReturnsCreditTotal),
+      supplierRefunded: money(totalSupplierRefunded),
       count: supplierPaymentItems.length,
       items: supplierPaymentItems,
     },
@@ -1704,6 +1724,8 @@ async function profitLossReport(ctx, url) {
       totalCollections: money(netCollections),
       cashCollections: money(cashSales),
       electronicCollections: money(electronicSales),
+      supplierRefundsReceived: money(totalSupplierRefunded),
+      openingCashIn: money(openingCashIn),
       directExpenses: money(directCashOutflow),
       monthlyExpenses: money(monthlyCashOutflow),
       supplierPayments: money(totalSupplierPaid),
@@ -2204,11 +2226,21 @@ async function purchaseSupplierReport(ctx, url) {
     WHERE p.tenant_id = ? AND p.store_id = ? AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') >= ? AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') < ?
     GROUP BY s.id, s.name
   `).all(ctx.tenantId, storeId, bounds.startIso, bounds.endExclusiveIso);
+  const refundRows = database.getRawDatabase().prepare(`
+    SELECT supplier_id AS supplierId, COALESCE(SUM(amount), 0) AS refundedAmount
+    FROM supplier_refunds
+    WHERE tenant_id = ? AND store_id = ?
+      AND replace(COALESCE(refunded_at, created_at), ' ', 'T') >= ?
+      AND replace(COALESCE(refunded_at, created_at), ' ', 'T') < ?
+    GROUP BY supplier_id
+  `).all(ctx.tenantId, storeId, bounds.startIso, bounds.endExclusiveIso);
+  const refundedMap = new Map(refundRows.map((r) => [r.supplierId, BigInt(r.refundedAmount ?? 0)]));
   const suppliers = rows.map((row) => {
     const totalMinor = BigInt(row.totalAmount ?? 0);
     const paidMinor = BigInt(row.paidAmount ?? 0);
     const creditMinor = BigInt(row.returnedCredit ?? 0);
-    const remainingMinor = totalMinor - paidMinor - creditMinor;
+    const refundedMinor = refundedMap.get(row.supplierId) ?? 0n;
+    const remainingMinor = totalMinor - paidMinor - creditMinor + refundedMinor;
     return {
       id: row.supplierId,
       name: row.supplierName,
@@ -2217,6 +2249,8 @@ async function purchaseSupplierReport(ctx, url) {
       totalAmount: moneyJson(Money.fromMinor(totalMinor, tenant.currency)),
       paidAmount: moneyJson(Money.fromMinor(paidMinor, tenant.currency)),
       returnedCredit: moneyJson(Money.fromMinor(creditMinor, tenant.currency)),
+      refundedToStore: moneyJson(Money.fromMinor(refundedMinor, tenant.currency)),
+      creditFromSupplier: moneyJson(Money.fromMinor(remainingMinor < 0n ? -remainingMinor : 0n, tenant.currency)),
       balanceDue: moneyJson(Money.fromMinor(remainingMinor, tenant.currency)),
     };
   });
@@ -2254,7 +2288,7 @@ async function financialMapReport(ctx, url) {
   const toIsoTimestamp = (val, fallbackDate) => {
     if (!val) return fallbackDate ? `${fallbackDate}T12:00:00.000Z` : new Date().toISOString();
     if (val instanceof Date) return val.toISOString();
-    let str = String(val).trim();
+    const str = String(val).trim();
     if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(str)) {
       return str.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(str) ? str : `${str}Z`;
     }
@@ -2412,6 +2446,36 @@ async function financialMapReport(ctx, url) {
   if (bounds) { transferSql += ` AND je.created_at >= ? AND je.created_at < ?`; transferParams.push(bounds.startIso, bounds.endExclusiveIso); }
   transferSql += ` GROUP BY je.id ORDER BY je.created_at ASC`;
   const transferRows = rawDb.prepare(transferSql).all(...transferParams);
+
+  // 10. Cash/Bank Refunds Collected From Suppliers (supplier_refunds)
+  let supRefundSql = `
+    SELECT sr.id, sr.amount, sr.payment_method, sr.reference_number, sr.notes, sr.refunded_at, sr.created_at, sr.created_by_user_id,
+      s.name AS supplier_name
+    FROM supplier_refunds sr
+    INNER JOIN suppliers s ON s.id = sr.supplier_id AND s.tenant_id = sr.tenant_id
+    WHERE sr.tenant_id = ? AND sr.store_id = ?
+  `;
+  const supRefundParams = [ctx.tenantId, storeId];
+  if (bounds) {
+    supRefundSql += ` AND replace(COALESCE(sr.refunded_at, sr.created_at), ' ', 'T') >= ? AND replace(COALESCE(sr.refunded_at, sr.created_at), ' ', 'T') < ?`;
+    supRefundParams.push(bounds.startIso, bounds.endExclusiveIso);
+  }
+  supRefundSql += ` ORDER BY COALESCE(sr.refunded_at, sr.created_at) ASC`;
+  const supRefundRows = rawDb.prepare(supRefundSql).all(...supRefundParams);
+
+  // 11. Opening Balances Cash/Bank Injection (opening-balance:*)
+  let openingSql = `
+    SELECT je.id, je.entry_number, je.entry_date, je.created_at, je.created_by_user_id, MAX(jl.memo) AS memo,
+      COALESCE(SUM(CASE WHEN a.account_code IN ('1010', '1015', '1020') THEN (CASE WHEN jl.entry_type = 'DEBIT' THEN jl.amount ELSE -jl.amount END) ELSE 0 END), 0) AS cash_in
+    FROM journal_entries je
+    INNER JOIN journal_lines jl ON jl.journal_entry_id = je.id
+    INNER JOIN accounts a ON a.id = jl.account_id
+    WHERE je.tenant_id = ? AND je.store_id = ? AND je.idempotency_key LIKE 'opening-balance:%'
+  `;
+  const openingParams = [ctx.tenantId, storeId];
+  if (from && to) { openingSql += ` AND je.entry_date >= ? AND je.entry_date <= ?`; openingParams.push(from, to); }
+  openingSql += ` GROUP BY je.id ORDER BY je.entry_date ASC, je.created_at ASC`;
+  const openingRows = rawDb.prepare(openingSql).all(...openingParams);
 
   const timeline = [];
 
@@ -2618,6 +2682,46 @@ async function financialMapReport(ctx, url) {
     });
   }
 
+  for (const sr of supRefundRows) {
+    const amt = BigInt(sr.amount ?? 0);
+    const methodAr = sr.payment_method === 'CASH' ? 'نقدي للدرج' : sr.payment_method === 'CASH_SAFE' ? 'للخزينة الرئيسية' : 'تحويل بنكي';
+    timeline.push({
+      id: sr.id,
+      timestamp: toIsoTimestamp(sr.refunded_at ?? sr.created_at),
+      sortOrder: 4,
+      type: 'SUPPLIER_REFUND',
+      category: 'استرداد من تاجر',
+      title: `استرداد نقدي من التاجر ${sr.supplier_name}`,
+      reference: sr.reference_number || sr.supplier_name,
+      party: `التاجر: ${sr.supplier_name}`,
+      actor: userMap.get(sr.created_by_user_id) || 'المسؤول',
+      amountIn: amt.toString(),
+      amountOut: '0',
+      profitImpact: '0',
+      details: `تحصيل رصيد مرتجع مستحق عند التاجر (${methodAr})${sr.notes ? ` · ${sr.notes}` : ''}`,
+    });
+  }
+
+  for (const ob of openingRows) {
+    const cashIn = BigInt(ob.cash_in ?? 0);
+    if (cashIn === 0n) continue;
+    timeline.push({
+      id: ob.id,
+      timestamp: `${ob.entry_date}T00:00:00.000Z`,
+      sortOrder: 0,
+      type: 'OPENING_BALANCE',
+      category: 'رصيد افتتاحي',
+      title: 'أرصدة نقدية افتتاحية',
+      reference: ob.entry_number,
+      party: 'رأس المال الافتتاحي',
+      actor: userMap.get(ob.created_by_user_id) || 'المالك',
+      amountIn: cashIn > 0n ? cashIn.toString() : '0',
+      amountOut: cashIn < 0n ? (-cashIn).toString() : '0',
+      profitImpact: '0',
+      details: `إثبات رصيد نقدي وبنكي افتتاحي بالمتجر (${Money.fromMinor(cashIn, currency).toDecimalString()} ${currency})`,
+    });
+  }
+
   for (const tr of transferRows) {
     const amt = BigInt(tr.amount ?? 0);
     const label = String(tr.memo ?? '').split(' — ')[0] || 'تحويل نقدية داخلي';
@@ -2651,6 +2755,8 @@ async function financialMapReport(ctx, url) {
   let totalGrossProfitMinor = 0n;
   let totalPurchasesBilledMinor = 0n;
   let totalSupplierPaidMinor = 0n;
+  let totalSupplierRefundedMinor = 0n;
+  let totalOpeningCashMinor = 0n;
   let totalExpensesMinor = 0n;
   let totalRefundsMinor = 0n;
   let totalReturnedCostMinor = 0n;
@@ -2673,6 +2779,10 @@ async function financialMapReport(ctx, url) {
       totalPurchasesBilledMinor += BigInt(item.billAmount ?? 0);
     } else if (item.type === 'SUPPLIER_PAYMENT') {
       totalSupplierPaidMinor += outAmt;
+    } else if (item.type === 'SUPPLIER_REFUND') {
+      totalSupplierRefundedMinor += inAmt;
+    } else if (item.type === 'OPENING_BALANCE') {
+      totalOpeningCashMinor += inAmt - outAmt;
     } else if (item.type === 'EXPENSE') {
       totalExpensesMinor += outAmt;
     } else if (item.type === 'CUSTOMER_RETURN') {
@@ -2695,7 +2805,7 @@ async function financialMapReport(ctx, url) {
 
   const netSalesMinor = totalSalesMinor - totalRefundsMinor;
   const totalCogsMinor = grossCogsOfSalesMinor - totalReturnedCostMinor + supplierReturnVarianceMinor;
-  const netCashFlowMinor = netSalesMinor - totalSupplierPaidMinor - totalExpensesMinor + totalShiftCashVarianceMinor;
+  const netCashFlowMinor = netSalesMinor - totalSupplierPaidMinor + totalSupplierRefundedMinor + totalOpeningCashMinor - totalExpensesMinor + totalShiftCashVarianceMinor;
   const netReturnLossMinor = totalRefundsMinor - totalReturnedCostMinor;
   const operatingProfitMinor = totalGrossProfitMinor - totalExpensesMinor - netReturnLossMinor - supplierReturnVarianceMinor - totalInvAdjustmentLossMinor + totalShiftCashVarianceMinor;
 
@@ -2709,6 +2819,8 @@ async function financialMapReport(ctx, url) {
       totalGrossProfit: totalGrossProfitMinor.toString(),
       totalPurchasesBilled: totalPurchasesBilledMinor.toString(),
       totalSupplierPaid: totalSupplierPaidMinor.toString(),
+      totalSupplierRefunded: totalSupplierRefundedMinor.toString(),
+      openingCashIn: totalOpeningCashMinor.toString(),
       totalExpensesPaid: totalExpensesMinor.toString(),
       totalRefunds: totalRefundsMinor.toString(),
       supplierReturnVariance: supplierReturnVarianceMinor.toString(),
@@ -2721,6 +2833,93 @@ async function financialMapReport(ctx, url) {
       eventsCount: timeline.length,
     },
     timeline: timeline, // Reversed chronological: newest event first, keeping cumulative runningCash per step
+  };
+}
+
+async function trialBalanceReport(ctx, url) {
+  ctx.assertPermission(Permissions.REPORTS_FINANCIAL_VIEW);
+  const stores = await storeRepo.listByTenant(ctx);
+  const requestedStore = url.searchParams.get('storeId');
+  const scopeAll = !ctx.storeId && requestedStore === 'ALL';
+  const storeId = ctx.storeId ?? (scopeAll ? null : (requestedStore ?? stores[0]?.id ?? null));
+  if (!scopeAll && (!storeId || !stores.some((s) => s.id === storeId))) {
+    throw Object.assign(new Error('الفرع غير متاح'), { status: 403 });
+  }
+  const { from, to } = parseHistoryRange(url);
+  const tenant = await tenantRepo.findById(ctx.tenantId);
+  if (!tenant) throw Object.assign(new Error('الشركة غير موجودة'), { status: 404 });
+  const currency = tenant.currency;
+  const rawDb = database.getRawDatabase();
+
+  const existingAccounts = await db.selectFrom('accounts').select(['account_code', 'account_name', 'account_type', 'normal_balance'])
+    .where('tenant_id', '=', ctx.tenantId).orderBy('account_code', 'asc').execute();
+  const accountMeta = new Map();
+  for (const [code, name, type, normal] of accountDefaults) {
+    accountMeta.set(code, { accountCode: code, accountName: name, accountType: type, normalBalance: normal });
+  }
+  for (const acc of existingAccounts) {
+    accountMeta.set(acc.account_code, {
+      accountCode: acc.account_code,
+      accountName: acc.account_name,
+      accountType: acc.account_type,
+      normalBalance: acc.normal_balance,
+    });
+  }
+
+  const conds = ['je.tenant_id = ?'];
+  const args = [ctx.tenantId];
+  if (storeId) { conds.push('je.store_id = ?'); args.push(storeId); }
+  if (from && to) { conds.push('je.entry_date >= ?', 'je.entry_date <= ?'); args.push(from, to); }
+  const sumRows = rawDb.prepare(`
+    SELECT a.account_code AS accountCode,
+      COALESCE(SUM(CASE WHEN jl.entry_type = 'DEBIT' THEN jl.amount ELSE 0 END), 0) AS debitTotal,
+      COALESCE(SUM(CASE WHEN jl.entry_type = 'CREDIT' THEN jl.amount ELSE 0 END), 0) AS creditTotal
+    FROM accounts a
+    INNER JOIN journal_lines jl ON jl.account_id = a.id
+    INNER JOIN journal_entries je ON je.id = jl.journal_entry_id
+    WHERE ${conds.join(' AND ')}
+    GROUP BY a.account_code
+  `).all(...args);
+  const totalsByCode = new Map(sumRows.map((r) => [r.accountCode, { debit: BigInt(r.debitTotal ?? 0), credit: BigInt(r.creditTotal ?? 0) }]));
+
+  const sortedCodes = [...accountMeta.keys()].sort((a, b) => a.localeCompare(b));
+  let totalDebit = 0n;
+  let totalCredit = 0n;
+  let totalDebitBalance = 0n;
+  let totalCreditBalance = 0n;
+
+  const accounts = sortedCodes.map((code) => {
+    const meta = accountMeta.get(code);
+    const sums = totalsByCode.get(code) ?? { debit: 0n, credit: 0n };
+    totalDebit += sums.debit;
+    totalCredit += sums.credit;
+    const netSigned = sums.debit - sums.credit;
+    const debitBalance = netSigned > 0n ? netSigned : 0n;
+    const creditBalance = netSigned < 0n ? -netSigned : 0n;
+    totalDebitBalance += debitBalance;
+    totalCreditBalance += creditBalance;
+    return {
+      ...meta,
+      debitTotal: moneyJson(Money.fromMinor(sums.debit, currency)),
+      creditTotal: moneyJson(Money.fromMinor(sums.credit, currency)),
+      debitBalance: moneyJson(Money.fromMinor(debitBalance, currency)),
+      creditBalance: moneyJson(Money.fromMinor(creditBalance, currency)),
+    };
+  });
+
+  return {
+    storeId: storeId ?? 'ALL',
+    currency,
+    from,
+    to,
+    accounts,
+    totals: {
+      debitTotal: moneyJson(Money.fromMinor(totalDebit, currency)),
+      creditTotal: moneyJson(Money.fromMinor(totalCredit, currency)),
+      debitBalanceTotal: moneyJson(Money.fromMinor(totalDebitBalance, currency)),
+      creditBalanceTotal: moneyJson(Money.fromMinor(totalCreditBalance, currency)),
+      isBalanced: totalDebit === totalCredit && totalDebitBalance === totalCreditBalance,
+    },
   };
 }
 
@@ -3021,7 +3220,6 @@ async function setupState() {
   const tenants = await tenantRepo.listAll();
   if (tenants.length === 0) return { configured: false };
   if (tenants.length !== 1) throw new Error('هذه القاعدة تحتوي على أكثر من شركة. يلزم فحص ملف البيانات قبل المتابعة.');
-  const systemContext = new ScopedExecutionContext({ tenantId: tenants[0].id, userId: 'system', roleId: 'OWNER', permissions: new Set(['*']), correlationId: randomUUID() });
   const owner = await db.selectFrom('users').select('id').where('tenant_id', '=', tenants[0].id).where('role', '=', 'OWNER').executeTakeFirst();
   return { configured: true, setupRequired: !owner, companyName: tenants[0].name, currency: tenants[0].currency, companyCode: tenants[0].code };
 }
@@ -3130,7 +3328,22 @@ async function currentData(ctx, url) {
   const purchaseEntries = canManageCatalog ? await loadPurchaseEntries(ctx.tenantId, purchases, userMap) : [];
   const supplierTotals = canManageCatalog ? supplierPurchaseAggregates({ tenantId: ctx.tenantId, storeId }) : new Map();
   const supplierReturnRows = canManageCatalog ? await db.selectFrom('supplier_returns').selectAll().where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).orderBy('created_at', 'desc').limit(BOOTSTRAP_PURCHASE_WINDOW).execute() : [];
-  const supplierData = suppliers.map((supplier) => serializeSupplierSummary(supplier, supplierTotals.get(supplier.id), tenant.currency, purchaseEntries.filter((entry) => entry.supplierId === supplier.id)));
+  const supplierRefundRows = canManageCatalog ? await db.selectFrom('supplier_refunds').selectAll().where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).orderBy('refunded_at', 'desc').limit(BOOTSTRAP_PURCHASE_WINDOW).execute() : [];
+  const refundsBySupplier = new Map();
+  for (const r of supplierRefundRows) {
+    const bucket = refundsBySupplier.get(r.supplier_id) ?? [];
+    bucket.push({
+      id: r.id,
+      amount: moneyJson(Money.fromMinor(BigInt(r.amount), r.currency)),
+      paymentMethod: r.payment_method,
+      referenceNumber: r.reference_number,
+      notes: r.notes,
+      refundedAt: r.refunded_at,
+      createdByName: userMap.get(r.created_by_user_id) || 'المسؤول',
+    });
+    refundsBySupplier.set(r.supplier_id, bucket);
+  }
+  const supplierData = suppliers.map((supplier) => serializeSupplierSummary(supplier, supplierTotals.get(supplier.id), tenant.currency, purchaseEntries.filter((entry) => entry.supplierId === supplier.id), refundsBySupplier.get(supplier.id) ?? []));
   const canViewMonthlyExpenses = ctx.hasPermission(Permissions.EXPENSES_MONTHLY_CONFIRM) || ctx.hasPermission(Permissions.EXPENSES_MONTHLY_PAY) || ctx.hasPermission(Permissions.REPORTS_MONTHLY_VIEW);
   const monthlyObligations = canViewMonthlyExpenses ? await db.selectFrom('recurring_expense_obligations')
     .innerJoin('expense_categories', 'expense_categories.id', 'recurring_expense_obligations.category_id')
@@ -3283,7 +3496,7 @@ async function currentData(ctx, url) {
       canPayMonthlyExpenses: ctx.hasPermission(Permissions.EXPENSES_MONTHLY_PAY) || ctx.roleId === 'OWNER' || ctx.roleId === 'STORE_MANAGER',
       canViewMonthlyExpenses: ctx.hasPermission(Permissions.EXPENSES_MONTHLY_CONFIRM) || ctx.hasPermission(Permissions.EXPENSES_MONTHLY_PAY) || ctx.roleId === 'OWNER' || ctx.roleId === 'STORE_MANAGER',
       canRefund: ctx.hasPermission(Permissions.POS_REFUND),
-      canReturnSale: ctx.hasPermission(Permissions.POS_REFUND) || ctx.roleId === 'CASHIER',
+      canReturnSale: ctx.hasPermission(Permissions.POS_REFUND),
       canViewSales,
       canViewInventory: ctx.hasPermission(Permissions.INVENTORY_VIEW),
       canTransferInventory: ctx.hasPermission(Permissions.INVENTORY_TRANSFER),
@@ -3337,6 +3550,25 @@ async function handleApi(req, res, url) {
   if (mutating) requireSameOrigin(req);
 
   if (method === 'GET' && path === '/api/bootstrap') return json(res, 200, await setupState());
+
+  if (method === 'POST' && path === '/api/internal/shutdown') {
+    const remoteAddress = req.socket?.remoteAddress ?? '';
+    const isLoopback = remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress === '::ffff:127.0.0.1';
+    if (!isLoopback) {
+      throw Object.assign(new Error('الطلب متاح محليًا فقط'), { status: 403 });
+    }
+    const providedToken = String(req.headers['x-retailos-shutdown-token'] ?? '');
+    const expectedBuf = Buffer.from(internalShutdownToken, 'utf8');
+    const providedBuf = Buffer.from(providedToken, 'utf8');
+    if (expectedBuf.length !== providedBuf.length || !timingSafeEqual(expectedBuf, providedBuf)) {
+      throw Object.assign(new Error('رمز الإيقاف الداخلي غير صالح'), { status: 401 });
+    }
+    json(res, 202, { shuttingDown: true, pid: process.pid });
+    res.once('finish', () => {
+      void shutdown().finally(() => process.exit(0));
+    });
+    return;
+  }
 
   if (method === 'GET' && path === '/api/sales') {
     const ctx = await requireContext(req);
@@ -3393,10 +3625,10 @@ async function handleApi(req, res, url) {
       WHERE ${where}
     `).get(...args);
 
-    let summaryReturns = 0n;
-    let summaryReturnedCost = 0n;
-    let summaryReturnedUnits = 0n;
-    let summaryReturnsCount = 0;
+    let summaryReturns;
+    let summaryReturnedCost;
+    let summaryReturnedUnits;
+    let summaryReturnsCount;
     if (search) {
       const retAgg = rawDatabase.prepare(`
         SELECT COUNT(cr.id) AS ret_count,
@@ -3761,6 +3993,7 @@ async function handleApi(req, res, url) {
   if (method === 'GET' && path === '/api/reports/top-products') return json(res, 200, await topProductsReport(ctx, url));
   if (method === 'GET' && path === '/api/reports/purchases') return json(res, 200, await purchaseSupplierReport(ctx, url));
   if (method === 'GET' && path === '/api/reports/financial-map') return json(res, 200, await financialMapReport(ctx, url));
+  if (method === 'GET' && path === '/api/reports/trial-balance') return json(res, 200, await trialBalanceReport(ctx, url));
   if (method === 'GET' && path === '/api/reports/growth-forecast') return json(res, 200, await growthForecastReport(ctx, url));
 
   if (method === 'GET' && path === '/api/reports/export.csv') {
@@ -3769,7 +4002,7 @@ async function handleApi(req, res, url) {
     const requestedStore = url.searchParams.get('storeId');
     const storeId = ctx.storeId ?? requestedStore ?? stores[0]?.id;
     if (!storeId || !stores.some((s) => s.id === storeId)) throw Object.assign(new Error('الفرع غير متاح'), { status: 403 });
-    let rows = [];
+    const rows = [];
     if (exportType === 'sales') {
       ctx.assertPermission(Permissions.REPORTS_DAILY_VIEW);
       const salesList = await saleRepo.listByStore(ctx, storeId, 500);
@@ -3961,6 +4194,43 @@ async function handleApi(req, res, url) {
     return json(res, 200, await getBackupSafetyPayload());
   }
 
+  if (method === 'POST' && path === '/api/backups/daily/key-export') {
+    ctx.assertPermission(Permissions.SYSTEM_BACKUP_MANAGE);
+    if (ctx.roleId !== 'OWNER') {
+      throw Object.assign(new Error('متاح لمالك النظام فقط'), { status: 403 });
+    }
+    const body = validate(DailyKeyExportSchema, await readJson(req));
+    try {
+      await verifyCurrentUserPasswordOrThrow(ctx, body.currentPassword);
+    } catch (authError) {
+      await recordAudit(ctx, {
+        action: 'DAILY_BACKUP_KEY_EXPORT_FAILED',
+        entityType: 'BACKUP',
+        entityId: ctx.userId,
+        summary: 'محاولة فاشلة لعرض مفتاح فك تشفير النسخ اليومية',
+      });
+      throw authError;
+    }
+    const dailyBackupKey = resolveDailyBackupPassphraseSync();
+    await recordAudit(ctx, {
+      action: 'DAILY_BACKUP_KEY_EXPORTED',
+      entityType: 'BACKUP',
+      entityId: ctx.userId,
+      summary: 'عرض/نسخ مفتاح فك تشفير النسخ اليومية التلقائية للاسترداد على جهاز بديل',
+      metadata: { source: (process.env.RETAILOS_DAILY_BACKUP_KEY ?? '').trim().length >= 12 ? 'ENV' : 'LOCAL_KEY_FILE' },
+    });
+    return json(
+      res,
+      200,
+      {
+        dailyBackupKey,
+        keySource: (process.env.RETAILOS_DAILY_BACKUP_KEY ?? '').trim().length >= 12 ? 'ENV' : 'LOCAL_KEY_FILE',
+        restoreInstructions: 'احتفظ بهذا المفتاح في مكان آمن خارج الجهاز. عند استعادة ملف retailos-daily-*.rfbackup على جهاز جديد، ضعه في خانة «كلمة مرور النسخة» بنموذج الاستعادة أو عيّن RETAILOS_DAILY_BACKUP_KEY.',
+      },
+      { 'Cache-Control': 'no-store' },
+    );
+  }
+
   if (method === 'POST' && path === '/api/backups/daily/run-now') {
     ctx.assertPermission(Permissions.SYSTEM_BACKUP_MANAGE);
     const backup = await ensureDailyBackup({ force: true, syncMirror: true });
@@ -3973,8 +4243,8 @@ async function handleApi(req, res, url) {
     const body = validate(BackupSettingsSchema, await readJson(req));
     const validatedMirrorPath = validateMirrorPath(body.mirrorPath);
     const current = await readBackupSettings();
-    let mirrorStatus = validatedMirrorPath ? 'PENDING' : 'UNCONFIGURED';
-    let mirrorError = null;
+    const mirrorStatus = validatedMirrorPath ? 'PENDING' : 'UNCONFIGURED';
+    const mirrorError = null;
     if (validatedMirrorPath) {
       const mirrorRoot = parse(validatedMirrorPath).root;
       if (mirrorRoot && !existsSync(mirrorRoot)) {
@@ -4484,7 +4754,7 @@ async function handleApi(req, res, url) {
 
     const from = url.searchParams.get('from') || '';
     const to = url.searchParams.get('to') || '';
-    let filterUser = url.searchParams.get('userId') || '';
+    const filterUser = url.searchParams.get('userId') || '';
 
     let sql = `SELECT cs.*, u.full_name, u.username, u.role FROM cashier_shifts cs
       LEFT JOIN users u ON u.id = cs.user_id AND u.tenant_id = cs.tenant_id
@@ -4767,6 +5037,7 @@ async function handleApi(req, res, url) {
     const nextShiftStartTime = body.shiftStartTime === undefined ? target.shift_start_time : (body.shiftStartTime || null);
     const nextLateGraceMinutes = body.lateGraceMinutes === undefined ? Number(target.late_grace_minutes ?? 0) : body.lateGraceMinutes;
     if (target.id === ctx.userId && (nextRole !== target.role || !nextActive)) throw Object.assign(new Error('You cannot change your own role or deactivate your own account'), { status: 400 });
+    if (target.id === ctx.userId && body.newPassword) throw Object.assign(new Error('استخدم صفحة تغيير كلمة المرور لتحديث كلمة مرورك'), { status: 400 });
     if (ctx.roleId !== 'OWNER' && (target.role !== 'CASHIER' || nextRole !== 'CASHIER' || nextStoreId !== ctx.storeId)) throw Object.assign(new Error('Store managers can only manage cashiers in their assigned store'), { status: 403 });
     if (nextRole === 'CASHIER' && !nextStoreId) throw Object.assign(new Error('Cashiers must be assigned to a store'), { status: 400 });
     if (nextStoreId && !await db.selectFrom('stores').select('id').where('tenant_id', '=', ctx.tenantId).where('id', '=', nextStoreId).executeTakeFirst()) throw Object.assign(new Error('Selected store is unavailable'), { status: 400 });
@@ -4774,31 +5045,20 @@ async function handleApi(req, res, url) {
       const activeOwners = await db.selectFrom('users').select(db.fn.countAll().as('count')).where('tenant_id', '=', ctx.tenantId).where('role', '=', 'OWNER').where('is_active', '=', 1).executeTakeFirst();
       if (Number(activeOwners?.count ?? 0) <= 1) throw Object.assign(new Error('At least one active owner must remain'), { status: 409 });
     }
-    const revokeSessions = nextRole !== target.role || nextStoreId !== target.store_id || Number(nextActive) !== target.is_active;
+    const passwordHash = body.newPassword ? await passwordHasher.hash(body.newPassword) : null;
+    const revokeSessions = nextRole !== target.role || nextStoreId !== target.store_id || Number(nextActive) !== target.is_active || Boolean(passwordHash);
     await db.transaction().execute(async (trx) => {
-      await trx.updateTable('users').set({ full_name: body.fullName ?? target.full_name, phone: body.phone === undefined ? target.phone : body.phone || null, employment_start_date: body.employmentStartDate ?? target.employment_start_date, shift_start_time: nextShiftStartTime, late_grace_minutes: nextLateGraceMinutes, role: nextRole, store_id: nextStoreId, is_active: nextActive ? 1 : 0 }).where('tenant_id', '=', ctx.tenantId).where('id', '=', targetId).execute();
+      await trx.updateTable('users').set({ full_name: body.fullName ?? target.full_name, phone: body.phone === undefined ? target.phone : body.phone || null, employment_start_date: body.employmentStartDate ?? target.employment_start_date, shift_start_time: nextShiftStartTime, late_grace_minutes: nextLateGraceMinutes, role: nextRole, store_id: nextStoreId, is_active: nextActive ? 1 : 0, ...(passwordHash ? { password_hash: passwordHash } : {}) }).where('tenant_id', '=', ctx.tenantId).where('id', '=', targetId).execute();
       if (revokeSessions) await trx.updateTable('sessions').set({ is_revoked: 1 }).where('tenant_id', '=', ctx.tenantId).where('user_id', '=', targetId).execute();
     });
-    await recordAudit(ctx, { storeId: nextStoreId ?? null, action: 'USER_UPDATED', entityType: 'USER', entityId: targetId, summary: `تحديث بيانات الموظف (${target.username})`, metadata: { role: nextRole, isActive: nextActive, shiftStartTime: nextShiftStartTime, lateGraceMinutes: nextLateGraceMinutes, sessionsRevoked: revokeSessions } });
-    return json(res, 200, { updated: true, sessionsRevoked: revokeSessions });
+    await recordAudit(ctx, { storeId: nextStoreId ?? null, action: 'USER_UPDATED', entityType: 'USER', entityId: targetId, summary: passwordHash ? `إعادة تعيين كلمة مرور الموظف وإلغاء جلساته (${target.username})` : `تحديث بيانات الموظف (${target.username})`, metadata: { role: nextRole, isActive: nextActive, shiftStartTime: nextShiftStartTime, lateGraceMinutes: nextLateGraceMinutes, passwordReset: Boolean(passwordHash), sessionsRevoked: revokeSessions } });
+    if (passwordHash) clearAuthFailures('login', String(target.username).toLowerCase());
+    return json(res, 200, { updated: true, passwordReset: Boolean(passwordHash), sessionsRevoked: revokeSessions });
   }
 
   if (method === 'POST' && path === '/api/account/password') {
-    pruneFailedPasswordChanges();
-    const rateLimitKey = `${ctx.tenantId}:${ctx.userId}`;
-    const failures = getAuthFailures('pwd_change', rateLimitKey);
-    if (Date.now() - failures.startedAt < LOCK_WINDOW_MS && failures.count >= MAX_FAILED_PASSWORD_CHANGES) {
-      throw Object.assign(new Error('محاولات كثيرة خاطئة. يرجى الانتظار 10 دقائق قبل المحاولة مجدداً.'), { status: 429 });
-    }
-
     const body = validate(PasswordChangeSchema, await readJson(req));
-    const currentUser = await userRepo.findById(ctx, ctx.userId);
-    const validCurrent = currentUser && await passwordHasher.verify(currentUser.passwordHash, body.currentPassword);
-    if (!validCurrent) {
-      recordAuthFailure('pwd_change', rateLimitKey);
-      throw Object.assign(new Error('Current password is incorrect'), { status: 400 });
-    }
-    clearAuthFailures('pwd_change', rateLimitKey);
+    const currentUser = await verifyCurrentUserPasswordOrThrow(ctx, body.currentPassword);
     const passwordHash = await passwordHasher.hash(body.newPassword);
     await db.transaction().execute(async (trx) => {
       await trx.updateTable('users').set({ password_hash: passwordHash }).where('tenant_id', '=', ctx.tenantId).where('id', '=', ctx.userId).execute();
@@ -4995,14 +5255,10 @@ async function handleApi(req, res, url) {
 
   const returnMatch = method === 'POST' ? path.match(/^\/api\/sales\/([0-9a-f-]+)\/returns$/i) : null;
   if (returnMatch) {
-    if (!ctx.hasPermission(Permissions.POS_REFUND) && ctx.roleId !== 'CASHIER') {
-      ctx.assertPermission(Permissions.POS_REFUND);
-    }
+    ctx.assertPermission(Permissions.POS_REFUND);
     const body = validate(CustomerReturnSchema, await readJson(req));
-    const returnNumber = await generateNextReturnNumber(ctx.tenantId);
     const result = await returns.record(ctx, {
       id: randomUUID(),
-      returnNumber,
       idempotencyKey: body.idempotencyKey,
       storeId: body.storeId,
       originalSaleId: returnMatch[1],
@@ -5010,14 +5266,12 @@ async function handleApi(req, res, url) {
       occurredAt: new Date(),
       lines: body.items.map((item) => ({ originalSaleItemId: item.originalSaleItemId, quantity: BigInt(item.quantity) }))
     });
-    return json(res, 201, { id: result.id, returnNumber, refundAmount: result.refundAmount.toString() });
+    return json(res, 201, { id: result.id, returnNumber: result.returnNumber, refundAmount: result.refundAmount.toString() });
   }
 
   const exchangeMatch = method === 'POST' ? path.match(/^\/api\/sales\/([0-9a-f-]+)\/exchange$/i) : null;
   if (exchangeMatch) {
-    if (!ctx.hasPermission(Permissions.POS_REFUND) && ctx.roleId !== 'CASHIER') {
-      ctx.assertPermission(Permissions.POS_REFUND);
-    }
+    ctx.assertPermission(Permissions.POS_REFUND);
     const body = validate(SaleExchangeSchema, await readJson(req));
     if (ctx.storeId && ctx.storeId !== body.storeId) {
       throw Object.assign(new Error('الفرع غير متاح لهذا المستخدم'), { status: 403 });
@@ -5299,7 +5553,7 @@ async function handleApi(req, res, url) {
     const tenant = await tenantRepo.findById(ctx.tenantId);
     if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
     const id = randomUUID();
-    const invoiceNumber = body.invoiceNumber?.trim() || await generateNextPurchaseNumber(ctx.tenantId);
+    const explicitInvoiceNumber = body.invoiceNumber?.trim() || undefined;
     let hasAnyRetailPrice = false;
     let computedRetailTotalMinor = 0n;
     const lines = body.items.map((line) => {
@@ -5319,7 +5573,7 @@ async function handleApi(req, res, url) {
     const expectedRetailTotal = hasAnyRetailPrice ? Money.fromMinor(computedRetailTotalMinor, tenant.currency) : undefined;
     const savedId = await purchasing.recordPurchase(ctx, {
       id, idempotencyKey: body.idempotencyKey, storeId: body.storeId, supplierId: body.supplierId,
-      invoiceNumber,
+      ...(explicitInvoiceNumber ? { invoiceNumber: explicitInvoiceNumber } : { autoGenerateInvoiceNumber: true }),
       totalAmount: Money.fromMinor(BigInt(body.totalAmount), tenant.currency),
       initialPayment: Money.fromMinor(BigInt(body.paidAmount), tenant.currency),
       paymentMethod: body.paymentMethod,
@@ -5330,7 +5584,9 @@ async function handleApi(req, res, url) {
       lines,
     });
     if (savedId === id) {
-      await recordAudit(ctx, { storeId: body.storeId, action: 'PURCHASE_RECORDED', entityType: 'PURCHASE', entityId: savedId, summary: `تسجيل فاتورة شراء (${invoiceNumber})`, metadata: { invoiceNumber, totalAmount: body.totalAmount, paidAmount: body.paidAmount, targetProfitPercent: body.targetProfitPercent ?? null, expectedRetailTotal: expectedRetailTotal?.amount.toString() ?? null } });
+      const savedPurchase = await db.selectFrom('supplier_purchases').select('invoice_number').where('id', '=', savedId).where('tenant_id', '=', ctx.tenantId).executeTakeFirst();
+      const recordedInvoice = savedPurchase?.invoice_number ?? explicitInvoiceNumber ?? savedId.slice(0, 8);
+      await recordAudit(ctx, { storeId: body.storeId, action: 'PURCHASE_RECORDED', entityType: 'PURCHASE', entityId: savedId, summary: `تسجيل فاتورة شراء (${recordedInvoice})`, metadata: { invoiceNumber: recordedInvoice, totalAmount: body.totalAmount, paidAmount: body.paidAmount, targetProfitPercent: body.targetProfitPercent ?? null, expectedRetailTotal: expectedRetailTotal?.amount.toString() ?? null } });
     }
     return json(res, 201, { id: savedId });
   }
@@ -5362,6 +5618,107 @@ async function handleApi(req, res, url) {
       await recordAudit(ctx, { action: 'SUPPLIER_PAYMENT_RECORDED', entityType: 'SUPPLIER_PAYMENT', entityId: savedId, summary: `تسجيل دفعة لمورد (${body.amount})`, metadata: { purchaseId: paymentMatch[1], amount: body.amount, paymentMethod: body.paymentMethod } });
     }
     return json(res, 201, { id: savedId });
+  }
+
+  const supplierRefundMatch = method === 'POST' ? path.match(/^\/api\/suppliers\/([0-9a-f-]+)\/refunds$/i) : null;
+  if (supplierRefundMatch) {
+    ctx.assertPermission(Permissions.CATALOG_MANAGE);
+    const supplierId = supplierRefundMatch[1];
+    const body = validate(SupplierRefundSchema, await readJson(req));
+    if (ctx.storeId && ctx.storeId !== body.storeId) throw Object.assign(new Error('Store scope mismatch'), { status: 403 });
+    const tenant = await tenantRepo.findById(ctx.tenantId);
+    if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
+    const refundAmount = BigInt(body.amount);
+    const cashAccountCode = body.paymentMethod === 'CASH' ? '1010' : body.paymentMethod === 'CASH_SAFE' ? '1015' : '1020';
+
+    const result = await db.transaction().execute(async (trx) => {
+      const replay = await trx.selectFrom('supplier_refunds').selectAll()
+        .where('tenant_id', '=', ctx.tenantId).where('idempotency_key', '=', body.idempotencyKey).executeTakeFirst();
+      if (replay) {
+        if (replay.supplier_id !== supplierId || replay.store_id !== body.storeId || BigInt(replay.amount) !== refundAmount || replay.payment_method !== body.paymentMethod) {
+          throw Object.assign(new Error('مفتاح العملية مستخدم لحركة استرداد مختلفة'), { status: 409 });
+        }
+        return { id: replay.id, amount: BigInt(replay.amount), isReplay: true };
+      }
+
+      const supplier = await trx.selectFrom('suppliers').select(['id', 'name']).where('id', '=', supplierId).where('tenant_id', '=', ctx.tenantId).executeTakeFirst();
+      const store = await trx.selectFrom('stores').select('id').where('id', '=', body.storeId).where('tenant_id', '=', ctx.tenantId).executeTakeFirst();
+      if (!supplier || !store) throw Object.assign(new Error('التاجر أو الفرع غير متاح'), { status: 404 });
+
+      const purchasesForSup = await trx.selectFrom('supplier_purchases').select(['id', 'total_amount', 'initial_paid_amount'])
+        .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', body.storeId).where('supplier_id', '=', supplierId).execute();
+      const purchaseIds = purchasesForSup.map((p) => p.id);
+      let totalBilled = 0n;
+      let totalPaid = 0n;
+      let totalReturned = 0n;
+      for (const p of purchasesForSup) {
+        totalBilled += BigInt(p.total_amount);
+        totalPaid += BigInt(p.initial_paid_amount);
+      }
+      if (purchaseIds.length > 0) {
+        const payRows = await trx.selectFrom('supplier_payments').select('amount').where('tenant_id', '=', ctx.tenantId).where('purchase_id', 'in', purchaseIds).execute();
+        for (const row of payRows) totalPaid += BigInt(row.amount);
+        const retRows = await trx.selectFrom('supplier_returns').select('credit_amount').where('tenant_id', '=', ctx.tenantId).where('purchase_id', 'in', purchaseIds).execute();
+        for (const row of retRows) totalReturned += BigInt(row.credit_amount);
+      }
+      const priorRefundRows = await trx.selectFrom('supplier_refunds').select('amount')
+        .where('tenant_id', '=', ctx.tenantId).where('store_id', '=', body.storeId).where('supplier_id', '=', supplierId).execute();
+      let priorRefunded = 0n;
+      for (const row of priorRefundRows) priorRefunded += BigInt(row.amount);
+
+      const netDue = totalBilled - totalPaid - totalReturned + priorRefunded;
+      const creditAvailable = netDue < 0n ? -netDue : 0n;
+      if (creditAvailable <= 0n) throw Object.assign(new Error('لا يوجد رصيد دائن لصالح المتجر عند هذا التاجر'), { status: 400 });
+      if (refundAmount > creditAvailable) throw Object.assign(new Error('المبلغ المطلوب أكبر من الرصيد المستحق لنا عند التاجر'), { status: 400 });
+
+      const refundId = randomUUID();
+      const now = new Date();
+      const journalKey = `supplier-refund:${body.idempotencyKey}`;
+      await postJournalEntry(trx, ctx, {
+        storeId: body.storeId,
+        currency: tenant.currency,
+        date: now,
+        sourceType: 'SUPPLIER_REFUND',
+        sourceId: refundId,
+        idempotencyKey: journalKey,
+        description: `استرداد نقدي من التاجر ${supplier.name}`,
+        lines: [
+          { accountCode: cashAccountCode, side: 'DEBIT', amount: refundAmount, memo: 'تحصيل رصيد مرتجع من التاجر' },
+          { accountCode: '2010', side: 'CREDIT', amount: refundAmount, memo: 'تسوية الرصيد الدائن لدى التاجر' },
+        ],
+      });
+      const journalEntry = await trx.selectFrom('journal_entries').select('id').where('tenant_id', '=', ctx.tenantId).where('idempotency_key', '=', journalKey).executeTakeFirstOrThrow();
+
+      await trx.insertInto('supplier_refunds').values({
+        id: refundId,
+        tenant_id: ctx.tenantId,
+        store_id: body.storeId,
+        supplier_id: supplierId,
+        idempotency_key: body.idempotencyKey,
+        amount: refundAmount,
+        currency: tenant.currency,
+        payment_method: body.paymentMethod,
+        reference_number: body.referenceNumber ?? null,
+        notes: body.notes ?? null,
+        journal_entry_id: journalEntry.id,
+        refunded_at: now.toISOString(),
+        created_by_user_id: ctx.userId,
+      }).execute();
+
+      return { id: refundId, amount: refundAmount, isReplay: false, remainingCredit: creditAvailable - refundAmount };
+    });
+
+    if (!result.isReplay) {
+      await recordAudit(ctx, {
+        storeId: body.storeId,
+        action: 'SUPPLIER_REFUND_RECEIVED',
+        entityType: 'SUPPLIER_REFUND',
+        entityId: result.id,
+        summary: `استلام مبلغ مسترد من تاجر (${body.amount})`,
+        metadata: { supplierId, amount: body.amount, paymentMethod: body.paymentMethod },
+      });
+    }
+    return json(res, 201, { id: result.id, amount: result.amount.toString(), remainingCredit: (result.remainingCredit ?? 0n).toString() });
   }
 
   if (method === 'POST' && (path === '/api/inventory/receive' || path === '/api/inventory/receive-batch')) {
@@ -5615,6 +5972,74 @@ async function handleApi(req, res, url) {
     return json(res, 200, { id: period.id, status: 'CLOSED', closedAt });
   }
 
+  if (method === 'POST' && path === '/api/accounting/opening-balances') {
+    ctx.assertPermission(Permissions.SETTINGS_MANAGE);
+    const body = validate(OpeningBalancesSchema, await readJson(req));
+    if (ctx.storeId && ctx.storeId !== body.storeId) throw Object.assign(new Error('الفرع غير متاح لهذا المستخدم'), { status: 403 });
+    const tenant = await tenantRepo.findById(ctx.tenantId);
+    if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
+
+    const cashDrawer = BigInt(body.cashDrawer);
+    const cashSafe = BigInt(body.cashSafe);
+    const bank = BigInt(body.bank);
+    const inventoryVal = BigInt(body.inventory);
+    const supplierPayables = BigInt(body.supplierPayables);
+    const totalAssets = cashDrawer + cashSafe + bank + inventoryVal;
+    if (totalAssets === 0n && supplierPayables === 0n) {
+      throw Object.assign(new Error('يجب إدخال قيمة واحدة على الأقل للأرصدة الافتتاحية'), { status: 400 });
+    }
+    const netEquity = totalAssets - supplierPayables;
+    const journalLines = [];
+    if (cashDrawer > 0n) journalLines.push({ accountCode: '1010', side: 'DEBIT', amount: cashDrawer, memo: 'رصيد افتتاحي — درج النقدية' });
+    if (cashSafe > 0n) journalLines.push({ accountCode: '1015', side: 'DEBIT', amount: cashSafe, memo: 'رصيد افتتاحي — الخزينة الرئيسية' });
+    if (bank > 0n) journalLines.push({ accountCode: '1020', side: 'DEBIT', amount: bank, memo: 'رصيد افتتاحي — البنك' });
+    if (inventoryVal > 0n) journalLines.push({ accountCode: '1300', side: 'DEBIT', amount: inventoryVal, memo: 'رصيد افتتاحي — المخزون' });
+    if (supplierPayables > 0n) journalLines.push({ accountCode: '2010', side: 'CREDIT', amount: supplierPayables, memo: 'رصيد افتتاحي — مستحقات تجار سابقة' });
+    if (netEquity > 0n) journalLines.push({ accountCode: '3010', side: 'CREDIT', amount: netEquity, memo: 'رصيد افتتاحي — رأس المال' });
+    else if (netEquity < 0n) journalLines.push({ accountCode: '3010', side: 'DEBIT', amount: -netEquity, memo: 'رصيد افتتاحي — عجز رأس المال' });
+
+    const journalKey = `opening-balance:${body.idempotencyKey}`;
+    const entryRes = await db.transaction().execute(async (trx) => {
+      const replay = await trx.selectFrom('journal_entries').select(['id', 'entry_number'])
+        .where('tenant_id', '=', ctx.tenantId).where('idempotency_key', '=', journalKey).executeTakeFirst();
+      if (replay) return { id: replay.id, entryNumber: replay.entry_number, isReplay: true };
+
+      const store = await trx.selectFrom('stores').select('id').where('id', '=', body.storeId).where('tenant_id', '=', ctx.tenantId).executeTakeFirst();
+      if (!store) throw Object.assign(new Error('الفرع غير موجود'), { status: 404 });
+
+      await postJournalEntry(trx, ctx, {
+        storeId: body.storeId,
+        currency: tenant.currency,
+        date: new Date(`${body.entryDate}T12:00:00.000Z`),
+        entryDate: body.entryDate,
+        sourceType: 'ADJUSTMENT',
+        sourceId: body.idempotencyKey,
+        idempotencyKey: journalKey,
+        description: `أرصدة افتتاحية بتاريخ ${body.entryDate}${body.notes ? ` (${body.notes})` : ''}`,
+        lines: journalLines,
+      });
+      const created = await trx.selectFrom('journal_entries').select(['id', 'entry_number'])
+        .where('tenant_id', '=', ctx.tenantId).where('idempotency_key', '=', journalKey).executeTakeFirstOrThrow();
+      return { id: created.id, entryNumber: created.entry_number, isReplay: false };
+    });
+
+    if (!entryRes.isReplay) {
+      await recordAudit(ctx, {
+        storeId: body.storeId,
+        action: 'OPENING_BALANCE_POSTED',
+        entityType: 'JOURNAL_ENTRY',
+        entityId: entryRes.id,
+        summary: `تسجيل أرصدة افتتاحية بتاريخ ${body.entryDate}`,
+        metadata: { entryNumber: entryRes.entryNumber, cashDrawer: body.cashDrawer, cashSafe: body.cashSafe, bank: body.bank, inventory: body.inventory, supplierPayables: body.supplierPayables, netEquity: netEquity.toString() },
+      });
+    }
+    return json(res, 201, {
+      id: entryRes.id,
+      entryNumber: entryRes.entryNumber,
+      netEquity: moneyJson(Money.fromMinor(netEquity, tenant.currency)),
+    });
+  }
+
   if (method === 'POST' && path === '/api/checkout') {
     ctx.assertPermission(Permissions.POS_CHECKOUT);
     const body = validate(CheckoutSchema, await readJson(req));
@@ -5655,11 +6080,9 @@ async function handleApi(req, res, url) {
       throw Object.assign(new Error('صافي الفاتورة بعد الخصم يجب أن يكون أكبر من صفر'), { status: 400 });
     }
     const now = new Date();
-    const existingReplay = await saleRepo.findByIdempotencyKey(ctx, body.idempotencyKey);
-    const saleNumber = existingReplay?.saleNumber ?? await generateNextSaleNumber(ctx.tenantId);
     const tentativeSaleId = randomUUID();
     const sale = await checkout.checkout(ctx, {
-      saleId: tentativeSaleId, saleNumber,
+      saleId: tentativeSaleId,
       storeId: body.storeId, cart,
       payments: [{ method: body.payment.method, amount: Money.fromMinor(BigInt(body.payment.amount), tenant.currency) }],
       idempotencyKey: body.idempotencyKey, customerName: body.customerName, occurredAt: now,
@@ -5708,7 +6131,6 @@ async function handleApi(req, res, url) {
       categoryName = category.name;
     }
 
-    const sessionNumber = await generateNextStocktakeNumber(ctx.tenantId);
     const sessionId = randomUUID();
     const nowIso = new Date().toISOString();
     const todayLabel = nowIso.slice(0, 10);
@@ -5719,7 +6141,7 @@ async function handleApi(req, res, url) {
         : `جرد انتقائي سريع — ${todayLabel}`;
     const title = body.title?.trim() || defaultTitle;
 
-    await db.transaction().execute(async (trx) => {
+    const sessionNumber = await db.transaction().execute(async (trx) => {
       let eligibleVariants = [];
       if (body.scope !== 'PARTIAL') {
         let query = trx
@@ -5776,13 +6198,14 @@ async function handleApi(req, res, url) {
         }
       }
 
+      const allocatedSessionNumber = await generateNextStocktakeNumber(ctx.tenantId, trx);
       await trx
         .insertInto('stocktake_sessions')
         .values({
           id: sessionId,
           tenant_id: ctx.tenantId,
           store_id: body.storeId,
-          session_number: sessionNumber,
+          session_number: allocatedSessionNumber,
           title,
           scope: body.scope,
           category_id: body.scope === 'CATEGORY' ? (body.categoryId ?? null) : null,
@@ -5842,6 +6265,7 @@ async function handleApi(req, res, url) {
           })
           .execute();
       }
+      return allocatedSessionNumber;
     });
 
     await recordAudit(ctx, {
@@ -6644,17 +7068,66 @@ function restartLocalServer() {
   });
 }
 
+const controlFilePath = join(dataDir, '.retailos-control.json');
+const internalShutdownToken = randomBytes(32).toString('hex');
+let controlFileOwned = false;
+function removeControlFileSync() {
+  if (!controlFileOwned) return;
+  controlFileOwned = false;
+  try {
+    if (existsSync(controlFilePath)) unlinkSync(controlFilePath);
+  } catch {
+    // Best-effort cleanup of local runtime control file
+  }
+}
+
 server.listen(port, '127.0.0.1', () => {
+  const addr = server.address();
+  const boundPort = typeof addr === 'object' && addr ? addr.port : port;
+  try {
+    writeFileSync(
+      controlFilePath,
+      JSON.stringify({
+        pid: process.pid,
+        port: boundPort,
+        token: internalShutdownToken,
+        startedAt: new Date().toISOString(),
+      }),
+      { encoding: 'utf8', mode: 0o600 },
+    );
+    controlFileOwned = true;
+  } catch (err) {
+    console.warn('Could not write runtime control file', err);
+  }
   console.log(`RetailOS is running locally at ${origin}`);
   console.log(`Company database: ${join(dataDir, 'retailos.sqlite')}`);
 });
 
+let shutdownPromise = null;
 async function shutdown() {
-  clearInterval(walCheckpointTimer);
-  server.close();
-  await ensureDailyBackup({ force: false, minAgeMs: 60_000, syncMirror: true }).catch(() => undefined);
-  database.checkpointPassive();
-  await database.close();
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    clearInterval(walCheckpointTimer);
+    await new Promise((resolve) => {
+      const timeout = setTimeout(() => resolve(undefined), 2000);
+      timeout.unref();
+      server.close(() => {
+        clearTimeout(timeout);
+        resolve(undefined);
+      });
+      server.closeIdleConnections?.();
+    });
+    await ensureDailyBackup({ force: true, syncMirror: true }).catch(() => undefined);
+    try {
+      database.getRawDatabase().pragma('wal_checkpoint(TRUNCATE)');
+    } catch {
+      database.checkpointPassive();
+    }
+    await database.close();
+    removeControlFileSync();
+  })();
+  return shutdownPromise;
 }
-process.on('SIGINT', () => void shutdown().then(() => process.exit(0)));
-process.on('SIGTERM', () => void shutdown().then(() => process.exit(0)));
+process.on('exit', () => removeControlFileSync());
+process.on('SIGINT', () => void shutdown().finally(() => process.exit(0)));
+process.on('SIGTERM', () => void shutdown().finally(() => process.exit(0)));

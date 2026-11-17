@@ -28,7 +28,7 @@ export interface CheckoutPaymentInput {
 
 export interface CheckoutParams {
   saleId: string;
-  saleNumber: string;
+  saleNumber?: string | undefined;
   storeId: string;
   cart: Cart;
   payments: readonly CheckoutPaymentInput[];
@@ -70,7 +70,7 @@ export class CheckoutService {
     if (params.payments.length === 0) {
       throw new InvalidPaymentError('A checkout requires at least one payment');
     }
-    if (!params.saleNumber.trim()) {
+    if (params.saleNumber !== undefined && !params.saleNumber.trim()) {
       throw new InvalidSaleError('A checkout requires a sale number');
     }
     if (!params.idempotencyKey.trim()) {

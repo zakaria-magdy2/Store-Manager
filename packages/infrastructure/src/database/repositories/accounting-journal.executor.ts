@@ -10,13 +10,14 @@ export interface JournalLineInput {
   memo: string;
 }
 
-const accountDefaults = [
+export const accountDefaults = [
   ['1010', 'درج النقدية', 'ASSET', 'DEBIT'],
   ['1015', 'الخزينة', 'ASSET', 'DEBIT'],
   ['1020', 'البنك والتحصيل الإلكتروني', 'ASSET', 'DEBIT'],
   ['1300', 'المخزون', 'ASSET', 'DEBIT'],
   ['2010', 'مستحقات التجار', 'LIABILITY', 'CREDIT'],
   ['2020', 'التزامات مستحقة', 'LIABILITY', 'CREDIT'],
+  ['3010', 'رأس المال والأرصدة الافتتاحية', 'EQUITY', 'CREDIT'],
   ['4010', 'إيرادات المبيعات', 'REVENUE', 'CREDIT'],
   ['5010', 'تكلفة البضاعة المباعة', 'EXPENSE', 'DEBIT'],
   ['5090', 'فروق تكلفة المورد والمخزون', 'EXPENSE', 'DEBIT'],
@@ -25,6 +26,57 @@ const accountDefaults = [
 
 function conflict(message: string): Error {
   return Object.assign(new Error(message), { status: 409 });
+}
+
+export async function ensureOpenAccountingPeriod(
+  trx: Kysely<RetailOSDatabase>,
+  tenantId: string,
+  date: string,
+): Promise<{ id: string; status: 'OPEN' | 'CLOSED' }> {
+  const existing = await trx
+    .selectFrom('accounting_periods')
+    .select(['id', 'status'])
+    .where('tenant_id', '=', tenantId)
+    .where('start_date', '<=', date)
+    .where('end_date', '>=', date)
+    .executeTakeFirst();
+  if (existing) {
+    if (existing.status !== 'OPEN') {
+      throw conflict('الفترة المحاسبية مقفلة ولا تقبل قيودًا جديدة');
+    }
+    return { id: existing.id, status: 'OPEN' };
+  }
+  const year = Number.parseInt(date.slice(0, 4), 10);
+  const month = Number.parseInt(date.slice(5, 7), 10);
+  const ym = date.slice(0, 7);
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const startDate = `${ym}-01`;
+  const endDate = `${ym}-${String(daysInMonth).padStart(2, '0')}`;
+  const overlapping = await trx
+    .selectFrom('accounting_periods')
+    .select('id')
+    .where('tenant_id', '=', tenantId)
+    .where('start_date', '<=', endDate)
+    .where('end_date', '>=', startDate)
+    .executeTakeFirst();
+  if (overlapping) {
+    throw conflict('تعذر إنشاء فترة محاسبية بسبب تداخل الفترات');
+  }
+  const periodId = `${tenantId}:period:${ym}`;
+  await trx
+    .insertInto('accounting_periods')
+    .values({
+      id: periodId,
+      tenant_id: tenantId,
+      name: ym,
+      start_date: startDate,
+      end_date: endDate,
+      status: 'OPEN',
+      closed_at: null,
+      closed_by_user_id: null,
+    })
+    .execute();
+  return { id: periodId, status: 'OPEN' };
 }
 
 export function resolveValidTimeZone(candidate?: string | null): string {
@@ -59,7 +111,7 @@ export async function postJournalEntry(
     currency: string;
     date: Date;
     entryDate?: string | undefined;
-    sourceType: 'EXPENSE' | 'SALE' | 'PURCHASE' | 'PURCHASE_PAYMENT' | 'SUPPLIER_RETURN' | 'RETURN' | 'TRANSFER' | 'ADJUSTMENT' | 'SESSION_CLOSING';
+    sourceType: 'EXPENSE' | 'SALE' | 'PURCHASE' | 'PURCHASE_PAYMENT' | 'SUPPLIER_RETURN' | 'SUPPLIER_REFUND' | 'RETURN' | 'TRANSFER' | 'ADJUSTMENT' | 'SESSION_CLOSING';
     sourceId: string;
     idempotencyKey: string;
     description: string;
@@ -109,26 +161,7 @@ export async function postJournalEntry(
     date = businessDateInTimeZone(input.date, tenantRow?.timezone ?? 'Africa/Cairo');
   }
 
-  let period = await trx.selectFrom('accounting_periods').selectAll().where('tenant_id', '=', ctx.tenantId)
-    .where('start_date', '<=', date).where('end_date', '>=', date).executeTakeFirst();
-  if (period && period.status !== 'OPEN') throw conflict('الفترة المحاسبية مقفلة ولا تقبل قيودًا جديدة');
-  if (!period) {
-    const year = Number.parseInt(date.slice(0, 4), 10);
-    const month = Number.parseInt(date.slice(5, 7), 10);
-    const ym = date.slice(0, 7);
-    const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
-    const startDate = `${ym}-01`;
-    const endDate = `${ym}-${String(daysInMonth).padStart(2, '0')}`;
-    const overlapping = await trx.selectFrom('accounting_periods').select('id').where('tenant_id', '=', ctx.tenantId)
-      .where('start_date', '<=', endDate).where('end_date', '>=', startDate).executeTakeFirst();
-    if (overlapping) throw conflict('تعذر إنشاء فترة محاسبية بسبب تداخل الفترات');
-    const periodId = `${ctx.tenantId}:period:${ym}`;
-    await trx.insertInto('accounting_periods').values({
-      id: periodId, tenant_id: ctx.tenantId, name: ym, start_date: startDate, end_date: endDate,
-      status: 'OPEN', closed_at: null, closed_by_user_id: null,
-    }).execute();
-    period = await trx.selectFrom('accounting_periods').selectAll().where('id', '=', periodId).executeTakeFirstOrThrow();
-  }
+  const period = await ensureOpenAccountingPeriod(trx, ctx.tenantId, date);
 
   const accountIds = new Map(accounts.map((account) => [account.account_code, account.id]));
   const journalId = randomUUID();

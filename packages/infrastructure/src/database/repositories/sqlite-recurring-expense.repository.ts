@@ -2,7 +2,11 @@ import { randomUUID } from 'node:crypto';
 import type { ExecutionContext } from '@retailos/application';
 import type { Kysely } from 'kysely';
 import type { RetailOSDatabase } from '../types.js';
-import { businessDateInTimeZone, postJournalEntry } from './accounting-journal.executor.js';
+import {
+  businessDateInTimeZone,
+  ensureOpenAccountingPeriod,
+  postJournalEntry,
+} from './accounting-journal.executor.js';
 
 const names = { RENT: 'إيجار المحل', UTILITIES: 'مرافق وفواتير', TRANSPORT: 'نقل ومواصلات', MAINTENANCE: 'صيانة', SUPPLIES: 'مستلزمات تشغيل', OTHER: 'التزامات أخرى' } as const;
 export type MonthlyExpenseCategory = keyof typeof names;
@@ -46,17 +50,13 @@ export class SqliteRecurringExpenseRepository {
         return { id: existing.id, amount: BigInt(existing.amount) };
       }
       const ym = `${input.year}-${String(input.month).padStart(2, '0')}`;
-      const startDate = `${ym}-01`, date = new Date(`${startDate}T12:00:00.000Z`);
+      const startDate = `${ym}-01`;
       const daysInMonth = new Date(Date.UTC(input.year, input.month, 0)).getUTCDate();
-      const journalKey = `monthly-accrual:${obligation.id}:${ym}`;
-      await postJournalEntry(trx, ctx, { storeId: obligation.store_id!, currency: obligation.currency, date, entryDate: startDate, sourceType: 'EXPENSE', sourceId: `${obligation.id}:${ym}`, idempotencyKey: journalKey, description: `استحقاق ${obligation.name} - ${ym}`, lines: [
-        { accountCode: '6090', side: 'DEBIT', amount: input.amount, memo: 'إثبات المصروف الشهري' },
-        { accountCode: '2020', side: 'CREDIT', amount: input.amount, memo: 'التزام شهري مستحق' },
-      ] });
-      const period = await trx.selectFrom('accounting_periods').select('id').where('tenant_id', '=', ctx.tenantId).where('start_date', '<=', startDate).where('end_date', '>=', startDate).executeTakeFirstOrThrow();
-      const journal = await trx.selectFrom('journal_entries').select('id').where('tenant_id', '=', ctx.tenantId).where('idempotency_key', '=', journalKey).executeTakeFirstOrThrow();
+      // Pure cash-basis policy: confirming the monthly obligation schedules the commitment
+      // without posting an expense journal entry yet; expense recognition happens on pay().
+      const period = await ensureOpenAccountingPeriod(trx, ctx.tenantId, startDate);
       const id = randomUUID();
-      await trx.insertInto('monthly_expense_actuals').values({ id, tenant_id: ctx.tenantId, store_id: obligation.store_id, obligation_id: obligation.id, period_id: period.id, year: input.year, month: input.month, days_in_month: daysInMonth, amount: input.amount, currency: obligation.currency, status: 'DUE', paid_amount: 0n, journal_entry_id: journal.id, confirmed_by_user_id: ctx.userId, confirmed_at: input.confirmedAt.toISOString() }).execute();
+      await trx.insertInto('monthly_expense_actuals').values({ id, tenant_id: ctx.tenantId, store_id: obligation.store_id, obligation_id: obligation.id, period_id: period.id, year: input.year, month: input.month, days_in_month: daysInMonth, amount: input.amount, currency: obligation.currency, status: 'DUE', paid_amount: 0n, journal_entry_id: null, confirmed_by_user_id: ctx.userId, confirmed_at: input.confirmedAt.toISOString() }).execute();
       return { id, amount: input.amount };
     });
   }
@@ -81,7 +81,7 @@ export class SqliteRecurringExpenseRepository {
         ? input.expenseDate
         : businessDateInTimeZone(input.paidAt, tenantRow?.timezone ?? 'Africa/Cairo');
       await postJournalEntry(trx, ctx, { storeId: actual.store_id!, currency: actual.currency, date: input.paidAt, entryDate: resolvedExpenseDate, sourceType: 'EXPENSE', sourceId: input.id, idempotencyKey: journalKey, description: `سداد ${obligation.name} - ${actual.year}/${String(actual.month).padStart(2, '0')}`, lines: [
-        { accountCode: '2020', side: 'DEBIT', amount: input.amount, memo: 'تسوية مستحق شهري' },
+        { accountCode: '6090', side: 'DEBIT', amount: input.amount, memo: 'إثبات مصروف شهري مسدد فعليًا' },
         { accountCode: sourceAccount, side: 'CREDIT', amount: input.amount, memo: 'سداد نقدي أو بنكي' },
       ] });
       const journal = await trx.selectFrom('journal_entries').select('id').where('tenant_id', '=', ctx.tenantId).where('idempotency_key', '=', journalKey).executeTakeFirstOrThrow();

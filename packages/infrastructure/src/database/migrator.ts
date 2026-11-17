@@ -28,6 +28,8 @@ import * as purchaseRetailPricing from './migrations/022_purchase_retail_pricing
 import * as businessTimezoneShiftsSequences from './migrations/023_business_timezone_shifts_sequences.js';
 import * as stressHardeningExpensesAndShifts from './migrations/024_stress_hardening_expenses_and_shifts.js';
 import * as customerReturnExchangeFlag from './migrations/025_customer_return_exchange_flag.js';
+import * as accountingCashBasisAndSupplierInvoiceIndex from './migrations/026_accounting_cash_basis_and_supplier_invoice_index.js';
+import * as supplierRefunds from './migrations/027_supplier_refunds.js';
 
 const MIGRATION_REGISTRY: Record<string, Migration> = {
   '001_initial_foundation': {
@@ -130,6 +132,14 @@ const MIGRATION_REGISTRY: Record<string, Migration> = {
     up: customerReturnExchangeFlag.up,
     down: customerReturnExchangeFlag.down,
   },
+  '026_accounting_cash_basis_and_supplier_invoice_index': {
+    up: accountingCashBasisAndSupplierInvoiceIndex.up,
+    down: accountingCashBasisAndSupplierInvoiceIndex.down,
+  },
+  '027_supplier_refunds': {
+    up: supplierRefunds.up,
+    down: supplierRefunds.down,
+  },
 };
 
 export const REGISTERED_MIGRATION_NAMES: readonly string[] = Object.freeze(
@@ -145,16 +155,22 @@ export class DatabaseMigrator {
     this.logger = new Logger('DatabaseMigrator');
   }
 
-  public async migrateToLatest(): Promise<{
+  public async migrateToLatest(maxMigrationName?: string): Promise<{
     success: boolean;
     executedMigrations: string[];
     error?: Error;
   }> {
+    const migrations = maxMigrationName
+      ? Object.fromEntries(
+          Object.entries(MIGRATION_REGISTRY).filter(([name]) => name <= maxMigrationName),
+        )
+      : MIGRATION_REGISTRY;
+
     // Cast to Kysely<unknown> as required by Kysely's Migrator API
     const migrator = new Migrator({
       db: this.db as Kysely<unknown>,
       provider: {
-        getMigrations: () => Promise.resolve(MIGRATION_REGISTRY),
+        getMigrations: () => Promise.resolve(migrations),
       },
     });
 

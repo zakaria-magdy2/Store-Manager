@@ -26,7 +26,7 @@ export interface SaleDraft {
   id: string;
   tenantId: string;
   storeId: string;
-  saleNumber: string;
+  saleNumber?: string | undefined;
   idempotencyKey: string;
   cashierUserId: string;
   customerName?: string | undefined;

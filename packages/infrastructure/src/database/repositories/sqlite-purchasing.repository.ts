@@ -3,6 +3,7 @@ import type { ExecutionContext } from '@retailos/application';
 import type { Money } from '@retailos/core';
 import { applyStockMovementInTransaction } from './stock-movement.executor.js';
 import { postJournalEntry } from './accounting-journal.executor.js';
+import { allocateDocumentNumberInTransaction } from './document-sequence.executor.js';
 import type { RetailOSDatabase } from '../types.js';
 
 export interface PurchaseLineInput {
@@ -18,6 +19,7 @@ export interface RecordPurchaseInput {
   supplierId: string;
   storeId: string;
   invoiceNumber?: string | undefined;
+  autoGenerateInvoiceNumber?: boolean | undefined;
   totalAmount: Money;
   initialPayment: Money;
   paymentMethod: 'CASH' | 'BANK_TRANSFER' | 'CARD' | 'MOBILE';
@@ -81,8 +83,13 @@ export class SqlitePurchasingRepository {
           .where('tenant_id', '=', ctx.tenantId).where('purchase_id', '=', replay.id)
           .where('idempotency_key', '=', `${input.idempotencyKey}:initial`).executeTakeFirst();
         const replayExpectedRetail = replay.expected_retail_total === null ? null : BigInt(replay.expected_retail_total);
+        const sameInvoice = input.invoiceNumber?.trim()
+          ? replay.invoice_number === input.invoiceNumber.trim()
+          : input.autoGenerateInvoiceNumber
+            ? Boolean(replay.invoice_number)
+            : replay.invoice_number === null;
         const sameRequest = replay.supplier_id === input.supplierId && replay.store_id === input.storeId
-          && replay.invoice_number === (input.invoiceNumber ?? null)
+          && sameInvoice
           && BigInt(replay.total_amount) === input.totalAmount.amount
           && replay.currency === input.totalAmount.currency.code
           && replayExpectedRetail === (input.expectedRetailTotal?.amount ?? null)
@@ -100,13 +107,25 @@ export class SqlitePurchasingRepository {
       const store = await trx.selectFrom('stores').select('id').where('id', '=', input.storeId).where('tenant_id', '=', ctx.tenantId).executeTakeFirst();
       if (!supplier || !store) throw badRequest('Supplier or store is not available in this company');
 
+      const resolvedInvoiceNumber = input.invoiceNumber?.trim()
+        ? input.invoiceNumber.trim()
+        : input.autoGenerateInvoiceNumber
+          ? await allocateDocumentNumberInTransaction(trx, {
+              tenantId: ctx.tenantId,
+              docType: 'PURCHASE',
+              prefix: 'PUR-',
+              existingTable: 'supplier_purchases',
+              existingCol: 'invoice_number',
+            })
+          : null;
+
       await trx.insertInto('supplier_purchases').values({
         id: input.id,
         tenant_id: ctx.tenantId,
         store_id: input.storeId,
         supplier_id: input.supplierId,
         idempotency_key: input.idempotencyKey,
-        invoice_number: input.invoiceNumber ?? null,
+        invoice_number: resolvedInvoiceNumber,
         purchased_at: input.purchasedAt.toISOString(),
         total_amount: input.totalAmount.amount,
         initial_paid_amount: 0n,
@@ -234,8 +253,17 @@ export class SqlitePurchasingRepository {
       if (input.amount.currency.code !== purchase.currency) throw badRequest('عملة السداد لا تطابق عملة الفاتورة');
       const payments = await trx.selectFrom('supplier_payments').select('amount')
         .where('tenant_id', '=', ctx.tenantId).where('purchase_id', '=', purchase.id).execute();
+      // Supplier returns reduce the payable for this invoice, so the remaining
+      // balance is total - paid - returned. Paying past that would over-settle
+      // the invoice and distort the supplier ledger.
+      const supplierReturns = await trx.selectFrom('supplier_returns').select('credit_amount')
+        .where('tenant_id', '=', ctx.tenantId).where('purchase_id', '=', purchase.id).execute();
       const paid = BigInt(purchase.initial_paid_amount) + payments.reduce((sum, payment) => sum + BigInt(payment.amount), 0n);
-      if (input.amount.amount > BigInt(purchase.total_amount) - paid) throw badRequest('المبلغ أكبر من المديونية المتبقية');
+      const returned = supplierReturns.reduce((sum, row) => sum + BigInt(row.credit_amount), 0n);
+      const outstanding = BigInt(purchase.total_amount) - paid - returned;
+      if (input.amount.amount > outstanding) {
+        throw badRequest(returned > 0n ? 'المبلغ أكبر من المديونية المتبقية بعد خصم مرتجعات المورد' : 'المبلغ أكبر من المديونية المتبقية');
+      }
 
       await trx.insertInto('supplier_payments').values({
         id: input.id,

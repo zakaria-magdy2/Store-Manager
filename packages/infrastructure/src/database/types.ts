@@ -68,7 +68,7 @@ export interface JournalEntriesTable {
   period_id: string;
   entry_number: string;
   entry_date: string;
-  source_type: 'SALE' | 'PURCHASE' | 'PURCHASE_PAYMENT' | 'SUPPLIER_RETURN' | 'RETURN' | 'TRANSFER' | 'EXPENSE' | 'ADJUSTMENT' | 'SESSION_CLOSING';
+  source_type: 'SALE' | 'PURCHASE' | 'PURCHASE_PAYMENT' | 'SUPPLIER_RETURN' | 'SUPPLIER_REFUND' | 'RETURN' | 'TRANSFER' | 'EXPENSE' | 'ADJUSTMENT' | 'SESSION_CLOSING';
   source_id: string;
   idempotency_key: string;
   status: Generated<'POSTED' | 'REVERSED'>;
@@ -458,7 +458,24 @@ export interface AuthRateLimitsTable {
 export interface DocumentSequencesTable {
   tenant_id: string;
   doc_type: string;
-  last_seq: Generated<number>;
+  last_seq: Generated<number | bigint>;
+}
+
+export interface SupplierRefundsTable {
+  id: string;
+  tenant_id: string;
+  store_id: string;
+  supplier_id: string;
+  idempotency_key: string;
+  amount: bigint;
+  currency: string;
+  payment_method: 'CASH' | 'CASH_SAFE' | 'BANK_TRANSFER';
+  reference_number: string | null;
+  notes: string | null;
+  journal_entry_id: string;
+  refunded_at: string;
+  created_by_user_id: string;
+  created_at: Generated<string>;
 }
 
 export interface RetailOSDatabase {
@@ -497,4 +514,5 @@ export interface RetailOSDatabase {
   cashier_shifts: CashierShiftsTable;
   auth_rate_limits: AuthRateLimitsTable;
   document_sequences: DocumentSequencesTable;
+  supplier_refunds: SupplierRefundsTable;
 }

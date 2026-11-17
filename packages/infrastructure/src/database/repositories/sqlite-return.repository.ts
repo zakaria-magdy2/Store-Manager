@@ -4,6 +4,7 @@ import { Money, type PaymentMethod } from '@retailos/core';
 import type { RetailOSDatabase } from '../types.js';
 import { applyStockMovementInTransaction } from './stock-movement.executor.js';
 import { accountForPaymentMethod, postJournalEntry } from './accounting-journal.executor.js';
+import { allocateDocumentNumberInTransaction } from './document-sequence.executor.js';
 
 export interface CustomerReturnLineInput { originalSaleItemId: string; quantity: bigint }
 export interface RecordCustomerReturnInput {
@@ -18,9 +19,9 @@ function conflict(message: string): Error { return Object.assign(new Error(messa
 export class SqliteReturnRepository {
   constructor(private readonly db: Kysely<RetailOSDatabase>) {}
 
-  public async record(ctx: ExecutionContext, input: RecordCustomerReturnInput): Promise<{ id: string; refundAmount: bigint }> {
+  public async record(ctx: ExecutionContext, input: RecordCustomerReturnInput): Promise<{ id: string; returnNumber: string; refundAmount: bigint }> {
     const res = await this.db.transaction().execute((trx) => this.recordInTransaction(trx, ctx, input));
-    return { id: res.id, refundAmount: res.refundAmount };
+    return { id: res.id, returnNumber: res.returnNumber, refundAmount: res.refundAmount };
   }
 
   /**
@@ -31,7 +32,7 @@ export class SqliteReturnRepository {
     trx: Kysely<RetailOSDatabase>,
     ctx: ExecutionContext,
     input: RecordCustomerReturnInput,
-  ): Promise<{ id: string; refundAmount: bigint; costAmount: bigint }> {
+  ): Promise<{ id: string; returnNumber: string; refundAmount: bigint; costAmount: bigint }> {
     if (ctx.storeId && ctx.storeId !== input.storeId) throw Object.assign(new Error('Store scope mismatch'), { status: 403 });
     if (!input.lines.length || input.lines.length > 100 || input.lines.some((line) => line.quantity <= 0n)) throw badRequest('حدد صنفًا وكمية صالحة للمرتجع');
     if (new Set(input.lines.map((line) => line.originalSaleItemId)).size !== input.lines.length) throw badRequest('لا تكرر الصنف نفسه في المرتجع');
@@ -46,7 +47,7 @@ export class SqliteReturnRepository {
         throw conflict('مفتاح العملية مستخدم لمرتجع مختلف');
       }
       const savedCost = savedLines.reduce((sum, line) => sum + BigInt(line.cost_amount), 0n);
-      return { id: replay.id, refundAmount: BigInt(replay.refund_amount), costAmount: savedCost };
+      return { id: replay.id, returnNumber: replay.return_number, refundAmount: BigInt(replay.refund_amount), costAmount: savedCost };
     }
 
     const sale = await trx.selectFrom('sales').selectAll().where('id', '=', input.originalSaleId)
@@ -96,8 +97,17 @@ export class SqliteReturnRepository {
     });
     const journalEntry = await trx.selectFrom('journal_entries').select('id').where('tenant_id', '=', ctx.tenantId)
       .where('idempotency_key', '=', journalKey).executeTakeFirstOrThrow();
+    const returnNumber =
+      input.returnNumber?.trim() ||
+      (await allocateDocumentNumberInTransaction(trx, {
+        tenantId: ctx.tenantId,
+        docType: 'RETURN',
+        prefix: 'RET-',
+        existingTable: 'customer_returns',
+        existingCol: 'return_number',
+      }));
     await trx.insertInto('customer_returns').values({ id: returnId, tenant_id: ctx.tenantId, store_id: sale.store_id,
-      original_sale_id: sale.id, return_number: input.returnNumber || `RET-${input.occurredAt.toISOString().replace(/\D/g, '').slice(0, 14)}-${returnId.slice(0, 6).toUpperCase()}`,
+      original_sale_id: sale.id, return_number: returnNumber,
       idempotency_key: input.idempotencyKey, refund_amount: refundAmount, currency: sale.currency,
       payment_method: input.paymentMethod, journal_entry_id: journalEntry.id, is_exchange: input.isExchange ? 1 : 0,
       created_by_user_id: ctx.userId, created_at: input.occurredAt.toISOString() }).execute();
@@ -113,6 +123,6 @@ export class SqliteReturnRepository {
         tenant_id: ctx.tenantId, original_sale_item_id: line.originalSaleItemId, variant_id: line.variantId,
         quantity: line.quantity, refund_amount: line.amount, cost_amount: line.cost }).execute();
     }
-    return { id: returnId, refundAmount, costAmount };
+    return { id: returnId, returnNumber, refundAmount, costAmount };
   }
 }

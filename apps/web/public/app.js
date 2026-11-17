@@ -112,7 +112,7 @@ function localDateIso(date = new Date()) {
     const m = parts.find((p) => p.type === 'month')?.value;
     const day = parts.find((p) => p.type === 'day')?.value;
     if (y && m && day) return `${y}-${m}-${day}`;
-  } catch {}
+  } catch { /* fall back to local date parts below */ }
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
@@ -383,7 +383,7 @@ async function api(path, options = {}) {
     });
   } catch (networkError) {
     if (networkError instanceof TypeError) {
-      throw new Error('تعذر الاتصال بالخادم المحلي — تأكد من تشغيل البرنامج وحاول مرة أخرى');
+      throw new Error('تعذر الاتصال بالخادم المحلي — تأكد من تشغيل البرنامج وحاول مرة أخرى', { cause: networkError });
     }
     throw networkError;
   }
@@ -607,7 +607,7 @@ function applyRequestedRoute(fallbackDefault = 'dashboard') {
   state.page = state.data?.capabilities?.cashierMode ? 'pos' : fallbackDefault;
   try {
     window.history.replaceState(null, '', '/');
-  } catch {}
+  } catch { /* history updates are best-effort */ }
   toast(state.accessDeniedNotice, 'error');
 }
 
@@ -741,10 +741,6 @@ function shellView() {
 
 function roleLabel(role) {
   return ({ OWNER: 'مدير النظام', STORE_MANAGER: 'مدير فرع', CASHIER: 'كاشير', AUDITOR: 'مراجع' })[role] ?? role;
-}
-
-function journalSourceLabel(sourceType) {
-  return ({ PURCHASE: 'Purchase', PURCHASE_PAYMENT: 'Supplier payment', SUPPLIER_RETURN: 'Supplier return', SALE: 'Sale', EXPENSE: 'Expense', RETURN: 'Return', TRANSFER: 'Stock transfer', ADJUSTMENT: 'Stock adjustment', SESSION_CLOSING: 'Session closing' })[sourceType] ?? sourceType;
 }
 
 function pageView() {
@@ -1016,7 +1012,7 @@ function showEmployeeDetails(user) {
     ? (att ? (att.isLate ? `متأخر +${att.lateMinutes} د (${attTimeLabel})` : `حاضر (${attTimeLabel})`) : 'لم يحضر اليوم بعد')
     : 'إدارة / مالك';
   const shiftLabel = user.shiftStartTime ? `${formatShiftTime12h(user.shiftStartTime)} (سماح ${user.lateGraceMinutes ?? 0} د)` : 'غير محدد';
-  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card employee-profile-card" role="dialog" aria-modal="true" aria-labelledby="employee-profile-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">ملف الموظف</span><h2 id="employee-profile-title">${escapeHtml(user.fullName)}</h2></div><button type="button" class="modal-close" data-close-employee aria-label="إغلاق">×</button></div><div class="employee-profile-body"><div class="employee-profile-meta"><div class="employee-meta-item"><small>اسم المستخدم</small><strong>${escapeHtml(user.username)}</strong></div><div class="employee-meta-item"><small>الدور الوظيفي</small><strong>${userRoleLabel(user.role)}</strong></div><div class="employee-meta-item"><small>الفرع المعين به</small><strong>${escapeHtml(storeName)}</strong></div><div class="employee-meta-item"><small>حالة الحساب</small><strong class="${user.isActive ? 'profile-active' : 'profile-inactive'}">${user.isActive ? 'نشط ومفعل' : 'موقوف'}</strong></div><div class="employee-meta-item"><small>حضور اليوم</small><strong style="color:${att?.isLate ? 'var(--amber, #b45309)' : (att ? 'var(--green, #15803d)' : 'var(--muted)')};">${attText}</strong></div><div class="employee-meta-item"><small>موعد بدء الشيفت</small><strong>${shiftLabel}</strong></div><div class="employee-meta-item"><small>تاريخ الانضمام</small><strong>${employeeDateLabel(user.createdAt, true)}</strong></div><div class="employee-meta-item"><small>مدة العمل في المتجر</small><strong>${employeeTenure(user.employmentStartDate)}</strong></div></div><form id="employee-profile-form" data-user-id="${user.id}" class="form-stack"><div class="form-grid"><label><span>رقم الهاتف</span><input name="phone" type="tel" maxlength="32" autocomplete="tel" value="${escapeHtml(user.phone ?? '')}" placeholder="لم يُسجل رقم هاتف"></label><label><span>تاريخ بدء العمل الفعلي</span><input name="employmentStartDate" type="date" required value="${escapeHtml(user.employmentStartDate ?? '')}"></label>${isEmp ? `<label><span>موعد بدء الشيفت</span><input name="shiftStartTime" type="time" value="${escapeHtml(user.shiftStartTime ?? '')}"></label><label><span>سماح التأخير (دقائق)</span><input name="lateGraceMinutes" type="number" min="0" max="180" value="${Number(user.lateGraceMinutes ?? 0)}"></label>` : ''}</div><div class="modal-actions" style="margin-top:10px;"><button type="button" class="button button-secondary" data-close-employee>إغلاق</button>${isEmp ? '<button type="button" class="button button-secondary" id="employee-modal-att-btn">كشف الحضور الشهري</button>' : ''}<button type="submit" class="button button-primary">حفظ بيانات الموظف</button></div></form></div></section></div>`;
+  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card employee-profile-card" role="dialog" aria-modal="true" aria-labelledby="employee-profile-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">ملف الموظف</span><h2 id="employee-profile-title">${escapeHtml(user.fullName)}</h2></div><button type="button" class="modal-close" data-close-employee aria-label="إغلاق">×</button></div><div class="employee-profile-body"><div class="employee-profile-meta"><div class="employee-meta-item"><small>اسم المستخدم</small><strong>${escapeHtml(user.username)}</strong></div><div class="employee-meta-item"><small>الدور الوظيفي</small><strong>${userRoleLabel(user.role)}</strong></div><div class="employee-meta-item"><small>الفرع المعين به</small><strong>${escapeHtml(storeName)}</strong></div><div class="employee-meta-item"><small>حالة الحساب</small><strong class="${user.isActive ? 'profile-active' : 'profile-inactive'}">${user.isActive ? 'نشط ومفعل' : 'موقوف'}</strong></div><div class="employee-meta-item"><small>حضور اليوم</small><strong style="color:${att?.isLate ? 'var(--amber, #b45309)' : (att ? 'var(--green, #15803d)' : 'var(--muted)')};">${attText}</strong></div><div class="employee-meta-item"><small>موعد بدء الشيفت</small><strong>${shiftLabel}</strong></div><div class="employee-meta-item"><small>تاريخ الانضمام</small><strong>${employeeDateLabel(user.createdAt, true)}</strong></div><div class="employee-meta-item"><small>مدة العمل في المتجر</small><strong>${employeeTenure(user.employmentStartDate)}</strong></div></div><form id="employee-profile-form" data-user-id="${user.id}" class="form-stack"><div class="form-grid"><label><span>رقم الهاتف</span><input name="phone" type="tel" maxlength="32" autocomplete="tel" value="${escapeHtml(user.phone ?? '')}" placeholder="لم يُسجل رقم هاتف"></label><label><span>تاريخ بدء العمل الفعلي</span><input name="employmentStartDate" type="date" required value="${escapeHtml(user.employmentStartDate ?? '')}"></label>${isEmp ? `<label><span>موعد بدء الشيفت</span><input name="shiftStartTime" type="time" value="${escapeHtml(user.shiftStartTime ?? '')}"></label><label><span>سماح التأخير (دقائق)</span><input name="lateGraceMinutes" type="number" min="0" max="180" value="${Number(user.lateGraceMinutes ?? 0)}"></label>${state.user?.id === user.id ? '' : '<label><span>كلمة مرور جديدة (اختياري)</span><input name="newPassword" type="password" minlength="12" maxlength="128" autocomplete="new-password" placeholder="اتركها فارغة لعدم التغيير"></label>'}` : ''}</div><div class="modal-actions" style="margin-top:10px;"><button type="button" class="button button-secondary" data-close-employee>إغلاق</button>${isEmp ? '<button type="button" class="button button-secondary" id="employee-modal-att-btn">كشف الحضور الشهري</button>' : ''}<button type="submit" class="button button-primary">حفظ بيانات الموظف</button></div></form></div></section></div>`;
   root.querySelectorAll('[data-close-employee]').forEach((element) => element.addEventListener('click', (event) => {
     if (element === event.target || element.tagName === 'BUTTON') root.innerHTML = '';
   }));
@@ -1033,15 +1029,16 @@ function showEmployeeDetails(user) {
       employmentStartDate: raw.employmentStartDate,
       ...(raw.shiftStartTime !== undefined ? { shiftStartTime: raw.shiftStartTime ? raw.shiftStartTime : null } : {}),
       ...(raw.lateGraceMinutes !== undefined ? { lateGraceMinutes: Number(raw.lateGraceMinutes || 0) } : {}),
+      ...(raw.newPassword ? { newPassword: raw.newPassword } : {}),
     };
     button.disabled = true;
     try {
-      await api(`/api/users/${form.dataset.userId}`, { method: 'PATCH', body: JSON.stringify(body) });
+      const result = await api(`/api/users/${form.dataset.userId}`, { method: 'PATCH', body: JSON.stringify(body) });
       invalidateUsersDerivedCache();
       await loadData(state.data.selectedStoreId);
       root.innerHTML = '';
       render();
-      toast('تم حفظ بيانات الموظف بنجاح');
+      toast(result.passwordReset ? 'تمت إعادة تعيين كلمة المرور وإلغاء جلسات الموظف' : 'تم حفظ بيانات الموظف بنجاح');
     } catch (error) { toast(error.message, 'error'); button.disabled = false; }
   });
 }
@@ -1346,7 +1343,6 @@ function dashboardView() {
     const val = BigInt((sale.netTotal ?? sale.total).amount);
     return val > max ? val : max;
   }, 1n);
-  const weekBars = ['س', 'ح', 'ن', 'ث', 'ر', 'خ', 'ج'];
   const safety = data.capabilities?.canManageBackups ? data.backupSafety : null;
   const safetyBanner = safety?.startupRecoveryInfo?.recovered
     ? `<div class="safety-alert-banner safety-alert-recovered">
@@ -1399,7 +1395,7 @@ function salesTable(sales) {
             const origTotal = sale.originalTotal ?? sale.total;
             const returnedAmt = sale.returnedAmount;
             const hasReturn = returnStatus !== 'NONE' && returnedAmt && BigInt(returnedAmt.amount || '0') > 0n;
-            const canReturn = (state.data.capabilities.canRefund || state.data.capabilities.canReturnSale || state.data.capabilities.cashierMode) && (sale.items ?? []).some((item) => BigInt(item.returnableQuantity ?? '0') > 0n);
+            const canReturn = (state.data.capabilities.canRefund || state.data.capabilities.canReturnSale) && (sale.items ?? []).some((item) => BigInt(item.returnableQuantity ?? '0') > 0n);
 
             const paymentPills = (sale.payments ?? []).map((payment) => {
               const method = payment.method;
@@ -2921,7 +2917,10 @@ function suppliersView() {
 
   const purchaseDisclosure = (supplier, purchase) => {
     const modelGroups = groupPurchaseItemsByModel(purchase, state.data.products);
-    const isPaid = !BigInt(purchase.remainingAmount.amount);
+    const remainingMinor = BigInt(purchase.remainingAmount.amount);
+    const isPaid = remainingMinor === 0n;
+    const hasSupplierCredit = remainingMinor < 0n;
+    const absRemaining = { ...purchase.remainingAmount, amount: (remainingMinor < 0n ? -remainingMinor : remainingMinor).toString() };
     const invoiceLabel = purchase.invoiceNumber || `PUR-${purchase.id.slice(0, 8).toUpperCase()}`;
     const dateFormatted = new Intl.DateTimeFormat('ar-EG', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(purchase.purchasedAt));
     const totalPieces = modelGroups.reduce((sum, g) => sum + g.totalQuantity, 0n);
@@ -2943,8 +2942,8 @@ function suppliersView() {
               <small>إجمالي الفاتورة</small>
               <strong class="table-total">${money(purchase.totalAmount)}</strong>
             </div>
-            <span class="status-pill ${isPaid ? 'status-complete' : 'status-low'}">
-              ${isPaid ? '✓ مسددة بالكامل' : `متبقي <bdi dir="ltr">${money(purchase.remainingAmount)}</bdi>`}
+            <span class="status-pill ${isPaid || hasSupplierCredit ? 'status-complete' : 'status-low'}">
+              ${isPaid ? '✓ مسددة بالكامل' : hasSupplierCredit ? `لصالح المحل +<bdi dir="ltr">${money(absRemaining)}</bdi>` : `متبقي <bdi dir="ltr">${money(purchase.remainingAmount)}</bdi>`}
             </span>
             <span class="disclosure-chevron" aria-hidden="true">${icon('chevron', 16)}</span>
           </div>
@@ -2960,9 +2959,9 @@ function suppliersView() {
               <small>المدفوع للتاجر</small>
               <strong class="table-total">${money(purchase.paidAmount)}</strong>
             </div>
-            <div class="purchase-finance-box ${isPaid ? 'paid' : 'due'}">
-              <small>المتبقي للتاجر</small>
-              <strong class="table-total">${money(purchase.remainingAmount)}</strong>
+            <div class="purchase-finance-box ${isPaid || hasSupplierCredit ? 'paid' : 'due'}">
+              <small>${hasSupplierCredit ? 'رصيد لصالح المحل عند التاجر' : 'المتبقي للتاجر'}</small>
+              <strong class="table-total">${money(hasSupplierCredit ? absRemaining : purchase.remainingAmount)}</strong>
             </div>
             ${hasExpectedRetail ? `
               <div class="purchase-finance-box">
@@ -3026,11 +3025,11 @@ function suppliersView() {
 
           <div class="purchase-footer-bar">
             <div class="purchase-footer-buttons">
-              ${!isPaid ? `
+              ${remainingMinor > 0n ? `
                 <button type="button" class="button button-primary button-sm pay-purchase" data-purchase="${purchase.id}" data-remaining="${purchase.remainingAmount.amount}">
                   ${icon('wallet', 15)} تسجيل سداد للتاجر
                 </button>
-              ` : '<span class="status-pill status-complete">✓ مسددة بالكامل</span>'}
+              ` : hasSupplierCredit ? `<span class="status-pill status-complete">رصيد مرتجع لصالح المحل +<bdi dir="ltr">${money(absRemaining)}</bdi></span>` : '<span class="status-pill status-complete">✓ مسددة بالكامل</span>'}
               <button type="button" class="button button-secondary button-sm print-purchase-labels" data-purchase-id="${purchase.id}">
                 طباعة باركود العلب
               </button>
@@ -3126,12 +3125,17 @@ function suppliersView() {
         <div><small>تم السداد للتجار ${from || to || searchQuery ? '(في الفترة)' : ''}</small><strong class="table-total text-green">${amount(totalPaidAll)}</strong></div>
       </div>
       <div class="inventory-summary-card">
-        <span class="summary-badge summary-amber">${icon('wallet', 18)}</span>
-        <div><small>مستحق للتجار ${from || to || searchQuery ? '(في الفترة)' : ''}</small><strong class="table-total ${BigInt(totalDueAll) > 0n ? 'text-rose' : ''}">${amount(totalDueAll)}</strong></div>
+        <span class="summary-badge ${BigInt(totalDueAll) < 0n ? 'summary-green' : 'summary-amber'}">${icon('wallet', 18)}</span>
+        <div><small>${BigInt(totalDueAll) < 0n ? 'رصيد لصالح المحل عند التجار' : 'مستحق للتجار'} ${from || to || searchQuery ? '(في الفترة)' : ''}</small><strong class="table-total ${BigInt(totalDueAll) > 0n ? 'text-rose' : BigInt(totalDueAll) < 0n ? 'text-green' : ''}">${amount((BigInt(totalDueAll) < 0n ? -BigInt(totalDueAll) : BigInt(totalDueAll)).toString())}</strong></div>
       </div>
     </div>
 
-    ${processedSuppliers.length ? processedSuppliers.map((supplier) => `
+    ${processedSuppliers.length ? processedSuppliers.map((supplier) => {
+      const dueMinor = BigInt(supplier.filteredDue);
+      const absDueStr = (dueMinor < 0n ? -dueMinor : dueMinor).toString();
+      const creditAvailable = BigInt(supplier.creditFromSupplier ?? '0');
+      const refundsList = supplier.supplierRefunds ?? [];
+      return `
       <details class="supplier-card" open>
         <summary class="supplier-summary-bar">
           <div class="supplier-summary-main">
@@ -3145,17 +3149,22 @@ function suppliersView() {
             <div class="supplier-meta-pills">
               <span class="purchase-meta-pill">مشتريات: <strong class="table-total">${amount(supplier.filteredPurchased)}</strong></span>
               <span class="purchase-meta-pill text-green">مدفوع: <strong class="table-total text-green">${amount(supplier.filteredPaid)}</strong></span>
-              <span class="purchase-meta-pill ${BigInt(supplier.filteredDue) > 0n ? 'text-rose' : 'text-green'}">متبقي: <strong class="table-total ${BigInt(supplier.filteredDue) > 0n ? 'text-rose' : 'text-green'}">${amount(supplier.filteredDue)}</strong></span>
+              ${dueMinor < 0n
+                ? `<span class="purchase-meta-pill text-green">لصالح المحل عند التاجر: <strong class="table-total text-green">${amount(absDueStr)}</strong></span>`
+                : `<span class="purchase-meta-pill ${dueMinor > 0n ? 'text-rose' : 'text-green'}">متبقي: <strong class="table-total ${dueMinor > 0n ? 'text-rose' : 'text-green'}">${amount(absDueStr)}</strong></span>`
+              }
             </div>
           </div>
           <div class="supplier-summary-actions">
+            ${creditAvailable > 0n ? `<button type="button" class="button button-primary button-sm collect-supplier-refund" data-supplier="${supplier.id}" data-supplier-name="${escapeHtml(supplier.name)}" data-credit="${creditAvailable.toString()}">استلام مرتجع نقدي</button>` : ''}
             <button type="button" class="button button-secondary button-sm purchase-for-supplier" data-supplier="${supplier.id}">+ فاتورة شراء جديدة</button>
             <span class="disclosure-chevron" aria-hidden="true">${icon('chevron', 16)}</span>
           </div>
         </summary>
+        ${refundsList.length ? `<div class="disclosure-content" style="padding:10px 16px;border-bottom:1px solid var(--line);">${refundsList.map((rf) => `<div class="invoice-history-row"><span>استرداد نقدي من التاجر (${rf.paymentMethod === 'CASH' ? 'درج النقدية' : rf.paymentMethod === 'CASH_SAFE' ? 'الخزينة' : 'تحويل بنكي'}) بواسطة <strong>${escapeHtml(rf.createdByName || 'المسؤول')}</strong> · ${new Date(rf.refundedAt).toLocaleDateString('ar-EG')}</span><strong class="table-total text-green">+${money(rf.amount)}</strong></div>`).join('')}</div>` : ''}
         ${supplier.purchases.length ? `<div class="purchase-list-scroll">${supplier.purchases.map((purchase) => purchaseDisclosure(supplier, purchase)).join('')}</div>` : '<div class="empty-row" style="padding:16px;">لا توجد فواتير شراء في هذه الفترة المحددة لهذا التاجر.</div>'}
       </details>
-    `).join('') : `
+    `; }).join('') : `
       <section class="panel empty-chart">
         <div class="empty-illustration">${icon('users', 28)}</div>
         <strong>ابدأ بإضافة أول تاجر</strong>
@@ -3335,6 +3344,14 @@ function profitLossView() {
         <p class="page-lead">ملخص مباشر وواضح لأرباح المتجر بعد خصم تكلفة البضاعة والمصروفات، بدون أي تعقيد.</p>
       </div>
       <div class="table-actions-inline">
+        <button type="button" class="button button-secondary" id="btn-open-trial-balance">
+          ${icon('chart', 16)} ميزان المراجعة
+        </button>
+        ${state.data.capabilities.canClosePeriod ? `
+          <button type="button" class="button button-secondary" id="btn-open-opening-balances">
+            ${icon('plus', 16)} الأرصدة الافتتاحية
+          </button>
+        ` : ''}
         <button type="button" class="button button-secondary" id="btn-open-journal-ledger">
           ${icon('box', 16)} دفتر القيود المحاسبية
         </button>
@@ -3445,7 +3462,7 @@ function topProductsView() {
   const suppliersBlock = state.data.capabilities.canViewAccounting ? `
     <section class="panel compact-panel">
       <div class="panel-heading"><div><h3>إحصائيات التجار والموردين والمسحوبات</h3><p>إجمالي الطلبات وعدد القطع والمسدد والمتبقي لكل تاجر في الفترة</p></div><span class="status-pill status-complete">${vendors?.suppliers?.length ?? 0} تاجر</span></div>
-      ${vendors?.suppliers?.length ? `<div class="table-scroll analytics-scroll-box"><table class="compact-table"><thead><tr><th>#</th><th>اسم التاجر</th><th>عدد الفواتير</th><th>إجمالي القطع المطلوبة</th><th>إجمالي المشتريات</th><th>المدفوع</th><th>المرتجعات</th><th>المتبقي للتاجر</th></tr></thead><tbody>${vendors.suppliers.map((s, idx) => `<tr><td>${idx + 1}</td><td><strong>${escapeHtml(s.name)}</strong></td><td>${s.invoiceCount} فاتورة</td><td><strong>${s.unitsOrdered ?? '—'}</strong> قطعة</td><td class="table-total">${money(s.totalAmount)}</td><td class="table-total">${s.paidAmount ? money(s.paidAmount) : '—'}</td><td class="table-total">${s.returnedCredit ? money(s.returnedCredit) : '—'}</td><td>${s.balanceDue && BigInt(s.balanceDue.amount) > 0n ? `<span class="status-pill status-low"><bdi dir="ltr">${money(s.balanceDue)}</bdi></span>` : '<span class="status-pill status-complete">مسدد</span>'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">لا توجد مشتريات مسجلة من التجار في هذه الفترة.</div>'}
+      ${vendors?.suppliers?.length ? `<div class="table-scroll analytics-scroll-box"><table class="compact-table"><thead><tr><th>#</th><th>اسم التاجر</th><th>عدد الفواتير</th><th>إجمالي القطع المطلوبة</th><th>إجمالي المشتريات</th><th>المدفوع</th><th>المرتجعات</th><th>الموقف المالي</th></tr></thead><tbody>${vendors.suppliers.map((s, idx) => `<tr><td>${idx + 1}</td><td><strong>${escapeHtml(s.name)}</strong></td><td>${s.invoiceCount} فاتورة</td><td><strong>${s.unitsOrdered ?? '—'}</strong> قطعة</td><td class="table-total">${money(s.totalAmount)}</td><td class="table-total">${s.paidAmount ? money(s.paidAmount) : '—'}</td><td class="table-total">${s.returnedCredit ? money(s.returnedCredit) : '—'}</td><td>${s.balanceDue && BigInt(s.balanceDue.amount) > 0n ? `<span class="status-pill status-low">متبقي للتاجر <bdi dir="ltr">${money(s.balanceDue)}</bdi></span>` : s.balanceDue && BigInt(s.balanceDue.amount) < 0n ? `<span class="status-pill status-complete">لصالح المحل +<bdi dir="ltr">${money({ ...s.balanceDue, amount: (-BigInt(s.balanceDue.amount)).toString() })}</bdi></span>` : '<span class="status-pill status-complete">مسدد</span>'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-row">لا توجد مشتريات مسجلة من التجار في هذه الفترة.</div>'}
     </section>` : '';
 
   const inventoryHealthBlock = `
@@ -3567,7 +3584,7 @@ function growthForecastWidget(forecast, currency) {
 
   const chronologicalHistory = [...monthlyHistory].sort((a, b) => a.yearMonth.localeCompare(b.yearMonth));
 
-  let chartMonths = [];
+  let chartMonths;
   if (state.growthViewMode === '3m') {
     chartMonths = chronologicalHistory.slice(-3);
   } else if (state.growthViewMode === '6m') {
@@ -3646,9 +3663,9 @@ function growthForecastWidget(forecast, currency) {
   const prevRevMinor = BigInt(previousMonth.revenue || '0');
   const curProfitMinor = BigInt(currentMonth.profit || '0');
 
-  let progressPct = 0;
-  let progressLabel = '';
-  let targetRefLabel = '';
+  let progressPct;
+  let progressLabel;
+  let targetRefLabel;
   if (prevRevMinor > 0n) {
     progressPct = Number((curRevMinor * 100n) / prevRevMinor);
     progressLabel = `${progressPct}% من الشهر السابق`;
@@ -3901,7 +3918,7 @@ async function loadGrowthForecast(year = null, month = null) {
     state.growthForecast = result;
     render();
     return result;
-  } catch (e) {
+  } catch {
     state.growthForecastKey = null;
     return null;
   }
@@ -4072,6 +4089,16 @@ function financialMapView() {
                   badgeIcon = '↺';
                   flowColor = '#0369a1';
                   flowHtml = 'تخفيض دين تاجر';
+                } else if (item.type === 'SUPPLIER_REFUND') {
+                  badgeClass = 'fm-sale';
+                  badgeIcon = '+';
+                  flowColor = 'var(--green, #15803d)';
+                  flowHtml = `<bdi dir="ltr" style="display:inline-block;">+${format(item.amountIn)}</bdi>`;
+                } else if (item.type === 'OPENING_BALANCE') {
+                  badgeClass = 'fm-sale';
+                  badgeIcon = '+';
+                  flowColor = 'var(--green, #15803d)';
+                  flowHtml = `<bdi dir="ltr" style="display:inline-block;">+${format(item.amountIn)}</bdi>`;
                 } else if (item.type === 'EXPENSE') {
                   badgeClass = 'fm-expense';
                   badgeIcon = '-';
@@ -4943,7 +4970,7 @@ function bindSuppliers() {
           try {
             const parsedCost = BigInt(toMinor(costStr, decimals));
             if (parsedCost > 0n) unitCostMinor = parsedCost;
-          } catch {}
+          } catch { /* invalid cost input keeps the line unpriced */ }
         }
 
         const retailStr = String(section.querySelector(`[name="purchaseRetailPrice_${index}"]`)?.value ?? '').trim();
@@ -5036,7 +5063,6 @@ function bindSuppliers() {
       if (targetPanel) targetPanel.hidden = !targetEnabled;
 
       let targetSalesMinor = 0n;
-      let targetProfitMinor = 0n;
       let remainingToTargetMinor = 0n;
       let activeTargetValid = false;
 
@@ -5062,7 +5088,7 @@ function bindSuppliers() {
       } else {
         activeTargetValid = true;
         const pctBps = BigInt(Math.round(parsedPct * 100));
-        targetProfitMinor = (totalCostMinor * pctBps + 5000n) / 10000n;
+        const targetProfitMinor = (totalCostMinor * pctBps + 5000n) / 10000n;
         targetSalesMinor = totalCostMinor + targetProfitMinor;
         remainingToTargetMinor = targetSalesMinor - totalAssignedRetailMinor;
 
@@ -5150,7 +5176,7 @@ function bindSuppliers() {
       let paidMinor = 0n;
       try {
         paidMinor = BigInt(toMinor(paidInput.value || '0', decimals));
-      } catch {}
+      } catch { /* invalid paid input keeps zero */ }
 
       const remainingMinor = totalCostMinor > paidMinor ? totalCostMinor - paidMinor : 0n;
       const remainingFormatted = decimalPrice({ amount: remainingMinor.toString(), decimals });
@@ -5169,9 +5195,9 @@ function bindSuppliers() {
 
     form.querySelector('#purchase-paid-input')?.addEventListener('input', () => {
       let totalMinor = 0n;
-      try { totalMinor = BigInt(toMinor(form.querySelector('#purchase-total-hidden').value || '0', decimals)); } catch {}
+      try { totalMinor = BigInt(toMinor(form.querySelector('#purchase-total-hidden').value || '0', decimals)); } catch { /* keep zero */ }
       let paidMinor = 0n;
-      try { paidMinor = BigInt(toMinor(form.querySelector('#purchase-paid-input').value || '0', decimals)); } catch {}
+      try { paidMinor = BigInt(toMinor(form.querySelector('#purchase-paid-input').value || '0', decimals)); } catch { /* keep zero */ }
       const rem = totalMinor > paidMinor ? totalMinor - paidMinor : 0n;
       form.querySelector('#invoice-remaining-text').textContent = `${decimalPrice({ amount: rem.toString(), decimals })} ${currency}`;
     });
@@ -5417,6 +5443,25 @@ function bindSuppliers() {
     const maxAmount = decimals ? `${digits.slice(0, -decimals)}.${digits.slice(-decimals)}` : digits;
     supplierModal(`<p>المتبقي: <strong>${money({ amount: button.dataset.remaining, currency: state.data.company.currency, decimals })}</strong></p><label>مبلغ السداد<input name="amount" inputmode="decimal" max="${maxAmount}" required></label><label>طريقة السداد<select name="paymentMethod"><option value="CASH">نقدي</option><option value="BANK_TRANSFER">تحويل بنكي</option><option value="CARD">بطاقة</option><option value="MOBILE">محفظة</option></select></label><label>رقم مرجعي<input name="referenceNumber" maxlength="80"></label><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'payment-form', `/api/purchases/${button.dataset.purchase}/payments`, (data) => ({ ...data, amount: toMinor(data.amount, currencyDecimals(state.data.company.currency)) }));
   }));
+  document.querySelectorAll('.collect-supplier-refund').forEach((button) => button.addEventListener('click', () => {
+    const decimals = currencyDecimals(state.data.company.currency);
+    const creditMinor = BigInt(button.dataset.credit ?? '0');
+    const digits = creditMinor.toString().padStart(decimals + 1, '0');
+    const defaultVal = decimals ? `${digits.slice(0, -decimals)}.${digits.slice(-decimals)}` : digits;
+    supplierModal(
+      `<p>رصيد مستحق لصالح المحل عند التاجر <strong>${escapeHtml(button.dataset.supplierName ?? '')}</strong>: <strong>${money({ amount: creditMinor.toString(), currency: state.data.company.currency, decimals })}</strong></p>
+       <label>المبلغ المسترد (${state.data.company.currency})<input name="amount" inputmode="decimal" value="${defaultVal}" required></label>
+       <label>حساب الإيداع<select name="paymentMethod"><option value="CASH">درج النقدية (1010)</option><option value="CASH_SAFE">الخزينة الرئيسية (1015)</option><option value="BANK_TRANSFER">البنك / التحصيل الإلكتروني (1020)</option></select></label>
+       <label>رقم مرجعي (اختياري)<input name="referenceNumber" maxlength="80"></label>
+       <label>ملاحظات (اختياري)<input name="notes" maxlength="300"></label>
+       <input type="hidden" name="storeId" value="${state.data.selectedStoreId}">
+       <input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`,
+      'supplier-refund-form',
+      `/api/suppliers/${button.dataset.supplier}/refunds`,
+      (data) => ({ ...data, amount: toMinor(data.amount, currencyDecimals(state.data.company.currency)) }),
+      'تم تسجيل استلام المبلغ المسترد من التاجر بنجاح',
+    );
+  }));
 
   document.querySelectorAll('[data-sup-preset]').forEach((btn) => btn.addEventListener('click', () => {
     const preset = btn.dataset.supPreset;
@@ -5630,7 +5675,7 @@ function showSaleDetails(sale) {
   const totalReturned = (sale.returns ?? []).reduce((sum, item) => sum + BigInt(typeof item.refundAmount === 'object' ? item.refundAmount.amount : item.refundAmount || '0'), 0n).toString();
   const hasDiscount = sale.discountTotal && BigInt(sale.discountTotal.amount) > 0n;
   const hasChange = sale.changeGiven && BigInt(sale.changeGiven.amount) > 0n;
-  const canReturn = (state.data.capabilities.canRefund || state.data.capabilities.canReturnSale || state.data.capabilities.cashierMode) && (sale.items ?? []).some((item) => BigInt(item.returnableQuantity ?? item.quantity ?? '0') > 0n);
+  const canReturn = (state.data.capabilities.canRefund || state.data.capabilities.canReturnSale) && (sale.items ?? []).some((item) => BigInt(item.returnableQuantity ?? item.quantity ?? '0') > 0n);
 
   root.innerHTML = `
     <div class="modal-backdrop">
@@ -6942,6 +6987,9 @@ function backupView() {
             <button type="button" class="button button-secondary button-sm" id="sync-mirror-now-btn">مزامنة خارجية فورية</button>
             <button type="button" class="button button-secondary button-sm" id="clear-mirror-path-btn" style="color:var(--rose, #be123c);">إلغاء المسار الخارجي</button>
           ` : ''}
+          ${state.data?.user?.role === 'OWNER' ? `
+            <button type="button" class="button button-secondary button-sm" id="export-daily-key-btn">استخراج مفتاح استعادة النسخ اليومية</button>
+          ` : ''}
         </div>
         ${mirror?.lastMirrorError ? `<div class="empty-row" style="color:var(--rose, #be123c);margin-top:8px;">${escapeHtml(mirror.lastMirrorError)}</div>` : ''}
       </form>
@@ -6954,7 +7002,7 @@ function backupView() {
 
     <div class="analytics-two-col">
       <section class="panel compact-panel"><div class="panel-heading"><div><h3>تصدير نسخة احتياطية مشفرة (.rfbackup)</h3><p>نسخة خارجية مشفرة بكلمة مرور لحفظها على فلاشة أو سحابة خارجية.</p></div></div><div class="empty-row">احفظ كلمة المرور في مكان آمن؛ لا يمكن فك تشفير النسخة بدونها.</div><form id="backup-export-form" class="form-stack"><label>كلمة مرور للتشفير<input name="passphrase" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label><label>أكد كلمة المرور<input name="confirmPassphrase" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label><button class="button button-primary" type="submit">تنزيل نسخة احتياطية</button></form></section>
-      <section class="panel compact-panel"><div class="panel-heading"><div><h3>استعادة نسخة مشفرة</h3><p>سيتم استبدال بيانات المحل الحالية وإعادة تشغيل النظام.</p></div></div><form id="backup-restore-form" class="form-stack"><label>ملف النسخة<input name="archive" type="file" accept=".rfbackup,application/octet-stream" required></label><label>كلمة مرور النسخة<input name="passphrase" type="password" minlength="12" maxlength="256" autocomplete="current-password" required></label><label><input name="confirmReplace" type="checkbox" required> أفهم أن الاستعادة ستستبدل البيانات.</label><button class="button button-danger" type="submit">استعادة النسخة</button></form></section>
+      <section class="panel compact-panel"><div class="panel-heading"><div><h3>استعادة نسخة مشفرة</h3><p>سيتم استبدال بيانات المحل الحالية وإعادة تشغيل النظام. لاستعادة نسخة يومية من جهاز آخر، أدخل مفتاح النسخ اليومي المستخرج في خانة كلمة المرور.</p></div></div><form id="backup-restore-form" class="form-stack"><label>ملف النسخة<input name="archive" type="file" accept=".rfbackup,application/octet-stream" required></label><label>كلمة مرور النسخة أو مفتاح النسخ اليومي<input name="passphrase" type="password" minlength="12" maxlength="256" autocomplete="current-password" required></label><label><input name="confirmReplace" type="checkbox" required> أفهم أن الاستعادة ستستبدل البيانات.</label><button class="button button-danger" type="submit">استعادة النسخة</button></form></section>
     </div>
 
     <section class="panel compact-panel">
@@ -7034,6 +7082,55 @@ function bindBackups() {
     } finally {
       btn.disabled = false;
     }
+  });
+  document.querySelector('#export-daily-key-btn')?.addEventListener('click', () => {
+    const root = getModalRoot();
+    root.innerHTML = `<div class="modal-backdrop"><section class="panel modal-card">
+      <div class="modal-heading"><div><h3>مفتاح فك تشفير النسخ اليومية (.rfbackup)</h3><p>أدخل كلمة مرور المالك للتحقق ثم احفظ المفتاح في مكان آمن خارج الجهاز (ملاحظات ورقية أو مدير كلمات مرور) لاستعادة ملفات retailos-daily-*.rfbackup على أي جهاز جديد.</p></div><button type="button" class="button button-secondary button-sm" data-close-modal>إغلاق</button></div>
+      <form id="export-daily-key-form" class="form-stack">
+        <label>كلمة مرور المالك الحالية<input name="currentPassword" type="password" autocomplete="current-password" required></label>
+        <button type="submit" class="button button-primary">عرض مفتاح الاستعادة</button>
+      </form>
+      <div id="daily-key-output" style="display:none;margin-top:12px;">
+        <label>مفتاح فك تشفير النسخ اليومية<input id="daily-key-value" type="text" readonly dir="ltr" style="font-family:monospace;"></label>
+        <p id="daily-key-instructions" style="font-size:12.5px;color:var(--muted);"></p>
+        <button type="button" class="button button-secondary button-sm" id="copy-daily-key-btn">نسخ المفتاح</button>
+      </div>
+    </section></div>`;
+    root.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
+    root.querySelector('#export-daily-key-form')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const form = ev.currentTarget;
+      const submitBtn = form.querySelector('[type="submit"]');
+      const currentPassword = String(new FormData(form).get('currentPassword') ?? '');
+      submitBtn.disabled = true;
+      try {
+        const res = await api('/api/backups/daily/key-export', { method: 'POST', body: JSON.stringify({ currentPassword }) });
+        const outBox = root.querySelector('#daily-key-output');
+        const keyInput = root.querySelector('#daily-key-value');
+        const instrEl = root.querySelector('#daily-key-instructions');
+        if (keyInput) keyInput.value = res.dailyBackupKey;
+        if (instrEl) instrEl.textContent = res.restoreInstructions;
+        if (outBox) outBox.style.display = 'block';
+        form.reset();
+        toast('تم التحقق وعرض مفتاح النسخ اليومي بنجاح');
+      } catch (err) {
+        toast(err.message, 'error');
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+    root.querySelector('#copy-daily-key-btn')?.addEventListener('click', async () => {
+      const val = root.querySelector('#daily-key-value')?.value ?? '';
+      if (!val) return;
+      try {
+        await navigator.clipboard.writeText(val);
+        toast('تم نسخ المفتاح إلى الحافظة');
+      } catch {
+        root.querySelector('#daily-key-value')?.select();
+        toast('انسخ المفتاح يدويًا من المربع أعلاه');
+      }
+    });
   });
   document.querySelector('#clear-mirror-path-btn')?.addEventListener('click', async (event) => {
     const btn = event.currentTarget;
@@ -7273,6 +7370,7 @@ async function showJournalLedgerModal() {
     PURCHASE: 'فاتورة شراء',
     PURCHASE_PAYMENT: 'سداد تاجر',
     SUPPLIER_RETURN: 'مرتجع لتاجر',
+    SUPPLIER_REFUND: 'استرداد نقدي من تاجر',
     EXPENSE: 'مصروف',
     CASH_TRANSFER: 'تحويل خزينة',
     SHIFT_VARIANCE: 'تسوية شيفت',
@@ -7362,8 +7460,137 @@ async function showJournalLedgerModal() {
   await loadPage(false).catch((error) => { toast(error.message, 'error'); });
 }
 
+async function showTrialBalanceModal() {
+  const modal = getModalRoot();
+  const currency = state.data.company.currency;
+  let from = '';
+  let to = '';
+  let payload = null;
+
+  const fetchTb = async () => {
+    const q = new URLSearchParams({ storeId: state.data.selectedStoreId });
+    if (from && to) { q.set('from', from); q.set('to', to); }
+    payload = await api(`/api/reports/trial-balance?${q.toString()}`);
+    draw();
+  };
+
+  const draw = () => {
+    const accounts = payload?.accounts ?? [];
+    const totals = payload?.totals;
+    modal.innerHTML = `
+      <div class="modal-backdrop">
+        <section class="panel modal-card modal-wide">
+          <div class="panel-heading">
+            <div>
+              <h3>ميزان المراجعة (Trial Balance)</h3>
+              <p>أرصدة جميع الحسابات المحاسبية ومجموع الأرصدة المدينة والدائنة للتحقق من توازن الدفاتر.</p>
+            </div>
+            <div class="table-actions-inline">
+              ${totals ? `<span class="status-pill ${totals.isBalanced ? 'status-complete' : 'status-low'}">${totals.isBalanced ? 'متزن 100% ✓' : 'يوجد فرق!'}</span>` : ''}
+              <button type="button" class="button button-secondary button-sm" data-close-modal>إغلاق</button>
+            </div>
+          </div>
+          <form id="trial-balance-filter" class="pro-filter-row pro-filter-row-split">
+            <div class="pro-date-inputs">
+              <div class="pro-input-wrap"><label>من:</label><input type="date" name="from" value="${from}"></div>
+              <div class="pro-input-wrap"><label>إلى:</label><input type="date" name="to" value="${to}"></div>
+              <button type="submit" class="button button-primary button-sm">تحديث</button>
+              ${from || to ? '<button type="button" id="reset-tb-filter" class="button button-secondary button-sm">كل الفترات</button>' : ''}
+            </div>
+          </form>
+          ${accounts.length ? `
+            <div class="table-scroll analytics-scroll-box">
+              <table class="compact-table zebra-table">
+                <thead>
+                  <tr><th>الكود</th><th>اسم الحساب</th><th>حركة مدين</th><th>حركة دائن</th><th>رصيد مدين</th><th>رصيد دائن</th></tr>
+                </thead>
+                <tbody>
+                  ${accounts.map((acc) => `
+                    <tr>
+                      <td><span class="sku-code">${escapeHtml(acc.accountCode)}</span></td>
+                      <td><strong>${escapeHtml(acc.accountName)}</strong></td>
+                      <td class="table-total">${money(acc.debitTotal)}</td>
+                      <td class="table-total">${money(acc.creditTotal)}</td>
+                      <td class="table-total">${BigInt(acc.debitBalance.amount) > 0n ? money(acc.debitBalance) : '—'}</td>
+                      <td class="table-total">${BigInt(acc.creditBalance.amount) > 0n ? money(acc.creditBalance) : '—'}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+                ${totals ? `
+                  <tfoot>
+                    <tr style="background:var(--surface-soft);font-weight:800;">
+                      <td colspan="2">الإجمالي العام (${escapeHtml(currency)})</td>
+                      <td class="table-total">${money(totals.debitTotal)}</td>
+                      <td class="table-total">${money(totals.creditTotal)}</td>
+                      <td class="table-total">${money(totals.debitBalanceTotal)}</td>
+                      <td class="table-total">${money(totals.creditBalanceTotal)}</td>
+                    </tr>
+                  </tfoot>
+                ` : ''}
+              </table>
+            </div>
+          ` : '<div class="empty-row">جاري تحميل ميزان المراجعة...</div>'}
+        </section>
+      </div>
+    `;
+    modal.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { modal.innerHTML = ''; }));
+    modal.querySelector('#trial-balance-filter')?.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(ev.currentTarget);
+      const nextFrom = String(fd.get('from') ?? '').trim();
+      const nextTo = String(fd.get('to') ?? '').trim();
+      if ((nextFrom && !nextTo) || (!nextFrom && nextTo)) { toast('حدد تاريخي البداية والنهاية معاً', 'error'); return; }
+      from = nextFrom;
+      to = nextTo;
+      void fetchTb().catch((err) => toast(err.message, 'error'));
+    });
+    modal.querySelector('#reset-tb-filter')?.addEventListener('click', () => {
+      from = '';
+      to = '';
+      void fetchTb().catch((err) => toast(err.message, 'error'));
+    });
+  };
+
+  await fetchTb().catch((err) => toast(err.message, 'error'));
+}
+
+function showOpeningBalancesModal() {
+  const decimals = currencyDecimals(state.data.company.currency);
+  const currency = state.data.company.currency;
+  const today = localDateIso();
+  supplierModal(
+    `<p>أدخل الأرصدة الافتتاحية للدرج والخزينة والبنك وأي بضاعة أو مستحقات تجار سابقة، وسيتم قيد صافي الفرق تلقائيًا في حساب رأس المال (3010) بقيد متوازن.</p>
+     <label>تاريخ الأرصدة الافتتاحية<input type="date" name="entryDate" value="${today}" required></label>
+     <label>درج النقدية (1010) — ${currency}<input name="cashDrawer" inputmode="decimal" value="0" required></label>
+     <label>الخزينة الرئيسية (1015) — ${currency}<input name="cashSafe" inputmode="decimal" value="0" required></label>
+     <label>البنك / التحصيل الإلكتروني (1020) — ${currency}<input name="bank" inputmode="decimal" value="0" required></label>
+     <label>قيمة بضاعة أول المدة (1300) اختياري — ${currency}<input name="inventory" inputmode="decimal" value="0" required></label>
+     <label>مستحقات تجار سابقة (2010) اختياري — ${currency}<input name="supplierPayables" inputmode="decimal" value="0" required></label>
+     <label>ملاحظات<input name="notes" maxlength="300" placeholder="مثال: أرصدة افتتاحية عند بدء التشغيل"></label>
+     <input type="hidden" name="storeId" value="${state.data.selectedStoreId}">
+     <input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`,
+    'opening-balances-form',
+    '/api/accounting/opening-balances',
+    (data) => ({
+      ...data,
+      cashDrawer: toMinor(data.cashDrawer || '0', decimals),
+      cashSafe: toMinor(data.cashSafe || '0', decimals),
+      bank: toMinor(data.bank || '0', decimals),
+      inventory: toMinor(data.inventory || '0', decimals),
+      supplierPayables: toMinor(data.supplierPayables || '0', decimals),
+    }),
+    'تم تسجيل قيد الأرصدة الافتتاحية بنجاح',
+  );
+}
+
 function bindProfitLoss() {
   bindAccounting();
+  document.querySelector('#btn-open-trial-balance')?.addEventListener('click', () => {
+    void showTrialBalanceModal();
+  });
+  document.querySelector('#btn-open-opening-balances')?.addEventListener('click', () => {
+    showOpeningBalancesModal();
+  });
   document.querySelector('#btn-open-journal-ledger')?.addEventListener('click', () => {
     void showJournalLedgerModal();
   });
@@ -7810,7 +8037,7 @@ function showProductEditModal(product) {
   });
 }
 
-function showCategoryModal(onCreated = null) {
+function showCategoryModal(_onCreated = null) {
   const root = getModalRoot();
   const overlay = document.createElement('div');
   overlay.className = 'modal-backdrop category-modal-overlay';
@@ -7847,7 +8074,6 @@ function showCategoryModal(onCreated = null) {
 
 function showProductModal() {
   const modal = getModalRoot();
-  const currency = state.data.company.currency;
   const popularColors = ['أسود', 'أبيض', 'كحلي', 'بيج', 'رمادي', 'هافان', 'بني', 'زيتي', 'نبيتي'];
   const categoryChoices = state.data.categories.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
 
@@ -8599,8 +8825,8 @@ function playStocktakeBeep(ok = true) {
     gain.connect(ctxAudio.destination);
     osc.start();
     osc.stop(ctxAudio.currentTime + (ok ? 0.08 : 0.16));
-    setTimeout(() => { try { void ctxAudio.close(); } catch {} }, 250);
-  } catch {}
+    setTimeout(() => { try { void ctxAudio.close(); } catch { /* audio context already closed */ } }, 250);
+  } catch { /* audio feedback is optional */ }
 }
 
 function stocktakeScopeLabel(scope, categoryName) {
@@ -9222,7 +9448,7 @@ async function loadStocktakeSessions() {
   }
 }
 
-async function flushStocktakeDirtyLines(sessionId, { silent = true, rerender = false } = {}) {
+async function flushStocktakeDirtyLines(sessionId, { rerender = false } = {}) {
   if (stocktakeFlushTimer) {
     clearTimeout(stocktakeFlushTimer);
     stocktakeFlushTimer = null;
@@ -9930,7 +10156,7 @@ function bindStocktake() {
         const minorStr = toMinor(raw, decimals);
         line.overrideUnitCost = { amount: minorStr, currency, decimals };
         queueLinePatch(lineId, { overrideUnitCost: minorStr });
-      } catch {}
+      } catch { /* invalid override cost is ignored */ }
     });
   };
 

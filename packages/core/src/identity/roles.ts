@@ -80,7 +80,8 @@ export const RolePermissions: Record<Role, ReadonlySet<string>> = {
 
   CASHIER: new Set([
     Permissions.POS_CHECKOUT,
-    // Cashiers can browse sellable items and complete checkout only.
+    // Cashiers handle checkout and normal customer returns/exchanges within assigned store.
+    Permissions.POS_REFUND,
     Permissions.INVENTORY_VIEW,
   ]),
 

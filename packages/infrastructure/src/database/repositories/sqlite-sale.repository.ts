@@ -33,6 +33,7 @@ import {
   toInventoryPosition,
 } from './stock-movement.executor.js';
 import { accountForPaymentMethod, postJournalEntry } from './accounting-journal.executor.js';
+import { allocateDocumentNumberInTransaction } from './document-sequence.executor.js';
 
 type Executor = Kysely<RetailOSDatabase>;
 type SaleRow = Selectable<SalesTable>;
@@ -153,11 +154,21 @@ export class SqliteSaleRepository implements CheckoutRepository, SaleRepository 
         );
       }
 
+      const resolvedSaleNumber =
+        draft.saleNumber?.trim() ||
+        (await allocateDocumentNumberInTransaction(trx, {
+          tenantId: ctx.tenantId,
+          docType: 'SALE',
+          prefix: 'INV-',
+          existingTable: 'sales',
+          existingCol: 'sale_number',
+        }));
+
       const sale = Sale.create({
         id: draft.id,
         tenantId: draft.tenantId,
         storeId: draft.storeId,
-        saleNumber: draft.saleNumber,
+        saleNumber: resolvedSaleNumber,
         idempotencyKey: draft.idempotencyKey,
         cashierUserId: draft.cashierUserId,
         customerName: draft.customerName,

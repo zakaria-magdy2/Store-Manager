@@ -7,14 +7,21 @@ import path from 'path';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+const tsFiles = ['packages/**/*.ts', 'apps/desktop/**/*.ts'];
+
 export default tseslint.config(
   // Base recommended rules
   eslint.configs.recommended,
-  ...tseslint.configs.recommendedTypeChecked,
+
+  // Scoped TypeScript type-checked rules for TS packages/apps
+  ...tseslint.configs.recommendedTypeChecked.map((config) => ({
+    ...config,
+    files: config.files ?? tsFiles,
+  })),
   prettierConfig,
 
-  // Global parser settings — use per-package tsconfig.eslint.json for type-aware linting
   {
+    files: tsFiles,
     languageOptions: {
       parserOptions: {
         project: [
@@ -30,9 +37,9 @@ export default tseslint.config(
     },
   },
 
-  // ─── FINANCIAL SAFETY RULES ───────────────────────────────────────────────
+  // ─── FINANCIAL SAFETY RULES (TypeScript) ──────────────────────────────────
   {
-    files: ['packages/**/*.ts', 'apps/**/*.ts'],
+    files: tsFiles,
     rules: {
       'no-restricted-globals': [
         'error',
@@ -69,7 +76,7 @@ export default tseslint.config(
     },
   },
 
-  // ─── TEST FILES ────────────────────────────────────────────────────────────
+  // ─── TEST FILES (TypeScript) ──────────────────────────────────────────────
   {
     files: ['**/*.test.ts', '**/*.spec.ts'],
     rules: {
@@ -79,14 +86,112 @@ export default tseslint.config(
     },
   },
 
+  // ─── WEB SERVER, BUILD & TESTS (Node ESM) ─────────────────────────────────
+  {
+    files: ['apps/web/server.mjs', 'apps/web/build.mjs', 'apps/web/tests/**/*.mjs'],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      ecmaVersion: 2024,
+      sourceType: 'module',
+      globals: {
+        AbortController: 'readonly',
+        Blob: 'readonly',
+        Buffer: 'readonly',
+        URL: 'readonly',
+        URLSearchParams: 'readonly',
+        clearInterval: 'readonly',
+        clearTimeout: 'readonly',
+        console: 'readonly',
+        crypto: 'readonly',
+        fetch: 'readonly',
+        FormData: 'readonly',
+        Headers: 'readonly',
+        Intl: 'readonly',
+        process: 'readonly',
+        Request: 'readonly',
+        Response: 'readonly',
+        setInterval: 'readonly',
+        setTimeout: 'readonly',
+        structuredClone: 'readonly',
+        TextDecoder: 'readonly',
+        TextEncoder: 'readonly',
+      },
+    },
+    rules: {
+      eqeqeq: ['error', 'smart'],
+      'no-unused-vars': ['error', { argsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' }],
+      'no-var': 'error',
+      'prefer-const': 'error',
+    },
+  },
+
+  // ─── WEB CLIENT UI (Browser ESM / Script) ─────────────────────────────────
+  {
+    files: ['apps/web/public/**/*.js'],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      ecmaVersion: 2024,
+      sourceType: 'script',
+      globals: {
+        AbortController: 'readonly',
+        alert: 'readonly',
+        atob: 'readonly',
+        Blob: 'readonly',
+        btoa: 'readonly',
+        clearInterval: 'readonly',
+        clearTimeout: 'readonly',
+        confirm: 'readonly',
+        console: 'readonly',
+        crypto: 'readonly',
+        CustomEvent: 'readonly',
+        document: 'readonly',
+        Element: 'readonly',
+        Event: 'readonly',
+        fetch: 'readonly',
+        File: 'readonly',
+        FileReader: 'readonly',
+        FormData: 'readonly',
+        Headers: 'readonly',
+        history: 'readonly',
+        HTMLElement: 'readonly',
+        Image: 'readonly',
+        Intl: 'readonly',
+        KeyboardEvent: 'readonly',
+        localStorage: 'readonly',
+        location: 'readonly',
+        MouseEvent: 'readonly',
+        navigator: 'readonly',
+        Request: 'readonly',
+        requestAnimationFrame: 'readonly',
+        Response: 'readonly',
+        sessionStorage: 'readonly',
+        setInterval: 'readonly',
+        setTimeout: 'readonly',
+        TextDecoder: 'readonly',
+        TextEncoder: 'readonly',
+        URL: 'readonly',
+        URLSearchParams: 'readonly',
+        window: 'readonly',
+      },
+    },
+    rules: {
+      eqeqeq: ['error', 'smart'],
+      'no-unused-vars': ['error', { argsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' }],
+      'no-var': 'error',
+      'prefer-const': 'error',
+    },
+  },
+
   // ─── IGNORE PATTERNS ───────────────────────────────────────────────────────
   {
     ignores: [
       '**/dist/**',
+      '**/out/**',
+      '**/release/**',
       '**/node_modules/**',
-      '**/*.js',
       '**/*.d.ts',
       'eslint.config.mjs',
+      'scripts/**',
     ],
   },
 );
