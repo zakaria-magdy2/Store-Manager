@@ -3397,13 +3397,41 @@ test('Final POS & accounting regression: split cash+electronic checkout GL (1010
       body: { storeId, idempotencyKey: randomUUID(), items: [{ variantId, quantity: '1' }], payments: [{ method: 'cash', amountMinor: '7000' }, { method: 'card', amountMinor: '4999' }] },
     })).response.status, 400);
 
+    // Reject duplicate payment methods inside payments and mixed payment-mode payloads (400)
+    assert.equal((await req('/api/checkout', {
+      method: 'POST',
+      cookieStr,
+      body: { storeId, idempotencyKey: randomUUID(), items: [{ variantId, quantity: '1' }], payments: [{ method: 'cash', amountMinor: '6000' }, { method: 'CASH', amountMinor: '6000' }] },
+    })).response.status, 400);
+    assert.equal((await req('/api/checkout', {
+      method: 'POST',
+      cookieStr,
+      body: { storeId, idempotencyKey: randomUUID(), items: [{ variantId, quantity: '1' }], payments: [{ method: 'wallet', amountMinor: '6000' }, { method: 'MOBILE', amountMinor: '6000' }] },
+    })).response.status, 400);
+    assert.equal((await req('/api/checkout', {
+      method: 'POST',
+      cookieStr,
+      body: { storeId, idempotencyKey: randomUUID(), items: [{ variantId, quantity: '1' }], payments: [{ method: 'cash', amountMinor: '7000' }, { method: 'card', amountMinor: '5000' }], payment: { method: 'CASH', amount: '12000' } },
+    })).response.status, 400);
+    assert.equal((await req('/api/checkout', {
+      method: 'POST',
+      cookieStr,
+      body: { storeId, idempotencyKey: randomUUID(), items: [{ variantId, quantity: '1' }], payments: [{ method: 'cash', amountMinor: '7000' }, { method: 'card', amountMinor: '5000' }], paymentMethod: 'cash', amountPaidMinor: '12000' },
+    })).response.status, 400);
+
+    // Check idempotency status endpoint before commit (found: false)
+    const splitIdemKey = randomUUID();
+    const statusBefore = await req(`/api/checkout/status/${splitIdemKey}?storeId=${storeId}`, { cookieStr });
+    assert.equal(statusBefore.response.status, 200);
+    assert.deepEqual(statusBefore.payload, { found: false });
+
     // Valid split checkout: 7000 cash + 5000 card = 12000
     const splitSaleRes = await req('/api/checkout', {
       method: 'POST',
       cookieStr,
       body: {
         storeId,
-        idempotencyKey: randomUUID(),
+        idempotencyKey: splitIdemKey,
         items: [{ variantId, quantity: '1' }],
         payments: [{ method: 'cash', amountMinor: '7000' }, { method: 'card', amountMinor: '5000' }],
       },
@@ -3412,6 +3440,14 @@ test('Final POS & accounting regression: split cash+electronic checkout GL (1010
     assert.equal(splitSaleRes.payload.total.amount, '12000');
     assert.equal(splitSaleRes.payload.changeGiven.amount, '0');
     assert.equal(splitSaleRes.payload.payments.length, 2);
+
+    // Check idempotency status endpoint after commit (found: true + committed sale)
+    const statusAfter = await req(`/api/checkout/status/${splitIdemKey}?storeId=${storeId}`, { cookieStr });
+    assert.equal(statusAfter.response.status, 200);
+    assert.equal(statusAfter.payload.found, true);
+    assert.equal(statusAfter.payload.sale.id, splitSaleRes.payload.id);
+    assert.equal(statusAfter.payload.sale.saleNumber, splitSaleRes.payload.saleNumber);
+    assert.equal(statusAfter.payload.sale.payments.length, 2);
 
     // Check receipt carries split payments breakdown
     const receiptRes = await req(`/api/sales/${splitSaleRes.payload.id}/receipt?width=80mm`, { cookieStr });

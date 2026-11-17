@@ -341,10 +341,34 @@ const CheckoutSchema = z
     paymentMethod: CheckoutPaymentMethodSchema.optional(),
     amountPaidMinor: CheckoutMinorAmountSchema.optional(),
   })
-  .refine(
-    (body) => Boolean(body.payments?.length || body.payment || (body.paymentMethod && body.amountPaidMinor !== undefined)),
-    { message: 'بيانات الدفع مطلوبة' },
-  );
+  .superRefine((body, ctx) => {
+    const hasPaymentsArray = Array.isArray(body.payments) && body.payments.length > 0;
+    const hasSingleObject = Boolean(body.payment);
+    const hasLegacySingle = body.paymentMethod !== undefined || body.amountPaidMinor !== undefined;
+    const modeCount = Number(hasPaymentsArray) + Number(hasSingleObject) + Number(hasLegacySingle);
+    if (modeCount === 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'بيانات الدفع مطلوبة' });
+      return;
+    }
+    if (modeCount > 1) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'لا يمكن إرسال أكثر من صيغة لبيانات الدفع في نفس الطلب' });
+      return;
+    }
+    if (hasLegacySingle && !(body.paymentMethod && body.amountPaidMinor !== undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'بيانات الدفع مطلوبة' });
+      return;
+    }
+    if (hasPaymentsArray) {
+      const seen = new Set();
+      for (const tender of body.payments) {
+        if (seen.has(tender.method)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'لا يمكن تكرار نفس وسيلة الدفع أكثر من مرة في الدفع المجزأ' });
+          return;
+        }
+        seen.add(tender.method);
+      }
+    }
+  });
 const SaleExchangeSchema = z.object({
   idempotencyKey: z.string().uuid(),
   storeId: z.string().uuid(),
@@ -2707,9 +2731,12 @@ async function financialMapReport(ctx, url) {
     const label = isMonthly ? `سداد ${e.obligation_name}` : `مصروف: ${e.category_name}`;
     const createdIso = toIsoTimestamp(e.created_at, e.expense_date);
     const createdLocalDay = e.created_at ? businessDateInTimeZone(new Date(createdIso), fmTz) : e.expense_date;
-    const expTimestamp = (e.expense_date && createdLocalDay && e.expense_date !== createdLocalDay)
-      ? `${e.expense_date}T23:59:59.000Z`
-      : createdIso;
+    let expTimestamp = createdIso;
+    if (e.expense_date && createdLocalDay && e.expense_date !== createdLocalDay && /^\d{4}-\d{2}-\d{2}$/.test(e.expense_date)) {
+      const dayStartMs = timeZoneStartOfDayUtcMs(e.expense_date, fmTz);
+      const nextDay = businessDateInTimeZone(new Date(dayStartMs + 30 * 3600 * 1000), fmTz);
+      expTimestamp = new Date(timeZoneStartOfDayUtcMs(nextDay, fmTz) - 1).toISOString();
+    }
     timeline.push({
       id: e.id,
       timestamp: expTimestamp,
@@ -3623,6 +3650,7 @@ async function currentData(ctx, url) {
     : null;
 
   return {
+    tenantId: ctx.tenantId,
     company: { name: tenant.name, currency: tenant.currency, timezone: resolveValidTimeZone(tenant.timezone) },
     user: { id: ctx.userId, fullName: signedInUser?.fullName ?? '', role: ctx.roleId, storeId: ctx.storeId ?? null, shiftStartTime: signedInUser?.shiftStartTime ?? null, lateGraceMinutes: signedInUser?.lateGraceMinutes ?? 0 },
     activeShift: activeShiftRow ? {
@@ -6264,6 +6292,36 @@ async function handleApi(req, res, url) {
       id: entryRes.id,
       entryNumber: entryRes.entryNumber,
       netEquity: moneyJson(Money.fromMinor(netEquity, tenant.currency)),
+    });
+  }
+
+  const checkoutStatusMatch = method === 'GET' ? path.match(/^\/api\/checkout\/status\/([^/]+)$/i) : null;
+  if (checkoutStatusMatch) {
+    const ctx = await requireContext(req);
+    ctx.assertPermission(Permissions.POS_CHECKOUT);
+    const idempotencyKey = validate(z.string().uuid('مفتاح المعاملة غير صالح'), decodeURIComponent(checkoutStatusMatch[1]).trim());
+    const requestedStoreId = url.searchParams.get('storeId');
+    if (requestedStoreId) assertStoreScope(ctx, requestedStoreId);
+    const storeId = await resolveHistoryStore(ctx, url);
+    const scopedCtx = new ScopedExecutionContext({
+      tenantId: ctx.tenantId,
+      storeId,
+      userId: ctx.userId,
+      roleId: ctx.roleId,
+      permissions: ctx.permissions,
+      correlationId: ctx.correlationId,
+    });
+    const sale = await saleRepo.findByIdempotencyKey(scopedCtx, idempotencyKey);
+    if (!sale) {
+      return json(res, 200, { found: false });
+    }
+    const cashierUser = await userRepo.findById(ctx, sale.cashierUserId);
+    return json(res, 200, {
+      found: true,
+      sale: {
+        ...saleJson(sale),
+        cashierName: cashierUser?.fullName ?? cashierUser?.username ?? 'كاشير',
+      },
     });
   }
 

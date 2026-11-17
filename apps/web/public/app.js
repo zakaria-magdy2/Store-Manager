@@ -32,43 +32,79 @@ function isPageAuthorized(page) {
 const PENDING_CHECKOUT_STORAGE_KEY = 'retailos_pending_checkout';
 
 function loadPendingCheckoutFromStorage() {
+  let raw;
   try {
-    const raw = localStorage.getItem(PENDING_CHECKOUT_STORAGE_KEY);
-    if (!raw) return null;
+    raw = localStorage.getItem(PENDING_CHECKOUT_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+  if (!raw) return null;
+  try {
     const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || typeof parsed.idempotencyKey !== 'string' || !parsed.payload || !Array.isArray(parsed.cart)) {
+    const valid = Boolean(
+      parsed
+      && typeof parsed === 'object'
+      && typeof parsed.idempotencyKey === 'string'
+      && typeof parsed.tenantId === 'string'
+      && typeof parsed.storeId === 'string'
+      && typeof parsed.userId === 'string'
+      && parsed.payload
+      && Array.isArray(parsed.cart),
+    );
+    if (!valid) {
+      try {
+        localStorage.removeItem(PENDING_CHECKOUT_STORAGE_KEY);
+      } catch { /* ignore */ }
+      toast('تم مسح بيانات فاتورة معلّقة غير صالحة من المتصفح', 'error');
       return null;
     }
     return parsed;
   } catch {
+    try {
+      localStorage.removeItem(PENDING_CHECKOUT_STORAGE_KEY);
+    } catch { /* ignore */ }
+    toast('تم مسح بيانات فاتورة معلّقة تالفة من المتصفح', 'error');
     return null;
   }
 }
 
 function savePendingCheckoutToStorage(record) {
-  state.pendingCheckout = record;
   try {
     localStorage.setItem(PENDING_CHECKOUT_STORAGE_KEY, JSON.stringify(record));
-  } catch { /* localStorage quota fallback stays in-memory */ }
+    state.pendingCheckout = record;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function clearPendingCheckoutStorage() {
-  state.pendingCheckout = null;
-  state.cartIdempotencyKey = null;
   try {
     localStorage.removeItem(PENDING_CHECKOUT_STORAGE_KEY);
-  } catch { /* ignore */ }
+    state.pendingCheckout = null;
+    state.cartIdempotencyKey = null;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function restorePendingCheckoutForStore() {
   const pending = loadPendingCheckoutFromStorage();
   if (!pending) return;
+  const activeTenantId = state.data?.tenantId;
   const activeStoreId = state.data?.selectedStoreId;
-  if (pending.storeId && activeStoreId && pending.storeId !== activeStoreId) return;
+  const activeUserId = state.user?.id ?? state.data?.user?.id;
+  if (!activeTenantId || !activeStoreId || !activeUserId) return;
+  if (pending.tenantId !== activeTenantId || pending.storeId !== activeStoreId || pending.userId !== activeUserId) {
+    return;
+  }
   const normalized = pending.status === 'submitting'
     ? { ...pending, status: 'ambiguous', lastError: pending.lastError || 'تمت إعادة تحميل الصفحة أثناء إرسال الفاتورة — راجع الفواتير أو أعد المحاولة بأمان' }
     : pending;
-  savePendingCheckoutToStorage(normalized);
+  if (!savePendingCheckoutToStorage(normalized)) {
+    state.pendingCheckout = normalized;
+  }
   state.cart = normalized.cart.map((item) => ({ ...item }));
   state.cartDiscountRaw = String(normalized.cartDiscountRaw ?? '');
   state.paymentMethod = normalized.paymentMethod || 'CASH';
@@ -6810,6 +6846,7 @@ function bindShell() {
     state.cart = [];
     state.cartDiscountRaw = '';
     state.cartIdempotencyKey = null;
+    state.pendingCheckout = null;
     state.accessDeniedNotice = '';
     state.shiftPreset = 'today';
     state.shiftFrom = null;
@@ -8976,22 +9013,45 @@ function bindPos() {
   });
   document.querySelector('#retry-pending-checkout-btn')?.addEventListener('click', () => void doCheckout(true));
   document.querySelector('#discard-pending-checkout-btn')?.addEventListener('click', async () => {
-    if (state.isSaving) return;
+    const pending = state.pendingCheckout;
+    if (state.isSaving || !pending) return;
+    const statusStoreId = pending.storeId || state.data?.selectedStoreId || '';
+    state.isSaving = true;
+    render();
+    let statusRes;
+    try {
+      const qs = statusStoreId ? `?storeId=${encodeURIComponent(statusStoreId)}` : '';
+      statusRes = await api(`/api/checkout/status/${encodeURIComponent(pending.idempotencyKey)}${qs}`);
+    } catch (error) {
+      state.isSaving = false;
+      render();
+      toast(`تعذر التحقق من حالة الفاتورة على الخادم: ${error.message}`, 'error');
+      return;
+    }
+    if (statusRes?.found && statusRes.sale) {
+      await finalizeCompletedCheckout(statusRes.sale, { recoveredFromStatus: true });
+      return;
+    }
+    state.isSaving = false;
+    render();
     const accepted = await showConfirmModal({
       title: 'تجاهل الفاتورة المعلّقة',
-      message: 'تأكد من مراجعة صفحة المبيعات أولاً للتأكد من عدم حفظ الفاتورة مسبقاً. هل تريد مسح الفاتورة المعلقة وإفراغ السلة الآن؟',
+      message: 'تم التحقق من الخادم ولم تُسجّل هذه الفاتورة بعد. هل تريد مسح العملية المعلقة وإفراغ السلة الآن؟',
       confirmText: 'نعم، مسح السلة',
       cancelText: 'إلغاء',
       danger: true,
     });
     if (!accepted) return;
-    clearPendingCheckoutStorage();
+    if (!clearPendingCheckoutStorage()) {
+      toast('تعذر مسح الفاتورة المعلقة من ذاكرة المتصفح — أعد المحاولة', 'error');
+      return;
+    }
     state.cart = [];
     state.cartDiscountRaw = '';
     state.splitCashRaw = '';
     state.splitElectronicRaw = '';
     render();
-    toast('تم مسح العملية المعلقة');
+    toast('تم التحقق من عدم حفظ الفاتورة ومسح العملية المعلقة');
   });
   document.querySelector('#checkout-button')?.addEventListener('click', () => void doCheckout(false));
   document.querySelector('#pos-start-shift-now-btn')?.addEventListener('click', () => {
@@ -9056,6 +9116,26 @@ function changeQuantity(variantId, delta) {
   render();
 }
 
+async function finalizeCompletedCheckout(sale, { recoveredFromStatus = false } = {}) {
+  if (!clearPendingCheckoutStorage()) {
+    state.pendingCheckout = null;
+    state.cartIdempotencyKey = null;
+  }
+  state.cart = [];
+  state.cartDiscountRaw = '';
+  state.splitCashRaw = '';
+  state.splitElectronicRaw = '';
+  state.isSaving = false;
+  invalidateFinancialCaches();
+  state.salesHistoryTotal = undefined;
+  state.salesHistorySearch = '';
+  await loadData(state.data.selectedStoreId);
+  state.page = 'pos';
+  render();
+  toast(recoveredFromStatus ? `تم العثور على الفاتورة ${sale.saleNumber} محفوظة مسبقًا وتم استكمالها` : `تم حفظ الفاتورة ${sale.saleNumber} بنجاح`);
+  void showThermalReceiptModal(sale.id);
+}
+
 async function doCheckout(isPendingRetry = false) {
   if (!state.data?.activeShift) {
     toast('يجب بدء الشيفت أولاً قبل إجراء أي عملية بيع', 'error');
@@ -9103,7 +9183,9 @@ async function doCheckout(isPendingRetry = false) {
     }
     pendingRecord = {
       idempotencyKey,
+      tenantId: state.data?.tenantId || '',
       storeId: state.data.selectedStoreId,
+      userId: state.user?.id ?? state.data?.user?.id ?? '',
       payload,
       cart: state.cart.map((item) => ({ ...item })),
       cartDiscountRaw: state.cartDiscountRaw,
@@ -9122,7 +9204,10 @@ async function doCheckout(isPendingRetry = false) {
     pendingRecord = { ...pendingRecord, status: 'submitting' };
   }
 
-  savePendingCheckoutToStorage(pendingRecord);
+  if (!savePendingCheckoutToStorage(pendingRecord)) {
+    toast('تعذر حفظ حالة الفاتورة في المتصفح لحمايتها من التكرار — فعّل التخزين المحلي وحاول مرة أخرى', 'error');
+    return;
+  }
   state.isSaving = true;
   render();
   try {
@@ -9131,20 +9216,7 @@ async function doCheckout(isPendingRetry = false) {
       skipConfirm: true,
       body: JSON.stringify(pendingRecord.payload),
     });
-    clearPendingCheckoutStorage();
-    state.cart = [];
-    state.cartDiscountRaw = '';
-    state.splitCashRaw = '';
-    state.splitElectronicRaw = '';
-    state.isSaving = false;
-    invalidateFinancialCaches();
-    state.salesHistoryTotal = undefined;
-    state.salesHistorySearch = '';
-    await loadData(state.data.selectedStoreId);
-    state.page = 'pos';
-    render();
-    toast(`تم حفظ الفاتورة ${result.saleNumber} بنجاح`);
-    void showThermalReceiptModal(result.id);
+    await finalizeCompletedCheckout(result);
   } catch (error) {
     state.isSaving = false;
     const isClientRejection = !error?.isCancelled && Number.isInteger(error?.status) && error.status >= 400 && error.status < 500;
@@ -9158,11 +9230,14 @@ async function doCheckout(isPendingRetry = false) {
       }
       toast(error.message, 'error');
     } else {
-      savePendingCheckoutToStorage({
+      const ambiguousRecord = {
         ...pendingRecord,
         status: 'ambiguous',
         lastError: error.message,
-      });
+      };
+      if (!savePendingCheckoutToStorage(ambiguousRecord)) {
+        state.pendingCheckout = ambiguousRecord;
+      }
       toast(`${error.message} — تم قفل السلة وحفظ المفتاح لإعادة المحاولة بأمان`, 'error');
     }
     render();
