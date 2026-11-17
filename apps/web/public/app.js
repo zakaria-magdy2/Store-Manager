@@ -90,6 +90,7 @@ function clearPendingCheckoutStorage() {
 }
 
 function restorePendingCheckoutForStore() {
+  state.pendingCheckout = null;
   const pending = loadPendingCheckoutFromStorage();
   if (!pending) return;
   const activeTenantId = state.data?.tenantId;
@@ -136,7 +137,7 @@ const state = {
   splitElectronicRaw: '',
   splitElectronicMethod: 'CARD',
   splitLastEdited: 'cash',
-  pendingCheckout: loadPendingCheckoutFromStorage(),
+  pendingCheckout: null,
   isSaving: false,
   report: null,
   reportKey: null,
@@ -6822,6 +6823,7 @@ function bindShell() {
       state.salesHistoryTotal = 0;
       resetStocktakeUiState();
       await loadData(event.target.value);
+      restorePendingCheckoutForStore();
       render();
     } catch (error) { toast(error.message, 'error'); }
   });

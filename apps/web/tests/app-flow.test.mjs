@@ -3449,6 +3449,24 @@ test('Final POS & accounting regression: split cash+electronic checkout GL (1010
     assert.equal(statusAfter.payload.sale.saleNumber, splitSaleRes.payload.saleNumber);
     assert.equal(statusAfter.payload.sale.payments.length, 2);
 
+    // Cashiers cannot query another user's idempotency status (returns found: false)
+    const otherCashierCreate = await req('/api/users', {
+      method: 'POST',
+      cookieStr,
+      body: { username: 'split_cashier2', password: 'Cashier-Password-2026', fullName: 'كاشير ثاني', role: 'CASHIER', storeId },
+    });
+    assert.equal(otherCashierCreate.response.status, 201);
+    const otherCashierLogin = await fetch(`${sUrl}/api/login`, {
+      method: 'POST',
+      headers: { Origin: sUrl, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'split_cashier2', password: 'Cashier-Password-2026' }),
+    });
+    assert.equal(otherCashierLogin.status, 200);
+    const otherCashierCookie = otherCashierLogin.headers.get('set-cookie').split(';')[0];
+    const cashierForeignLookup = await req(`/api/checkout/status/${splitIdemKey}?storeId=${storeId}`, { cookieStr: otherCashierCookie });
+    assert.equal(cashierForeignLookup.response.status, 200);
+    assert.deepEqual(cashierForeignLookup.payload, { found: false });
+
     // Check receipt carries split payments breakdown
     const receiptRes = await req(`/api/sales/${splitSaleRes.payload.id}/receipt?width=80mm`, { cookieStr });
     assert.equal(receiptRes.response.status, 200);

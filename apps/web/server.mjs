@@ -6311,8 +6311,11 @@ async function handleApi(req, res, url) {
       permissions: ctx.permissions,
       correlationId: ctx.correlationId,
     });
+    const canQueryAnyCashier = ctx.hasPermission(Permissions.AUDIT_LOG_VIEW)
+      || ctx.roleId === 'OWNER'
+      || ctx.roleId === 'STORE_MANAGER';
     const sale = await saleRepo.findByIdempotencyKey(scopedCtx, idempotencyKey);
-    if (!sale) {
+    if (!sale || (!canQueryAnyCashier && sale.cashierUserId !== ctx.userId)) {
       return json(res, 200, { found: false });
     }
     const cashierUser = await userRepo.findById(ctx, sale.cashierUserId);
