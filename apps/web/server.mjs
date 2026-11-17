@@ -299,18 +299,52 @@ const OwnerSchema = z.object({
   ownerName: z.string().min(2).max(100).trim(),
   password: z.string().min(12).max(128),
 });
-const CheckoutSchema = z.object({
-  storeId: z.string().uuid(),
-  idempotencyKey: z.string().uuid(),
-  customerName: z.string().max(120).trim().optional(),
-  cartDiscount: z.string().regex(/^\d{1,15}$/).optional(),
-  items: z.array(z.object({
-    variantId: z.string().uuid(),
-    quantity: z.string().regex(/^[1-9]\d{0,8}$/),
-    lineDiscount: z.string().regex(/^\d{1,15}$/).optional(),
-  })).min(1).max(100),
-  payment: z.object({ method: z.enum(['CASH', 'CARD', 'MOBILE', 'OTHER']), amount: z.string().regex(/^\d{1,15}$/) }),
-});
+const CheckoutPaymentMethodSchema = z
+  .string()
+  .trim()
+  .transform((v) => v.toUpperCase())
+  .refine((v) => ['CASH', 'CARD', 'MOBILE', 'WALLET', 'OTHER'].includes(v), {
+    message: 'طريقة الدفع غير مدعومة',
+  })
+  .transform((v) => (v === 'WALLET' ? 'MOBILE' : v));
+
+const CheckoutMinorAmountSchema = z
+  .union([
+    z.string().regex(/^\d{1,15}$/),
+    z.number().int().min(0).max(999999999999999),
+  ])
+  .transform((v) => String(v));
+
+const CheckoutTenderSchema = z
+  .object({
+    method: CheckoutPaymentMethodSchema,
+    amount: CheckoutMinorAmountSchema.optional(),
+    amountMinor: CheckoutMinorAmountSchema.optional(),
+  })
+  .refine((t) => t.amount !== undefined || t.amountMinor !== undefined, {
+    message: 'قيمة الدفع مطلوبة',
+  });
+
+const CheckoutSchema = z
+  .object({
+    storeId: z.string().uuid(),
+    idempotencyKey: z.string().uuid(),
+    customerName: z.string().max(120).trim().optional(),
+    cartDiscount: z.string().regex(/^\d{1,15}$/).optional(),
+    items: z.array(z.object({
+      variantId: z.string().uuid(),
+      quantity: z.string().regex(/^[1-9]\d{0,8}$/),
+      lineDiscount: z.string().regex(/^\d{1,15}$/).optional(),
+    })).min(1).max(100),
+    payment: CheckoutTenderSchema.optional(),
+    payments: z.array(CheckoutTenderSchema).min(1).max(10).optional(),
+    paymentMethod: CheckoutPaymentMethodSchema.optional(),
+    amountPaidMinor: CheckoutMinorAmountSchema.optional(),
+  })
+  .refine(
+    (body) => Boolean(body.payments?.length || body.payment || (body.paymentMethod && body.amountPaidMinor !== undefined)),
+    { message: 'بيانات الدفع مطلوبة' },
+  );
 const SaleExchangeSchema = z.object({
   idempotencyKey: z.string().uuid(),
   storeId: z.string().uuid(),
@@ -2382,7 +2416,7 @@ async function financialMapReport(ctx, url) {
   // 1. Sales (with original merchandise COGS)
   let salesSql = `
     SELECT s.id, s.sale_number, s.created_at, s.customer_name, s.cashier_user_id,
-      (SELECT sp.method FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id LIMIT 1) AS payment_method,
+      CASE WHEN (SELECT COUNT(*) FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id) > 1 THEN 'MIXED' ELSE (SELECT sp.method FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id LIMIT 1) END AS payment_method,
       COALESCE((SELECT SUM(si.net_revenue) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS revenue,
       COALESCE((SELECT SUM(si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS cogs,
       COALESCE((SELECT SUM(si.net_revenue - si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS gross_profit
@@ -5091,7 +5125,7 @@ async function handleApi(req, res, url) {
 
     const salesRows = rawDb.prepare(`
       SELECT s.id, s.sale_number, s.created_at, s.customer_name, s.status, s.change_given,
-        COALESCE((SELECT sp.method FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id LIMIT 1), 'CASH') as payment_method,
+        CASE WHEN (SELECT COUNT(*) FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id) > 1 THEN 'MIXED' ELSE COALESCE((SELECT sp.method FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id LIMIT 1), 'CASH') END as payment_method,
         COALESCE((SELECT SUM(si.net_revenue) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS total_amount,
         COALESCE((SELECT SUM(si.cost_of_goods_sold) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS total_cogs,
         COALESCE((SELECT SUM(si.quantity) FROM sale_items si WHERE si.tenant_id = s.tenant_id AND si.sale_id = s.id), 0) AS sold_qty,
@@ -6272,16 +6306,51 @@ async function handleApi(req, res, url) {
     if (cart.total.amount <= 0n) {
       throw Object.assign(new Error('صافي الفاتورة بعد الخصم يجب أن يكون أكبر من صفر'), { status: 400 });
     }
+
+    let resolvedPayments;
+    if (Array.isArray(body.payments) && body.payments.length > 0) {
+      resolvedPayments = body.payments.map((tender) => {
+        const amt = BigInt(tender.amountMinor ?? tender.amount ?? '0');
+        if (amt <= 0n) {
+          throw Object.assign(new Error('جميع مبالغ الدفع المجزأ يجب أن تكون أكبر من صفر'), { status: 400 });
+        }
+        return { method: tender.method, amount: Money.fromMinor(amt, tenant.currency) };
+      });
+      const tenderSum = resolvedPayments.reduce((s, t) => s + t.amount.amount, 0n);
+      if (tenderSum !== cart.total.amount) {
+        throw Object.assign(new Error('مجموع أجزاء الدفع يجب أن يساوي صافي الفاتورة بالضبط'), { status: 400 });
+      }
+    } else if (body.payment) {
+      const amt = BigInt(body.payment.amountMinor ?? body.payment.amount ?? '0');
+      resolvedPayments = [{ method: body.payment.method, amount: Money.fromMinor(amt, tenant.currency) }];
+    } else {
+      const amt = BigInt(body.amountPaidMinor ?? '0');
+      resolvedPayments = [{ method: body.paymentMethod, amount: Money.fromMinor(amt, tenant.currency) }];
+    }
+
     const now = new Date();
     const tentativeSaleId = randomUUID();
     const sale = await checkout.checkout(ctx, {
       saleId: tentativeSaleId,
       storeId: body.storeId, cart,
-      payments: [{ method: body.payment.method, amount: Money.fromMinor(BigInt(body.payment.amount), tenant.currency) }],
+      payments: resolvedPayments,
       idempotencyKey: body.idempotencyKey, customerName: body.customerName, occurredAt: now,
     });
     if (sale.id === tentativeSaleId) {
-      await recordAudit(ctx, { storeId: body.storeId, action: 'SALE_COMPLETED', entityType: 'SALE', entityId: sale.id, summary: `إتمام عملية بيع (${sale.saleNumber})`, metadata: { saleNumber: sale.saleNumber, total: sale.total.amount.toString(), paymentMethod: body.payment.method } });
+      const paymentSummary = resolvedPayments.length > 1 ? 'MIXED' : resolvedPayments[0].method;
+      await recordAudit(ctx, {
+        storeId: body.storeId,
+        action: 'SALE_COMPLETED',
+        entityType: 'SALE',
+        entityId: sale.id,
+        summary: `إتمام عملية بيع (${sale.saleNumber})`,
+        metadata: {
+          saleNumber: sale.saleNumber,
+          total: sale.total.amount.toString(),
+          paymentMethod: paymentSummary,
+          payments: resolvedPayments.map((p) => ({ method: p.method, amount: p.amount.amount.toString() })),
+        },
+      });
     }
     const cashierUser = await userRepo.findById(ctx, ctx.userId);
     return json(res, 201, { ...saleJson(sale), cashierName: cashierUser?.fullName ?? cashierUser?.username ?? 'كاشير' });

@@ -3261,3 +3261,229 @@ test('Pre-launch hardening: duplicate opening balances 409 guard and Trial Balan
     await rm(hDir, { recursive: true, force: true }).catch(() => {});
   }
 });
+
+test('Final POS & accounting regression: split cash+electronic checkout GL (1010/1020/4010) and cumulative Trial Balance across pre-opening, opening, and reversed expenses', async () => {
+  const port = await reservePort();
+  const sUrl = `http://127.0.0.1:${port}`;
+  const sDir = await mkdtemp(join(appDir, '.test-data-split-'));
+  let log = '';
+  let srv = null;
+
+  const startServer = async () => {
+    const proc = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+      cwd: workspace,
+      env: { ...process.env, PORT: String(port), RETAILOS_DATA_DIR: sDir, RETAILOS_COMPANY_NAME: 'شركة الدفع المجزأ', RETAILOS_COMPANY_CODE: 'SPLIT_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    proc.stdout.on('data', (c) => { log += c.toString(); });
+    proc.stderr.on('data', (c) => { log += c.toString(); });
+    for (let i = 0; i < 600; i += 1) {
+      if (proc.exitCode !== null) throw new Error(`Server exited ${proc.exitCode}\n${log}`);
+      try { if ((await fetch(`${sUrl}/api/bootstrap`)).ok) return proc; } catch { /* wait */ }
+      await new Promise((r) => setTimeout(r, 125));
+    }
+    throw new Error(`Timeout\n${log}`);
+  };
+
+  const stopServer = async (proc) => {
+    if (proc && proc.exitCode === null) {
+      proc.kill('SIGTERM');
+      await Promise.race([once(proc, 'exit'), new Promise((r) => setTimeout(r, 4000))]);
+    }
+  };
+
+  const req = async (path, { method = 'GET', body, cookieStr } = {}) => {
+    const headers = { Origin: sUrl };
+    if (body) headers['Content-Type'] = 'application/json';
+    if (cookieStr) headers.Cookie = cookieStr;
+    const response = await fetch(`${sUrl}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const payload = await response.json();
+    return { response, payload };
+  };
+
+  const monthRange = (offsetMonths) => {
+    const today = cairoDateIso();
+    const y = Number(today.slice(0, 4));
+    const m = Number(today.slice(5, 7)) - 1 + offsetMonths;
+    const start = new Date(Date.UTC(y, m, 1));
+    const end = new Date(Date.UTC(y, m + 1, 0));
+    const ym = `${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, '0')}`;
+    const last = String(end.getUTCDate()).padStart(2, '0');
+    return { ym, from: `${ym}-01`, to: `${ym}-${last}` };
+  };
+
+  try {
+    srv = await startServer();
+    assert.equal((await req('/api/setup', { method: 'POST', body: { ownerName: 'مالك المجزأ', ownerUsername: 'split_owner', password: 'Split-Owner-Password-2026' } })).response.status, 201);
+    const login = await req('/api/login', { method: 'POST', body: { username: 'split_owner', password: 'Split-Owner-Password-2026' } });
+    assert.equal(login.response.status, 200);
+    const cookieStr = login.response.headers.get('set-cookie').split(';')[0];
+
+    const boot = await req('/api/data', { cookieStr });
+    const storeId = boot.payload.stores[0].id;
+
+    const mPre = monthRange(-3);
+    const mOpen = monthRange(-2);
+    const mMid = monthRange(-1);
+    const mCur = monthRange(0);
+
+    // Pre-opening range: all accounts zero and balanced
+    const preTb = await req(`/api/reports/trial-balance?storeId=${storeId}&from=${mPre.from}&to=${mPre.to}`, { cookieStr });
+    assert.equal(preTb.response.status, 200);
+    assert.equal(preTb.payload.totals.isBalanced, true);
+    assert.equal(preTb.payload.totals.debitBalanceTotal.amount, '0');
+
+    // Opening balance in mOpen-01: Drawer=100000, Safe=100000 -> Equity=200000
+    assert.equal((await req('/api/accounting/opening-balances', {
+      method: 'POST',
+      cookieStr,
+      body: { storeId, idempotencyKey: randomUUID(), entryDate: mOpen.from, cashDrawer: '100000', cashSafe: '100000', bank: '0', inventory: '0', supplierPayables: '0', notes: 'افتتاحي' },
+    })).response.status, 201);
+
+    // Two expenses in mOpen: 10000 (to reverse later) + 30000 (stays active) from CASH_DRAWER
+    const exp1 = await req('/api/expenses', {
+      method: 'POST',
+      cookieStr,
+      body: { idempotencyKey: randomUUID(), storeId, categoryCode: 'SUPPLIES', amount: '10000', paymentMethod: 'CASH_DRAWER', expenseDate: `${mOpen.ym}-05`, notes: 'مصروف مسترجع' },
+    });
+    assert.equal(exp1.response.status, 201);
+    assert.equal((await req('/api/expenses', {
+      method: 'POST',
+      cookieStr,
+      body: { idempotencyKey: randomUUID(), storeId, categoryCode: 'UTILITIES', amount: '30000', paymentMethod: 'CASH_DRAWER', expenseDate: `${mOpen.ym}-10`, notes: 'مصروف ثابت' },
+    })).response.status, 201);
+
+    // Mid-month range (no transactions in mMid): cumulative opening carried cleanly (1010=60000, 6090=40000, 3010=200000)
+    const midTb = await req(`/api/reports/trial-balance?storeId=${storeId}&from=${mMid.from}&to=${mMid.to}`, { cookieStr });
+    assert.equal(midTb.payload.totals.isBalanced, true);
+    const midAcc = (c) => midTb.payload.accounts.find((a) => a.accountCode === c);
+    assert.equal(midAcc('1010').debitBalance.amount, '60000');
+    assert.equal(midAcc('6090').debitBalance.amount, '40000');
+    assert.equal(midAcc('3010').creditBalance.amount, '200000');
+
+    // Delete exp1 (posts reversal journal entry on original expenseDate in mMid) -> verify mMid updates cleanly and mCur carries the updated opening
+    assert.equal((await req(`/api/expenses/${exp1.payload.id}`, { method: 'DELETE', cookieStr })).response.status, 200);
+    const midTbRecheck = await req(`/api/reports/trial-balance?storeId=${storeId}&from=${mMid.from}&to=${mMid.to}`, { cookieStr });
+    assert.equal(midTbRecheck.payload.accounts.find((a) => a.accountCode === '1010').debitBalance.amount, '70000');
+    assert.equal(midTbRecheck.payload.accounts.find((a) => a.accountCode === '6090').debitBalance.amount, '30000');
+
+    // Create product, purchase stock (cost 5000, retail 12000), start shift, and execute split checkout!
+    assert.equal((await req('/api/products', {
+      method: 'POST',
+      cookieStr,
+      body: { name: 'حقيبة مجزأ', sku: 'SPL-BAG', hasVariants: true, options: [{ key: 'color', name: 'اللون', values: ['أبيض'] }], variants: [{ sku: 'SPL-BAG-W', attributes: { color: 'أبيض' }, retailPrice: '12000', reorderPoint: '1' }] },
+    })).response.status, 201);
+    const variantId = (await req(`/api/data?storeId=${storeId}`, { cookieStr })).payload.products[0].variants[0].id;
+    const sup = (await req('/api/suppliers', { method: 'POST', cookieStr, body: { name: 'تاجر الدفع المجزأ' } })).payload.id;
+    assert.equal((await req('/api/purchases', {
+      method: 'POST',
+      cookieStr,
+      body: { storeId, supplierId: sup, idempotencyKey: randomUUID(), totalAmount: '15000', paidAmount: '15000', paymentMethod: 'BANK_TRANSFER', items: [{ variantId, quantity: '3', unitCost: '5000' }] },
+    })).response.status, 201);
+
+    const shiftRes = await req('/api/shifts/start', { method: 'POST', cookieStr, body: { storeId, openingCash: '10000' } });
+    assert.equal(shiftRes.response.status, 201);
+    const shiftId = shiftRes.payload.shift.id;
+
+    // Invalid split cases must return 400
+    assert.equal((await req('/api/checkout', {
+      method: 'POST',
+      cookieStr,
+      body: { storeId, idempotencyKey: randomUUID(), items: [{ variantId, quantity: '1' }], payments: [{ method: 'cash', amountMinor: '0' }, { method: 'card', amountMinor: '12000' }] },
+    })).response.status, 400);
+    assert.equal((await req('/api/checkout', {
+      method: 'POST',
+      cookieStr,
+      body: { storeId, idempotencyKey: randomUUID(), items: [{ variantId, quantity: '1' }], payments: [{ method: 'cash', amountMinor: '7000' }, { method: 'card', amountMinor: '4999' }] },
+    })).response.status, 400);
+
+    // Valid split checkout: 7000 cash + 5000 card = 12000
+    const splitSaleRes = await req('/api/checkout', {
+      method: 'POST',
+      cookieStr,
+      body: {
+        storeId,
+        idempotencyKey: randomUUID(),
+        items: [{ variantId, quantity: '1' }],
+        payments: [{ method: 'cash', amountMinor: '7000' }, { method: 'card', amountMinor: '5000' }],
+      },
+    });
+    assert.equal(splitSaleRes.response.status, 201, JSON.stringify(splitSaleRes.payload));
+    assert.equal(splitSaleRes.payload.total.amount, '12000');
+    assert.equal(splitSaleRes.payload.changeGiven.amount, '0');
+    assert.equal(splitSaleRes.payload.payments.length, 2);
+
+    // Check receipt carries split payments breakdown
+    const receiptRes = await req(`/api/sales/${splitSaleRes.payload.id}/receipt?width=80mm`, { cookieStr });
+    assert.equal(receiptRes.response.status, 200);
+    assert.deepEqual(
+      receiptRes.payload.receipt.payments.map((p) => ({ method: p.method, amount: p.amount.amount })),
+      [{ method: 'CASH', amount: '7000' }, { method: 'CARD', amount: '5000' }],
+    );
+
+    // Backward-compatible single paymentMethod + amountPaidMinor ('wallet' -> MOBILE)
+    const walletSaleRes = await req('/api/checkout', {
+      method: 'POST',
+      cookieStr,
+      body: {
+        storeId,
+        idempotencyKey: randomUUID(),
+        items: [{ variantId, quantity: '1' }],
+        paymentMethod: 'wallet',
+        amountPaidMinor: '12000',
+      },
+    });
+    assert.equal(walletSaleRes.response.status, 201, JSON.stringify(walletSaleRes.payload));
+    assert.equal(walletSaleRes.payload.payments[0].method, 'MOBILE');
+
+    // End shift: expectedCash = 10000 opening + 7000 cash portion from split sale = 17000
+    const shiftEndRes = await req('/api/shifts/end', {
+      method: 'POST',
+      cookieStr,
+      body: { shiftId, actualCash: '17000', handoverCash: '0' },
+    });
+    assert.equal(shiftEndRes.response.status, 200);
+    assert.equal(shiftEndRes.payload.shift.expectedCash, '17000');
+    assert.equal(shiftEndRes.payload.shift.variance, '0');
+
+    // Inspect GL Journal lines for split sale: 1010 +7000, 1020 +5000, 4010 -12000, 5010 +5000, 1300 -5000
+    const jeList = await req(`/api/journal-entries?storeId=${storeId}&sourceType=SALE&limit=20`, { cookieStr });
+    assert.equal(jeList.response.status, 200);
+    const splitEntry = (jeList.payload?.payload?.entries ?? []).find(
+      (e) => e.description?.includes(splitSaleRes.payload.saleNumber) || e.lines?.some((l) => l.memo?.includes(splitSaleRes.payload.saleNumber)),
+    );
+    assert.ok(splitEntry, 'Journal entry for split sale must exist');
+    const lineAmt = (code, side) => splitEntry.lines
+      .filter((l) => l.accountCode === code && l.side === side)
+      .reduce((s, l) => s + BigInt(l.amount.amount), 0n);
+    assert.equal(lineAmt('1010', 'DEBIT'), 7000n);
+    assert.equal(lineAmt('1020', 'DEBIT'), 5000n);
+    assert.equal(lineAmt('4010', 'CREDIT'), 12000n);
+    assert.equal(lineAmt('5010', 'DEBIT'), 5000n);
+    assert.equal(lineAmt('1300', 'CREDIT'), 5000n);
+
+    // Check Trial Balance for mCur: carries mOpen+mMid opening (after exp1 reversal on mMid expenseDate) + split/wallet sales + bank purchase
+    const curTb = await req(`/api/reports/trial-balance?storeId=${storeId}&from=${mCur.from}&to=${mCur.to}`, { cookieStr });
+    assert.equal(curTb.response.status, 200);
+    assert.equal(curTb.payload.totals.isBalanced, true);
+    const curAcc = (c) => curTb.payload.accounts.find((a) => a.accountCode === c);
+    // 1010: opening=70000, period debit=7000 (split cash) -> closing=77000
+    assert.equal(curAcc('1010').openingDebitBalance.amount, '70000');
+    assert.equal(curAcc('1010').periodDebit.amount, '7000');
+    assert.equal(curAcc('1010').debitBalance.amount, '77000');
+    // 1020: opening=0, period=+5000 (card) + 12000 (wallet) - 15000 (bank purchase) = +2000
+    assert.equal(curAcc('1020').debitBalance.amount, '2000');
+    // 6090: opening=30000, period credit=0 (reversal occurred on mMid expenseDate) -> closing=30000
+    assert.equal(curAcc('6090').openingDebitBalance.amount, '30000');
+    assert.equal(curAcc('6090').periodCredit.amount, '0');
+    assert.equal(curAcc('6090').debitBalance.amount, '30000');
+    // 4010: 12000 + 12000 = 24000 credit
+    assert.equal(curAcc('4010').creditBalance.amount, '24000');
+    // 1300: 15000 - 10000 = 5000 debit, 5010: 10000 debit
+    assert.equal(curAcc('1300').debitBalance.amount, '5000');
+    assert.equal(curAcc('5010').debitBalance.amount, '10000');
+  } finally {
+    await stopServer(srv);
+    await rm(sDir, { recursive: true, force: true }).catch(() => {});
+  }
+});

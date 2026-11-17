@@ -29,6 +29,59 @@ function isPageAuthorized(page) {
   return ['dashboard', 'pos', 'products', 'inventory', 'sales', 'suppliers'].includes(page);
 }
 
+const PENDING_CHECKOUT_STORAGE_KEY = 'retailos_pending_checkout';
+
+function loadPendingCheckoutFromStorage() {
+  try {
+    const raw = localStorage.getItem(PENDING_CHECKOUT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || typeof parsed.idempotencyKey !== 'string' || !parsed.payload || !Array.isArray(parsed.cart)) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function savePendingCheckoutToStorage(record) {
+  state.pendingCheckout = record;
+  try {
+    localStorage.setItem(PENDING_CHECKOUT_STORAGE_KEY, JSON.stringify(record));
+  } catch { /* localStorage quota fallback stays in-memory */ }
+}
+
+function clearPendingCheckoutStorage() {
+  state.pendingCheckout = null;
+  state.cartIdempotencyKey = null;
+  try {
+    localStorage.removeItem(PENDING_CHECKOUT_STORAGE_KEY);
+  } catch { /* ignore */ }
+}
+
+function restorePendingCheckoutForStore() {
+  const pending = loadPendingCheckoutFromStorage();
+  if (!pending) return;
+  const activeStoreId = state.data?.selectedStoreId;
+  if (pending.storeId && activeStoreId && pending.storeId !== activeStoreId) return;
+  const normalized = pending.status === 'submitting'
+    ? { ...pending, status: 'ambiguous', lastError: pending.lastError || 'تمت إعادة تحميل الصفحة أثناء إرسال الفاتورة — راجع الفواتير أو أعد المحاولة بأمان' }
+    : pending;
+  savePendingCheckoutToStorage(normalized);
+  state.cart = normalized.cart.map((item) => ({ ...item }));
+  state.cartDiscountRaw = String(normalized.cartDiscountRaw ?? '');
+  state.paymentMethod = normalized.paymentMethod || 'CASH';
+  state.splitCashRaw = String(normalized.splitCashRaw ?? '');
+  state.splitElectronicRaw = String(normalized.splitElectronicRaw ?? '');
+  state.splitElectronicMethod = normalized.splitElectronicMethod === 'MOBILE' ? 'MOBILE' : 'CARD';
+  state.splitLastEdited = normalized.splitLastEdited === 'electronic' ? 'electronic' : 'cash';
+  state.cartIdempotencyKey = normalized.idempotencyKey;
+  if (isPageAuthorized('pos')) {
+    state.page = 'pos';
+  }
+}
+
 const state = {
   bootstrap: null,
   user: null,
@@ -43,6 +96,11 @@ const state = {
   posInputError: '',
   posDirtyInvalid: false,
   paymentMethod: 'CASH',
+  splitCashRaw: '',
+  splitElectronicRaw: '',
+  splitElectronicMethod: 'CARD',
+  splitLastEdited: 'cash',
+  pendingCheckout: loadPendingCheckoutFromStorage(),
   isSaving: false,
   report: null,
   reportKey: null,
@@ -638,6 +696,7 @@ async function start() {
         state.data = session;
         state.page = session.capabilities?.cashierMode ? 'pos' : 'dashboard';
         applyRequestedRoute(state.page);
+        restorePendingCheckoutForStore();
       } catch (error) {
         if (!String(error.message).includes('تسجيل الدخول') && !String(error.message).includes('انتهت الجلسة')) throw error;
       }
@@ -707,6 +766,7 @@ function bindLogin() {
       state.page = session.capabilities?.cashierMode ? 'pos' : 'dashboard';
       await loadData();
       applyRequestedRoute(state.page);
+      restorePendingCheckoutForStore();
       render();
     } catch (error) {
       toast(error.message, 'error');
@@ -1470,7 +1530,7 @@ function salesTable(sales) {
 }
 
 function methodLabel(method) {
-  return ({ CASH: 'نقدي', CARD: 'بطاقة', MOBILE: 'محفظة', OTHER: 'أخرى', CASH_DRAWER: 'درج النقدية', CASH_SAFE: 'الخزينة', BANK_TRANSFER: 'تحويل بنكي' })[method] ?? method;
+  return ({ CASH: 'نقدي', CARD: 'بطاقة', MOBILE: 'محفظة', OTHER: 'أخرى', MIXED: 'دفع مجزأ (نقدي + إلكتروني)', CASH_DRAWER: 'درج النقدية', CASH_SAFE: 'الخزينة', BANK_TRANSFER: 'تحويل بنكي' })[method] ?? method;
 }
 
 const COLOR_OPTION_NAMES = new Set(['color', 'colour', 'لون', 'اللون', 'الالوان', 'الألوان']);
@@ -4458,6 +4518,15 @@ function expensesView() {
   `;
 }
 
+function minorToDecimalInput(minor, decimals) {
+  const n = BigInt(minor ?? 0);
+  const abs = n < 0n ? -n : n;
+  const scale = 10n ** BigInt(decimals);
+  const whole = abs / scale;
+  const frac = (abs % scale).toString().padStart(decimals, '0').replace(/0+$/, '');
+  return frac ? `${whole}.${frac}` : `${whole}`;
+}
+
 function computePosCartState() {
   const currency = state.data?.company?.currency ?? 'EGP';
   const decimals = state.cart[0]?.price.decimals ?? currencyDecimals(currency);
@@ -4504,7 +4573,33 @@ function computePosCartState() {
   }
 
   const totalMinor = subtotalMinor > discountMinor ? subtotalMinor - discountMinor : 0n;
-  const errorMessage = qtyErrors[0] || discountError || '';
+  let splitCashMinor = 0n;
+  let splitElectronicMinor = 0n;
+  let splitError = '';
+
+  if (state.paymentMethod === 'SPLIT' && state.cart.length > 0 && totalMinor > 0n && !qtyErrors.length && !discountError) {
+    try {
+      if (state.splitLastEdited === 'electronic') {
+        const rawElec = String(state.splitElectronicRaw ?? '').trim();
+        if (!rawElec) throw new Error('أدخل قيمة الدفع الإلكتروني');
+        splitElectronicMinor = BigInt(toMinor(rawElec, decimals));
+        if (splitElectronicMinor <= 0n) throw new Error('المبلغ الإلكتروني في الدفع المجزأ يجب أن يكون أكبر من صفر');
+        if (splitElectronicMinor >= totalMinor) throw new Error('المبلغ الإلكتروني يجب أن يكون أقل من صافي الفاتورة');
+        splitCashMinor = totalMinor - splitElectronicMinor;
+      } else {
+        const rawCash = String(state.splitCashRaw ?? '').trim();
+        if (!rawCash) throw new Error('أدخل قيمة الدفع النقدي');
+        splitCashMinor = BigInt(toMinor(rawCash, decimals));
+        if (splitCashMinor <= 0n) throw new Error('المبلغ النقدي في الدفع المجزأ يجب أن يكون أكبر من صفر');
+        if (splitCashMinor >= totalMinor) throw new Error('المبلغ النقدي يجب أن يكون أقل من صافي الفاتورة');
+        splitElectronicMinor = totalMinor - splitCashMinor;
+      }
+    } catch (err) {
+      splitError = err.message || 'توزيع الدفع المجزأ غير صالح';
+    }
+  }
+
+  const errorMessage = qtyErrors[0] || discountError || splitError || '';
   return {
     currency,
     decimals,
@@ -4512,6 +4607,8 @@ function computePosCartState() {
     discountMinor,
     totalMinor,
     totalPieces,
+    splitCashMinor,
+    splitElectronicMinor,
     errorMessage,
     hasError: Boolean(errorMessage),
   };
@@ -4563,7 +4660,37 @@ function posView() {
   for (const prod of state.data.products ?? []) {
     for (const v of prod.variants ?? []) productByVariantId.set(v.id, prod);
   }
-  return `<div class="pos-layout"><section class="pos-catalog">${shiftBanner}<div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>${mustStartShift ? 'ابدأ الشيفت أولاً لإتاحة اختيار المنتجات وإتمام البيع.' : 'ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.'}</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="${mustStartShift ? 'ابدأ الشيفت أولاً لتفعيل نقطة البيع...' : 'ابحث باسم الموديل أو كود الموديل أو الباركود'}" value="${escapeHtml(state.query)}" ${mustStartShift ? 'disabled' : 'autofocus'}><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="">كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}">${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products" style="${mustStartShift ? 'opacity:0.55;' : ''}">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const pricingSummary = summarizeProductPricing(product); const price = pricingSummary.labelText; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${(mustStartShift || (product.itemKind === 'PRODUCT' && stock <= 0n)) ? 'disabled' : ''}><span class="pos-product-art ${product.imagePath ? 'has-image' : `art-${index % 6}`}">${product.imagePath ? renderProductThumb(product, '', 'pos-product-thumb') : icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${escapeHtml(price)}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${state.cart.length ? '' : 'disabled'}>مسح الكل</button></div><div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${mustStartShift ? `<div class="cart-empty"><span class="cart-empty-icon cart-empty-icon-shift">${icon('clock', 23)}</span><strong>يجب بدء الشيفت أولاً</strong><p>لا يمكن إجراء أي عملية بيع قبل تسجيل بدء الشيفت واستلام الدرج.</p><button type="button" id="cart-start-shift-btn" class="button button-sm shift-start-cta" style="margin-top:12px;">${icon('play', 15)}<span>بدء الشيفت الآن</span></button></div>` : state.cart.length ? state.cart.map((item) => { const matchedProd = productByVariantId.get(item.variantId); const valAttr = item.rawQuantity !== undefined ? item.rawQuantity : String(item.quantity); const lineTotalMinor = (/^[1-9]\d{0,5}$/.test(String(valAttr).trim())) ? (BigInt(item.price.amount) * BigInt(String(valAttr).trim())).toString() : '0'; return `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art ${matchedProd?.imagePath ? 'has-image' : ''}">${matchedProd?.imagePath ? renderProductThumb(matchedProd, icon('box', 16), 'cart-line-thumb') : icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف">×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button type="button" aria-label="إنقاص الكمية" data-qty="${item.variantId}" data-delta="-1">−</button><input type="text" inputmode="numeric" class="cart-qty-input" data-qty-input="${item.variantId}" aria-label="كمية ${escapeHtml(item.name)}" value="${escapeHtml(valAttr)}" style="width:46px;text-align:center;font-weight:800;border:1px solid var(--line);border-radius:7px;padding:2px 4px;background:var(--surface);color:var(--ink);font-size:13px;"><button type="button" aria-label="زيادة الكمية" data-qty="${item.variantId}" data-delta="1">+</button></div><strong data-line-total="${item.variantId}">${money({ ...item.price, amount: lineTotalMinor })}</strong></div></div>`; }).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة بالبحث أو اللمس (أو بالباركود إن وجد) عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong id="pos-total-pieces">${totalPieces.toString()}</strong></div><div><span>الإجمالي الفرعي</span><strong id="pos-subtotal-summary">${money({ amount: subtotalMinor.toString(), currency, decimals })}</strong></div>${canDiscount ? `<div style="align-items:center;"><span>خصم الفاتورة (${currency})</span><input type="text" id="pos-discount-input" inputmode="decimal" aria-label="خصم الفاتورة" placeholder="0.00" value="${escapeHtml(state.cartDiscountRaw)}" ${(!mustStartShift && state.cart.length) ? '' : 'disabled'} style="width:110px;text-align:left;font-weight:700;border:1px solid var(--line);border-radius:8px;padding:4px 8px;background:var(--surface);color:var(--ink);"></div>` : `<div><span>الخصم</span><strong id="pos-discount-summary">${money(discountMoneyObj)}</strong></div>`}<div class="cart-grand-total"><span>الإجمالي المستحق</span><strong id="pos-grand-total">${money(total)}</strong></div></div><div id="pos-input-error" role="alert" style="${hasError ? 'display:block;' : 'display:none;'}margin-bottom:10px;padding:8px 10px;border-radius:8px;background:rgba(190,18,60,0.09);border:1px solid rgba(190,18,60,0.3);color:#be123c;font-size:12px;font-weight:700;">${escapeHtml(errorMessage)}</div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}" ${mustStartShift ? 'disabled' : ''}><span>${mark}</span>${label}</button>`).join('')}</div><button id="checkout-button" class="button button-primary checkout-button ${mustStartShift ? 'checkout-button-locked' : ''}" ${(!mustStartShift && state.cart.length && !state.isSaving && !hasError) ? '' : 'disabled'}><span>${mustStartShift ? 'ابدأ الشيفت أولاً' : 'إتمام البيع'}</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
+  const isCheckoutLocked = Boolean(state.pendingCheckout);
+  const pendingBanner = isCheckoutLocked ? `
+    <div id="pending-checkout-banner" role="alert" style="margin-bottom:12px;padding:12px;border-radius:10px;background:rgba(217,119,6,0.12);border:1px solid rgba(217,119,6,0.45);color:var(--ink);">
+      <strong style="display:block;font-size:13px;color:#b45309;margin-bottom:4px;">توجد عملية بيع معلّقة غير مؤكدة (${escapeHtml(String(state.pendingCheckout.idempotencyKey).slice(0, 8))})</strong>
+      <p style="margin:0 0 8px;font-size:12px;color:var(--ink-soft);">تم قفل السلة لحماية المخزون ومنع تكرار الفاتورة. أعد المحاولة بنفس المفتاح بأمان أو راجع سجل المبيعات قبل التجاهل.</p>
+      ${state.pendingCheckout.lastError ? `<div style="font-size:11.5px;color:#be123c;margin-bottom:8px;font-weight:700;">${escapeHtml(state.pendingCheckout.lastError)}</div>` : ''}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button type="button" id="retry-pending-checkout-btn" class="button button-primary button-sm" ${state.isSaving ? 'disabled' : ''}>${state.isSaving ? 'جاري إعادة المحاولة...' : 'إعادة المحاولة بنفس الفاتورة بأمان'}</button>
+        <button type="button" id="discard-pending-checkout-btn" class="button button-secondary button-sm" ${state.isSaving ? 'disabled' : ''}>تجاهل بعد مراجعة الفواتير</button>
+      </div>
+    </div>
+  ` : '';
+  const splitPanel = state.paymentMethod === 'SPLIT' && state.cart.length ? `
+    <div id="pos-split-panel" style="margin-bottom:12px;padding:10px;border-radius:10px;background:var(--surface-soft);border:1px solid var(--line);display:grid;gap:8px;">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <label style="font-size:11.5px;font-weight:700;display:grid;gap:4px;">نقدي (${currency})
+          <input type="text" id="pos-split-cash" inputmode="decimal" value="${escapeHtml(state.splitCashRaw)}" ${isCheckoutLocked || mustStartShift ? 'disabled' : ''} style="height:34px;border:1px solid var(--line);border-radius:8px;padding:0 8px;background:var(--surface);color:var(--ink);font-weight:700;">
+        </label>
+        <label style="font-size:11.5px;font-weight:700;display:grid;gap:4px;">إلكتروني (${currency})
+          <input type="text" id="pos-split-electronic" inputmode="decimal" value="${escapeHtml(state.splitElectronicRaw)}" ${isCheckoutLocked || mustStartShift ? 'disabled' : ''} style="height:34px;border:1px solid var(--line);border-radius:8px;padding:0 8px;background:var(--surface);color:var(--ink);font-weight:700;">
+        </label>
+      </div>
+      <label style="font-size:11.5px;font-weight:700;display:flex;align-items:center;justify-content:space-between;gap:8px;"><span>قناة التحصيل الإلكتروني</span>
+        <select id="pos-split-elec-method" ${isCheckoutLocked || mustStartShift ? 'disabled' : ''} style="height:32px;border:1px solid var(--line);border-radius:8px;padding:0 8px;background:var(--surface);color:var(--ink);font-weight:700;">
+          <option value="CARD" ${state.splitElectronicMethod === 'CARD' ? 'selected' : ''}>بطاقة (1020)</option>
+          <option value="MOBILE" ${state.splitElectronicMethod === 'MOBILE' ? 'selected' : ''}>محفظة إلكترونية (1020)</option>
+        </select>
+      </label>
+    </div>
+  ` : '';
+  return `<div class="pos-layout"><section class="pos-catalog">${shiftBanner}<div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>${mustStartShift ? 'ابدأ الشيفت أولاً لإتاحة اختيار المنتجات وإتمام البيع.' : 'ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.'}</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="${mustStartShift ? 'ابدأ الشيفت أولاً لتفعيل نقطة البيع...' : 'ابحث باسم الموديل أو كود الموديل أو الباركود'}" value="${escapeHtml(state.query)}" ${(mustStartShift || isCheckoutLocked) ? 'disabled' : 'autofocus'}><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="" ${isCheckoutLocked ? 'disabled' : ''}>كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}" ${isCheckoutLocked ? 'disabled' : ''}>${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products" style="${mustStartShift ? 'opacity:0.55;' : ''}">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const pricingSummary = summarizeProductPricing(product); const price = pricingSummary.labelText; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${(mustStartShift || isCheckoutLocked || (product.itemKind === 'PRODUCT' && stock <= 0n)) ? 'disabled' : ''}><span class="pos-product-art ${product.imagePath ? 'has-image' : `art-${index % 6}`}">${product.imagePath ? renderProductThumb(product, '', 'pos-product-thumb') : icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${escapeHtml(price)}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><button class="text-action" data-page="products">الذهاب للمنتجات ←</button></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${(state.cart.length && !isCheckoutLocked) ? '' : 'disabled'}>مسح الكل</button></div>${pendingBanner}<div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${mustStartShift ? `<div class="cart-empty"><span class="cart-empty-icon cart-empty-icon-shift">${icon('clock', 23)}</span><strong>يجب بدء الشيفت أولاً</strong><p>لا يمكن إجراء أي عملية بيع قبل تسجيل بدء الشيفت واستلام الدرج.</p><button type="button" id="cart-start-shift-btn" class="button button-sm shift-start-cta" style="margin-top:12px;">${icon('play', 15)}<span>بدء الشيفت الآن</span></button></div>` : state.cart.length ? state.cart.map((item) => { const matchedProd = productByVariantId.get(item.variantId); const valAttr = item.rawQuantity !== undefined ? item.rawQuantity : String(item.quantity); const lineTotalMinor = (/^[1-9]\d{0,5}$/.test(String(valAttr).trim())) ? (BigInt(item.price.amount) * BigInt(String(valAttr).trim())).toString() : '0'; return `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art ${matchedProd?.imagePath ? 'has-image' : ''}">${matchedProd?.imagePath ? renderProductThumb(matchedProd, icon('box', 16), 'cart-line-thumb') : icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف" ${isCheckoutLocked ? 'disabled' : ''}>×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button type="button" aria-label="إنقاص الكمية" data-qty="${item.variantId}" data-delta="-1" ${isCheckoutLocked ? 'disabled' : ''}>−</button><input type="text" inputmode="numeric" class="cart-qty-input" data-qty-input="${item.variantId}" aria-label="كمية ${escapeHtml(item.name)}" value="${escapeHtml(valAttr)}" ${isCheckoutLocked ? 'disabled' : ''} style="width:46px;text-align:center;font-weight:800;border:1px solid var(--line);border-radius:7px;padding:2px 4px;background:var(--surface);color:var(--ink);font-size:13px;"><button type="button" aria-label="زيادة الكمية" data-qty="${item.variantId}" data-delta="1" ${isCheckoutLocked ? 'disabled' : ''}>+</button></div><strong data-line-total="${item.variantId}">${money({ ...item.price, amount: lineTotalMinor })}</strong></div></div>`; }).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة بالبحث أو اللمس (أو بالباركود إن وجد) عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong id="pos-total-pieces">${totalPieces.toString()}</strong></div><div><span>الإجمالي الفرعي</span><strong id="pos-subtotal-summary">${money({ amount: subtotalMinor.toString(), currency, decimals })}</strong></div>${canDiscount ? `<div style="align-items:center;"><span>خصم الفاتورة (${currency})</span><input type="text" id="pos-discount-input" inputmode="decimal" aria-label="خصم الفاتورة" placeholder="0.00" value="${escapeHtml(state.cartDiscountRaw)}" ${(!mustStartShift && state.cart.length && !isCheckoutLocked) ? '' : 'disabled'} style="width:110px;text-align:left;font-weight:700;border:1px solid var(--line);border-radius:8px;padding:4px 8px;background:var(--surface);color:var(--ink);"></div>` : `<div><span>الخصم</span><strong id="pos-discount-summary">${money(discountMoneyObj)}</strong></div>`}<div class="cart-grand-total"><span>الإجمالي المستحق</span><strong id="pos-grand-total">${money(total)}</strong></div></div><div id="pos-input-error" role="alert" style="${hasError ? 'display:block;' : 'display:none;'}margin-bottom:10px;padding:8px 10px;border-radius:8px;background:rgba(190,18,60,0.09);border:1px solid rgba(190,18,60,0.3);color:#be123c;font-size:12px;font-weight:700;">${escapeHtml(errorMessage)}</div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦'], ['SPLIT', 'دفع مجزأ (نقدي + إلكتروني)', '⇄']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}" ${(mustStartShift || isCheckoutLocked) ? 'disabled' : ''}><span>${mark}</span>${label}</button>`).join('')}</div>${splitPanel}<button id="checkout-button" class="button button-primary checkout-button ${mustStartShift ? 'checkout-button-locked' : ''}" ${(!mustStartShift && !isCheckoutLocked && state.cart.length && !state.isSaving && !hasError) ? '' : 'disabled'}><span>${mustStartShift ? 'ابدأ الشيفت أولاً' : isCheckoutLocked ? 'بانتظار حسم العملية المعلقة' : 'إتمام البيع'}</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
 }
 
 function supplierModal(html, formId, endpoint, convert = (data) => data, successMessage = 'تم حفظ الحركة في سجل التاجر') {
@@ -6853,6 +6980,16 @@ async function showThermalReceiptModal(saleId) {
                   <span>المدفوع:</span>
                   <span>${money(receipt.paidTotal)}</span>
                 </div>
+                ${Array.isArray(receipt.payments) && receipt.payments.length > 0 ? `
+                  <div style="margin:4px 0 6px;padding-right:8px;border-right:2px solid var(--line);display:grid;gap:2px;">
+                    ${receipt.payments.map((p) => `
+                      <div class="thermal-total-row" style="font-size:11.5px;color:var(--muted);">
+                        <span>• ${escapeHtml(methodLabel(p.method))}:</span>
+                        <strong>${money(p.amount)}</strong>
+                      </div>
+                    `).join('')}
+                  </div>
+                ` : ''}
                 <div class="thermal-total-row">
                   <span>المتبقي (الباقي):</span>
                   <span>${money(receipt.changeGiven)}</span>
@@ -8619,7 +8756,33 @@ function showPosProductPickerModal(product) {
   }));
 }
 
+function syncPosSplitInputsOnTotalChange() {
+  if (state.paymentMethod !== 'SPLIT' || !state.cart.length) return;
+  const { decimals, totalMinor } = computePosCartState();
+  if (totalMinor <= 0n) return;
+  try {
+    if (state.splitLastEdited === 'electronic' && String(state.splitElectronicRaw ?? '').trim()) {
+      const elec = BigInt(toMinor(state.splitElectronicRaw, decimals));
+      if (elec > 0n && elec < totalMinor) {
+        state.splitCashRaw = minorToDecimalInput(totalMinor - elec, decimals);
+        const cashInput = document.querySelector('#pos-split-cash');
+        if (cashInput && document.activeElement !== cashInput) cashInput.value = state.splitCashRaw;
+      }
+      return;
+    }
+    if (String(state.splitCashRaw ?? '').trim()) {
+      const cash = BigInt(toMinor(state.splitCashRaw, decimals));
+      if (cash > 0n && cash < totalMinor) {
+        state.splitElectronicRaw = minorToDecimalInput(totalMinor - cash, decimals);
+        const elecInput = document.querySelector('#pos-split-electronic');
+        if (elecInput && document.activeElement !== elecInput) elecInput.value = state.splitElectronicRaw;
+      }
+    }
+  } catch { /* wait for valid input */ }
+}
+
 function syncPosTotalsDom() {
+  syncPosSplitInputsOnTotalChange();
   const cartState = computePosCartState();
   const { currency, decimals, subtotalMinor, discountMinor, totalMinor, totalPieces, errorMessage, hasError } = cartState;
   const piecesEl = document.querySelector('#pos-total-pieces');
@@ -8635,7 +8798,7 @@ function syncPosTotalsDom() {
   if (checkoutBtn) {
     const strong = checkoutBtn.querySelector('strong');
     if (strong) strong.textContent = money({ amount: totalMinor.toString(), currency, decimals });
-    checkoutBtn.disabled = Boolean(!state.data?.activeShift || !state.cart.length || state.isSaving || hasError);
+    checkoutBtn.disabled = Boolean(!state.data?.activeShift || state.pendingCheckout || !state.cart.length || state.isSaving || hasError);
   }
   if (errEl) {
     errEl.textContent = errorMessage;
@@ -8652,14 +8815,24 @@ function syncPosTotalsDom() {
 }
 
 function bindPos() {
+  const isCheckoutLocked = Boolean(state.pendingCheckout);
   const search = document.querySelector('#pos-search');
-  if (search && document.activeElement?.tagName !== 'INPUT') {
+  if (search && !isCheckoutLocked && document.activeElement?.tagName !== 'INPUT') {
     search.focus();
   }
-  search?.addEventListener('input', (event) => { state.query = event.target.value; const cursor = event.target.selectionStart; render(); const next = document.querySelector('#pos-search'); next?.focus(); next?.setSelectionRange(cursor, cursor); });
+  search?.addEventListener('input', (event) => {
+    if (state.pendingCheckout) return;
+    state.query = event.target.value;
+    const cursor = event.target.selectionStart;
+    render();
+    const next = document.querySelector('#pos-search');
+    next?.focus();
+    next?.setSelectionRange(cursor, cursor);
+  });
   search?.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter') return;
     event.preventDefault();
+    if (state.pendingCheckout) return;
     const term = event.target.value.trim().toLowerCase();
     if (!term) {
       search.focus();
@@ -8688,10 +8861,12 @@ function bindPos() {
     }
   });
   document.querySelectorAll('[data-pos-cat]').forEach((chip) => chip.addEventListener('click', () => {
+    if (state.pendingCheckout) return;
     state.posCategory = chip.dataset.posCat || null;
     render();
   }));
   document.querySelectorAll('[data-pick-product]').forEach((button) => button.addEventListener('click', () => {
+    if (state.pendingCheckout) return;
     const product = state.data.products.find((item) => item.id === button.dataset.pickProduct);
     if (!product) return;
     const matrix = extractProductMatrix(product);
@@ -8702,6 +8877,7 @@ function bindPos() {
   document.querySelectorAll('[data-qty]').forEach((button) => button.addEventListener('click', () => changeQuantity(button.dataset.qty, Number(button.dataset.delta))));
   document.querySelectorAll('[data-qty-input]').forEach((input) => {
     input.addEventListener('input', () => {
+      if (state.pendingCheckout) return;
       const item = state.cart.find((l) => l.variantId === input.dataset.qtyInput);
       if (!item) return;
       state.cartIdempotencyKey = null;
@@ -8727,6 +8903,7 @@ function bindPos() {
   });
   const discountInput = document.querySelector('#pos-discount-input');
   discountInput?.addEventListener('input', () => {
+    if (state.pendingCheckout) return;
     state.cartIdempotencyKey = null;
     state.cartDiscountRaw = discountInput.value;
     syncPosTotalsDom();
@@ -8739,14 +8916,84 @@ function bindPos() {
       if (cartState.hasError) toast(cartState.errorMessage, 'error');
     }
   });
-  document.querySelectorAll('[data-remove]').forEach((button) => button.addEventListener('click', () => { state.cartIdempotencyKey = null; state.cart = state.cart.filter((item) => item.variantId !== button.dataset.remove); if (!state.cart.length) state.cartDiscountRaw = ''; render(); }));
-  document.querySelector('#clear-cart')?.addEventListener('click', () => { state.cart = []; state.cartDiscountRaw = ''; state.cartIdempotencyKey = null; render(); });
-  document.querySelectorAll('[data-method]').forEach((button) => button.addEventListener('click', () => {
-    if (state.paymentMethod !== button.dataset.method) state.cartIdempotencyKey = null;
-    state.paymentMethod = button.dataset.method;
+  document.querySelectorAll('[data-remove]').forEach((button) => button.addEventListener('click', () => {
+    if (state.pendingCheckout) return;
+    state.cartIdempotencyKey = null;
+    state.cart = state.cart.filter((item) => item.variantId !== button.dataset.remove);
+    if (!state.cart.length) {
+      state.cartDiscountRaw = '';
+      state.splitCashRaw = '';
+      state.splitElectronicRaw = '';
+    }
     render();
   }));
-  document.querySelector('#checkout-button')?.addEventListener('click', doCheckout);
+  document.querySelector('#clear-cart')?.addEventListener('click', () => {
+    if (state.pendingCheckout) return;
+    state.cart = [];
+    state.cartDiscountRaw = '';
+    state.splitCashRaw = '';
+    state.splitElectronicRaw = '';
+    state.cartIdempotencyKey = null;
+    render();
+  });
+  document.querySelectorAll('[data-method]').forEach((button) => button.addEventListener('click', () => {
+    if (state.pendingCheckout) return;
+    const nextMethod = button.dataset.method;
+    if (state.paymentMethod !== nextMethod) state.cartIdempotencyKey = null;
+    state.paymentMethod = nextMethod;
+    if (nextMethod === 'SPLIT' && state.cart.length) {
+      const { decimals, totalMinor } = computePosCartState();
+      if (!String(state.splitCashRaw ?? '').trim() && !String(state.splitElectronicRaw ?? '').trim() && totalMinor > 1n) {
+        const cashHalf = totalMinor / 2n;
+        const elecHalf = totalMinor - cashHalf;
+        state.splitLastEdited = 'cash';
+        state.splitCashRaw = minorToDecimalInput(cashHalf, decimals);
+        state.splitElectronicRaw = minorToDecimalInput(elecHalf, decimals);
+      }
+    }
+    render();
+  }));
+  const splitCashInput = document.querySelector('#pos-split-cash');
+  splitCashInput?.addEventListener('input', () => {
+    if (state.pendingCheckout) return;
+    state.cartIdempotencyKey = null;
+    state.splitLastEdited = 'cash';
+    state.splitCashRaw = splitCashInput.value;
+    syncPosTotalsDom();
+  });
+  const splitElecInput = document.querySelector('#pos-split-electronic');
+  splitElecInput?.addEventListener('input', () => {
+    if (state.pendingCheckout) return;
+    state.cartIdempotencyKey = null;
+    state.splitLastEdited = 'electronic';
+    state.splitElectronicRaw = splitElecInput.value;
+    syncPosTotalsDom();
+  });
+  document.querySelector('#pos-split-elec-method')?.addEventListener('change', (ev) => {
+    if (state.pendingCheckout) return;
+    state.cartIdempotencyKey = null;
+    state.splitElectronicMethod = ev.currentTarget.value === 'MOBILE' ? 'MOBILE' : 'CARD';
+  });
+  document.querySelector('#retry-pending-checkout-btn')?.addEventListener('click', () => void doCheckout(true));
+  document.querySelector('#discard-pending-checkout-btn')?.addEventListener('click', async () => {
+    if (state.isSaving) return;
+    const accepted = await showConfirmModal({
+      title: 'تجاهل الفاتورة المعلّقة',
+      message: 'تأكد من مراجعة صفحة المبيعات أولاً للتأكد من عدم حفظ الفاتورة مسبقاً. هل تريد مسح الفاتورة المعلقة وإفراغ السلة الآن؟',
+      confirmText: 'نعم، مسح السلة',
+      cancelText: 'إلغاء',
+      danger: true,
+    });
+    if (!accepted) return;
+    clearPendingCheckoutStorage();
+    state.cart = [];
+    state.cartDiscountRaw = '';
+    state.splitCashRaw = '';
+    state.splitElectronicRaw = '';
+    render();
+    toast('تم مسح العملية المعلقة');
+  });
+  document.querySelector('#checkout-button')?.addEventListener('click', () => void doCheckout(false));
   document.querySelector('#pos-start-shift-now-btn')?.addEventListener('click', () => {
     showStartShiftModal();
   });
@@ -8759,6 +9006,10 @@ function bindPos() {
 }
 
 function addToCart(variantId) {
+  if (state.pendingCheckout) {
+    toast('السلة مقفلة بسبب وجود عملية بيع معلقة — أعد المحاولة أو راجع الفواتير أولاً', 'error');
+    return;
+  }
   if (!state.data?.activeShift) {
     toast('يجب بدء الشيفت أولاً قبل إجراء أي عملية بيع', 'error');
     showStartShiftModal();
@@ -8788,6 +9039,7 @@ function addToCart(variantId) {
 }
 
 function changeQuantity(variantId, delta) {
+  if (state.pendingCheckout) return;
   const item = state.cart.find((line) => line.variantId === variantId);
   if (!item) return;
   const curQty = (item.rawQuantity !== undefined && !/^[1-9]\d{0,5}$/.test(String(item.rawQuantity).trim())) ? item.quantity : Number(item.rawQuantity ?? item.quantity);
@@ -8796,44 +9048,94 @@ function changeQuantity(variantId, delta) {
   item.rawQuantity = undefined;
   item.quantity = curQty + delta;
   if (item.quantity < 1) state.cart = state.cart.filter((line) => line.variantId !== variantId);
-  if (!state.cart.length) state.cartDiscountRaw = '';
+  if (!state.cart.length) {
+    state.cartDiscountRaw = '';
+    state.splitCashRaw = '';
+    state.splitElectronicRaw = '';
+  }
   render();
 }
 
-async function doCheckout() {
+async function doCheckout(isPendingRetry = false) {
   if (!state.data?.activeShift) {
     toast('يجب بدء الشيفت أولاً قبل إجراء أي عملية بيع', 'error');
     showStartShiftModal();
     return;
   }
-  if (!state.cart.length || state.isSaving) return;
-  const cartState = computePosCartState();
-  if (cartState.hasError) {
-    syncPosTotalsDom();
-    toast(cartState.errorMessage, 'error');
+  if (state.isSaving) return;
+  if (state.pendingCheckout && !isPendingRetry) {
+    toast('توجد عملية بيع معلقة غير مؤكدة — استخدم زر إعادة المحاولة بنفس الفاتورة', 'error');
     return;
   }
-  const button = document.querySelector('#checkout-button');
-  if (button) button.disabled = true;
-  state.isSaving = true;
-  if (!state.cartIdempotencyKey) {
-    state.cartIdempotencyKey = crypto.randomUUID();
-  }
-  const currentKey = state.cartIdempotencyKey;
-  try {
+
+  let pendingRecord = state.pendingCheckout;
+  if (!isPendingRetry) {
+    if (!state.cart.length) return;
+    const cartState = computePosCartState();
+    if (cartState.hasError) {
+      syncPosTotalsDom();
+      toast(cartState.errorMessage, 'error');
+      return;
+    }
+    try {
+      await requireMutationConfirmation('إتمام عملية البيع وتحديث المخزون والدرج');
+    } catch (confirmErr) {
+      if (!confirmErr?.isCancelled) toast(confirmErr.message, 'error');
+      return;
+    }
+    const idempotencyKey = state.cartIdempotencyKey || crypto.randomUUID();
+    state.cartIdempotencyKey = idempotencyKey;
     const payload = {
       storeId: state.data.selectedStoreId,
-      idempotencyKey: currentKey,
+      idempotencyKey,
       items: state.cart.map((item) => ({ variantId: item.variantId, quantity: String(item.quantity) })),
-      payment: { method: state.paymentMethod, amount: cartState.totalMinor.toString() },
     };
+    if (state.paymentMethod === 'SPLIT') {
+      payload.payments = [
+        { method: 'CASH', amountMinor: cartState.splitCashMinor.toString() },
+        { method: state.splitElectronicMethod, amountMinor: cartState.splitElectronicMinor.toString() },
+      ];
+    } else {
+      payload.payment = { method: state.paymentMethod, amount: cartState.totalMinor.toString() };
+    }
     if (cartState.discountMinor > 0n) {
       payload.cartDiscount = cartState.discountMinor.toString();
     }
-    const result = await api('/api/checkout', { method: 'POST', body: JSON.stringify(payload) });
+    pendingRecord = {
+      idempotencyKey,
+      storeId: state.data.selectedStoreId,
+      payload,
+      cart: state.cart.map((item) => ({ ...item })),
+      cartDiscountRaw: state.cartDiscountRaw,
+      paymentMethod: state.paymentMethod,
+      splitCashRaw: state.splitCashRaw,
+      splitElectronicRaw: state.splitElectronicRaw,
+      splitElectronicMethod: state.splitElectronicMethod,
+      splitLastEdited: state.splitLastEdited,
+      status: 'submitting',
+      createdAt: new Date().toISOString(),
+      lastError: '',
+    };
+  } else if (!pendingRecord) {
+    return;
+  } else {
+    pendingRecord = { ...pendingRecord, status: 'submitting' };
+  }
+
+  savePendingCheckoutToStorage(pendingRecord);
+  state.isSaving = true;
+  render();
+  try {
+    const result = await api('/api/checkout', {
+      method: 'POST',
+      skipConfirm: true,
+      body: JSON.stringify(pendingRecord.payload),
+    });
+    clearPendingCheckoutStorage();
     state.cart = [];
     state.cartDiscountRaw = '';
-    state.cartIdempotencyKey = null;
+    state.splitCashRaw = '';
+    state.splitElectronicRaw = '';
     state.isSaving = false;
     invalidateFinancialCaches();
     state.salesHistoryTotal = undefined;
@@ -8841,21 +9143,28 @@ async function doCheckout() {
     await loadData(state.data.selectedStoreId);
     state.page = 'pos';
     render();
-    toast(`تم حفظ الفاتورة ${result.saleNumber} بنجاح`); void showThermalReceiptModal(result.id);
+    toast(`تم حفظ الفاتورة ${result.saleNumber} بنجاح`);
+    void showThermalReceiptModal(result.id);
   } catch (error) {
     state.isSaving = false;
     const isClientRejection = !error?.isCancelled && Number.isInteger(error?.status) && error.status >= 400 && error.status < 500;
-    const isAmbiguousFailure = !error?.isCancelled && (!Number.isInteger(error?.status) || error.status >= 500);
     if (isClientRejection) {
-      state.cartIdempotencyKey = null;
+      clearPendingCheckoutStorage();
       await loadData(state.data.selectedStoreId).catch(() => {});
       for (const item of state.cart) {
         const latestProd = state.data?.products?.find((p) => p.variants?.some((v) => v.id === item.variantId));
         const latestVar = latestProd?.variants?.find((v) => v.id === item.variantId);
         if (latestVar) item.available = latestVar.quantity;
       }
+      toast(error.message, 'error');
+    } else {
+      savePendingCheckoutToStorage({
+        ...pendingRecord,
+        status: 'ambiguous',
+        lastError: error.message,
+      });
+      toast(`${error.message} — تم قفل السلة وحفظ المفتاح لإعادة المحاولة بأمان`, 'error');
     }
-    toast(isAmbiguousFailure ? `${error.message} — يمكنك إعادة المحاولة بأمان بنفس المفتاح دون تكرار الفاتورة` : error.message, 'error');
     render();
   }
 }
