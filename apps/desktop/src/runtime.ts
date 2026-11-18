@@ -1,10 +1,18 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import {
+  createHash,
+  createHmac,
+  createPublicKey,
+  randomBytes,
+  timingSafeEqual,
+  verify,
+} from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
-import { join, resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
+import { EMBEDDED_LICENSE_PUBLIC_KEY_PEM } from '@retailos/infrastructure';
 
 export const DEFAULT_DESKTOP_PORT = 3210;
 
@@ -143,6 +151,7 @@ export function buildServerProcessEnv(
     RETAILOS_BACKUP_DIR: paths.backupDir,
   };
   delete nextEnv.RETAILOS_WATERMARK_SECRET;
+  delete nextEnv.RETAILOS_DAILY_BACKUP_KEY;
   delete nextEnv.RETAILOS_TEST_LICENSE_PUBLIC_KEY;
   delete nextEnv.RETAILOS_TEST_CLOCK_FILE;
   if (options?.runAsNode) {
@@ -161,18 +170,38 @@ export interface SafeStorageAdapter {
   decryptString(encrypted: Buffer): string;
 }
 
-/**
- * Generates (once per install) and protects the per-install license watermark HMAC key
- * in `<userData>/license-watermark.bin` via Windows DPAPI (`safeStorage`) when available.
- */
-export async function resolveOrCreateDesktopWatermarkSecret(options: {
+const DPAPI_REQUIRED_ERROR_AR =
+  'تعذر تهيئة الحماية الآمنة لنظام التشغيل (Windows DPAPI غير متاح). لا يمكن تشغيل النظام بأمان دون تشفير مفاتيح التفعيل والنسخ الاحتياطي.';
+
+export const CLOCK_ADVANCE_STDOUT_PREFIX = '__RETAILOS_CLOCK_ADVANCE__:';
+
+function shouldFailClosedOnMissingDpapi(requireDpapi?: boolean): boolean {
+  if (typeof requireDpapi === 'boolean') {
+    return requireDpapi;
+  }
+  return process.platform === 'win32' && process.env.NODE_ENV === 'production';
+}
+
+async function atomicWriteFile(filePath: string, data: Buffer | string, mode = 0o600): Promise<void> {
+  const tempPath = `${filePath}.tmp-${randomBytes(6).toString('hex')}`;
+  await writeFile(tempPath, data, typeof data === 'string' ? { encoding: 'utf8', mode } : { mode });
+  await rename(tempPath, filePath);
+}
+
+async function resolveOrCreateDpapiSecret(options: {
   readonly userDataDir: string;
+  readonly dpapiFilename: string;
+  readonly fallbackFilename: string;
+  readonly encoding: 'hex' | 'base64url';
+  readonly pattern: RegExp;
   readonly safeStorage?: SafeStorageAdapter | undefined;
+  readonly requireDpapi?: boolean | undefined;
+  readonly legacyPlaintextKeyPath?: string | undefined;
 }): Promise<string> {
   const userDataDir = resolve(options.userDataDir);
   await mkdir(userDataDir, { recursive: true });
-  const dpapiFilePath = join(userDataDir, 'license-watermark.bin');
-  const fallbackKeyPath = join(userDataDir, '.retailos-watermark.key');
+  const dpapiFilePath = join(userDataDir, options.dpapiFilename);
+  const fallbackKeyPath = join(userDataDir, options.fallbackFilename);
   const dpapi = options.safeStorage;
 
   if (dpapi && dpapi.isEncryptionAvailable()) {
@@ -180,29 +209,298 @@ export async function resolveOrCreateDesktopWatermarkSecret(options: {
       try {
         const encrypted = await readFile(dpapiFilePath);
         const decrypted = dpapi.decryptString(encrypted).trim();
-        if (/^[0-9a-f]{64}$/i.test(decrypted)) {
+        if (options.pattern.test(decrypted)) {
           return decrypted;
         }
       } catch {
-        // Corrupted or foreign DPAPI blob: fall through to create a fresh key;
-        // any pre-existing SQLite watermark will immediately fail HMAC verification -> CLOCK_TAMPERED.
+        // Corrupted or foreign DPAPI blob: generate fresh secret below (existing SQLite HMAC fails closed).
       }
     }
-    const generated = randomBytes(32).toString('hex');
-    const encryptedBlob = dpapi.encryptString(generated);
-    await writeFile(dpapiFilePath, encryptedBlob, { mode: 0o600 });
-    return generated;
+
+    let secretToSeal: string | null = null;
+    if (options.legacyPlaintextKeyPath && existsSync(options.legacyPlaintextKeyPath)) {
+      try {
+        const legacy = (await readFile(options.legacyPlaintextKeyPath, 'utf8')).trim();
+        if (options.pattern.test(legacy)) {
+          secretToSeal = legacy;
+          await rm(options.legacyPlaintextKeyPath, { force: true }).catch(() => undefined);
+        }
+      } catch {
+        secretToSeal = null;
+      }
+    }
+    const finalSecret = secretToSeal ?? randomBytes(32).toString(options.encoding);
+    const encryptedBlob = dpapi.encryptString(finalSecret);
+    await atomicWriteFile(dpapiFilePath, encryptedBlob);
+    return finalSecret;
+  }
+
+  if (shouldFailClosedOnMissingDpapi(options.requireDpapi)) {
+    throw new Error(DPAPI_REQUIRED_ERROR_AR);
   }
 
   if (existsSync(fallbackKeyPath)) {
     const existing = (await readFile(fallbackKeyPath, 'utf8')).trim();
-    if (/^[0-9a-f]{64}$/i.test(existing)) {
+    if (options.pattern.test(existing)) {
       return existing;
     }
   }
-  const generated = randomBytes(32).toString('hex');
-  await writeFile(fallbackKeyPath, `${generated}\n`, { encoding: 'utf8', mode: 0o600 });
+  const generated = randomBytes(32).toString(options.encoding);
+  await atomicWriteFile(fallbackKeyPath, `${generated}\n`);
   return generated;
+}
+
+/**
+ * Generates (once per install) and protects the per-install license watermark HMAC key
+ * in `<userData>/license-watermark.bin` via Windows DPAPI (`safeStorage`).
+ * Fails closed on Windows production if DPAPI is unavailable.
+ */
+export function resolveOrCreateDesktopWatermarkSecret(options: {
+  readonly userDataDir: string;
+  readonly safeStorage?: SafeStorageAdapter | undefined;
+  readonly requireDpapi?: boolean | undefined;
+}): Promise<string> {
+  return resolveOrCreateDpapiSecret({
+    userDataDir: options.userDataDir,
+    dpapiFilename: 'license-watermark.bin',
+    fallbackFilename: '.retailos-watermark.key',
+    encoding: 'hex',
+    pattern: /^[0-9a-f]{64}$/i,
+    safeStorage: options.safeStorage,
+    requireDpapi: options.requireDpapi,
+  });
+}
+
+/**
+ * Generates (once per install) and protects the automatic daily backup passphrase
+ * in `<userData>/daily-backup.bin` via Windows DPAPI (`safeStorage`).
+ */
+export function resolveOrCreateDesktopDailyBackupSecret(options: {
+  readonly userDataDir: string;
+  readonly safeStorage?: SafeStorageAdapter | undefined;
+  readonly requireDpapi?: boolean | undefined;
+  readonly legacyPlaintextKeyPath?: string | undefined;
+}): Promise<string> {
+  return resolveOrCreateDpapiSecret({
+    userDataDir: options.userDataDir,
+    dpapiFilename: 'daily-backup.bin',
+    fallbackFilename: '.retailos-daily.key',
+    encoding: 'base64url',
+    pattern: /^.{12,256}$/,
+    safeStorage: options.safeStorage,
+    requireDpapi: options.requireDpapi,
+    legacyPlaintextKeyPath: options.legacyPlaintextKeyPath,
+  });
+}
+
+function computeExternalClockHmac(watermarkSecret: string, clockMs: number): string {
+  return createHmac('sha256', Buffer.from(watermarkSecret, 'utf8'))
+    .update(`RetailOS-External-Clock-v1:${String(clockMs)}`)
+    .digest('hex');
+}
+
+export interface ExternalClockReadResult {
+  readonly clockMs: number | null;
+  readonly tampered: boolean;
+}
+
+export async function readExternalClockWatermark(options: {
+  readonly userDataDir: string;
+  readonly watermarkSecret: string;
+  readonly safeStorage?: SafeStorageAdapter | undefined;
+  readonly requireDpapi?: boolean | undefined;
+}): Promise<ExternalClockReadResult> {
+  const clockFilePath = join(resolve(options.userDataDir), 'license-clock.dat');
+  if (!existsSync(clockFilePath)) {
+    return { clockMs: null, tampered: false };
+  }
+
+  const dpapi = options.safeStorage;
+  if (shouldFailClosedOnMissingDpapi(options.requireDpapi) && (!dpapi || !dpapi.isEncryptionAvailable())) {
+    throw new Error(DPAPI_REQUIRED_ERROR_AR);
+  }
+
+  try {
+    const rawBytes = await readFile(clockFilePath);
+    const jsonText =
+      dpapi && dpapi.isEncryptionAvailable()
+        ? dpapi.decryptString(rawBytes)
+        : rawBytes.toString('utf8');
+    const parsed = JSON.parse(jsonText) as Record<string, unknown>;
+    const clockMs = parsed?.clockMs;
+    const hmac = parsed?.hmac;
+    if (
+      typeof clockMs !== 'number' ||
+      !globalThis.Number.isSafeInteger(clockMs) ||
+      clockMs <= 0 ||
+      typeof hmac !== 'string'
+    ) {
+      return { clockMs: null, tampered: true };
+    }
+    const expected = computeExternalClockHmac(options.watermarkSecret, clockMs);
+    const actualBuf = Buffer.from(hmac, 'utf8');
+    const expectedBuf = Buffer.from(expected, 'utf8');
+    if (actualBuf.length !== expectedBuf.length || !timingSafeEqual(actualBuf, expectedBuf)) {
+      return { clockMs: null, tampered: true };
+    }
+    return { clockMs, tampered: false };
+  } catch {
+    return { clockMs: null, tampered: true };
+  }
+}
+
+export async function writeExternalClockWatermark(options: {
+  readonly userDataDir: string;
+  readonly watermarkSecret: string;
+  readonly clockMs: number;
+  readonly safeStorage?: SafeStorageAdapter | undefined;
+  readonly requireDpapi?: boolean | undefined;
+}): Promise<void> {
+  if (!globalThis.Number.isSafeInteger(options.clockMs) || options.clockMs <= 0) {
+    return;
+  }
+
+  const dpapi = options.safeStorage;
+  if (shouldFailClosedOnMissingDpapi(options.requireDpapi) && (!dpapi || !dpapi.isEncryptionAvailable())) {
+    throw new Error(DPAPI_REQUIRED_ERROR_AR);
+  }
+
+  const existing = await readExternalClockWatermark({
+    userDataDir: options.userDataDir,
+    watermarkSecret: options.watermarkSecret,
+    safeStorage: options.safeStorage,
+    requireDpapi: options.requireDpapi,
+  });
+  if (existing.tampered) {
+    // Do not overwrite an already tampered external clock file automatically.
+    return;
+  }
+  if (existing.clockMs !== null && existing.clockMs >= options.clockMs) {
+    return;
+  }
+
+  await mkdir(resolve(options.userDataDir), { recursive: true });
+  const clockFilePath = join(resolve(options.userDataDir), 'license-clock.dat');
+  const payload = JSON.stringify({
+    clockMs: options.clockMs,
+    hmac: computeExternalClockHmac(options.watermarkSecret, options.clockMs),
+  });
+  const encoded: Buffer | string =
+    dpapi && dpapi.isEncryptionAvailable() ? dpapi.encryptString(payload) : payload;
+  await atomicWriteFile(clockFilePath, encoded);
+}
+
+async function listRuntimeCodeFiles(dirPath: string, baseDir = dirPath, acc: string[] = []): Promise<string[]> {
+  const entries = await readdir(dirPath, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name === 'node_modules' || entry.name === 'integrity-manifest.json') {
+      continue;
+    }
+    const fullPath = join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      await listRuntimeCodeFiles(fullPath, baseDir, acc);
+      continue;
+    }
+    if (
+      entry.name.endsWith('.mjs') ||
+      entry.name.endsWith('.js') ||
+      entry.name.endsWith('.html')
+    ) {
+      acc.push(fullPath.slice(baseDir.length + 1).replace(/\\/g, '/'));
+    }
+  }
+  return acc;
+}
+
+export async function verifyStagedRuntimeIntegrity(options: {
+  readonly webDir: string;
+  readonly publicKeyPem?: string | undefined;
+  readonly requireManifest?: boolean | undefined;
+}): Promise<{ readonly checked: boolean; readonly verifiedFiles: number }> {
+  const webDir = resolve(options.webDir);
+  const manifestPath = join(webDir, 'integrity-manifest.json');
+  if (!existsSync(manifestPath)) {
+    if (options.requireManifest) {
+      throw new Error('ملف التحقق من سلامة البرنامج (integrity-manifest.json) مفقود');
+    }
+    return { checked: false, verifiedFiles: 0 };
+  }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>;
+  } catch {
+    throw new Error('تعذر قراءة ملف التحقق من سلامة البرنامج (integrity-manifest.json)');
+  }
+
+  if (
+    parsed.version !== 1 ||
+    parsed.algorithm !== 'sha256' ||
+    !parsed.files ||
+    typeof parsed.files !== 'object' ||
+    Array.isArray(parsed.files) ||
+    typeof parsed.signature !== 'string'
+  ) {
+    throw new Error('تنسيق ملف التحقق من سلامة البرنامج (integrity-manifest.json) غير صالح');
+  }
+
+  const rawFiles = parsed.files as Record<string, unknown>;
+  const sortedKeys = Object.keys(rawFiles).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  if (!sortedKeys.includes('server.mjs')) {
+    throw new Error('ملف التحقق من سلامة البرنامج يفتقد الملف الأساسي للخادم');
+  }
+
+  const sortedFiles: Record<string, string> = {};
+  for (const key of sortedKeys) {
+    const val = rawFiles[key];
+    if (typeof val !== 'string' || !/^[0-9a-f]{64}$/i.test(val)) {
+      throw new Error(`قيمة البصمة الرقمية غير صالحة للملف: ${key}`);
+    }
+    sortedFiles[key] = val.toLowerCase();
+  }
+
+  const canonicalPayload = JSON.stringify({
+    version: 1,
+    algorithm: 'sha256',
+    files: sortedFiles,
+  });
+  const pubKey = createPublicKey((options.publicKeyPem ?? EMBEDDED_LICENSE_PUBLIC_KEY_PEM).trim());
+  const sigBytes = Buffer.from(parsed.signature, 'base64url');
+  const signatureOk = verify(
+    null,
+    Buffer.from(`ROS-MANIFEST-V1:${canonicalPayload}`, 'utf8'),
+    pubKey,
+    sigBytes,
+  );
+  if (!signatureOk) {
+    throw new Error('تم العبث بملفات التشغيل: التوقيع الرقمي لـ integrity-manifest.json غير مطابق');
+  }
+
+  for (const relPath of sortedKeys) {
+    const resolvedTarget = resolve(webDir, relPath);
+    if (!resolvedTarget.startsWith(`${webDir}${sep}`) && resolvedTarget !== webDir) {
+      throw new Error(`مسار ملف غير مسموح في manifest: ${relPath}`);
+    }
+    if (!existsSync(resolvedTarget)) {
+      throw new Error(`تم حذف ملف تشغيل أساسي: ${relPath}`);
+    }
+    const actualHash = createHash('sha256')
+      .update(await readFile(resolvedTarget))
+      .digest('hex')
+      .toLowerCase();
+    if (actualHash !== sortedFiles[relPath]) {
+      throw new Error(`تم تعديل ملف تشغيل محمي (${relPath}) وتوقفت الحماية عن الإقلاع`);
+    }
+  }
+
+  const diskCodeFiles = await listRuntimeCodeFiles(webDir);
+  for (const relFile of diskCodeFiles) {
+    if (!Object.prototype.hasOwnProperty.call(sortedFiles, relFile)) {
+      throw new Error(`تم رصد ملف برمجي غير موقّع داخل حزمة التشغيل: ${relFile}`);
+    }
+  }
+
+  return { checked: true, verifiedFiles: sortedKeys.length };
 }
 
 export async function isPortFreeOnLoopback(port: number): Promise<boolean> {
@@ -469,6 +767,10 @@ export function startManagedServerChild(options: {
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
   readonly watermarkSecret: string;
+  readonly dailyBackupSecret?: string | undefined;
+  readonly externalClockMs?: number | null | undefined;
+  readonly externalClockTampered?: boolean | undefined;
+  readonly onClockAdvance?: ((clockMs: number) => void) | undefined;
 }): { readonly child: ChildProcess; readonly logs: string[] } {
   const logs: string[] = [];
   const appendLog = (chunk: Buffer | string) => {
@@ -484,14 +786,44 @@ export function startManagedServerChild(options: {
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });
-  child.stdout?.on('data', appendLog);
+
+  let stdoutBuffer = '';
+  child.stdout?.on('data', (chunk: Buffer | string) => {
+    stdoutBuffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+    let newlineIndex = stdoutBuffer.indexOf('\n');
+    while (newlineIndex !== -1) {
+      const line = stdoutBuffer.slice(0, newlineIndex).replace(/\r$/, '');
+      stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+      if (line.startsWith(CLOCK_ADVANCE_STDOUT_PREFIX)) {
+        const rawDigits = line.slice(CLOCK_ADVANCE_STDOUT_PREFIX.length).trim();
+        if (/^\d{10,16}$/.test(rawDigits)) {
+          const parsedMs = globalThis.Number.parseInt(rawDigits, 10);
+          if (globalThis.Number.isSafeInteger(parsedMs) && parsedMs > 0) {
+            options.onClockAdvance?.(parsedMs);
+          }
+        }
+      } else if (line.length > 0) {
+        appendLog(`${line}\n`);
+      }
+      newlineIndex = stdoutBuffer.indexOf('\n');
+    }
+  });
   child.stderr?.on('data', appendLog);
 
   if (!child.stdin) {
     throw new Error('Failed to open private stdin pipe for RetailOS watermark secret');
   }
   child.stdin.on('error', () => undefined);
-  child.stdin.write(`${JSON.stringify({ watermarkSecret: options.watermarkSecret })}\n`);
+  child.stdin.write(
+    `${JSON.stringify({
+      watermarkSecret: options.watermarkSecret,
+      ...(options.dailyBackupSecret ? { dailyBackupSecret: options.dailyBackupSecret } : {}),
+      ...(typeof options.externalClockMs === 'number' && options.externalClockMs > 0
+        ? { externalClockMs: options.externalClockMs }
+        : {}),
+      ...(options.externalClockTampered ? { externalClockTampered: true } : {}),
+    })}\n`,
+  );
   child.stdin.end();
 
   return { child, logs };

@@ -31,6 +31,7 @@ import * as customerReturnExchangeFlag from './migrations/025_customer_return_ex
 import * as accountingCashBasisAndSupplierInvoiceIndex from './migrations/026_accounting_cash_basis_and_supplier_invoice_index.js';
 import * as supplierRefunds from './migrations/027_supplier_refunds.js';
 import * as systemLicensing from './migrations/028_system_licensing.js';
+import * as systemLicensingGuard from './migrations/029_system_licensing_guard.js';
 
 const MIGRATION_REGISTRY: Record<string, Migration> = {
   '001_initial_foundation': {
@@ -144,6 +145,10 @@ const MIGRATION_REGISTRY: Record<string, Migration> = {
   '028_system_licensing': {
     up: systemLicensing.up,
     down: systemLicensing.down,
+  },
+  '029_system_licensing_guard': {
+    up: systemLicensingGuard.up,
+    down: systemLicensingGuard.down,
   },
 };
 

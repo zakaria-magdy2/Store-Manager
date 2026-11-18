@@ -19,12 +19,16 @@ import {
   DEFAULT_DESKTOP_PORT,
   type DesktopDataPaths,
   type DesktopWindowSecurityPolicy,
+  readExternalClockWatermark,
   resolveAvailableLoopbackPort,
   resolveDesktopDataPaths,
+  resolveOrCreateDesktopDailyBackupSecret,
   resolveOrCreateDesktopWatermarkSecret,
   startManagedServerChild,
   stopManagedServerProcess,
+  verifyStagedRuntimeIntegrity,
   waitForServerReady,
+  writeExternalClockWatermark,
 } from './runtime.js';
 
 const CHANNELS = Object.freeze({
@@ -55,6 +59,7 @@ let desktopPaths: DesktopDataPaths | null = null;
 let activeSecurityPolicy: DesktopWindowSecurityPolicy | null = null;
 let quitHandled = false;
 let shutdownInFlight: Promise<void> | null = null;
+let pendingClockPersist: Promise<void> = Promise.resolve();
 let webContentsGuardInstalled = false;
 const trustedPopupWebContentsIds = new Set<number>();
 
@@ -112,6 +117,7 @@ async function shutdownServerOnce(): Promise<void> {
         origin: serverOrigin,
       });
     }
+    await pendingClockPersist.catch(() => undefined);
     serverChild = null;
   })();
   return shutdownInFlight;
@@ -311,12 +317,28 @@ async function bootDesktopApplication(): Promise<void> {
   const desktopVersion = app.getVersion();
   process.env.RETAILOS_DESKTOP_VERSION = desktopVersion;
 
+  const requireDpapi = process.platform === 'win32' && (app.isPackaged || process.env.NODE_ENV === 'production');
+  const serverScriptPath = resolveWebServerScriptPath();
+  await verifyStagedRuntimeIntegrity({ webDir: dirname(serverScriptPath) });
+
   const watermarkSecret = await resolveOrCreateDesktopWatermarkSecret({
     userDataDir: paths.userDataDir,
     safeStorage,
+    requireDpapi,
+  });
+  const dailyBackupSecret = await resolveOrCreateDesktopDailyBackupSecret({
+    userDataDir: paths.userDataDir,
+    safeStorage,
+    requireDpapi,
+    legacyPlaintextKeyPath: join(paths.dataDir, '.retailos-daily.key'),
+  });
+  const externalClock = await readExternalClockWatermark({
+    userDataDir: paths.userDataDir,
+    watermarkSecret,
+    safeStorage,
+    requireDpapi,
   });
 
-  const serverScriptPath = resolveWebServerScriptPath();
   const childEnv = buildServerProcessEnv(process.env, paths, port, {
     runAsNode: true,
     desktopVersion,
@@ -328,6 +350,22 @@ async function bootDesktopApplication(): Promise<void> {
     cwd: dirname(serverScriptPath),
     env: childEnv,
     watermarkSecret,
+    dailyBackupSecret,
+    externalClockMs: externalClock.clockMs,
+    externalClockTampered: externalClock.tampered,
+    onClockAdvance: (nextClockMs) => {
+      pendingClockPersist = pendingClockPersist
+        .then(() =>
+          writeExternalClockWatermark({
+            userDataDir: paths.userDataDir,
+            watermarkSecret,
+            clockMs: nextClockMs,
+            safeStorage,
+            requireDpapi,
+          }),
+        )
+        .catch(() => undefined);
+    },
   });
   serverChild = managed.child;
 

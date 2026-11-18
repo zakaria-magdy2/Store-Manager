@@ -4119,13 +4119,19 @@ test('Production server.mjs ignores env-var license overrides and enforces DB wa
     const dataB = await reqB('/api/data', { cookieStr: cookieB });
     const storeIdB = dataB.payload.stores[0].id;
 
-    // Delete system_licensing row directly in SQLite while audit_logs already exist
+    // Delete system_licensing row directly in SQLite: trigger 029 must block it first;
+    // even if attacker drops the trigger offline, LicenseService still detects missing watermark row -> CLOCK_TAMPERED
     await stopProc(harnessProc);
     harnessProc = null;
 
     const mgr = new SqliteDatabaseManager({ filename: join(dirB, 'retailos.sqlite') });
     mgr.connect();
     try {
+      await assert.rejects(
+        () => mgr.getDb().deleteFrom('system_licensing').execute(),
+        /deletion is forbidden|system_licensing/,
+      );
+      mgr.getRawDatabase().exec('DROP TRIGGER IF EXISTS trg_system_licensing_no_delete');
       await mgr.getDb().deleteFrom('system_licensing').execute();
     } finally {
       await mgr.close();
@@ -4147,5 +4153,193 @@ test('Production server.mjs ignores env-var license overrides and enforces DB wa
   } finally {
     await stopProc(harnessProc);
     await rm(dirB, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test('Hardening regression: external clock rewind protection, /api/auth/* non-exemption, and BigInt stocktake & growth forecast', async () => {
+  const dirC = await mkdtemp(join(appDir, '.test-hardening-c-'));
+  const clockFileC = join(dirC, 'mock-clock.txt');
+  const extClockFileC = join(dirC, 'ext-clock.txt');
+  const baseMs = Date.now();
+  await writeFile(clockFileC, String(baseMs), 'utf8');
+  const portC = await reservePort();
+  const urlC = `http://127.0.0.1:${portC}`;
+  let logC = '';
+
+  const startHarness = async () => {
+    const proc = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
+      cwd: workspace,
+      env: testLicenseEnv({
+        PORT: String(portC),
+        RETAILOS_DATA_DIR: dirC,
+        RETAILOS_TEST_CLOCK_FILE: clockFileC,
+        RETAILOS_TEST_EXTERNAL_CLOCK_FILE: extClockFileC,
+        RETAILOS_COMPANY_NAME: 'شركة التحصين الشامل',
+        RETAILOS_COMPANY_CODE: 'HARDEN_C',
+        RETAILOS_CURRENCY: 'EGP',
+        RETAILOS_STORE_NAME: 'الفرع الرئيسي',
+      }),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    proc.stdout.on('data', (c) => { logC += c.toString(); });
+    proc.stderr.on('data', (c) => { logC += c.toString(); });
+    for (let i = 0; i < 400; i += 1) {
+      if (proc.exitCode !== null) throw new Error(`Harness exited ${proc.exitCode}\n${logC}`);
+      try { if ((await fetch(`${urlC}/api/bootstrap`)).ok) return proc; } catch { /* wait */ }
+      await new Promise((r) => setTimeout(r, 125));
+    }
+    throw new Error(`Harness timeout\n${logC}`);
+  };
+
+  const stopHarness = async (proc) => {
+    if (proc && proc.exitCode === null) {
+      proc.kill('SIGTERM');
+      await Promise.race([once(proc, 'exit'), new Promise((r) => setTimeout(r, 3000))]);
+    }
+  };
+
+  const reqC = async (path, { method = 'GET', body, cookieStr } = {}) => {
+    const headers = { Origin: urlC };
+    if (body) headers['Content-Type'] = 'application/json';
+    if (cookieStr) headers.Cookie = cookieStr;
+    const response = await fetch(`${urlC}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const payload = await response.json();
+    return { response, payload };
+  };
+
+  let procC = await startHarness();
+  try {
+    // 1. P2-06: /api/auth/* is no longer exempt when unlicensed -> returns 402 LICENSE_REQUIRED after auth
+    const setupC = await reqC('/api/setup', {
+      method: 'POST',
+      body: { ownerUsername: 'h_owner', ownerName: 'مالك التحصين', password: 'Harden-C-Password-2026' },
+    });
+    assert.equal(setupC.response.status, 201);
+    const loginC = await reqC('/api/login', {
+      method: 'POST',
+      body: { username: 'h_owner', password: 'Harden-C-Password-2026' },
+    });
+    assert.equal(loginC.response.status, 200);
+    const cookieC = loginC.response.headers.get('set-cookie').split(';')[0];
+
+    const unexemptAuthCheck = await reqC('/api/auth/probe', { method: 'POST', cookieStr: cookieC, body: {} });
+    assert.equal(unexemptAuthCheck.response.status, 402);
+    assert.equal(unexemptAuthCheck.payload.code, 'LICENSE_REQUIRED');
+
+    // 2. Activate, create product + purchase + large BigInt stocktake + sale -> verify pure BigInt forecast/stocktake
+    await activateTestLicense(urlC);
+    const dataC = await reqC('/api/data', { cookieStr: cookieC });
+    const storeIdC = dataC.payload.stores[0].id;
+
+    const prodC = await reqC('/api/products', {
+      method: 'POST',
+      cookieStr: cookieC,
+      body: {
+        name: 'منتج BigInt',
+        sku: 'BIG-001',
+        variants: [{ sku: 'BIG-001-V', retailPrice: '150000', reorderPoint: '0' }],
+      },
+    });
+    assert.equal(prodC.response.status, 201);
+    const afterProdC = await reqC(`/api/data?storeId=${storeIdC}`, { cookieStr: cookieC });
+    const variantIdC = afterProdC.payload.products.find((p) => p.id === prodC.payload.id).variants[0].id;
+
+    const supC = await reqC('/api/suppliers', {
+      method: 'POST',
+      cookieStr: cookieC,
+      body: { name: 'مورد BigInt' },
+    });
+    assert.equal(supC.response.status, 201);
+    const purC = await reqC('/api/purchases', {
+      method: 'POST',
+      cookieStr: cookieC,
+      body: {
+        storeId: storeIdC,
+        supplierId: supC.payload.id,
+        idempotencyKey: randomUUID(),
+        totalAmount: '500000',
+        paidAmount: '500000',
+        paymentMethod: 'BANK_TRANSFER',
+        items: [{ variantId: variantIdC, quantity: '5', unitCost: '100000' }],
+      },
+    });
+    assert.equal(purC.response.status, 201);
+
+    const stkStart = await reqC('/api/stocktakes', {
+      method: 'POST',
+      cookieStr: cookieC,
+      body: { storeId: storeIdC, title: 'جرد BigInt', scope: 'FULL' },
+    });
+    assert.equal(stkStart.response.status, 201);
+    const stkId = stkStart.payload.session.id;
+    const lineId = stkStart.payload.lines[0].id;
+    const countRes = await reqC(`/api/stocktakes/${stkId}/lines`, {
+      method: 'PATCH',
+      cookieStr: cookieC,
+      body: { lines: [{ lineId, countedQuantity: 6, overrideUnitCost: '100000' }] },
+    });
+    assert.equal(countRes.response.status, 200);
+    const commitRes = await reqC(`/api/stocktakes/${stkId}/commit`, {
+      method: 'POST',
+      cookieStr: cookieC,
+      body: { idempotencyKey: randomUUID(), uncountedStrategy: 'SKIP_UNCOUNTED' },
+    });
+    assert.equal(commitRes.response.status, 200);
+    assert.equal(commitRes.payload.session.totalSurplusCost.amount, '100000');
+    assert.equal(commitRes.payload.session.netVarianceCost.amount, '100000');
+
+    const shiftC = await reqC('/api/shifts/start', {
+      method: 'POST',
+      cookieStr: cookieC,
+      body: { storeId: storeIdC, openingCash: '10000' },
+    });
+    assert.equal(shiftC.response.status, 201);
+
+    const saleC = await reqC('/api/checkout', {
+      method: 'POST',
+      cookieStr: cookieC,
+      body: {
+        storeId: storeIdC,
+        idempotencyKey: randomUUID(),
+        payment: { method: 'CASH', amount: '300000' },
+        items: [{ variantId: variantIdC, quantity: '2' }],
+      },
+    });
+    assert.equal(saleC.response.status, 201);
+
+    const forecastRes = await reqC(`/api/reports/growth-forecast?storeId=${storeIdC}`, { cookieStr: cookieC });
+    assert.equal(forecastRes.response.status, 200);
+    assert.match(String(forecastRes.payload.forecast.projectedRevenue), /^\d+$/);
+
+    // 3. Simulate external DPAPI clock advance (+10 days), then restore an old DB snapshot while clock is at +2 days -> CLOCK_TAMPERED
+    await stopHarness(procC);
+    procC = null;
+    const snapshotDbBytes = await readFile(join(dirC, 'retailos.sqlite'));
+    procC = await startHarness();
+
+    await writeFile(clockFileC, String(baseMs + 10 * 86400000), 'utf8');
+    const advancedStatus = await reqC('/api/license/status');
+    assert.equal(advancedStatus.payload.status, 'ACTIVE');
+
+    await stopHarness(procC);
+    procC = null;
+    await rm(join(dirC, 'retailos.sqlite-wal'), { force: true }).catch(() => {});
+    await rm(join(dirC, 'retailos.sqlite-shm'), { force: true }).catch(() => {});
+    await writeFile(join(dirC, 'retailos.sqlite'), snapshotDbBytes);
+    await writeFile(clockFileC, String(baseMs + 2 * 86400000), 'utf8');
+
+    procC = await startHarness();
+    const rewoundStatus = await reqC('/api/license/status');
+    assert.equal(rewoundStatus.payload.status, 'CLOCK_TAMPERED');
+    const blockedAfterRewind = await reqC('/api/expenses', {
+      method: 'POST',
+      cookieStr: cookieC,
+      body: { storeId: storeIdC, category: 'عامة', amount: '100', expenseDate: cairoDateIso(new Date(baseMs)), description: 'اختبار' },
+    });
+    assert.equal(blockedAfterRewind.response.status, 402);
+    assert.equal(blockedAfterRewind.payload.licenseStatus, 'CLOCK_TAMPERED');
+  } finally {
+    await stopHarness(procC);
+    await rm(dirC, { recursive: true, force: true }).catch(() => {});
   }
 });

@@ -61,9 +61,25 @@ import { z } from 'zod';
 
 const serverFilePath = fileURLToPath(import.meta.url);
 
-async function resolveLicenseWatermarkSecret(providedSecret) {
-  const fromOption = typeof providedSecret === 'string' ? providedSecret.trim() : '';
-  if (fromOption.length >= 32) return fromOption;
+async function resolveHostStartupSecrets(options = {}) {
+  const optWatermark = typeof options.watermarkSecret === 'string' ? options.watermarkSecret.trim() : '';
+  const optDailyBackup = typeof options.dailyBackupSecret === 'string' ? options.dailyBackupSecret.trim() : '';
+  const optExternalClockMs =
+    typeof options.externalWatermarkMs === 'number' &&
+    Number.isSafeInteger(options.externalWatermarkMs) &&
+    options.externalWatermarkMs > 0
+      ? options.externalWatermarkMs
+      : 0;
+  const optExternalTampered = Boolean(options.externalWatermarkTampered);
+
+  if (optWatermark.length >= 32) {
+    return {
+      watermarkSecret: optWatermark,
+      dailyBackupSecret: optDailyBackup.length >= 12 ? optDailyBackup.slice(0, 256) : null,
+      externalClockMs: optExternalClockMs,
+      externalClockTampered: optExternalTampered,
+    };
+  }
 
   if (process.argv.includes('--electron-stdio-secret')) {
     const line = await new Promise((resolvePromise, rejectPromise) => {
@@ -88,7 +104,7 @@ async function resolveLicenseWatermarkSecret(providedSecret) {
       }, 5000);
       const onData = (chunk) => {
         buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-        if (buffer.length > 8192) {
+        if (buffer.length > 16384) {
           finish(new Error('Fatal: RetailOS desktop secret payload exceeded limit'));
           return;
         }
@@ -116,7 +132,22 @@ async function resolveLicenseWatermarkSecret(providedSecret) {
       const parsed = JSON.parse(line);
       const parsedSecret = typeof parsed?.watermarkSecret === 'string' ? parsed.watermarkSecret.trim() : '';
       if (parsedSecret.length >= 32) {
-        return parsedSecret;
+        const parsedDaily =
+          typeof parsed?.dailyBackupSecret === 'string' && parsed.dailyBackupSecret.trim().length >= 12
+            ? parsed.dailyBackupSecret.trim().slice(0, 256)
+            : null;
+        const parsedExtClock =
+          typeof parsed?.externalClockMs === 'number' &&
+          Number.isSafeInteger(parsed.externalClockMs) &&
+          parsed.externalClockMs > 0
+            ? parsed.externalClockMs
+            : 0;
+        return {
+          watermarkSecret: parsedSecret,
+          dailyBackupSecret: parsedDaily,
+          externalClockMs: parsedExtClock,
+          externalClockTampered: Boolean(parsed?.externalClockTampered),
+        };
       }
     } catch {
       // Fall through to fail-closed error below
@@ -128,7 +159,10 @@ async function resolveLicenseWatermarkSecret(providedSecret) {
 }
 
 export async function createServerApp(options = {}) {
-const watermarkSecret = await resolveLicenseWatermarkSecret(options.watermarkSecret);
+const hostSecrets = await resolveHostStartupSecrets(options);
+const watermarkSecret = hostSecrets.watermarkSecret;
+let dailyBackupSecret = hostSecrets.dailyBackupSecret;
+let latestExternalClockMs = hostSecrets.externalClockMs;
 const appDir = dirname(serverFilePath);
 const publicDir = resolve(appDir, 'public');
 const defaultDataDir = appDir.endsWith(`${sep}dist`) ? resolve(appDir, '..', 'data') : join(appDir, 'data');
@@ -159,6 +193,9 @@ await mkdir(preRestoreBackupDir, { recursive: true });
 const restoredAfterCrash = await recoverPendingSqliteRestore(dataDir, databasePath, companyConfig.code);
 
 function resolveDailyBackupPassphraseSync() {
+  if (typeof dailyBackupSecret === 'string' && dailyBackupSecret.length >= 12) {
+    return dailyBackupSecret;
+  }
   const envKey = (process.env.RETAILOS_DAILY_BACKUP_KEY ?? '').trim();
   if (envKey.length >= 12) return envKey.slice(0, 256);
   if (existsSync(dailyBackupKeyPath)) {
@@ -167,6 +204,7 @@ function resolveDailyBackupPassphraseSync() {
   }
   const generated = randomBytes(32).toString('base64url');
   writeFileSync(dailyBackupKeyPath, `${generated}\n`, { encoding: 'utf8', mode: 0o600 });
+  dailyBackupSecret = generated;
   return generated;
 }
 
@@ -333,6 +371,17 @@ const returns = new SqliteReturnRepository(db);
 const licenseService = new LicenseService(db, {
   publicKeyPem: typeof options.licensePublicKey === 'string' ? options.licensePublicKey : undefined,
   watermarkSecret,
+  externalWatermarkMs: latestExternalClockMs,
+  externalWatermarkTampered: hostSecrets.externalClockTampered,
+  onWatermarkAdvance: (clockMs) => {
+    if (clockMs > latestExternalClockMs) {
+      latestExternalClockMs = clockMs;
+      if (process.argv.includes('--electron-stdio-secret')) {
+        process.stdout.write(`__RETAILOS_CLOCK_ADVANCE__:${String(clockMs)}\n`);
+      }
+      options.onWatermarkAdvance?.(clockMs);
+    }
+  },
   nowProvider: typeof options.nowProvider === 'function' ? options.nowProvider : undefined,
 });
 await licenseService.getStatus();
@@ -1046,7 +1095,15 @@ function customerReturnFilterSql({ tenantId, storeId, bounds = null, search = ''
 const MAX_FAILED_LOGINS = 6;
 const MAX_FAILED_PASSWORD_CHANGES = 5;
 const LOCK_WINDOW_MS = 10 * 60 * 1000;
+const BASE_LOGIN_BACKOFF_MS = 30 * 1000;
+const MAX_LOGIN_BACKOFF_MS = 60 * 1000;
 const MAX_FAILED_KEYS = 2000;
+
+function computeLoginBackoffMs(failureCount) {
+  if (failureCount < MAX_FAILED_LOGINS) return 0;
+  const exp = Math.min(2, failureCount - MAX_FAILED_LOGINS);
+  return Math.min(MAX_LOGIN_BACKOFF_MS, BASE_LOGIN_BACKOFF_MS * (2 ** exp));
+}
 
 function getAuthFailures(scope, key) {
   const row = database.getRawDatabase().prepare('SELECT count, started_at AS startedAt FROM auth_rate_limits WHERE scope = ? AND key = ?').get(scope, key);
@@ -1058,7 +1115,9 @@ function recordAuthFailure(scope, key, windowMs = LOCK_WINDOW_MS) {
   const current = getAuthFailures(scope, key);
   const inWindow = now - current.startedAt < windowMs;
   const nextCount = (inWindow ? current.count : 0) + 1;
-  const nextStart = inWindow ? current.startedAt : now;
+  const nextStart = scope === 'login' && nextCount >= MAX_FAILED_LOGINS
+    ? now
+    : (inWindow ? current.startedAt : now);
   database.getRawDatabase().prepare(`
     INSERT INTO auth_rate_limits (scope, key, count, started_at) VALUES (?, ?, ?, ?)
     ON CONFLICT(scope, key) DO UPDATE SET count = excluded.count, started_at = excluded.started_at
@@ -1445,10 +1504,10 @@ async function syncStocktakeDraftTotals(conn, sessionId, tenantId, storeId) {
       total_lines: rows.length,
       counted_lines: countedLines,
       total_variance_qty: totalVarianceQty,
-      total_surplus_cost: Number(totalSurplusCost),
-      total_shortage_cost: Number(totalShortageCost),
-      net_variance_cost: Number(netVarianceCost),
-      net_variance_retail: Number(netVarianceRetail),
+      total_surplus_cost: totalSurplusCost,
+      total_shortage_cost: totalShortageCost,
+      net_variance_cost: netVarianceCost,
+      net_variance_retail: netVarianceRetail,
       updated_at: new Date().toISOString(),
     })
     .where('id', '=', sessionId)
@@ -3271,16 +3330,24 @@ async function growthForecastReport(ctx, url) {
     ? dailyRunRateMinor * BigInt(daysInCurrentMonth)
     : curRevenue;
 
-  let growthPercent = 0;
+  let growthBps = 0n;
   if (prevRevenue > 0n) {
-    growthPercent = Number((projectedMonthEndRevenueMinor - prevRevenue) * 10000n / prevRevenue) / 100;
+    growthBps = ((projectedMonthEndRevenueMinor - prevRevenue) * 10000n) / prevRevenue;
   } else if (curRevenue > 0n) {
-    growthPercent = 100;
+    growthBps = 10000n;
   }
+  const growthPercent = Number(growthBps) / 100;
 
-  const trendFactor = Math.max(-0.2, Math.min(0.4, (growthPercent / 100) * 0.5));
-  const projectedNextMonthMinor = BigInt(Math.round(Number(projectedMonthEndRevenueMinor) * (1 + trendFactor)));
-  const nextMonthGrowthPercent = Number(Math.round(trendFactor * 1000) / 10);
+  const rawTrendBps = growthBps / 2n;
+  const clampedTrendBps = rawTrendBps < -2000n ? -2000n : rawTrendBps > 4000n ? 4000n : rawTrendBps;
+  const numerator = projectedMonthEndRevenueMinor * (10000n + clampedTrendBps);
+  const projectedNextMonthMinor = numerator >= 0n
+    ? (numerator + 5000n) / 10000n
+    : (numerator - 5000n) / 10000n;
+  const roundedTenths = clampedTrendBps >= 0n
+    ? (clampedTrendBps + 5n) / 10n
+    : (clampedTrendBps - 5n) / 10n;
+  const nextMonthGrowthPercent = Number(roundedTenths) / 10;
 
   const arMonths = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
   const curMonthName = `${arMonths[currentMonth - 1]} ${currentYear}`;
@@ -3826,7 +3893,6 @@ const LicenseActivateSchema = z.object({
 
 function isLicenseExemptMutationPath(path) {
   if (path.startsWith('/api/license/')) return true;
-  if (path.startsWith('/api/auth/')) return true;
   if (path.startsWith('/api/backups/')) return true;
   return (
     path === '/api/login' ||
@@ -4300,8 +4366,11 @@ async function handleApi(req, res, url) {
     const normalizedUsername = body.username.trim().toLowerCase();
     const key = normalizedUsername;
     const failures = getAuthFailures('login', key);
-    if (Date.now() - failures.startedAt < LOCK_WINDOW_MS && failures.count >= MAX_FAILED_LOGINS) {
-      throw Object.assign(new Error('محاولات كثيرة. انتظر عشر دقائق ثم حاول مرة أخرى.'), { status: 429 });
+    const loginCooldownMs = computeLoginBackoffMs(failures.count);
+    const elapsedMs = Date.now() - failures.startedAt;
+    if (loginCooldownMs > 0 && elapsedMs < loginCooldownMs) {
+      const waitSeconds = Math.max(1, Math.ceil((loginCooldownMs - elapsedMs) / 1000));
+      throw Object.assign(new Error(`محاولات كثيرة. انتظر ${waitSeconds} ثانية ثم حاول مرة أخرى.`), { status: 429 });
     }
     try {
       const session = await auth.login({ tenantCode: state.companyCode, username: body.username, password: body.password });
@@ -6673,10 +6742,10 @@ async function handleApi(req, res, url) {
           total_lines: eligibleVariants.length,
           counted_lines: 0,
           total_variance_qty: 0,
-          total_surplus_cost: 0,
-          total_shortage_cost: 0,
-          net_variance_cost: 0,
-          net_variance_retail: 0,
+          total_surplus_cost: 0n,
+          total_shortage_cost: 0n,
+          net_variance_cost: 0n,
+          net_variance_retail: 0n,
           journal_entry_id: null,
           created_by_user_id: ctx.userId,
           committed_by_user_id: null,
@@ -7244,8 +7313,8 @@ async function handleApi(req, res, url) {
             .set({
               committed_expected_quantity: liveQty,
               committed_variance_qty: 0,
-              committed_variance_cost: 0,
-              committed_unit_cost: Number(unitCostMinor),
+              committed_variance_cost: 0n,
+              committed_unit_cost: unitCostMinor,
               updated_at: nowIso,
             })
             .where('id', '=', line.id)
@@ -7291,8 +7360,8 @@ async function handleApi(req, res, url) {
             last_counted_at: line.last_counted_at ?? nowIso,
             committed_expected_quantity: liveQty,
             committed_variance_qty: delta,
-            committed_variance_cost: Number(lineCostVariance),
-            committed_unit_cost: Number(unitCostMinor),
+            committed_variance_cost: lineCostVariance,
+            committed_unit_cost: unitCostMinor,
             updated_at: nowIso,
           })
           .where('id', '=', line.id)
@@ -7349,10 +7418,10 @@ async function handleApi(req, res, url) {
           total_lines: lineRows.length,
           counted_lines: countedLines,
           total_variance_qty: totalVarianceQty,
-          total_surplus_cost: Number(surplusCostTotal),
-          total_shortage_cost: Number(shortageCostTotal),
-          net_variance_cost: Number(netVarianceCost),
-          net_variance_retail: Number(netVarianceRetail),
+          total_surplus_cost: surplusCostTotal,
+          total_shortage_cost: shortageCostTotal,
+          net_variance_cost: netVarianceCost,
+          net_variance_retail: netVarianceRetail,
           journal_entry_id: journalEntryId,
           committed_by_user_id: ctx.userId,
           committed_at: nowIso,
@@ -7517,7 +7586,11 @@ function restartLocalServer() {
         windowsHide: true,
       });
       child.stdin?.on('error', () => undefined);
-      child.stdin?.write(`${JSON.stringify({ watermarkSecret })}\n`);
+      child.stdin?.write(`${JSON.stringify({
+        watermarkSecret,
+        ...(dailyBackupSecret ? { dailyBackupSecret } : {}),
+        ...(latestExternalClockMs > 0 ? { externalClockMs: latestExternalClockMs } : {}),
+      })}\n`);
       child.stdin?.end();
       child.unref();
       setTimeout(() => process.exit(0), 250);

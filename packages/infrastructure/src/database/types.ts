@@ -386,10 +386,10 @@ export interface StocktakeSessionsTable {
   total_lines: number;
   counted_lines: number;
   total_variance_qty: number;
-  total_surplus_cost: number;
-  total_shortage_cost: number;
-  net_variance_cost: number;
-  net_variance_retail: number;
+  total_surplus_cost: bigint;
+  total_shortage_cost: bigint;
+  net_variance_cost: bigint;
+  net_variance_retail: bigint;
   journal_entry_id: string | null;
   created_by_user_id: string;
   committed_by_user_id: string | null;
@@ -420,8 +420,8 @@ export interface StocktakeLinesTable {
   reason: string | null;
   committed_expected_quantity: number | null;
   committed_variance_qty: number | null;
-  committed_variance_cost: number | null;
-  committed_unit_cost: number | null;
+  committed_variance_cost: bigint | null;
+  committed_unit_cost: bigint | null;
   last_counted_at: string | null;
   created_at: string;
   updated_at: string;

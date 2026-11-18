@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -21,12 +22,16 @@ import {
   DESKTOP_IPC_CHANNELS,
   DesktopHostSupervisor,
   isProcessAlive,
+  readExternalClockWatermark,
   resolveAvailableLoopbackPort,
   resolveDesktopDataPaths,
+  resolveOrCreateDesktopDailyBackupSecret,
   resolveOrCreateDesktopWatermarkSecret,
   startManagedServerChild,
   stopManagedServerProcess,
+  verifyStagedRuntimeIntegrity,
   waitForServerReady,
+  writeExternalClockWatermark,
 } from '../dist/index.js';
 
 test('createDesktopWindowSecurityPolicy enforces loopback origin, sandbox flags, and IPC channel whitelist', () => {
@@ -308,9 +313,17 @@ test('resolveOrCreateDesktopWatermarkSecret persists DPAPI-sealed secret and bui
     assert.equal(secret2, secret1);
 
     const paths = resolveDesktopDataPaths(tempUserData);
+    const dailySecret = await resolveOrCreateDesktopDailyBackupSecret({
+      userDataDir: tempUserData,
+      safeStorage: fakeDpapi,
+    });
+    assert.ok(dailySecret.length >= 32);
+    assert.equal(existsSync(join(tempUserData, 'daily-backup.bin')), true);
+
     const childEnv = buildServerProcessEnv(
       {
         RETAILOS_WATERMARK_SECRET: secret1,
+        RETAILOS_DAILY_BACKUP_KEY: dailySecret,
         RETAILOS_TEST_LICENSE_PUBLIC_KEY: 'should-be-stripped',
         RETAILOS_TEST_CLOCK_FILE: 'should-be-stripped',
       },
@@ -319,10 +332,118 @@ test('resolveOrCreateDesktopWatermarkSecret persists DPAPI-sealed secret and bui
       { runAsNode: true, desktopVersion: '0.1.0' },
     );
     assert.equal(childEnv.RETAILOS_WATERMARK_SECRET, undefined);
+    assert.equal(childEnv.RETAILOS_DAILY_BACKUP_KEY, undefined);
     assert.equal(childEnv.RETAILOS_TEST_LICENSE_PUBLIC_KEY, undefined);
     assert.equal(childEnv.RETAILOS_TEST_CLOCK_FILE, undefined);
     assert.equal(childEnv.NODE_ENV, 'production');
+
+    // Fail closed when DPAPI is required on Windows production and unavailable
+    await assert.rejects(
+      () =>
+        resolveOrCreateDesktopWatermarkSecret({
+          userDataDir: tempUserData,
+          requireDpapi: true,
+        }),
+      /DPAPI/,
+    );
+    await assert.rejects(
+      () =>
+        resolveOrCreateDesktopDailyBackupSecret({
+          userDataDir: tempUserData,
+          requireDpapi: true,
+        }),
+      /DPAPI/,
+    );
+
+    // External DPAPI monotonic clock file: monotonic write, reject rewind, detect corruption
+    const t1 = Date.parse('2026-11-18T10:00:00.000Z');
+    const t2 = Date.parse('2026-11-19T10:00:00.000Z');
+    await writeExternalClockWatermark({
+      userDataDir: tempUserData,
+      watermarkSecret: secret1,
+      clockMs: t2,
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+    });
+    await writeExternalClockWatermark({
+      userDataDir: tempUserData,
+      watermarkSecret: secret1,
+      clockMs: t1,
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+    });
+    const clockRead = await readExternalClockWatermark({
+      userDataDir: tempUserData,
+      watermarkSecret: secret1,
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+    });
+    assert.deepEqual(clockRead, { clockMs: t2, tampered: false });
+
+    await writeFile(join(tempUserData, 'license-clock.dat'), Buffer.from('corrupt-blob'));
+    const tamperedRead = await readExternalClockWatermark({
+      userDataDir: tempUserData,
+      watermarkSecret: secret1,
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+    });
+    assert.deepEqual(tamperedRead, { clockMs: null, tampered: true });
   } finally {
     await rm(tempUserData, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('verifyStagedRuntimeIntegrity validates Ed25519 manifest and rejects tampered or unmanifested files', async () => {
+  const tempWebDir = await mkdtemp(join(tmpdir(), 'retailos-manifest-'));
+  try {
+    const { publicKey, privateKey } = generateKeyPairSync('ed25519', {
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    });
+    const publicKeyPem = String(publicKey);
+    const privateKeyPem = String(privateKey);
+
+    await writeFile(join(tempWebDir, 'server.mjs'), 'console.log("server");\n', 'utf8');
+    await writeFile(join(tempWebDir, 'index.html'), '<html><body>ok</body></html>\n', 'utf8');
+
+    const files = {
+      'index.html': createHash('sha256')
+        .update('<html><body>ok</body></html>\n', 'utf8')
+        .digest('hex'),
+      'server.mjs': createHash('sha256').update('console.log("server");\n', 'utf8').digest('hex'),
+    };
+    const canonical = JSON.stringify({ version: 1, algorithm: 'sha256', files });
+    const sig = sign(null, Buffer.from(`ROS-MANIFEST-V1:${canonical}`, 'utf8'), privateKeyPem).toString(
+      'base64url',
+    );
+    await writeFile(
+      join(tempWebDir, 'integrity-manifest.json'),
+      JSON.stringify({ version: 1, algorithm: 'sha256', files, signature: sig }, null, 2),
+      'utf8',
+    );
+
+    const ok = await verifyStagedRuntimeIntegrity({
+      webDir: tempWebDir,
+      publicKeyPem,
+      requireManifest: true,
+    });
+    assert.deepEqual(ok, { checked: true, verifiedFiles: 2 });
+
+    // Dropping an unmanifested .mjs file must fail immediately
+    await writeFile(join(tempWebDir, 'injected.mjs'), 'evil();\n', 'utf8');
+    await assert.rejects(
+      () => verifyStagedRuntimeIntegrity({ webDir: tempWebDir, publicKeyPem, requireManifest: true }),
+      /غير موقّع/,
+    );
+    await rm(join(tempWebDir, 'injected.mjs'), { force: true });
+
+    // Modifying server.mjs must fail immediately
+    await writeFile(join(tempWebDir, 'server.mjs'), 'console.log("tampered");\n', 'utf8');
+    await assert.rejects(
+      () => verifyStagedRuntimeIntegrity({ webDir: tempWebDir, publicKeyPem, requireManifest: true }),
+      /تم تعديل ملف تشغيل/,
+    );
+  } finally {
+    await rm(tempWebDir, { recursive: true, force: true }).catch(() => undefined);
   }
 });

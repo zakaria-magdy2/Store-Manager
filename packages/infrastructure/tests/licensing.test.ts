@@ -1,4 +1,5 @@
 import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { sql } from 'kysely';
 import { describe, expect, it } from 'vitest';
 import { MACHINE_ID_PATTERN } from '@retailos/core';
 import {
@@ -341,7 +342,11 @@ describe('Offline Hardware-Locked Ed25519 Licensing Engine', () => {
       currentNow = Date.parse('2026-11-20T12:05:00.000Z');
       expect((await service.getStatus()).status).toBe('ACTIVE');
 
-      // 2. Deleting the system_licensing row while sales exist must NOT silently recreate watermark -> CLOCK_TAMPERED
+      // 2. Migration 029 trigger blocks SQLite DELETE on system_licensing; even if trigger is dropped offline, missing row -> CLOCK_TAMPERED
+      await expect(db.deleteFrom('system_licensing').execute()).rejects.toThrow(
+        /deletion is forbidden|system_licensing/,
+      );
+      await sql`DROP TRIGGER IF EXISTS trg_system_licensing_no_delete;`.execute(db);
       await db.deleteFrom('system_licensing').execute();
       const deletedRowStatus = await service.getStatus();
       expect(deletedRowStatus.status).toBe('CLOCK_TAMPERED');
@@ -372,6 +377,65 @@ describe('Offline Hardware-Locked Ed25519 Licensing Engine', () => {
       } finally {
         await dbManager2.close();
       }
+    } finally {
+      await dbManager.close();
+    }
+  });
+
+  it('prevents backup-restore clock rewind via external DPAPI watermark floor', async () => {
+    const dbManager = new SqliteDatabaseManager({ filename: ':memory:' });
+    dbManager.connect();
+    try {
+      const db = dbManager.getDb();
+      await new DatabaseMigrator(db).migrateToLatest();
+
+      const { publicKey, privateKey } = createTestKeyPair();
+      const machineId = deriveMachineIdFromSeed('machine-backup-rewind');
+      const watermarkSecret = 'd'.repeat(64);
+      const token = signTestToken(privateKey, {
+        customerName: 'متجر النسخ',
+        machineId,
+        issuedAt: '2026-11-01T00:00:00.000Z',
+        expiresAt: '2027-11-01T00:00:00.000Z',
+        planName: 'سنوية',
+      });
+
+      // DB represents an older backup taken on Nov 18
+      let nowMs = Date.parse('2026-11-18T10:00:00.000Z');
+      const backupTimeService = new LicenseService(db, {
+        publicKeyPem: publicKey,
+        watermarkSecret,
+        machineIdOverride: machineId,
+        nowProvider: () => nowMs,
+      });
+      await backupTimeService.activate(token);
+
+      // Simulate restoring that Nov 18 backup on Nov 20 while external DPAPI watermark reached Nov 25
+      const externalNov25 = Date.parse('2026-11-25T10:00:00.000Z');
+      let capturedAdvance = 0;
+      nowMs = Date.parse('2026-11-20T10:00:00.000Z');
+      const rewoundService = new LicenseService(db, {
+        publicKeyPem: publicKey,
+        watermarkSecret,
+        externalWatermarkMs: externalNov25,
+        onWatermarkAdvance: (ms) => {
+          capturedAdvance = ms;
+        },
+        machineIdOverride: machineId,
+        nowProvider: () => nowMs,
+      });
+
+      expect((await rewoundService.getStatus()).status).toBe('CLOCK_TAMPERED');
+      await expect(rewoundService.assertOperationalAccess()).rejects.toMatchObject({
+        status: 402,
+        licenseStatus: 'CLOCK_TAMPERED',
+      });
+      await expect(rewoundService.activate(token)).rejects.toMatchObject({ status: 400 });
+
+      // When system clock is legitimate (Nov 26 >= external Nov 25), status returns ACTIVE and advances DB & external clock
+      nowMs = Date.parse('2026-11-26T10:00:00.000Z');
+      expect((await rewoundService.getStatus()).status).toBe('ACTIVE');
+      expect(capturedAdvance).toBe(nowMs);
     } finally {
       await dbManager.close();
     }

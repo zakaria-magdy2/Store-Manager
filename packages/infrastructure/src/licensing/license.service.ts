@@ -57,6 +57,9 @@ export class LicenseEnforcementError extends Error {
 export interface LicenseServiceOptions {
   readonly publicKeyPem?: string | undefined;
   readonly watermarkSecret?: string | undefined;
+  readonly externalWatermarkMs?: number | undefined;
+  readonly externalWatermarkTampered?: boolean | undefined;
+  readonly onWatermarkAdvance?: ((clockMs: number) => void) | undefined;
   readonly machineIdOverride?: string | undefined;
   readonly nowProvider?: (() => number) | undefined;
 }
@@ -65,6 +68,9 @@ export class LicenseService {
   private readonly publicKeyPem: string;
   private readonly publicKey: KeyObject;
   private readonly watermarkSecret: string;
+  private externalWatermarkMs: number;
+  private readonly externalWatermarkTampered: boolean;
+  private readonly onWatermarkAdvance: ((clockMs: number) => void) | undefined;
   private readonly machineId: string;
   private readonly nowProvider: () => number;
 
@@ -79,8 +85,26 @@ export class LicenseService {
       providedSecret && providedSecret.length >= 32
         ? providedSecret
         : randomBytes(32).toString('hex');
+    const initialExtMs = options?.externalWatermarkMs;
+    this.externalWatermarkMs =
+      typeof initialExtMs === 'number' && globalThis.Number.isFinite(initialExtMs) && initialExtMs > 0
+        ? initialExtMs
+        : 0;
+    this.externalWatermarkTampered = Boolean(options?.externalWatermarkTampered);
+    this.onWatermarkAdvance = options?.onWatermarkAdvance;
     this.machineId = options?.machineIdOverride ?? getMachineId();
     this.nowProvider = options?.nowProvider ?? (() => Date.now());
+  }
+
+  public getExternalWatermarkMs(): number {
+    return this.externalWatermarkMs;
+  }
+
+  private recordWatermarkAdvance(clockMs: number): void {
+    if (clockMs > this.externalWatermarkMs) {
+      this.externalWatermarkMs = clockMs;
+      this.onWatermarkAdvance?.(clockMs);
+    }
   }
 
   public getMachineId(): string {
@@ -124,6 +148,15 @@ export class LicenseService {
 
   public async getStatus(): Promise<LicenseEvaluation> {
     const nowMs = this.nowProvider();
+    if (this.externalWatermarkTampered) {
+      return this.buildEvaluation(
+        'CLOCK_TAMPERED',
+        null,
+        nowMs,
+        'تم رصد عبث بملف توثيق التوقيت الخارجي للنظام',
+      );
+    }
+
     const ledgerBaseline = await this.getOperationalLedgerBaseline();
     const row = await this.ensureWatermarkRow(nowMs, ledgerBaseline);
 
@@ -138,14 +171,14 @@ export class LicenseService {
 
     const token = row.activation_token?.trim() || null;
     const hmacValid = this.isWatermarkHmacValid(row);
+    const effectiveWatermarkMs = Math.max(
+      row.last_verified_clock_ms,
+      this.externalWatermarkMs,
+      ledgerBaseline.maxTimestampMs ?? 0,
+    );
 
     if (!token) {
-      if (
-        !hmacValid ||
-        nowMs + CLOCK_SKEW_TOLERANCE_MS < row.last_verified_clock_ms ||
-        (ledgerBaseline.maxTimestampMs !== null &&
-          nowMs + CLOCK_SKEW_TOLERANCE_MS < ledgerBaseline.maxTimestampMs)
-      ) {
+      if (!hmacValid || nowMs + CLOCK_SKEW_TOLERANCE_MS < effectiveWatermarkMs) {
         return this.buildEvaluation(
           'CLOCK_TAMPERED',
           null,
@@ -153,9 +186,11 @@ export class LicenseService {
           'تم رصد تلاعب في تاريخ وساعة الجهاز أو سجل التوقيت',
         );
       }
-      if (nowMs > row.last_verified_clock_ms) {
-        await this.updateWatermarkRow(null, nowMs);
+      const nextWatermarkMs = Math.max(nowMs, row.last_verified_clock_ms, this.externalWatermarkMs);
+      if (nextWatermarkMs > row.last_verified_clock_ms) {
+        await this.updateWatermarkRow(null, nextWatermarkMs);
       }
+      this.recordWatermarkAdvance(nextWatermarkMs);
       return this.buildEvaluation('UNLICENSED', null, nowMs, 'البرنامج غير مفعّل على هذا الجهاز');
     }
 
@@ -181,13 +216,7 @@ export class LicenseService {
       );
     }
 
-    const latestRecordedClockMs =
-      ledgerBaseline.maxTimestampMs !== null &&
-      ledgerBaseline.maxTimestampMs > row.last_verified_clock_ms
-        ? ledgerBaseline.maxTimestampMs
-        : row.last_verified_clock_ms;
-
-    if (!hmacValid || nowMs + CLOCK_SKEW_TOLERANCE_MS < latestRecordedClockMs) {
+    if (!hmacValid || nowMs + CLOCK_SKEW_TOLERANCE_MS < effectiveWatermarkMs) {
       return this.buildEvaluation(
         'CLOCK_TAMPERED',
         payload,
@@ -196,11 +225,13 @@ export class LicenseService {
       );
     }
 
+    const nextWatermarkMs = Math.max(nowMs, row.last_verified_clock_ms, this.externalWatermarkMs);
     const expiresMs = Date.parse(payload.expiresAt);
     if (nowMs >= expiresMs) {
-      if (nowMs > row.last_verified_clock_ms) {
-        await this.updateWatermarkRow(token, nowMs);
+      if (nextWatermarkMs > row.last_verified_clock_ms) {
+        await this.updateWatermarkRow(token, nextWatermarkMs);
       }
+      this.recordWatermarkAdvance(nextWatermarkMs);
       return this.buildEvaluation(
         'EXPIRED',
         payload,
@@ -209,9 +240,10 @@ export class LicenseService {
       );
     }
 
-    if (nowMs > row.last_verified_clock_ms) {
-      await this.updateWatermarkRow(token, nowMs);
+    if (nextWatermarkMs > row.last_verified_clock_ms) {
+      await this.updateWatermarkRow(token, nextWatermarkMs);
     }
+    this.recordWatermarkAdvance(nextWatermarkMs);
 
     return this.buildEvaluation('ACTIVE', payload, nowMs, null);
   }
@@ -219,6 +251,13 @@ export class LicenseService {
   public async activate(rawToken: string): Promise<LicenseEvaluation> {
     const trimmed = rawToken.trim();
     const nowMs = this.nowProvider();
+    if (this.externalWatermarkTampered) {
+      throw Object.assign(
+        new Error('تم رصد عبث بملف توثيق التوقيت الخارجي ولا يمكن التفعيل قبل إصلاحه'),
+        { status: 400 },
+      );
+    }
+
     const ledgerBaseline = await this.getOperationalLedgerBaseline();
     const existingRow = await this.ensureWatermarkRow(nowMs, ledgerBaseline);
 
@@ -243,11 +282,11 @@ export class LicenseService {
       );
     }
 
-    // Enforce monotonic high-watermark across both the watermark row and recorded business ledger.
+    // Enforce monotonic high-watermark across SQLite row, external DPAPI clock, and operational ledger.
     const existingWatermarkValid = this.isWatermarkHmacValid(existingRow);
     const watermarkBaseline = existingWatermarkValid ? existingRow.last_verified_clock_ms : 0;
     const ledgerMax = ledgerBaseline.maxTimestampMs ?? 0;
-    const baselineClockMs = Math.max(watermarkBaseline, ledgerMax, nowMs);
+    const baselineClockMs = Math.max(watermarkBaseline, this.externalWatermarkMs, ledgerMax, nowMs);
 
     if (nowMs + CLOCK_SKEW_TOLERANCE_MS < baselineClockMs) {
       throw Object.assign(
@@ -264,6 +303,7 @@ export class LicenseService {
     }
 
     await this.updateWatermarkRow(trimmed, baselineClockMs);
+    this.recordWatermarkAdvance(baselineClockMs);
     return this.buildEvaluation('ACTIVE', payload, nowMs, null);
   }
 

@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
+import { createHash, sign } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { cp, lstat, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
+import { cp, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -145,6 +146,26 @@ const requiredPaths = [
     'migrations',
     '027_supplier_refunds.js',
   ),
+  join(
+    stageWebDir,
+    'node_modules',
+    '@retailos',
+    'infrastructure',
+    'dist',
+    'database',
+    'migrations',
+    '028_system_licensing.js',
+  ),
+  join(
+    stageWebDir,
+    'node_modules',
+    '@retailos',
+    'infrastructure',
+    'dist',
+    'database',
+    'migrations',
+    '029_system_licensing_guard.js',
+  ),
   join(stageWebDir, 'node_modules', '@retailos', 'application', 'dist', 'index.js'),
   join(stageWebDir, 'node_modules', '@retailos', 'core', 'dist', 'index.js'),
   join(stageWebDir, 'node_modules', '@retailos', 'shared', 'dist', 'index.js'),
@@ -198,5 +219,66 @@ async function assertNoPrivateKeysStaged(dirPath) {
 }
 
 await assertNoPrivateKeysStaged(stageWebDir);
+
+async function collectManifestTargetFiles(dirPath, baseDir = dirPath, acc = []) {
+  const entries = await readdir(dirPath, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name === 'node_modules' || entry.name === 'integrity-manifest.json') {
+      continue;
+    }
+    const fullPath = join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      await collectManifestTargetFiles(fullPath, baseDir, acc);
+      continue;
+    }
+    if (
+      entry.name.endsWith('.mjs') ||
+      entry.name.endsWith('.js') ||
+      entry.name.endsWith('.html')
+    ) {
+      const rel = fullPath.slice(baseDir.length + 1).replace(/\\/g, '/');
+      acc.push({ rel, fullPath });
+    }
+  }
+  return acc;
+}
+
+const manifestPath = join(stageWebDir, 'integrity-manifest.json');
+await rm(manifestPath, { force: true });
+const privateKeyPath = join(workspaceDir, 'tools', 'vendor-keygen', 'keys', 'private.pem');
+if (existsSync(privateKeyPath)) {
+  const targetFiles = await collectManifestTargetFiles(stageWebDir);
+  targetFiles.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+  const files = {};
+  for (const item of targetFiles) {
+    const digest = createHash('sha256')
+      .update(await readFile(item.fullPath))
+      .digest('hex');
+    files[item.rel] = digest;
+  }
+  const canonicalPayload = JSON.stringify({
+    version: 1,
+    algorithm: 'sha256',
+    files,
+  });
+  const privateKeyPem = await readFile(privateKeyPath, 'utf8');
+  const signature = sign(
+    null,
+    Buffer.from(`ROS-MANIFEST-V1:${canonicalPayload}`, 'utf8'),
+    privateKeyPem,
+  ).toString('base64url');
+  await writeFile(
+    manifestPath,
+    `${JSON.stringify({ version: 1, algorithm: 'sha256', files, signature }, null, 2)}\n`,
+    'utf8',
+  );
+  console.log(
+    `Signed runtime integrity manifest (${Object.keys(files).length} files) at ${manifestPath}`,
+  );
+} else {
+  console.log(
+    '[stage-web-runtime] Skipping integrity-manifest signing (local vendor private key not present).',
+  );
+}
 
 console.log(`Staged standalone RetailOS desktop web runtime at ${stageWebDir}`);
