@@ -14,5 +14,9 @@ release/
 .env.local
 apps/web/.test-data-*/
 apps/web/.test-rbac-*/
+apps/web/.test-e2e-*/
+apps/web/.playwright-results/
+apps/web/playwright-report/
+apps/web/test-results/
 apps/web/data/
 apps/desktop/stage/

@@ -7,14 +7,18 @@
     "dev": "node server.mjs",
     "start": "node server.mjs",
     "build": "node build.mjs",
-    "lint": "node --check server.mjs && node --check public/app.js && node --check build.mjs && pnpm exec eslint server.mjs build.mjs public/app.js tests/*.test.mjs --max-warnings 0",
-    "test": "node --test tests/*.test.mjs"
+    "lint": "node --check server.mjs && node --check public/app.js && node --check build.mjs && pnpm exec eslint server.mjs build.mjs public/app.js tests/*.test.mjs tests/*.spec.mjs --max-warnings 0",
+    "test": "node --test tests/*.test.mjs",
+    "test:e2e": "playwright test -c playwright.config.mjs"
   },
   "dependencies": {
-    "@retailos/core": "workspace:*",
-    "@retailos/shared": "workspace:*",
     "@retailos/application": "workspace:*",
+    "@retailos/core": "workspace:*",
     "@retailos/infrastructure": "workspace:*",
+    "@retailos/shared": "workspace:*",
     "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.1"
   }
 }

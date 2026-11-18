@@ -100,7 +100,18 @@ if (existsSync(retailosModDir)) {
 }
 
 // Never bundle live or test databases, tests, build configs, or duplicate web dist artifacts.
-for (const unsafeEntry of ['data', 'tests', 'dist', '.turbo', 'build.mjs', 'pnpm-lock.yaml']) {
+for (const unsafeEntry of [
+  'data',
+  'tests',
+  'dist',
+  '.turbo',
+  '.playwright-results',
+  'playwright-report',
+  'test-results',
+  'build.mjs',
+  'playwright.config.mjs',
+  'pnpm-lock.yaml',
+]) {
   await rm(join(stageWebDir, unsafeEntry), { recursive: true, force: true });
 }
 const rootEntries = await readdir(stageWebDir);
