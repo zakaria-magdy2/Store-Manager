@@ -478,6 +478,14 @@ export interface SupplierRefundsTable {
   created_at: Generated<string>;
 }
 
+export interface SystemLicensingTable {
+  id: number;
+  activation_token: string | null;
+  last_verified_clock_ms: number;
+  clock_hmac: string;
+  updated_at: string;
+}
+
 export interface RetailOSDatabase {
   tenants: TenantsTable;
   stores: StoresTable;
@@ -515,4 +523,5 @@ export interface RetailOSDatabase {
   auth_rate_limits: AuthRateLimitsTable;
   document_sequences: DocumentSequencesTable;
   supplier_refunds: SupplierRefundsTable;
+  system_licensing: SystemLicensingTable;
 }

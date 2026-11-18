@@ -20,3 +20,5 @@ apps/web/playwright-report/
 apps/web/test-results/
 apps/web/data/
 apps/desktop/stage/
+tools/vendor-keygen/
+tools/vendor-keygen/keys/

@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createConnection, createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +25,50 @@ let dataDir;
 let baseUrl;
 let cookie;
 let serverLog = '';
+
+const { publicKey: flowLicensePublicKey, privateKey: flowLicensePrivateKey } =
+  generateKeyPairSync('ed25519');
+const flowLicensePublicKeyPem = flowLicensePublicKey.export({ type: 'spki', format: 'pem' }).toString();
+
+function signFlowLicenseToken(payload, privateKey = flowLicensePrivateKey) {
+  const encodedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const signingInput = `ROS1.${encodedPayload}`;
+  const signature = sign(null, Buffer.from(signingInput, 'utf8'), privateKey).toString('base64url');
+  return `${signingInput}.${signature}`;
+}
+
+function testLicenseEnv(extraEnv) {
+  return {
+    ...process.env,
+    NODE_ENV: 'test',
+    RETAILOS_TEST_LICENSE_PUBLIC_KEY: flowLicensePublicKeyPem,
+    ...extraEnv,
+  };
+}
+
+async function activateTestLicense(url, { days = 365, customerName = 'متجر الاختبار' } = {}) {
+  const statusRes = await fetch(`${url}/api/license/status`);
+  assert.equal(statusRes.status, 200, `License status check failed at ${url}`);
+  const statusBody = await statusRes.json();
+  if (statusBody.status === 'ACTIVE') return statusBody;
+  const now = Date.now();
+  const token = signFlowLicenseToken({
+    licenseId: `TST-${randomUUID().slice(0, 8).toUpperCase()}`,
+    customerName,
+    machineId: statusBody.machineId,
+    issuedAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + days * 24 * 60 * 60 * 1000).toISOString(),
+    planName: 'Test Annual Plan',
+  });
+  const actRes = await fetch(`${url}/api/license/activate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: url },
+    body: JSON.stringify({ token }),
+  });
+  const actBody = await actRes.json();
+  assert.equal(actRes.status, 200, `License activation failed: ${JSON.stringify(actBody)}`);
+  return actBody;
+}
 
 async function reservePort() {
   const probe = createServer();
@@ -62,12 +106,13 @@ before(async () => {
   baseUrl = `http://127.0.0.1:${port}`;
   serverProcess = spawn(process.execPath, [join(appDir, 'server.mjs')], {
     cwd: workspace,
-    env: { ...process.env, PORT: String(port), RETAILOS_DATA_DIR: dataDir, RETAILOS_COMPANY_NAME: 'متجر الاختبار', RETAILOS_COMPANY_CODE: 'RETAIL_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع الرئيسي' },
+    env: testLicenseEnv({ PORT: String(port), RETAILOS_DATA_DIR: dataDir, RETAILOS_COMPANY_NAME: 'متجر الاختبار', RETAILOS_COMPANY_CODE: 'RETAIL_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع الرئيسي' }),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   serverProcess.stdout.on('data', (chunk) => { serverLog += chunk.toString(); });
   serverProcess.stderr.on('data', (chunk) => { serverLog += chunk.toString(); });
   await waitForApp().catch((error) => { throw new Error(`${error.message}\n${serverLog}`); });
+  await activateTestLicense(baseUrl);
 });
 
 after(async () => {
@@ -930,15 +975,14 @@ test('executes full professional stocktake lifecycle with permissions, blind cou
   let stkLog = '';
   const stkServer = spawn(process.execPath, [join(appDir, 'server.mjs')], {
     cwd: workspace,
-    env: {
-      ...process.env,
+    env: testLicenseEnv({
       PORT: String(stkPort),
       RETAILOS_DATA_DIR: stkDataDir,
       RETAILOS_COMPANY_NAME: 'متجر الجرد',
       RETAILOS_COMPANY_CODE: 'STK_TEST',
       RETAILOS_CURRENCY: 'EGP',
       RETAILOS_STORE_NAME: 'الفرع الرئيسي',
-    },
+    }),
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   stkServer.stderr.on('data', (chunk) => { stkLog += chunk.toString(); });
@@ -963,6 +1007,7 @@ test('executes full professional stocktake lifecycle with permissions, blind cou
       await new Promise((r) => setTimeout(r, 125));
     }
     assert.ok(stkReady, `stkServer did not become ready: ${stkLog}`);
+    await activateTestLicense(stkUrl);
 
     assert.equal((await stkReq('/api/setup', {
       method: 'POST',
@@ -1290,15 +1335,14 @@ test('supports unpriced product catalog creation, supplier purchase wholesale+re
   let purLog = '';
   const purServer = spawn(process.execPath, [join(appDir, 'server.mjs')], {
     cwd: workspace,
-    env: {
-      ...process.env,
+    env: testLicenseEnv({
       PORT: String(purPort),
       RETAILOS_DATA_DIR: purDataDir,
       RETAILOS_COMPANY_NAME: 'متجر التسعير',
       RETAILOS_COMPANY_CODE: 'PRC_TEST',
       RETAILOS_CURRENCY: 'EGP',
       RETAILOS_STORE_NAME: 'الفرع الرئيسي',
-    },
+    }),
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   purServer.stderr.on('data', (chunk) => { purLog += chunk.toString(); });
@@ -1323,6 +1367,7 @@ test('supports unpriced product catalog creation, supplier purchase wholesale+re
       await new Promise((r) => setTimeout(r, 125));
     }
     assert.ok(purReady, `purServer did not become ready: ${purLog}`);
+    await activateTestLicense(purUrl);
 
     assert.equal((await purReq('/api/setup', {
       method: 'POST',
@@ -1494,15 +1539,14 @@ test('updates all financial views (sales summary, shifts, shift sales, dashboard
   let finLog = '';
   const finServer = spawn(process.execPath, [join(appDir, 'server.mjs')], {
     cwd: workspace,
-    env: {
-      ...process.env,
+    env: testLicenseEnv({
       PORT: String(finPort),
       RETAILOS_DATA_DIR: finDataDir,
       RETAILOS_COMPANY_NAME: 'متجر الحسابات المتكاملة',
       RETAILOS_COMPANY_CODE: 'FIN_TEST',
       RETAILOS_CURRENCY: 'EGP',
       RETAILOS_STORE_NAME: 'الفرع الرئيسي',
-    },
+    }),
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   finServer.stderr.on('data', (chunk) => { finLog += chunk.toString(); });
@@ -1527,6 +1571,7 @@ test('updates all financial views (sales summary, shifts, shift sales, dashboard
       await new Promise((r) => setTimeout(r, 125));
     }
     assert.ok(finReady, `finServer did not become ready: ${finLog}`);
+    await activateTestLicense(finUrl);
 
     assert.equal((await finReq('/api/setup', {
       method: 'POST',
@@ -1750,15 +1795,14 @@ test('keeps /api/sales strictly pure while separating profit-loss expenses and f
   let sepLog = '';
   const sepServer = spawn(process.execPath, [join(appDir, 'server.mjs')], {
     cwd: workspace,
-    env: {
-      ...process.env,
+    env: testLicenseEnv({
       PORT: String(sepPort),
       RETAILOS_DATA_DIR: sepDataDir,
       RETAILOS_COMPANY_NAME: 'متجر الفصل المالي',
       RETAILOS_COMPANY_CODE: 'SEP_TEST',
       RETAILOS_CURRENCY: 'EGP',
       RETAILOS_STORE_NAME: 'الفرع الرئيسي',
-    },
+    }),
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   sepServer.stderr.on('data', (chunk) => { sepLog += chunk.toString(); });
@@ -1783,6 +1827,7 @@ test('keeps /api/sales strictly pure while separating profit-loss expenses and f
       await new Promise((r) => setTimeout(r, 125));
     }
     assert.ok(sepReady, `sepServer did not become ready: ${sepLog}`);
+    await activateTestLicense(sepUrl);
 
     assert.equal((await sepReq('/api/setup', {
       method: 'POST',
@@ -1959,15 +2004,14 @@ test('release readiness: full paged history (>200 purchases, journals, returns, 
   const startSrv = async () => {
     const child = spawn(process.execPath, [join(appDir, 'server.mjs')], {
       cwd: workspace,
-      env: {
-        ...process.env,
+      env: testLicenseEnv({
         PORT: String(rrPort),
         RETAILOS_DATA_DIR: rrDataDir,
         RETAILOS_COMPANY_NAME: 'متجر الجاهزية',
         RETAILOS_COMPANY_CODE: 'READINESS',
         RETAILOS_CURRENCY: 'EGP',
         RETAILOS_STORE_NAME: 'الفرع الرئيسي',
-      },
+      }),
       stdio: ['ignore', 'ignore', 'pipe'],
     });
     child.stderr.on('data', (chunk) => { rrLog += chunk.toString(); });
@@ -1975,7 +2019,10 @@ test('release readiness: full paged history (>200 purchases, journals, returns, 
       if (child.exitCode !== null) throw new Error(`rrServer exited (${child.exitCode}): ${rrLog}`);
       try {
         const res = await fetch(`${rrUrl}/api/bootstrap`);
-        if (res.ok) return child;
+        if (res.ok) {
+          await activateTestLicense(rrUrl);
+          return child;
+        }
       } catch { /* transient failure: keep waiting or fall back */ }
       await new Promise((r) => setTimeout(r, 125));
     }
@@ -2148,15 +2195,14 @@ test('multi-unit sale with line and cart discounts keeps P&L, Financial Map, Sal
   const startSrv = async () => {
     const child = spawn(process.execPath, [join(appDir, 'server.mjs')], {
       cwd: workspace,
-      env: {
-        ...process.env,
+      env: testLicenseEnv({
         PORT: String(discPort),
         RETAILOS_DATA_DIR: discDataDir,
         RETAILOS_COMPANY_NAME: 'متجر الخصومات',
         RETAILOS_COMPANY_CODE: 'DISC',
         RETAILOS_CURRENCY: 'EGP',
         RETAILOS_STORE_NAME: 'الفرع الرئيسي',
-      },
+      }),
       stdio: ['ignore', 'ignore', 'pipe'],
     });
     child.stderr.on('data', (chunk) => { discLog += chunk.toString(); });
@@ -2164,7 +2210,10 @@ test('multi-unit sale with line and cart discounts keeps P&L, Financial Map, Sal
       if (child.exitCode !== null) throw new Error(`discServer exited (${child.exitCode}): ${discLog}`);
       try {
         const res = await fetch(`${discUrl}/api/bootstrap`);
-        if (res.ok) return child;
+        if (res.ok) {
+          await activateTestLicense(discUrl);
+          return child;
+        }
       } catch { /* transient failure: keep waiting or fall back */ }
       await new Promise((r) => setTimeout(r, 125));
     }
@@ -2313,15 +2362,14 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
   const startSrv = async () => {
     const child = spawn(process.execPath, [join(appDir, 'server.mjs')], {
       cwd: workspace,
-      env: {
-        ...process.env,
+      env: testLicenseEnv({
         PORT: String(sPort),
         RETAILOS_DATA_DIR: sDir,
         RETAILOS_COMPANY_NAME: 'متجر الضغط',
         RETAILOS_COMPANY_CODE: 'STRESS',
         RETAILOS_CURRENCY: 'EGP',
         RETAILOS_STORE_NAME: 'فرع الضغط',
-      },
+      }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     child.stdout.on('data', (chunk) => { sLog += chunk.toString(); });
@@ -2330,7 +2378,10 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
       if (child.exitCode !== null) throw new Error(`stressServer exited (${child.exitCode}): ${sLog}`);
       try {
         const res = await fetch(`${sUrl}/api/bootstrap`);
-        if (res.ok) return child;
+        if (res.ok) {
+          await activateTestLicense(sUrl);
+          return child;
+        }
       } catch { /* transient failure: keep waiting or fall back */ }
       await new Promise((r) => setTimeout(r, 125));
     }
@@ -2947,14 +2998,14 @@ test('Stage 1 supplier balance regression: search+refunds, pagination+search, le
   const startTestServer = async () => {
     const proc = spawn(process.execPath, [join(appDir, 'server.mjs')], {
       cwd: workspace,
-      env: { ...process.env, PORT: String(port), RETAILOS_DATA_DIR: sDir, RETAILOS_COMPANY_NAME: 'شركة الموردين', RETAILOS_COMPANY_CODE: 'SUP_REG', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع' },
+      env: testLicenseEnv({ PORT: String(port), RETAILOS_DATA_DIR: sDir, RETAILOS_COMPANY_NAME: 'شركة الموردين', RETAILOS_COMPANY_CODE: 'SUP_REG', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع' }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     proc.stdout.on('data', (c) => { log += c.toString(); });
     proc.stderr.on('data', (c) => { log += c.toString(); });
     for (let i = 0; i < 600; i += 1) {
       if (proc.exitCode !== null) throw new Error(`Server exited ${proc.exitCode}\n${log}`);
-      try { if ((await fetch(`${sUrl}/api/bootstrap`)).ok) return proc; } catch { /* wait */ }
+      try { if ((await fetch(`${sUrl}/api/bootstrap`)).ok) { await activateTestLicense(sUrl); return proc; } } catch { /* wait */ }
       await new Promise((r) => setTimeout(r, 125));
     }
     throw new Error(`Timeout\n${log}`);
@@ -3148,14 +3199,14 @@ test('Pre-launch hardening: duplicate opening balances 409 guard and Trial Balan
   const startServer = async () => {
     const proc = spawn(process.execPath, [join(appDir, 'server.mjs')], {
       cwd: workspace,
-      env: { ...process.env, PORT: String(port), RETAILOS_DATA_DIR: hDir, RETAILOS_COMPANY_NAME: 'شركة التحصين', RETAILOS_COMPANY_CODE: 'HARDEN_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع' },
+      env: testLicenseEnv({ PORT: String(port), RETAILOS_DATA_DIR: hDir, RETAILOS_COMPANY_NAME: 'شركة التحصين', RETAILOS_COMPANY_CODE: 'HARDEN_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع' }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     proc.stdout.on('data', (c) => { log += c.toString(); });
     proc.stderr.on('data', (c) => { log += c.toString(); });
     for (let i = 0; i < 600; i += 1) {
       if (proc.exitCode !== null) throw new Error(`Server exited ${proc.exitCode}\n${log}`);
-      try { if ((await fetch(`${hUrl}/api/bootstrap`)).ok) return proc; } catch { /* wait */ }
+      try { if ((await fetch(`${hUrl}/api/bootstrap`)).ok) { await activateTestLicense(hUrl); return proc; } } catch { /* wait */ }
       await new Promise((r) => setTimeout(r, 125));
     }
     throw new Error(`Timeout\n${log}`);
@@ -3272,14 +3323,14 @@ test('Final POS & accounting regression: split cash+electronic checkout GL (1010
   const startServer = async () => {
     const proc = spawn(process.execPath, [join(appDir, 'server.mjs')], {
       cwd: workspace,
-      env: { ...process.env, PORT: String(port), RETAILOS_DATA_DIR: sDir, RETAILOS_COMPANY_NAME: 'شركة الدفع المجزأ', RETAILOS_COMPANY_CODE: 'SPLIT_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع' },
+      env: testLicenseEnv({ PORT: String(port), RETAILOS_DATA_DIR: sDir, RETAILOS_COMPANY_NAME: 'شركة الدفع المجزأ', RETAILOS_COMPANY_CODE: 'SPLIT_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع' }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     proc.stdout.on('data', (c) => { log += c.toString(); });
     proc.stderr.on('data', (c) => { log += c.toString(); });
     for (let i = 0; i < 600; i += 1) {
       if (proc.exitCode !== null) throw new Error(`Server exited ${proc.exitCode}\n${log}`);
-      try { if ((await fetch(`${sUrl}/api/bootstrap`)).ok) return proc; } catch { /* wait */ }
+      try { if ((await fetch(`${sUrl}/api/bootstrap`)).ok) { await activateTestLicense(sUrl); return proc; } } catch { /* wait */ }
       await new Promise((r) => setTimeout(r, 125));
     }
     throw new Error(`Timeout\n${log}`);
@@ -3552,14 +3603,14 @@ test('RBAC guards: stock transfer destination store authorization and auditor sh
   const startServer = async () => {
     const proc = spawn(process.execPath, [join(appDir, 'server.mjs')], {
       cwd: workspace,
-      env: { ...process.env, PORT: String(tPort), RETAILOS_DATA_DIR: tDir, RETAILOS_COMPANY_NAME: 'شركة RBAC', RETAILOS_COMPANY_CODE: 'RBAC_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع الرئيسي' },
+      env: testLicenseEnv({ PORT: String(tPort), RETAILOS_DATA_DIR: tDir, RETAILOS_COMPANY_NAME: 'شركة RBAC', RETAILOS_COMPANY_CODE: 'RBAC_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع الرئيسي' }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     proc.stdout.on('data', (c) => { tLog += c.toString(); });
     proc.stderr.on('data', (c) => { tLog += c.toString(); });
     for (let i = 0; i < 600; i += 1) {
       if (proc.exitCode !== null) throw new Error(`Server exited ${proc.exitCode}\n${tLog}`);
-      try { if ((await fetch(`${tUrl}/api/bootstrap`)).ok) return proc; } catch { /* wait */ }
+      try { if ((await fetch(`${tUrl}/api/bootstrap`)).ok) { await activateTestLicense(tUrl); return proc; } } catch { /* wait */ }
       await new Promise((r) => setTimeout(r, 125));
     }
     throw new Error(`Timeout\n${tLog}`);
@@ -3693,5 +3744,217 @@ test('RBAC guards: stock transfer destination store authorization and auditor sh
   } finally {
     await stopServer(srv);
     await rm(tDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test('Offline Ed25519 licensing: 402 enforcement, token validation, persistence, anti-clock tampering & expiration', async () => {
+  const lDir = await mkdtemp(join(appDir, '.test-lic-data-'));
+  const clockFile = join(lDir, 'mock-clock-ms.txt');
+  const baseNow = Date.now();
+  await writeFile(clockFile, String(baseNow), 'utf8');
+
+  const lPort = await reservePort();
+  const lUrl = `http://127.0.0.1:${lPort}`;
+  let lLog = '';
+
+  const startServer = async () => {
+    const proc = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+      cwd: workspace,
+      env: testLicenseEnv({
+        PORT: String(lPort),
+        RETAILOS_DATA_DIR: lDir,
+        RETAILOS_TEST_CLOCK_FILE: clockFile,
+        RETAILOS_COMPANY_NAME: 'شركة الترخيص',
+        RETAILOS_COMPANY_CODE: 'LIC_TEST',
+        RETAILOS_CURRENCY: 'EGP',
+        RETAILOS_STORE_NAME: 'الفرع الرئيسي',
+      }),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    proc.stdout.on('data', (c) => { lLog += c.toString(); });
+    proc.stderr.on('data', (c) => { lLog += c.toString(); });
+    for (let i = 0; i < 600; i += 1) {
+      if (proc.exitCode !== null) throw new Error(`Server exited ${proc.exitCode}\n${lLog}`);
+      try { if ((await fetch(`${lUrl}/api/bootstrap`)).ok) return proc; } catch { /* wait */ }
+      await new Promise((r) => setTimeout(r, 125));
+    }
+    throw new Error(`Timeout\n${lLog}`);
+  };
+
+  const stopServer = async (proc) => {
+    if (proc && proc.exitCode === null) {
+      proc.kill('SIGTERM');
+      await Promise.race([once(proc, 'exit'), new Promise((r) => setTimeout(r, 3000))]);
+    }
+  };
+
+  const req = async (path, { method = 'GET', body, cookieStr } = {}) => {
+    const headers = { Origin: lUrl };
+    if (body) headers['Content-Type'] = 'application/json';
+    if (cookieStr) headers.Cookie = cookieStr;
+    const response = await fetch(`${lUrl}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const contentType = response.headers.get('content-type') || '';
+    const payload = contentType.includes('application/json') ? await response.json() : await response.arrayBuffer();
+    return { response, payload };
+  };
+
+  let srv = await startServer();
+  try {
+    // 1. Unlicensed fresh boot -> UNLICENSED + valid machineId
+    const initialStatus = await req('/api/license/status');
+    assert.equal(initialStatus.response.status, 200);
+    assert.equal(initialStatus.payload.status, 'UNLICENSED');
+    assert.match(initialStatus.payload.machineId, /^ROS-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+    const machineId = initialStatus.payload.machineId;
+
+    // 2. Setup + login remain accessible when unlicensed
+    const setupRes = await req('/api/setup', {
+      method: 'POST',
+      body: { ownerUsername: 'lic_owner', ownerName: 'مالك الترخيص', password: 'Lic-Owner-Password-2026' },
+    });
+    assert.equal(setupRes.response.status, 201);
+    const loginRes = await req('/api/login', {
+      method: 'POST',
+      body: { username: 'lic_owner', password: 'Lic-Owner-Password-2026' },
+    });
+    assert.equal(loginRes.response.status, 200);
+    const ownerCookie = loginRes.response.headers.get('set-cookie').split(';')[0];
+
+    const dataRes = await req('/api/data', { cookieStr: ownerCookie });
+    assert.equal(dataRes.response.status, 200);
+    const storeId = dataRes.payload.stores[0].id;
+
+    // 3. Operational write endpoints must return 402 LICENSE_REQUIRED while unlicensed
+    const blockedWrites = [
+      ['/api/shifts/start', { storeId, openingCash: '0' }],
+      ['/api/checkout', { storeId, idempotencyKey: randomUUID(), paymentMethod: 'CASH', tenderedAmount: '100', items: [{ variantId: randomUUID(), quantity: '1' }] }],
+      ['/api/purchases', { storeId, supplierId: randomUUID(), idempotencyKey: randomUUID(), totalAmount: '100', paidAmount: '100', paymentMethod: 'CASH', items: [] }],
+      ['/api/expenses', { storeId, category: 'عامة', amount: '100', expenseDate: cairoDateIso(new Date(baseNow)), description: 'اختبار' }],
+      ['/api/inventory/transfer', { fromStoreId: storeId, toStoreId: randomUUID(), variantId: randomUUID(), quantity: '1' }],
+      ['/api/inventory/damage', { storeId, variantId: randomUUID(), quantity: '1', reason: 'تالف' }],
+    ];
+    for (const [route, payload] of blockedWrites) {
+      const blocked = await req(route, { method: 'POST', cookieStr: ownerCookie, body: payload });
+      assert.equal(blocked.response.status, 402, `Expected 402 on ${route}, got ${blocked.response.status}`);
+      assert.equal(blocked.payload.code, 'LICENSE_REQUIRED');
+      assert.equal(blocked.payload.licenseStatus, 'UNLICENSED');
+    }
+
+    // 4. Encrypted backup export remains allowed even when unlicensed
+    const backupExport = await req('/api/backups/export', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { passphrase: 'Backup-Unlicensed-Safe-2026' },
+    });
+    assert.equal(backupExport.response.status, 200);
+    assert.ok(backupExport.payload.byteLength > 0);
+
+    // 5. Reject wrong machineId, tampered signature, and already-expired token on /api/license/activate
+    const wrongMachineToken = signFlowLicenseToken({
+      licenseId: 'WRONG-MACH',
+      customerName: 'عميل خطأ',
+      machineId: 'ROS-AAAA-BBBB-CCCC',
+      issuedAt: new Date(baseNow).toISOString(),
+      expiresAt: new Date(baseNow + 30 * 86400000).toISOString(),
+      planName: 'Annual',
+    });
+    const wrongMachRes = await req('/api/license/activate', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { token: wrongMachineToken },
+    });
+    assert.equal(wrongMachRes.response.status, 400);
+
+    const valid30DayToken = signFlowLicenseToken({
+      licenseId: 'VALID-30D',
+      customerName: 'عميل سليم',
+      machineId,
+      issuedAt: new Date(baseNow).toISOString(),
+      expiresAt: new Date(baseNow + 30 * 86400000).toISOString(),
+      planName: '30-Day Pro',
+    });
+    const parts = valid30DayToken.split('.');
+    const tamperedToken = `${parts[0]}.${parts[1]}.${parts[2].slice(0, -4)}XXXX`;
+    const tamperedRes = await req('/api/license/activate', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { token: tamperedToken },
+    });
+    assert.equal(tamperedRes.response.status, 400);
+
+    const expiredToken = signFlowLicenseToken({
+      licenseId: 'EXP-PAST',
+      customerName: 'عميل منتهي',
+      machineId,
+      issuedAt: new Date(baseNow - 40 * 86400000).toISOString(),
+      expiresAt: new Date(baseNow - 1000).toISOString(),
+      planName: 'Expired',
+    });
+    const expiredRes = await req('/api/license/activate', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { token: expiredToken },
+    });
+    assert.equal(expiredRes.response.status, 400);
+
+    // 6. Valid activation succeeds & unblocks operational writes + persists across restarts
+    const activatedRes = await req('/api/license/activate', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { token: valid30DayToken },
+    });
+    assert.equal(activatedRes.response.status, 200, JSON.stringify(activatedRes.payload));
+    assert.equal(activatedRes.payload.status, 'ACTIVE');
+    assert.equal(activatedRes.payload.daysRemaining, 30);
+
+    await stopServer(srv);
+    srv = await startServer();
+    const persistedStatus = await req('/api/license/status');
+    assert.equal(persistedStatus.response.status, 200);
+    assert.equal(persistedStatus.payload.status, 'ACTIVE');
+
+    const startShiftOk = await req('/api/shifts/start', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { storeId, openingCash: '0' },
+    });
+    assert.equal(startShiftOk.response.status, 201, JSON.stringify(startShiftOk.payload));
+
+    // 7. Monotonic clock anti-tampering: advance clock +5 days (advances watermark), then roll back -6 days -> CLOCK_TAMPERED & 402
+    const forward5d = baseNow + 5 * 86400000;
+    await writeFile(clockFile, String(forward5d), 'utf8');
+    const forwardStatus = await req('/api/license/status');
+    assert.equal(forwardStatus.payload.status, 'ACTIVE');
+
+    await writeFile(clockFile, String(baseNow - 86400000), 'utf8');
+    const tamperedStatus = await req('/api/license/status');
+    assert.equal(tamperedStatus.payload.status, 'CLOCK_TAMPERED');
+    const blockedAfterTamper = await req('/api/expenses', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { storeId, category: 'عامة', amount: '100', expenseDate: cairoDateIso(new Date(baseNow)), description: 'اختبار' },
+    });
+    assert.equal(blockedAfterTamper.response.status, 402);
+    assert.equal(blockedAfterTamper.payload.licenseStatus, 'CLOCK_TAMPERED');
+
+    // Restore clock >= watermark -> returns ACTIVE
+    await writeFile(clockFile, String(forward5d + 1000), 'utf8');
+    const restoredStatus = await req('/api/license/status');
+    assert.equal(restoredStatus.payload.status, 'ACTIVE');
+
+    // 8. Advance past expiry (+31 days) -> EXPIRED & 402
+    await writeFile(clockFile, String(baseNow + 31 * 86400000), 'utf8');
+    const expiredRuntimeStatus = await req('/api/license/status');
+    assert.equal(expiredRuntimeStatus.payload.status, 'EXPIRED');
+    const blockedExpired = await req('/api/expenses', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { storeId, category: 'عامة', amount: '100', expenseDate: cairoDateIso(new Date(baseNow)), description: 'اختبار' },
+    });
+    assert.equal(blockedExpired.response.status, 402);
+    assert.equal(blockedExpired.payload.licenseStatus, 'EXPIRED');
+  } finally {
+    await stopServer(srv);
+    await rm(lDir, { recursive: true, force: true }).catch(() => {});
   }
 });

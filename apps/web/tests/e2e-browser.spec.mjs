@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -17,6 +18,18 @@ let sharedContext = null;
 let page = null;
 const pageErrors = [];
 const server5xxResponses = [];
+const { publicKey: e2eLicensePublicKey, privateKey: e2eLicensePrivateKey } =
+  generateKeyPairSync('ed25519');
+const e2eLicensePublicKeyPem = e2eLicensePublicKey.export({ type: 'spki', format: 'pem' }).toString();
+
+function signE2ELicenseToken(payload) {
+  const encodedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const signingInput = `ROS1.${encodedPayload}`;
+  const signature = sign(null, Buffer.from(signingInput, 'utf8'), e2eLicensePrivateKey).toString(
+    'base64url',
+  );
+  return `${signingInput}.${signature}`;
+}
 
 async function reservePort() {
   const probe = createServer();
@@ -61,6 +74,8 @@ test.describe.serial('RetailOS Real-Browser E2E Suite (1366x768 RTL)', () => {
       cwd: workspace,
       env: {
         ...process.env,
+        NODE_ENV: 'test',
+        RETAILOS_TEST_LICENSE_PUBLIC_KEY: e2eLicensePublicKeyPem,
         PORT: String(port),
         RETAILOS_DATA_DIR: dataDir,
         RETAILOS_COMPANY_NAME: 'متجر الاختبار الشامل',
@@ -115,9 +130,33 @@ test.describe.serial('RetailOS Real-Browser E2E Suite (1366x768 RTL)', () => {
     }
   });
 
-  test('1. Setup, Login, Logout & Two-User RBAC Boundaries (OWNER vs read-only AUDITOR)', async () => {
+  test('1. License Activation, Setup, Login, Logout & Two-User RBAC Boundaries (OWNER vs read-only AUDITOR)', async () => {
     await page.goto(baseUrl);
     await expect(page.locator('html')).toHaveAttribute('dir', 'rtl');
+
+    // First-run license gate must block setup until activated with valid Ed25519 token
+    await expect(page.locator('#license-activation-screen')).toBeVisible();
+    const machineId = (await page.locator('#license-machine-id').inputValue()).trim();
+    expect(machineId).toMatch(/^ROS-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+
+    // Invalid license token must be rejected cleanly without leaving activation screen
+    await page.fill('#license-token-input', 'ROS1.invalid_payload.invalid_signature');
+    await page.click('#activate-license-btn');
+    await expect(page.locator('#license-activation-screen')).toBeVisible();
+    await expect(page.locator('#toast-region')).toContainText(/غير صالح|توقيع|تنسيق/);
+
+    // Activate with 5-day license so expiry warning banner also renders after login
+    const now = Date.now();
+    const validToken = signE2ELicenseToken({
+      licenseId: `E2E-${randomUUID().slice(0, 8).toUpperCase()}`,
+      customerName: 'عميل E2E',
+      machineId,
+      issuedAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + 5 * 24 * 60 * 60 * 1000).toISOString(),
+      planName: 'E2E Trial Plan',
+    });
+    await page.fill('#license-token-input', validToken);
+    await page.click('#activate-license-btn');
 
     // Initial owner setup
     await expect(page.locator('#setup-form')).toBeVisible();
@@ -443,18 +482,23 @@ test.describe.serial('RetailOS Real-Browser E2E Suite (1366x768 RTL)', () => {
     await page.click('#modal-root [data-close-modal]');
   });
 
-  test('5. RTL Responsive Overflow Check (1366x768) across POS, Inventory, Suppliers, Reports & Accounting', async () => {
+  test('5. RTL Responsive Overflow Check (1366x768) across POS, Inventory, Suppliers, Reports, Accounting & License', async () => {
+    await expect(page.locator('#license-expiry-banner')).toBeVisible();
     const routes = [
       { type: 'nav', pageId: 'pos' },
       { type: 'nav', pageId: 'inventory' },
       { type: 'nav', pageId: 'suppliers' },
       { type: 'nav', pageId: 'reports' },
       { type: 'hash', hash: '#accounting', pageId: 'accounting' },
+      { type: 'accountMenu', pageId: 'license' },
     ];
 
     for (const route of routes) {
       if (route.type === 'nav') {
         await page.click(`.nav-item[data-page="${route.pageId}"]`);
+      } else if (route.type === 'accountMenu') {
+        await page.click('#account-menu-toggle');
+        await page.click(`.account-menu [data-page="${route.pageId}"]`);
       } else {
         await page.evaluate((h) => {
           globalThis.window.location.hash = h;

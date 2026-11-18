@@ -27,3 +27,6 @@ export * from './database/repositories/document-sequence.executor.js';
 export * from './database/repositories/stock-movement.executor.js';
 export * from './sync/sqlite-outbox.repository.js';
 export * from './hardware/index.js';
+export * from './licensing/public-key.js';
+export * from './licensing/machine-fingerprint.js';
+export * from './licensing/license.service.js';

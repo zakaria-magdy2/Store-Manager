@@ -30,6 +30,7 @@ import * as stressHardeningExpensesAndShifts from './migrations/024_stress_harde
 import * as customerReturnExchangeFlag from './migrations/025_customer_return_exchange_flag.js';
 import * as accountingCashBasisAndSupplierInvoiceIndex from './migrations/026_accounting_cash_basis_and_supplier_invoice_index.js';
 import * as supplierRefunds from './migrations/027_supplier_refunds.js';
+import * as systemLicensing from './migrations/028_system_licensing.js';
 
 const MIGRATION_REGISTRY: Record<string, Migration> = {
   '001_initial_foundation': {
@@ -139,6 +140,10 @@ const MIGRATION_REGISTRY: Record<string, Migration> = {
   '027_supplier_refunds': {
     up: supplierRefunds.up,
     down: supplierRefunds.down,
+  },
+  '028_system_licensing': {
+    up: systemLicensing.up,
+    down: systemLicensing.down,
   },
 };
 

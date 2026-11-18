@@ -140,7 +140,10 @@ export function buildServerProcessEnv(
     RETAILOS_DB_PATH: paths.databasePath,
     RETAILOS_BACKUP_DIR: paths.backupDir,
   };
+  delete nextEnv.RETAILOS_TEST_LICENSE_PUBLIC_KEY;
+  delete nextEnv.RETAILOS_TEST_CLOCK_FILE;
   if (options?.runAsNode) {
+    nextEnv.NODE_ENV = 'production';
     nextEnv.ELECTRON_RUN_AS_NODE = '1';
   }
   if (options?.desktopVersion) {

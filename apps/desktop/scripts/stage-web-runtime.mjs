@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { cp, lstat, mkdir, readdir, rename, rm } from 'node:fs/promises';
+import { cp, lstat, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -159,5 +159,32 @@ for (const reqPath of requiredPaths) {
     throw new Error(`Staged desktop web runtime is missing required artifact: ${reqPath}`);
   }
 }
+
+// Verify vendor keygen tools and private keys are NEVER bundled into desktop stage/release.
+if (existsSync(join(stageWebDir, 'tools')) || existsSync(join(stageWebDir, 'vendor-keygen'))) {
+  throw new Error('Security violation: vendor-keygen tools directory must never be staged.');
+}
+
+async function assertNoPrivateKeysStaged(dirPath) {
+  const entries = await readdir(dirPath, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      await assertNoPrivateKeysStaged(fullPath);
+      continue;
+    }
+    if (entry.name.toLowerCase().endsWith('private.pem') || entry.name.toLowerCase().includes('vendor-keygen')) {
+      throw new Error(`Security violation: forbidden vendor key artifact staged at ${fullPath}`);
+    }
+    if (entry.name.endsWith('.pem') || entry.name.endsWith('.key')) {
+      const content = await readFile(fullPath, 'utf8');
+      if (content.includes('PRIVATE KEY')) {
+        throw new Error(`Security violation: private key material detected in staged file ${fullPath}`);
+      }
+    }
+  }
+}
+
+await assertNoPrivateKeysStaged(stageWebDir);
 
 console.log(`Staged standalone RetailOS desktop web runtime at ${stageWebDir}`);

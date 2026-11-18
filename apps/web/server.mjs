@@ -53,6 +53,8 @@ import {
   postJournalEntry,
   applyStockMovementInTransaction,
   allocateDocumentNumberInTransaction,
+  LicenseEnforcementError,
+  LicenseService,
 } from '@retailos/infrastructure';
 import { CreateProductSchema, CreateUserSchema, UpdateProductSchema } from '@retailos/shared';
 import { z } from 'zod';
@@ -258,6 +260,29 @@ const checkout = new CheckoutService(saleRepo, saleRepo, variantRepo, productRep
 const purchasing = new SqlitePurchasingRepository(db);
 const expenses = new SqliteExpenseRepository(db);
 const returns = new SqliteReturnRepository(db);
+const testLicensePubKey =
+  process.env.NODE_ENV === 'test' && process.env.RETAILOS_TEST_LICENSE_PUBLIC_KEY
+    ? process.env.RETAILOS_TEST_LICENSE_PUBLIC_KEY.replace(/\\n/g, '\n')
+    : undefined;
+const testClockFile =
+  process.env.NODE_ENV === 'test' && process.env.RETAILOS_TEST_CLOCK_FILE
+    ? process.env.RETAILOS_TEST_CLOCK_FILE
+    : null;
+const licenseService = new LicenseService(db, {
+  publicKeyPem: testLicensePubKey,
+  nowProvider: testClockFile
+    ? () => {
+        try {
+          if (existsSync(testClockFile)) {
+            const parsed = Number.parseInt(readFileSync(testClockFile, 'utf8').trim(), 10);
+            if (Number.isFinite(parsed) && parsed > 0) return parsed;
+          }
+        } catch { /* fallback to wall clock */ }
+        return Date.now();
+      }
+    : undefined,
+});
+await licenseService.getStatus();
 const recurringExpenses = new SqliteRecurringExpenseRepository(db);
 const supplierReturnsRepo = new SqliteSupplierReturnRepository(db);
 const auditLogs = new SqliteAuditLogRepository(db);
@@ -3742,6 +3767,23 @@ async function currentData(ctx, url) {
   };
 }
 
+const LicenseActivateSchema = z.object({
+  token: z.string().trim().min(20, 'كود التفعيل غير صالح').max(4096, 'كود التفعيل أطول من المسموح'),
+});
+
+function isLicenseExemptMutationPath(path) {
+  if (path.startsWith('/api/license/')) return true;
+  if (path.startsWith('/api/auth/')) return true;
+  if (path.startsWith('/api/backups/')) return true;
+  return (
+    path === '/api/login' ||
+    path === '/api/logout' ||
+    path === '/api/setup' ||
+    path === '/api/account/password' ||
+    path === '/api/internal/shutdown'
+  );
+}
+
 async function handleApi(req, res, url) {
   const method = req.method ?? 'GET';
   const path = url.pathname;
@@ -3749,6 +3791,34 @@ async function handleApi(req, res, url) {
   if (mutating) requireSameOrigin(req);
 
   if (method === 'GET' && path === '/api/bootstrap') return json(res, 200, await setupState());
+
+  if (method === 'GET' && path === '/api/license/status') {
+    return json(res, 200, await licenseService.getStatus());
+  }
+
+  if (method === 'POST' && path === '/api/license/activate') {
+    const body = validate(LicenseActivateSchema, await readJson(req));
+    const activated = await licenseService.activate(body.token);
+    const sessionToken = readCookie(req, 'retailos_session');
+    if (sessionToken) {
+      try {
+        const actorCtx = await auth.validateSession(sessionToken);
+        await recordAudit(actorCtx, {
+          action: 'LICENSE_ACTIVATED',
+          entityType: 'LICENSE',
+          entityId: activated.licenseId ?? 'system',
+          summary: `تفعيل اشتراك النظام (${activated.customerName ?? ''} · حتى ${String(activated.expiresAt ?? '').slice(0, 10)})`,
+          metadata: {
+            customerName: activated.customerName,
+            planName: activated.planName,
+            expiresAt: activated.expiresAt,
+            machineId: activated.machineId,
+          },
+        });
+      } catch { /* activation allowed before login */ }
+    }
+    return json(res, 200, activated);
+  }
 
   if (method === 'POST' && path === '/api/internal/shutdown') {
     const remoteAddress = req.socket?.remoteAddress ?? '';
@@ -4223,6 +4293,9 @@ async function handleApi(req, res, url) {
   }
 
   const ctx = await requireContext(req);
+  if (mutating && !isLicenseExemptMutationPath(path)) {
+    await licenseService.assertOperationalAccess();
+  }
 
   if (method === 'GET' && path === '/api/reports/profit-loss') return json(res, 200, await profitLossReport(ctx, url));
   if (method === 'GET' && path === '/api/reports/top-products') return json(res, 200, await topProductsReport(ctx, url));
@@ -6334,6 +6407,7 @@ async function handleApi(req, res, url) {
 
   if (method === 'POST' && path === '/api/checkout') {
     ctx.assertPermission(Permissions.POS_CHECKOUT);
+    await licenseService.touchWatermarkOnCheckout();
     const body = validate(CheckoutSchema, await readJson(req));
     const openShift = database.getRawDatabase().prepare(
       "SELECT id, store_id FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' LIMIT 1"
@@ -7351,7 +7425,10 @@ const server = createServer(async (req, res) => {
       : isInsufficientStock
         ? 'الكمية المطلوبة غير متوفرة في المخزون (تم بيعها أو نفد الرصيد)'
         : (error?.message ?? 'حدث خطأ غير متوقع');
-    json(res, status, { error: message });
+    const errorBody = error instanceof LicenseEnforcementError
+      ? { error: message, code: error.code, licenseStatus: error.licenseStatus }
+      : { error: message };
+    json(res, status, errorBody);
   }
 });
 

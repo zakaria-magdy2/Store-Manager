@@ -14,9 +14,10 @@ function readRequestedPageFromLocation() {
 }
 
 function isPageAuthorized(page) {
+  if (page === 'license') return true;
   const caps = state.data?.capabilities;
   if (!caps) return false;
-  if (caps.cashierMode) return ['pos', 'inventory', 'sales'].includes(page);
+  if (caps.cashierMode) return ['pos', 'inventory', 'sales', 'license'].includes(page);
   if (['reports', 'financial-map', 'accounting'].includes(page)) return Boolean(caps.canViewAccounting);
   if (page === 'expenses') return Boolean(caps.canViewExpenses);
   if (page === 'monthly-expenses') return Boolean(caps.canViewMonthlyExpenses);
@@ -121,6 +122,8 @@ function restorePendingCheckoutForStore() {
 
 const state = {
   bootstrap: null,
+  license: null,
+  licenseBypassForBackups: false,
   user: null,
   data: null,
   page: 'dashboard',
@@ -453,7 +456,7 @@ const navItems = [
   { id: 'top-products', label: 'التقارير والإحصائيات', icon: 'chart' },
   { id: 'stocktake', label: 'الجرد الشامل', icon: 'scan' },
 ];
-const extraPageTitles = { backups: 'النسخ الاحتياطي اليومي والاستعادة', 'audit-logs': 'سجل المراجعة والأمان', 'monthly-expenses': 'الالتزامات الشهرية', 'financial-map': 'المسار المالي وحركة النقدية', shifts: 'سجل الشيفتات ومتابعة الحضور', users: 'المستخدمون وسجل الحضور' };
+const extraPageTitles = { backups: 'النسخ الاحتياطي اليومي والاستعادة', 'audit-logs': 'سجل المراجعة والأمان', 'monthly-expenses': 'الالتزامات الشهرية', 'financial-map': 'المسار المالي وحركة النقدية', shifts: 'سجل الشيفتات ومتابعة الحضور', users: 'المستخدمون وسجل الحضور', license: 'الاشتراك والترخيص' };
 
 function icon(name, size = 20) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] ?? ''}</svg>`;
@@ -487,6 +490,15 @@ async function api(path, options = {}) {
     if (response.status === 401 && state.user) {
       state.user = null;
       state.data = null;
+      render();
+    }
+    if (response.status === 402 && result?.code === 'LICENSE_REQUIRED') {
+      state.license = {
+        ...(state.license ?? {}),
+        status: result.licenseStatus || 'UNLICENSED',
+        reason: result.error || 'يلزم تفعيل الاشتراك',
+      };
+      state.licenseBypassForBackups = false;
       render();
     }
     throw Object.assign(new Error(result.error || 'حصل خطأ، حاول مرة تانية'), { status: response.status, payload: result });
@@ -725,7 +737,12 @@ async function start() {
     render();
   });
   try {
-    state.bootstrap = await api('/api/bootstrap');
+    const [boot, license] = await Promise.all([
+      api('/api/bootstrap'),
+      api('/api/license/status').catch(() => null),
+    ]);
+    state.bootstrap = boot;
+    if (license) state.license = license;
     if (state.bootstrap.configured) {
       try {
         const session = await api(`/api/data?tzOffset=${encodeURIComponent(String(new Date().getTimezoneOffset()))}`);
@@ -745,8 +762,248 @@ async function start() {
   }
 }
 
+function licenseStatusMeta(lic) {
+  const status = lic?.status ?? 'UNLICENSED';
+  if (status === 'ACTIVE') {
+    return {
+      title: 'الترخيص نشط ومفعّل',
+      reason: lic.reason || 'النسخة مفعّلة وتعمل بكامل الصلاحيات.',
+      pillClass: 'status-complete',
+      pillText: 'مفعّل',
+    };
+  }
+  if (status === 'EXPIRED') {
+    return {
+      title: 'انتهت صلاحية الاشتراك',
+      reason: lic?.reason || 'منتهي الصلاحية — يرجى إرسال كود الجهاز للمطور للحصول على كود التجديد.',
+      pillClass: 'status-low',
+      pillText: 'منتهي الصلاحية',
+    };
+  }
+  if (status === 'MACHINE_MISMATCH') {
+    return {
+      title: 'كود التفعيل غير مطابق لهذا الجهاز',
+      reason: lic?.reason || 'الكود خاص بجهاز آخر — انسخ كود هذا الجهاز وأرسله للمطور لتفعيله.',
+      pillClass: 'status-low',
+      pillText: 'جهاز غير مطابق',
+    };
+  }
+  if (status === 'CLOCK_TAMPERED') {
+    return {
+      title: 'تاريخ وساعة الجهاز غير صحيحين',
+      reason: lic?.reason || 'تاريخ الجهاز متأخر عن آخر تشغيل موثق — اضبط الساعة على التوقيت الصحيح ثم أعد المحاولة.',
+      pillClass: 'status-low',
+      pillText: 'خطأ في ساعة الجهاز',
+    };
+  }
+  return {
+    title: 'تفعيل برنامج رَفّ',
+    reason: lic?.reason || 'غير مفعّل — انسخ كود الجهاز وأرسله للمطور للحصول على كود التفعيل.',
+    pillClass: 'status-low',
+    pillText: 'غير مفعّل',
+  };
+}
+
+function licenseActivationView() {
+  const lic = state.license ?? { status: 'UNLICENSED', machineId: '' };
+  const meta = licenseStatusMeta(lic);
+  const canEmergencyBackup = Boolean(state.user && state.data?.capabilities?.canManageBackups);
+  return `<main id="license-activation-screen" class="license-screen" role="dialog" aria-modal="true" aria-labelledby="license-screen-title">
+    <section class="license-card">
+      <div class="license-card-head">
+        <div class="brand-lockup" style="padding:0;"><span class="brand-mark">ر</span><span>رَفّ لإدارة المتاجر</span></div>
+        <span class="status-pill ${meta.pillClass}">${meta.pillText}</span>
+      </div>
+      <div class="license-copy">
+        <h1 id="license-screen-title">${escapeHtml(meta.title)}</h1>
+        <p id="license-status-reason" class="license-reason-banner" role="alert">${escapeHtml(meta.reason)}</p>
+      </div>
+      <div class="license-machine-box">
+        <label class="license-machine-label">كود الجهاز (أرسله للدعم الفني للحصول على كود التفعيل)
+          <div class="license-machine-row">
+            <input id="license-machine-id" type="text" readonly dir="ltr" value="${escapeHtml(lic.machineId || '—')}">
+            <button type="button" id="copy-machine-id-btn" class="button button-secondary button-sm">نسخ الكود</button>
+          </div>
+        </label>
+      </div>
+      <form id="license-activation-form" class="form-stack">
+        <label>كود التفعيل (ROS1...)
+          <textarea id="license-token-input" name="token" rows="3" dir="ltr" required minlength="20" placeholder="الصق كود التفعيل هنا..."></textarea>
+        </label>
+        <div class="license-actions-row">
+          <button type="submit" id="activate-license-btn" class="button button-primary button-wide">تفعيل البرنامج</button>
+        </div>
+      </form>
+      ${(canEmergencyBackup || state.user) ? `
+        <div class="license-footer-actions">
+          ${canEmergencyBackup ? '<button type="button" id="license-open-backups-btn" class="button button-secondary button-sm">تصدير نسخة احتياطية (.rfbackup)</button>' : ''}
+          ${state.user ? '<button type="button" id="license-logout-btn" class="text-action">تسجيل الخروج</button>' : ''}
+        </div>
+      ` : ''}
+    </section>
+  </main>`;
+}
+
+function bindLicenseActivation() {
+  document.querySelector('#copy-machine-id-btn')?.addEventListener('click', async () => {
+    const input = document.querySelector('#license-machine-id');
+    const val = input?.value ?? '';
+    if (!val || val === '—') return;
+    try {
+      await navigator.clipboard.writeText(val);
+      toast('تم نسخ كود الجهاز إلى الحافظة');
+    } catch {
+      input?.select();
+      toast('حدد الكود وانسخه يدويًا من المربع');
+    }
+  });
+
+  document.querySelector('#license-activation-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const btn = form.querySelector('#activate-license-btn');
+    const token = String(new FormData(form).get('token') ?? '').trim();
+    if (!token) return;
+    btn.disabled = true;
+    try {
+      const updated = await api('/api/license/activate', {
+        method: 'POST',
+        skipConfirm: true,
+        body: JSON.stringify({ token }),
+      });
+      state.license = updated;
+      state.licenseBypassForBackups = false;
+      if (state.user) {
+        await loadData(state.data?.selectedStoreId).catch(() => {});
+      }
+      toast('تم تفعيل الاشتراك بنجاح');
+      render();
+    } catch (error) {
+      toast(error.message, 'error');
+      btn.disabled = false;
+    }
+  });
+
+  document.querySelector('#license-open-backups-btn')?.addEventListener('click', () => {
+    state.licenseBypassForBackups = true;
+    state.page = 'backups';
+    render();
+  });
+
+  document.querySelector('#license-logout-btn')?.addEventListener('click', async () => {
+    await api('/api/logout', { method: 'POST', skipConfirm: true }).catch(() => {});
+    state.user = null;
+    state.data = null;
+    state.licenseBypassForBackups = false;
+    render();
+  });
+}
+
+function licenseView() {
+  const lic = state.license ?? { status: 'UNLICENSED', machineId: '' };
+  const meta = licenseStatusMeta(lic);
+  const expiresText = lic.expiresAt
+    ? new Date(lic.expiresAt).toLocaleDateString('ar-EG', { dateStyle: 'long' })
+    : 'غير محدد';
+  const issuedText = lic.issuedAt
+    ? new Date(lic.issuedAt).toLocaleDateString('ar-EG', { dateStyle: 'long' })
+    : 'غير محدد';
+  const remainingText = lic.status === 'ACTIVE' && lic.daysRemaining !== null
+    ? `${lic.daysRemaining} يوم متبقي`
+    : meta.pillText;
+  return `<div class="page-heading-row">
+    <div><p class="page-lead">بيانات الاشتراك والترخيص، كود الجهاز، وتجديد الرخصة دون الحاجة لإعادة تشغيل البرنامج.</p></div>
+    <span class="status-pill ${meta.pillClass}">${meta.pillText}</span>
+  </div>
+  <div class="compact-kpi-grid">
+    <article class="compact-kpi-card ${lic.status === 'ACTIVE' ? 'compact-kpi-positive' : 'compact-kpi-negative'}">
+      <div class="compact-kpi-top"><span>حالة الترخيص</span><span class="kpi-tag ${lic.status === 'ACTIVE' ? 'kpi-tag-green' : 'kpi-tag-red'}">${meta.pillText}</span></div>
+      <strong class="compact-kpi-value">${escapeHtml(remainingText)}</strong>
+      <small>${escapeHtml(meta.reason)}</small>
+    </article>
+    <article class="compact-kpi-card">
+      <div class="compact-kpi-top"><span>تاريخ انتهاء الصلاحية</span><span class="kpi-tag kpi-tag-indigo">${escapeHtml(lic.planName || '—')}</span></div>
+      <strong class="compact-kpi-value" style="font-size:17px;">${escapeHtml(expiresText)}</strong>
+      <small>تاريخ الإصدار: ${escapeHtml(issuedText)} · العميل: ${escapeHtml(lic.customerName || '—')}</small>
+    </article>
+    <article class="compact-kpi-card">
+      <div class="compact-kpi-top"><span>معرف الرخصة</span><span class="kpi-tag kpi-tag-teal">Ed25519</span></div>
+      <strong class="compact-kpi-value" dir="ltr" style="font-size:15px;">${escapeHtml(lic.licenseId || '—')}</strong>
+      <small>ترخيص موثّق ومرتبط بهذا الجهاز فقط (Offline).</small>
+    </article>
+  </div>
+  <section class="panel compact-panel">
+    <div class="panel-heading"><div><h3>كود الجهاز (Machine ID)</h3><p>أرسل هذا الكود للدعم الفني عند طلب كود تفعيل جديد أو تجديد الاشتراك.</p></div></div>
+    <div class="license-machine-row" style="max-width:520px;">
+      <input id="license-page-machine-id" type="text" readonly dir="ltr" value="${escapeHtml(lic.machineId || '—')}">
+      <button type="button" id="copy-page-machine-id-btn" class="button button-secondary button-sm">نسخ الكود</button>
+    </div>
+  </section>
+  <section class="panel compact-panel" style="margin-top:16px;">
+    <div class="panel-heading"><div><h3>تجديد أو تحديث كود التفعيل</h3><p>الصق كود التفعيل الجديد (<code>ROS1...</code>) لتمديد فترة الاشتراك فورًا.</p></div></div>
+    <form id="renew-license-form" class="form-stack" style="max-width:640px;">
+      <label>كود التفعيل الجديد
+        <textarea id="renew-license-token-input" name="token" rows="3" dir="ltr" required minlength="20" placeholder="الصق كود التفعيل الجديد هنا..."></textarea>
+      </label>
+      <div>
+        <button type="submit" id="renew-license-submit-btn" class="button button-primary button-sm">تفعيل / تجديد الاشتراك</button>
+      </div>
+    </form>
+  </section>`;
+}
+
+function bindLicenseView() {
+  document.querySelector('#copy-page-machine-id-btn')?.addEventListener('click', async () => {
+    const input = document.querySelector('#license-page-machine-id');
+    const val = input?.value ?? '';
+    if (!val || val === '—') return;
+    try {
+      await navigator.clipboard.writeText(val);
+      toast('تم نسخ كود الجهاز إلى الحافظة');
+    } catch {
+      input?.select();
+      toast('حدد الكود وانسخه يدويًا من المربع');
+    }
+  });
+
+  document.querySelector('#renew-license-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const btn = form.querySelector('#renew-license-submit-btn');
+    const token = String(new FormData(form).get('token') ?? '').trim();
+    if (!token) return;
+    btn.disabled = true;
+    try {
+      const updated = await api('/api/license/activate', {
+        method: 'POST',
+        skipConfirm: true,
+        body: JSON.stringify({ token }),
+      });
+      state.license = updated;
+      state.licenseBypassForBackups = false;
+      toast('تم تحديث وتفعيل الاشتراك بنجاح');
+      render();
+    } catch (error) {
+      toast(error.message, 'error');
+      btn.disabled = false;
+    }
+  });
+}
+
 function render() {
   const root = document.querySelector('#app');
+  const licenseBlocked = Boolean(state.license && state.license.status !== 'ACTIVE');
+  const allowEmergencyBackupScreen = Boolean(
+    state.licenseBypassForBackups &&
+    state.user &&
+    state.data?.capabilities?.canManageBackups &&
+    state.page === 'backups',
+  );
+  if (licenseBlocked && !allowEmergencyBackupScreen) {
+    root.innerHTML = licenseActivationView();
+    bindLicenseActivation();
+    return;
+  }
   if (state.bootstrap?.setupRequired) {
     root.innerHTML = setupView();
     bindSetup();
@@ -800,6 +1057,8 @@ function bindLogin() {
       const values = Object.fromEntries(new FormData(form));
       const session = await api('/api/login', { method: 'POST', body: JSON.stringify(values) });
       state.user = session.user;
+      state.license = await api('/api/license/status').catch(() => state.license);
+      state.licenseBypassForBackups = false;
       state.page = session.capabilities?.cashierMode ? 'pos' : 'dashboard';
       await loadData();
       applyRequestedRoute(state.page);
@@ -817,7 +1076,7 @@ function shellView() {
   const cashierAllowedPages = ['pos', 'inventory', 'sales'];
   const visibleNavItems = isCashier ? navItems.filter((item) => cashierAllowedPages.includes(item.id)) : navItems;
   const pageTitle = navItems.find((item) => item.id === state.page)?.label ?? extraPageTitles[state.page] ?? 'الرئيسية';
-  const menuExtraItems = `${state.data.capabilities.canManageUsers ? `<button type="button" class="account-menu-item" role="menuitem" data-page="users">${icon('users', 17)}<span>المستخدمون وسجل الحضور</span></button>` : ''}${state.data.capabilities.canManageBackups ? `<button type="button" class="account-menu-item" role="menuitem" data-page="backups">${icon('store', 17)}<span>النسخ الاحتياطي اليومي</span></button>` : ''}${state.data.capabilities.canViewAuditLogs ? `<button type="button" class="account-menu-item" role="menuitem" data-page="audit-logs">${icon('scan', 17)}<span>سجل المراجعة والأمان</span></button>` : ''}`;
+  const menuExtraItems = `${state.data.capabilities.canManageUsers ? `<button type="button" class="account-menu-item" role="menuitem" data-page="users">${icon('users', 17)}<span>المستخدمون وسجل الحضور</span></button>` : ''}${state.data.capabilities.canManageBackups ? `<button type="button" class="account-menu-item" role="menuitem" data-page="backups">${icon('store', 17)}<span>النسخ الاحتياطي اليومي</span></button>` : ''}<button type="button" class="account-menu-item" role="menuitem" data-page="license">${icon('clock', 17)}<span>الاشتراك والترخيص</span></button>${state.data.capabilities.canViewAuditLogs ? `<button type="button" class="account-menu-item" role="menuitem" data-page="audit-logs">${icon('scan', 17)}<span>سجل المراجعة والأمان</span></button>` : ''}`;
   const activeShift = state.data.activeShift;
   const shiftControl = activeShift ? `
     <button type="button" id="header-end-shift-btn" class="button button-sm button-shift-active" title="الشيفت مفتوحة حالياً، اضغط لإنهائها وتقفيل الدرج">
@@ -830,10 +1089,16 @@ function shellView() {
   `;
   const { totalCount: totalAlertsCount } = computeSystemAlerts(state.data);
 
+  const licenseExpiryBanner = state.license?.status === 'ACTIVE' && state.license.daysRemaining !== null && state.license.daysRemaining <= 7
+    ? `<div id="license-expiry-banner" class="license-expiry-banner" role="status"><span>تنبيه: يتبقى ${state.license.daysRemaining} يوم على انتهاء اشتراك رَفّ (${escapeHtml(state.license.planName || 'اشتراك')}). يرجى التجديد لتجنب توقف العمليات.</span><button type="button" class="button button-secondary button-sm" data-page="license">تجديد الاشتراك</button></div>`
+    : '';
+  const licenseBypassBanner = state.license?.status !== 'ACTIVE' && state.licenseBypassForBackups
+    ? `<div id="license-unlicensed-backup-banner" class="license-expiry-banner license-expiry-banner-critical" role="alert"><span>وضع الطوارئ: الاشتراك غير نشط حاليًا — يمكنك تصدير نسخة احتياطية فقط حتى إتمام التفعيل.</span><button type="button" class="button button-primary button-sm" id="license-return-activation-btn">العودة لشاشة التفعيل</button></div>`
+    : '';
   const deniedBanner = state.accessDeniedNotice
     ? `<div role="alert" style="margin-bottom:14px;padding:12px 16px;border-radius:12px;background:rgba(190,18,60,0.09);border:1px solid rgba(190,18,60,0.3);color:#be123c;font-weight:700;display:flex;justify-content:space-between;align-items:center;gap:12px;"><span>${escapeHtml(state.accessDeniedNotice)}</span><button type="button" class="text-action" id="dismiss-access-denied">إغلاق</button></div>`
     : '';
-  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'financial-map' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'stocktake' || state.data.capabilities.canAdjustInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item account-menu-whatsapp" role="menuitem" href="https://wa.me/201200562966" target="_blank" rel="noopener noreferrer">${icon('message', 17)}<span>تواصل مع الدعم (واتساب)<small class="support-phone-sub">01200562966</small></span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${shiftControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>⌘ K</kbd></label><button type="button" class="icon-button notification-button ${totalAlertsCount > 0 ? 'has-alerts' : ''}" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount > 0 ? `<span class="notif-count-badge">${totalAlertsCount > 99 ? '99+' : totalAlertsCount}</span>` : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${deniedBanner}${pageView()}</section></main>`;
+  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'financial-map' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'stocktake' || state.data.capabilities.canAdjustInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item account-menu-whatsapp" role="menuitem" href="https://wa.me/201200562966" target="_blank" rel="noopener noreferrer">${icon('message', 17)}<span>تواصل مع الدعم (واتساب)<small class="support-phone-sub">01200562966</small></span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${shiftControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>⌘ K</kbd></label><button type="button" class="icon-button notification-button ${totalAlertsCount > 0 ? 'has-alerts' : ''}" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount > 0 ? `<span class="notif-count-badge">${totalAlertsCount > 99 ? '99+' : totalAlertsCount}</span>` : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${licenseBypassBanner}${licenseExpiryBanner}${deniedBanner}${pageView()}</section></main>`;
 }
 
 function roleLabel(role) {
@@ -841,6 +1106,7 @@ function roleLabel(role) {
 }
 
 function pageView() {
+  if (state.page === 'license') return licenseView();
   if (state.data.capabilities.cashierMode) {
     if (state.page === 'inventory') return inventoryView();
     if (state.page === 'sales') return salesView();
@@ -6876,6 +7142,8 @@ function bindShell() {
     state.analyticsTo = null;
     state.growthViewMode = null;
     resetStocktakeUiState();
+    state.licenseBypassForBackups = false;
+    state.license = await api('/api/license/status').catch(() => state.license);
     render();
   });
   const search = document.querySelector('#global-search');
@@ -6914,7 +7182,13 @@ function bindShell() {
   if (state.page === 'reports') bindProfitLoss();
   if (state.page === 'top-products') bindTopProducts();
   if (state.page === 'backups') bindBackups();
+  if (state.page === 'license') bindLicenseView();
   if (state.page === 'shifts') bindShifts(); if (state.page === 'users') bindUsers(); if (state.page === 'audit-logs') bindAuditLogs(); if (state.page === 'accounting') bindAccounting();
+  document.querySelector('#license-return-activation-btn')?.addEventListener('click', () => {
+    state.licenseBypassForBackups = false;
+    state.page = 'dashboard';
+    render();
+  });
   document.querySelector('#header-start-shift-btn')?.addEventListener('click', () => {
     showStartShiftModal();
   });
@@ -7122,6 +7396,15 @@ function backupView() {
         </div>
         <strong class="compact-kpi-value">نسخة أمان فورية</strong>
         <small>قبل استعادة أي نسخة يومية أو مشفرة، يحفظ النظام نسخة أمان تلقائية من وضعك الحالي أولاً.</small>
+      </article>
+
+      <article class="compact-kpi-card ${state.license?.status === 'ACTIVE' ? 'compact-kpi-positive' : 'compact-kpi-negative'}">
+        <div class="compact-kpi-top">
+          <span>الاشتراك والترخيص</span>
+          <span class="kpi-tag ${state.license?.status === 'ACTIVE' ? 'kpi-tag-green' : 'kpi-tag-red'}">${licenseStatusMeta(state.license).pillText}</span>
+        </div>
+        <strong class="compact-kpi-value" style="font-size:17px;">${state.license?.expiresAt ? new Date(state.license.expiresAt).toLocaleDateString('ar-EG', { dateStyle: 'medium' }) : 'غير مفعّل'}</strong>
+        <small>${state.license?.status === 'ACTIVE' && state.license?.daysRemaining !== null ? `متبقي ${state.license.daysRemaining} يوم` : escapeHtml(licenseStatusMeta(state.license).reason)} <button type="button" class="text-action" data-page="license" style="margin-right:6px;">تفاصيل وتجديد الاشتراك</button></small>
       </article>
     </div>
 
@@ -10360,6 +10643,8 @@ function bindStocktake() {
   document.querySelector('#stocktake-back-btn')?.addEventListener('click', async () => {
     await flushStocktakeDirtyLines(sessionId, { silent: true, rerender: false });
     resetStocktakeUiState();
+    state.licenseBypassForBackups = false;
+    state.license = await api('/api/license/status').catch(() => state.license);
     render();
   });
 

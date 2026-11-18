@@ -6520,4 +6520,117 @@ bdi[dir="ltr"] {
   gap: 12px;
 }
 
+.license-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: radial-gradient(circle at top right, rgba(99, 102, 241, 0.14), transparent 55%), var(--bg-canvas);
+}
+
+.license-card {
+  width: 100%;
+  max-width: 560px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 20px;
+  padding: 28px;
+  box-shadow: 0 22px 54px rgba(15, 23, 42, 0.12);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.license-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.license-copy h1 {
+  margin: 0 0 8px;
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.license-reason-banner {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(190, 18, 60, 0.08);
+  border: 1px solid rgba(190, 18, 60, 0.25);
+  color: #be123c;
+  font-size: 13.5px;
+  font-weight: 700;
+  line-height: 1.6;
+}
+
+.license-machine-label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.license-machine-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.license-machine-row input {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-align: center;
+}
+
+.license-footer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.license-expiry-banner {
+  margin-bottom: 14px;
+  padding: 11px 16px;
+  border-radius: 12px;
+  background: rgba(217, 119, 6, 0.12);
+  border: 1px solid rgba(217, 119, 6, 0.35);
+  color: #92400e;
+  font-weight: 700;
+  font-size: 13.5px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.license-expiry-banner-critical {
+  background: rgba(190, 18, 60, 0.1);
+  border-color: rgba(190, 18, 60, 0.32);
+  color: #be123c;
+}
+
+:root[data-theme="dark"] .license-reason-banner,
+:root[data-theme="dark"] .license-expiry-banner-critical {
+  color: #fda4af;
+  background: rgba(225, 29, 72, 0.16);
+}
+
+:root[data-theme="dark"] .license-expiry-banner {
+  color: #fcd34d;
+  background: rgba(217, 119, 6, 0.18);
+}
+
 
