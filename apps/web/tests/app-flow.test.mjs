@@ -104,7 +104,7 @@ before(async () => {
   dataDir = await mkdtemp(join(appDir, '.test-data-'));
   const port = await reservePort();
   baseUrl = `http://127.0.0.1:${port}`;
-  serverProcess = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+  serverProcess = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
     cwd: workspace,
     env: testLicenseEnv({ PORT: String(port), RETAILOS_DATA_DIR: dataDir, RETAILOS_COMPANY_NAME: 'متجر الاختبار', RETAILOS_COMPANY_CODE: 'RETAIL_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع الرئيسي' }),
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -973,7 +973,7 @@ test('executes full professional stocktake lifecycle with permissions, blind cou
   const stkPort = await reservePort();
   const stkUrl = `http://127.0.0.1:${stkPort}`;
   let stkLog = '';
-  const stkServer = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+  const stkServer = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
     cwd: workspace,
     env: testLicenseEnv({
       PORT: String(stkPort),
@@ -1333,7 +1333,7 @@ test('supports unpriced product catalog creation, supplier purchase wholesale+re
   const purPort = await reservePort();
   const purUrl = `http://127.0.0.1:${purPort}`;
   let purLog = '';
-  const purServer = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+  const purServer = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
     cwd: workspace,
     env: testLicenseEnv({
       PORT: String(purPort),
@@ -1537,7 +1537,7 @@ test('updates all financial views (sales summary, shifts, shift sales, dashboard
   const finPort = await reservePort();
   const finUrl = `http://127.0.0.1:${finPort}`;
   let finLog = '';
-  const finServer = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+  const finServer = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
     cwd: workspace,
     env: testLicenseEnv({
       PORT: String(finPort),
@@ -1793,7 +1793,7 @@ test('keeps /api/sales strictly pure while separating profit-loss expenses and f
   const sepPort = await reservePort();
   const sepUrl = `http://127.0.0.1:${sepPort}`;
   let sepLog = '';
-  const sepServer = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+  const sepServer = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
     cwd: workspace,
     env: testLicenseEnv({
       PORT: String(sepPort),
@@ -2002,7 +2002,7 @@ test('release readiness: full paged history (>200 purchases, journals, returns, 
   let rrLog = '';
 
   const startSrv = async () => {
-    const child = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+    const child = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
       cwd: workspace,
       env: testLicenseEnv({
         PORT: String(rrPort),
@@ -2193,7 +2193,7 @@ test('multi-unit sale with line and cart discounts keeps P&L, Financial Map, Sal
   };
 
   const startSrv = async () => {
-    const child = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+    const child = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
       cwd: workspace,
       env: testLicenseEnv({
         PORT: String(discPort),
@@ -2360,7 +2360,7 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
   };
 
   const startSrv = async () => {
-    const child = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+    const child = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
       cwd: workspace,
       env: testLicenseEnv({
         PORT: String(sPort),
@@ -2996,7 +2996,7 @@ test('Stage 1 supplier balance regression: search+refunds, pagination+search, le
   let srv = null;
 
   const startTestServer = async () => {
-    const proc = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+    const proc = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
       cwd: workspace,
       env: testLicenseEnv({ PORT: String(port), RETAILOS_DATA_DIR: sDir, RETAILOS_COMPANY_NAME: 'شركة الموردين', RETAILOS_COMPANY_CODE: 'SUP_REG', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع' }),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -3197,7 +3197,7 @@ test('Pre-launch hardening: duplicate opening balances 409 guard and Trial Balan
   let srv = null;
 
   const startServer = async () => {
-    const proc = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+    const proc = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
       cwd: workspace,
       env: testLicenseEnv({ PORT: String(port), RETAILOS_DATA_DIR: hDir, RETAILOS_COMPANY_NAME: 'شركة التحصين', RETAILOS_COMPANY_CODE: 'HARDEN_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع' }),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -3321,7 +3321,7 @@ test('Final POS & accounting regression: split cash+electronic checkout GL (1010
   let srv = null;
 
   const startServer = async () => {
-    const proc = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+    const proc = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
       cwd: workspace,
       env: testLicenseEnv({ PORT: String(port), RETAILOS_DATA_DIR: sDir, RETAILOS_COMPANY_NAME: 'شركة الدفع المجزأ', RETAILOS_COMPANY_CODE: 'SPLIT_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع' }),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -3601,7 +3601,7 @@ test('RBAC guards: stock transfer destination store authorization and auditor sh
   let tLog = '';
 
   const startServer = async () => {
-    const proc = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+    const proc = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
       cwd: workspace,
       env: testLicenseEnv({ PORT: String(tPort), RETAILOS_DATA_DIR: tDir, RETAILOS_COMPANY_NAME: 'شركة RBAC', RETAILOS_COMPANY_CODE: 'RBAC_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع الرئيسي' }),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -3758,7 +3758,7 @@ test('Offline Ed25519 licensing: 402 enforcement, token validation, persistence,
   let lLog = '';
 
   const startServer = async () => {
-    const proc = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+    const proc = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
       cwd: workspace,
       env: testLicenseEnv({
         PORT: String(lPort),
@@ -3956,5 +3956,169 @@ test('Offline Ed25519 licensing: 402 enforcement, token validation, persistence,
   } finally {
     await stopServer(srv);
     await rm(lDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test('Production server.mjs ignores env-var license overrides and enforces DB watermark & ledger hardening', async () => {
+  const dirA = await mkdtemp(join(appDir, '.test-direct-srv-'));
+  const dirB = await mkdtemp(join(appDir, '.test-ledger-harden-'));
+  const stopProc = async (proc) => {
+    if (proc && proc.exitCode === null) {
+      proc.kill('SIGTERM');
+      await Promise.race([once(proc, 'exit'), new Promise((r) => setTimeout(r, 3000))]);
+    }
+  };
+
+  // --- Part A: Direct server.mjs launch MUST ignore RETAILOS_TEST_LICENSE_PUBLIC_KEY ---
+  let prodProc = null;
+  try {
+    const portA = await reservePort();
+    const urlA = `http://127.0.0.1:${portA}`;
+    let logA = '';
+    prodProc = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        NODE_ENV: 'test',
+        PORT: String(portA),
+        RETAILOS_DATA_DIR: dirA,
+        RETAILOS_TEST_LICENSE_PUBLIC_KEY: flowLicensePublicKeyPem,
+        RETAILOS_COMPANY_NAME: 'اختبار الإنتاج',
+        RETAILOS_COMPANY_CODE: 'PROD_KEY_TEST',
+        RETAILOS_CURRENCY: 'EGP',
+        RETAILOS_STORE_NAME: 'الفرع الرئيسي',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    prodProc.stdout.on('data', (c) => { logA += c.toString(); });
+    prodProc.stderr.on('data', (c) => { logA += c.toString(); });
+
+    let readyA = false;
+    for (let i = 0; i < 400; i += 1) {
+      if (prodProc.exitCode !== null) throw new Error(`Direct server exited ${prodProc.exitCode}\n${logA}`);
+      try { if ((await fetch(`${urlA}/api/bootstrap`)).ok) { readyA = true; break; } } catch { /* wait */ }
+      await new Promise((r) => setTimeout(r, 125));
+    }
+    assert.ok(readyA, `Direct server timeout\n${logA}`);
+
+    const stRes = await fetch(`${urlA}/api/license/status`);
+    assert.equal(stRes.status, 200);
+    const stBody = await stRes.json();
+    assert.equal(stBody.status, 'UNLICENSED');
+
+    const now = Date.now();
+    const forgedByEnvTestKey = signFlowLicenseToken({
+      licenseId: 'ENV-BYPASS-TRY',
+      customerName: 'مهاجم',
+      machineId: stBody.machineId,
+      issuedAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + 365 * 86400000).toISOString(),
+      planName: 'Bypass',
+    });
+    const actAttempt = await fetch(`${urlA}/api/license/activate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: urlA },
+      body: JSON.stringify({ token: forgedByEnvTestKey }),
+    });
+    assert.equal(
+      actAttempt.status,
+      400,
+      `Direct server.mjs MUST reject tokens signed by RETAILOS_TEST_LICENSE_PUBLIC_KEY, got ${actAttempt.status}`,
+    );
+    const filesInDirA = await readdir(dirA);
+    assert.ok(filesInDirA.includes('.retailos-watermark.key'), 'Headless per-install watermark secret file must be created');
+  } finally {
+    await stopProc(prodProc);
+    await rm(dirA, { recursive: true, force: true }).catch(() => {});
+  }
+
+  // --- Part B: Deleting system_licensing row after audit/sales activity triggers CLOCK_TAMPERED ---
+  let harnessProc = null;
+  try {
+    const portB = await reservePort();
+    const urlB = `http://127.0.0.1:${portB}`;
+    const clockFileB = join(dirB, 'mock-clock.txt');
+    const baseMs = Date.now();
+    await writeFile(clockFileB, String(baseMs), 'utf8');
+    let logB = '';
+
+    const bootHarness = async () => {
+      const proc = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
+        cwd: workspace,
+        env: testLicenseEnv({
+          PORT: String(portB),
+          RETAILOS_DATA_DIR: dirB,
+          RETAILOS_TEST_CLOCK_FILE: clockFileB,
+          RETAILOS_COMPANY_NAME: 'شركة سجل التوقيت',
+          RETAILOS_COMPANY_CODE: 'WM_DEL_TEST',
+          RETAILOS_CURRENCY: 'EGP',
+          RETAILOS_STORE_NAME: 'الفرع الرئيسي',
+        }),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      proc.stdout.on('data', (c) => { logB += c.toString(); });
+      proc.stderr.on('data', (c) => { logB += c.toString(); });
+      for (let i = 0; i < 400; i += 1) {
+        if (proc.exitCode !== null) throw new Error(`Harness exited ${proc.exitCode}\n${logB}`);
+        try { if ((await fetch(`${urlB}/api/bootstrap`)).ok) return proc; } catch { /* wait */ }
+        await new Promise((r) => setTimeout(r, 125));
+      }
+      throw new Error(`Harness timeout\n${logB}`);
+    };
+
+    const reqB = async (path, { method = 'GET', body, cookieStr } = {}) => {
+      const headers = { Origin: urlB };
+      if (body) headers['Content-Type'] = 'application/json';
+      if (cookieStr) headers.Cookie = cookieStr;
+      const response = await fetch(`${urlB}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+      const payload = await response.json();
+      return { response, payload };
+    };
+
+    harnessProc = await bootHarness();
+    await activateTestLicense(urlB);
+
+    const setupB = await reqB('/api/setup', {
+      method: 'POST',
+      body: { ownerUsername: 'wm_owner', ownerName: 'مالك السجل', password: 'Watermark-Owner-Password-2026' },
+    });
+    assert.equal(setupB.response.status, 201);
+    const loginB = await reqB('/api/login', {
+      method: 'POST',
+      body: { username: 'wm_owner', password: 'Watermark-Owner-Password-2026' },
+    });
+    assert.equal(loginB.response.status, 200);
+    const cookieB = loginB.response.headers.get('set-cookie').split(';')[0];
+    const dataB = await reqB('/api/data', { cookieStr: cookieB });
+    const storeIdB = dataB.payload.stores[0].id;
+
+    // Delete system_licensing row directly in SQLite while audit_logs already exist
+    await stopProc(harnessProc);
+    harnessProc = null;
+
+    const mgr = new SqliteDatabaseManager({ filename: join(dirB, 'retailos.sqlite') });
+    mgr.connect();
+    try {
+      await mgr.getDb().deleteFrom('system_licensing').execute();
+    } finally {
+      await mgr.close();
+    }
+
+    // Restart server: MUST detect missing watermark row on DB with business/audit history -> CLOCK_TAMPERED
+    harnessProc = await bootHarness();
+    const tamperedAfterDelete = await reqB('/api/license/status');
+    assert.equal(tamperedAfterDelete.response.status, 200);
+    assert.equal(tamperedAfterDelete.payload.status, 'CLOCK_TAMPERED');
+
+    const blockedWrite = await reqB('/api/expenses', {
+      method: 'POST',
+      cookieStr: cookieB,
+      body: { storeId: storeIdB, category: 'عامة', amount: '100', expenseDate: cairoDateIso(new Date(baseMs)), description: 'اختبار' },
+    });
+    assert.equal(blockedWrite.response.status, 402);
+    assert.equal(blockedWrite.payload.licenseStatus, 'CLOCK_TAMPERED');
+  } finally {
+    await stopProc(harnessProc);
+    await rm(dirB, { recursive: true, force: true }).catch(() => {});
   }
 });

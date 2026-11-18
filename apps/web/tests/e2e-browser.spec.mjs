@@ -70,7 +70,7 @@ test.describe.serial('RetailOS Real-Browser E2E Suite (1366x768 RTL)', () => {
     dataDir = await mkdtemp(join(appDir, '.test-e2e-'));
     const port = await reservePort();
     baseUrl = `http://127.0.0.1:${port}`;
-    serverProcess = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+    serverProcess = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
       cwd: workspace,
       env: {
         ...process.env,

@@ -1,6 +1,8 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join, resolve } from 'node:path';
 
@@ -131,6 +133,7 @@ export function buildServerProcessEnv(
   options?: {
     readonly runAsNode?: boolean | undefined;
     readonly desktopVersion?: string | undefined;
+    readonly watermarkSecret?: string | undefined;
   },
 ): NodeJS.ProcessEnv {
   const nextEnv: NodeJS.ProcessEnv = {
@@ -142,6 +145,9 @@ export function buildServerProcessEnv(
   };
   delete nextEnv.RETAILOS_TEST_LICENSE_PUBLIC_KEY;
   delete nextEnv.RETAILOS_TEST_CLOCK_FILE;
+  if (options?.watermarkSecret) {
+    nextEnv.RETAILOS_WATERMARK_SECRET = options.watermarkSecret;
+  }
   if (options?.runAsNode) {
     nextEnv.NODE_ENV = 'production';
     nextEnv.ELECTRON_RUN_AS_NODE = '1';
@@ -150,6 +156,56 @@ export function buildServerProcessEnv(
     nextEnv.RETAILOS_DESKTOP_VERSION = options.desktopVersion;
   }
   return nextEnv;
+}
+
+export interface SafeStorageAdapter {
+  isEncryptionAvailable(): boolean;
+  encryptString(plainText: string): Buffer;
+  decryptString(encrypted: Buffer): string;
+}
+
+/**
+ * Generates (once per install) and protects the per-install license watermark HMAC key
+ * in `<userData>/license-watermark.bin` via Windows DPAPI (`safeStorage`) when available.
+ */
+export async function resolveOrCreateDesktopWatermarkSecret(options: {
+  readonly userDataDir: string;
+  readonly safeStorage?: SafeStorageAdapter | undefined;
+}): Promise<string> {
+  const userDataDir = resolve(options.userDataDir);
+  await mkdir(userDataDir, { recursive: true });
+  const dpapiFilePath = join(userDataDir, 'license-watermark.bin');
+  const fallbackKeyPath = join(userDataDir, '.retailos-watermark.key');
+  const dpapi = options.safeStorage;
+
+  if (dpapi && dpapi.isEncryptionAvailable()) {
+    if (existsSync(dpapiFilePath)) {
+      try {
+        const encrypted = await readFile(dpapiFilePath);
+        const decrypted = dpapi.decryptString(encrypted).trim();
+        if (/^[0-9a-f]{64}$/i.test(decrypted)) {
+          return decrypted;
+        }
+      } catch {
+        // Corrupted or foreign DPAPI blob: fall through to create a fresh key;
+        // any pre-existing SQLite watermark will immediately fail HMAC verification -> CLOCK_TAMPERED.
+      }
+    }
+    const generated = randomBytes(32).toString('hex');
+    const encryptedBlob = dpapi.encryptString(generated);
+    await writeFile(dpapiFilePath, encryptedBlob, { mode: 0o600 });
+    return generated;
+  }
+
+  if (existsSync(fallbackKeyPath)) {
+    const existing = (await readFile(fallbackKeyPath, 'utf8')).trim();
+    if (/^[0-9a-f]{64}$/i.test(existing)) {
+      return existing;
+    }
+  }
+  const generated = randomBytes(32).toString('hex');
+  await writeFile(fallbackKeyPath, `${generated}\n`, { encoding: 'utf8', mode: 0o600 });
+  return generated;
 }
 
 export async function isPortFreeOnLoopback(port: number): Promise<boolean> {

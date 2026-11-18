@@ -1,4 +1,11 @@
-import { createHmac, createPublicKey, timingSafeEqual, verify, type KeyObject } from 'node:crypto';
+import {
+  createHmac,
+  createPublicKey,
+  randomBytes,
+  timingSafeEqual,
+  verify,
+  type KeyObject,
+} from 'node:crypto';
 import type { Kysely } from 'kysely';
 import {
   computeRemainingDaysCeiling,
@@ -14,6 +21,27 @@ import { EMBEDDED_LICENSE_PUBLIC_KEY_PEM } from './public-key.js';
 
 export const CLOCK_SKEW_TOLERANCE_MS = 5 * 60 * 1000;
 
+function parseLedgerTimestampMs(raw: unknown): number | null {
+  if (typeof raw !== 'string') {
+    return null;
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+  // SQLite CURRENT_TIMESTAMP produces 'YYYY-MM-DD HH:MM:SS' in UTC without a timezone suffix.
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$/.test(trimmed)
+    ? `${trimmed.replace(' ', 'T')}Z`
+    : trimmed;
+  const parsed = Date.parse(normalized);
+  return globalThis.Number.isFinite(parsed) ? parsed : null;
+}
+
+interface OperationalLedgerBaseline {
+  readonly hasRecords: boolean;
+  readonly maxTimestampMs: number | null;
+}
+
 export class LicenseEnforcementError extends Error {
   public readonly status = 402;
   public readonly code = 'LICENSE_REQUIRED';
@@ -28,6 +56,7 @@ export class LicenseEnforcementError extends Error {
 
 export interface LicenseServiceOptions {
   readonly publicKeyPem?: string | undefined;
+  readonly watermarkSecret?: string | undefined;
   readonly machineIdOverride?: string | undefined;
   readonly nowProvider?: (() => number) | undefined;
 }
@@ -35,6 +64,7 @@ export interface LicenseServiceOptions {
 export class LicenseService {
   private readonly publicKeyPem: string;
   private readonly publicKey: KeyObject;
+  private readonly watermarkSecret: string;
   private readonly machineId: string;
   private readonly nowProvider: () => number;
 
@@ -44,6 +74,11 @@ export class LicenseService {
   ) {
     this.publicKeyPem = (options?.publicKeyPem ?? EMBEDDED_LICENSE_PUBLIC_KEY_PEM).trim();
     this.publicKey = createPublicKey(this.publicKeyPem);
+    const providedSecret = options?.watermarkSecret?.trim();
+    this.watermarkSecret =
+      providedSecret && providedSecret.length >= 32
+        ? providedSecret
+        : randomBytes(32).toString('hex');
     this.machineId = options?.machineIdOverride ?? getMachineId();
     this.nowProvider = options?.nowProvider ?? (() => Date.now());
   }
@@ -89,12 +124,34 @@ export class LicenseService {
 
   public async getStatus(): Promise<LicenseEvaluation> {
     const nowMs = this.nowProvider();
-    const row = await this.ensureWatermarkRow(nowMs);
+    const ledgerBaseline = await this.getOperationalLedgerBaseline();
+    const row = await this.ensureWatermarkRow(nowMs, ledgerBaseline);
+
+    if (!row) {
+      return this.buildEvaluation(
+        'CLOCK_TAMPERED',
+        null,
+        nowMs,
+        'تم رصد حذف أو العبث بسجل توثيق التوقيت في قاعدة البيانات',
+      );
+    }
 
     const token = row.activation_token?.trim() || null;
+    const hmacValid = this.isWatermarkHmacValid(row);
+
     if (!token) {
-      if (nowMs + CLOCK_SKEW_TOLERANCE_MS < row.last_verified_clock_ms) {
-        return this.buildEvaluation('CLOCK_TAMPERED', null, nowMs, 'تم رصد تلاعب في تاريخ وساعة الجهاز');
+      if (
+        !hmacValid ||
+        nowMs + CLOCK_SKEW_TOLERANCE_MS < row.last_verified_clock_ms ||
+        (ledgerBaseline.maxTimestampMs !== null &&
+          nowMs + CLOCK_SKEW_TOLERANCE_MS < ledgerBaseline.maxTimestampMs)
+      ) {
+        return this.buildEvaluation(
+          'CLOCK_TAMPERED',
+          null,
+          nowMs,
+          'تم رصد تلاعب في تاريخ وساعة الجهاز أو سجل التوقيت',
+        );
       }
       if (nowMs > row.last_verified_clock_ms) {
         await this.updateWatermarkRow(null, nowMs);
@@ -104,6 +161,14 @@ export class LicenseService {
 
     const payload = this.verifyRawToken(token);
     if (!payload) {
+      if (!hmacValid) {
+        return this.buildEvaluation(
+          'CLOCK_TAMPERED',
+          null,
+          nowMs,
+          'تم رصد عبث بسجل توثيق التوقيت في قاعدة البيانات',
+        );
+      }
       return this.buildEvaluation('UNLICENSED', null, nowMs, 'كود التفعيل المحفوظ غير صالح');
     }
 
@@ -116,12 +181,18 @@ export class LicenseService {
       );
     }
 
-    if (!this.isWatermarkHmacValid(row) || nowMs + CLOCK_SKEW_TOLERANCE_MS < row.last_verified_clock_ms) {
+    const latestRecordedClockMs =
+      ledgerBaseline.maxTimestampMs !== null &&
+      ledgerBaseline.maxTimestampMs > row.last_verified_clock_ms
+        ? ledgerBaseline.maxTimestampMs
+        : row.last_verified_clock_ms;
+
+    if (!hmacValid || nowMs + CLOCK_SKEW_TOLERANCE_MS < latestRecordedClockMs) {
       return this.buildEvaluation(
         'CLOCK_TAMPERED',
         payload,
         nowMs,
-        'تاريخ وساعة الجهاز متأخران عن آخر تشغيل مسجل — يرجى ضبط التاريخ والوقت الصحيحين',
+        'تاريخ وساعة الجهاز متأخران عن آخر تشغيل أو عملية مسجلة — يرجى ضبط التاريخ والوقت الصحيحين',
       );
     }
 
@@ -148,7 +219,15 @@ export class LicenseService {
   public async activate(rawToken: string): Promise<LicenseEvaluation> {
     const trimmed = rawToken.trim();
     const nowMs = this.nowProvider();
-    const existingRow = await this.ensureWatermarkRow(nowMs);
+    const ledgerBaseline = await this.getOperationalLedgerBaseline();
+    const existingRow = await this.ensureWatermarkRow(nowMs, ledgerBaseline);
+
+    if (!existingRow) {
+      throw Object.assign(
+        new Error('تم رصد حذف سجل توثيق التوقيت من قاعدة البيانات ولا يمكن التفعيل على قاعدة بيانات مفقودة السجل'),
+        { status: 400 },
+      );
+    }
 
     const payload = this.verifyRawToken(trimmed);
     if (!payload) {
@@ -164,12 +243,11 @@ export class LicenseService {
       );
     }
 
-    // Preserve monotonic high-watermark if the existing watermark belongs to this machine;
-    // reset cleanly only when migrating an unlicensed/foreign backup onto this new machine.
+    // Enforce monotonic high-watermark across both the watermark row and recorded business ledger.
     const existingWatermarkValid = this.isWatermarkHmacValid(existingRow);
-    const baselineClockMs = existingWatermarkValid
-      ? Math.max(existingRow.last_verified_clock_ms, nowMs)
-      : nowMs;
+    const watermarkBaseline = existingWatermarkValid ? existingRow.last_verified_clock_ms : 0;
+    const ledgerMax = ledgerBaseline.maxTimestampMs ?? 0;
+    const baselineClockMs = Math.max(watermarkBaseline, ledgerMax, nowMs);
 
     if (nowMs + CLOCK_SKEW_TOLERANCE_MS < baselineClockMs) {
       throw Object.assign(
@@ -211,7 +289,42 @@ export class LicenseService {
     return status;
   }
 
-  private async ensureWatermarkRow(nowMs: number): Promise<SystemLicensingTable> {
+  private async getOperationalLedgerBaseline(): Promise<OperationalLedgerBaseline> {
+    const [salesMax, shiftsMax, auditMax] = await Promise.all([
+      this.db
+        .selectFrom('sales')
+        .select((eb) => eb.fn.max('created_at').as('maxTs'))
+        .executeTakeFirst(),
+      this.db
+        .selectFrom('cashier_shifts')
+        .select((eb) => eb.fn.max('created_at').as('maxTs'))
+        .executeTakeFirst(),
+      this.db
+        .selectFrom('audit_logs')
+        .select((eb) => eb.fn.max('created_at').as('maxTs'))
+        .executeTakeFirst(),
+    ]);
+
+    const rawValues = [salesMax?.maxTs, shiftsMax?.maxTs, auditMax?.maxTs];
+    let hasRecords = false;
+    let maxTimestampMs: number | null = null;
+    for (const raw of rawValues) {
+      if (raw !== null && raw !== undefined && String(raw).trim() !== '') {
+        hasRecords = true;
+      }
+      const parsed = parseLedgerTimestampMs(raw);
+      if (parsed !== null && (maxTimestampMs === null || parsed > maxTimestampMs)) {
+        maxTimestampMs = parsed;
+      }
+    }
+
+    return { hasRecords, maxTimestampMs };
+  }
+
+  private async ensureWatermarkRow(
+    nowMs: number,
+    ledgerBaseline: OperationalLedgerBaseline,
+  ): Promise<SystemLicensingTable | null> {
     const existing = await this.db
       .selectFrom('system_licensing')
       .selectAll()
@@ -219,6 +332,11 @@ export class LicenseService {
       .executeTakeFirst();
     if (existing) {
       return existing;
+    }
+
+    // Refuse to recreate a missing watermark row if business history already exists in SQLite.
+    if (ledgerBaseline.hasRecords) {
+      return null;
     }
 
     const initialHmac = this.computeWatermarkHmac(nowMs, null);
@@ -262,11 +380,8 @@ export class LicenseService {
   }
 
   private computeWatermarkHmac(clockMs: number, activationToken: string | null): string {
-    return createHmac(
-      'sha256',
-      `RetailOS-Clock-Watermark-v1:${this.publicKeyPem}:${this.machineId}`,
-    )
-      .update(`${String(clockMs)}:${activationToken ?? ''}`)
+    return createHmac('sha256', Buffer.from(this.watermarkSecret, 'utf8'))
+      .update(`RetailOS-Clock-Watermark-v2:${this.machineId}:${String(clockMs)}:${activationToken ?? ''}`)
       .digest('hex');
   }
 

@@ -7,7 +7,7 @@
     "dev": "node server.mjs",
     "start": "node server.mjs",
     "build": "node build.mjs",
-    "lint": "node --check server.mjs && node --check public/app.js && node --check build.mjs && pnpm exec eslint server.mjs build.mjs public/app.js tests/*.test.mjs tests/*.spec.mjs --max-warnings 0",
+    "lint": "node --check server.mjs && node --check public/app.js && node --check build.mjs && node --check tests/e2e-server-harness.mjs && pnpm exec eslint server.mjs build.mjs public/app.js tests/*.mjs --max-warnings 0",
     "test": "node --test tests/*.test.mjs",
     "test:e2e": "playwright test -c playwright.config.mjs"
   },

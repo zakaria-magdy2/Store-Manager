@@ -8,6 +8,7 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  safeStorage,
   session,
   shell,
   type IpcMainInvokeEvent,
@@ -20,6 +21,7 @@ import {
   type DesktopWindowSecurityPolicy,
   resolveAvailableLoopbackPort,
   resolveDesktopDataPaths,
+  resolveOrCreateDesktopWatermarkSecret,
   startManagedServerChild,
   stopManagedServerProcess,
   waitForServerReady,
@@ -309,10 +311,16 @@ async function bootDesktopApplication(): Promise<void> {
   const desktopVersion = app.getVersion();
   process.env.RETAILOS_DESKTOP_VERSION = desktopVersion;
 
+  const watermarkSecret = await resolveOrCreateDesktopWatermarkSecret({
+    userDataDir: paths.userDataDir,
+    safeStorage,
+  });
+
   const serverScriptPath = resolveWebServerScriptPath();
   const childEnv = buildServerProcessEnv(process.env, paths, port, {
     runAsNode: true,
     desktopVersion,
+    watermarkSecret,
   });
 
   const managed = startManagedServerChild({

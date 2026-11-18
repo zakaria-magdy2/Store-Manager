@@ -23,6 +23,7 @@ import {
   isProcessAlive,
   resolveAvailableLoopbackPort,
   resolveDesktopDataPaths,
+  resolveOrCreateDesktopWatermarkSecret,
   startManagedServerChild,
   stopManagedServerProcess,
   waitForServerReady,
@@ -266,6 +267,51 @@ test('managed desktop server boots with temporary userData paths, verifies /api/
     if (child) {
       await stopManagedServerProcess({ child, dataDir: paths.dataDir, origin }).catch(() => undefined);
     }
+    await rm(tempUserData, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('resolveOrCreateDesktopWatermarkSecret persists DPAPI-sealed secret and passes RETAILOS_WATERMARK_SECRET', async () => {
+  const tempUserData = await mkdtemp(join(tmpdir(), 'retailos-watermark-dpapi-'));
+  try {
+    const fakeDpapi = {
+      isEncryptionAvailable: () => true,
+      encryptString: (plain) => Buffer.from(`dpapi:${plain}`, 'utf8'),
+      decryptString: (blob) => {
+        const text = blob.toString('utf8');
+        if (!text.startsWith('dpapi:')) throw new Error('Invalid DPAPI envelope');
+        return text.slice('dpapi:'.length);
+      },
+    };
+
+    const secret1 = await resolveOrCreateDesktopWatermarkSecret({
+      userDataDir: tempUserData,
+      safeStorage: fakeDpapi,
+    });
+    assert.match(secret1, /^[0-9a-f]{64}$/);
+    assert.equal(existsSync(join(tempUserData, 'license-watermark.bin')), true);
+
+    const secret2 = await resolveOrCreateDesktopWatermarkSecret({
+      userDataDir: tempUserData,
+      safeStorage: fakeDpapi,
+    });
+    assert.equal(secret2, secret1);
+
+    const paths = resolveDesktopDataPaths(tempUserData);
+    const childEnv = buildServerProcessEnv(
+      {
+        RETAILOS_TEST_LICENSE_PUBLIC_KEY: 'should-be-stripped',
+        RETAILOS_TEST_CLOCK_FILE: 'should-be-stripped',
+      },
+      paths,
+      3210,
+      { runAsNode: true, desktopVersion: '0.1.0', watermarkSecret: secret1 },
+    );
+    assert.equal(childEnv.RETAILOS_WATERMARK_SECRET, secret1);
+    assert.equal(childEnv.RETAILOS_TEST_LICENSE_PUBLIC_KEY, undefined);
+    assert.equal(childEnv.RETAILOS_TEST_CLOCK_FILE, undefined);
+    assert.equal(childEnv.NODE_ENV, 'production');
+  } finally {
     await rm(tempUserData, { recursive: true, force: true }).catch(() => undefined);
   }
 });

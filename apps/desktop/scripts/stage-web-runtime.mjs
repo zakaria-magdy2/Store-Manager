@@ -160,9 +160,16 @@ for (const reqPath of requiredPaths) {
   }
 }
 
-// Verify vendor keygen tools and private keys are NEVER bundled into desktop stage/release.
-if (existsSync(join(stageWebDir, 'tools')) || existsSync(join(stageWebDir, 'vendor-keygen'))) {
-  throw new Error('Security violation: vendor-keygen tools directory must never be staged.');
+// Verify vendor keygen tools, test harnesses, and private keys are NEVER bundled into desktop stage/release.
+if (
+  existsSync(join(stageWebDir, 'tools')) ||
+  existsSync(join(stageWebDir, 'vendor-keygen')) ||
+  existsSync(join(stageWebDir, 'tests')) ||
+  existsSync(join(stageWebDir, 'e2e-server-harness.mjs'))
+) {
+  throw new Error(
+    'Security violation: vendor-keygen tools and test harnesses must never be staged.',
+  );
 }
 
 async function assertNoPrivateKeysStaged(dirPath) {
@@ -173,8 +180,13 @@ async function assertNoPrivateKeysStaged(dirPath) {
       await assertNoPrivateKeysStaged(fullPath);
       continue;
     }
-    if (entry.name.toLowerCase().endsWith('private.pem') || entry.name.toLowerCase().includes('vendor-keygen')) {
-      throw new Error(`Security violation: forbidden vendor key artifact staged at ${fullPath}`);
+    const lowerName = entry.name.toLowerCase();
+    if (
+      lowerName.endsWith('private.pem') ||
+      lowerName.includes('vendor-keygen') ||
+      lowerName.includes('e2e-server-harness')
+    ) {
+      throw new Error(`Security violation: forbidden artifact staged at ${fullPath}`);
     }
     if (entry.name.endsWith('.pem') || entry.name.endsWith('.key')) {
       const content = await readFile(fullPath, 'utf8');

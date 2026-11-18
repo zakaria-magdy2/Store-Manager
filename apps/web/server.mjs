@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { homedir } from 'node:os';
 import { Transform } from 'node:stream';
-import { createReadStream, createWriteStream, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, join, normalize, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -59,7 +59,10 @@ import {
 import { CreateProductSchema, CreateUserSchema, UpdateProductSchema } from '@retailos/shared';
 import { z } from 'zod';
 
-const appDir = dirname(fileURLToPath(import.meta.url));
+const serverFilePath = fileURLToPath(import.meta.url);
+
+export async function createServerApp(options = {}) {
+const appDir = dirname(serverFilePath);
 const publicDir = resolve(appDir, 'public');
 const defaultDataDir = appDir.endsWith(`${sep}dist`) ? resolve(appDir, '..', 'data') : join(appDir, 'data');
 const dataDir = resolve(process.env.RETAILOS_DATA_DIR ?? defaultDataDir);
@@ -260,27 +263,25 @@ const checkout = new CheckoutService(saleRepo, saleRepo, variantRepo, productRep
 const purchasing = new SqlitePurchasingRepository(db);
 const expenses = new SqliteExpenseRepository(db);
 const returns = new SqliteReturnRepository(db);
-const testLicensePubKey =
-  process.env.NODE_ENV === 'test' && process.env.RETAILOS_TEST_LICENSE_PUBLIC_KEY
-    ? process.env.RETAILOS_TEST_LICENSE_PUBLIC_KEY.replace(/\\n/g, '\n')
-    : undefined;
-const testClockFile =
-  process.env.NODE_ENV === 'test' && process.env.RETAILOS_TEST_CLOCK_FILE
-    ? process.env.RETAILOS_TEST_CLOCK_FILE
-    : null;
+function resolveLicenseWatermarkSecretSync() {
+  const fromOption = typeof options.watermarkSecret === 'string' ? options.watermarkSecret.trim() : '';
+  if (fromOption.length >= 32) return fromOption;
+  const fromEnv = (process.env.RETAILOS_WATERMARK_SECRET ?? '').trim();
+  if (fromEnv.length >= 32) return fromEnv;
+  const secretPath = join(dataDir, '.retailos-watermark.key');
+  if (existsSync(secretPath)) {
+    const existing = readFileSync(secretPath, 'utf8').trim();
+    if (existing.length >= 32) return existing;
+  }
+  const generated = randomBytes(32).toString('hex');
+  writeFileSync(secretPath, `${generated}\n`, { encoding: 'utf8', mode: 0o600 });
+  return generated;
+}
+
 const licenseService = new LicenseService(db, {
-  publicKeyPem: testLicensePubKey,
-  nowProvider: testClockFile
-    ? () => {
-        try {
-          if (existsSync(testClockFile)) {
-            const parsed = Number.parseInt(readFileSync(testClockFile, 'utf8').trim(), 10);
-            if (Number.isFinite(parsed) && parsed > 0) return parsed;
-          }
-        } catch { /* fallback to wall clock */ }
-        return Date.now();
-      }
-    : undefined,
+  publicKeyPem: typeof options.licensePublicKey === 'string' ? options.licensePublicKey : undefined,
+  watermarkSecret: resolveLicenseWatermarkSecretSync(),
+  nowProvider: typeof options.nowProvider === 'function' ? options.nowProvider : undefined,
 });
 await licenseService.getStatus();
 const recurringExpenses = new SqliteRecurringExpenseRepository(db);
@@ -7456,7 +7457,7 @@ function restartLocalServer() {
   server.close(() => {
     database.checkpointPassive();
     void database.close().then(() => {
-      const child = spawn(process.execPath, [fileURLToPath(import.meta.url)], {
+      const child = spawn(process.execPath, [serverFilePath], {
         cwd: appDir,
         env: process.env,
         detached: true,
@@ -7535,3 +7536,19 @@ async function shutdown() {
 process.on('exit', () => removeControlFileSync());
 process.on('SIGINT', () => void shutdown().finally(() => process.exit(0)));
 process.on('SIGTERM', () => void shutdown().finally(() => process.exit(0)));
+  return { server, port, origin, databasePath, licenseService, shutdown };
+}
+
+function isInvokedAsMainModule() {
+  const entryArg = process.argv[1];
+  if (!entryArg) return false;
+  try {
+    return realpathSync(resolve(entryArg)) === realpathSync(serverFilePath);
+  } catch {
+    return resolve(entryArg) === resolve(serverFilePath);
+  }
+}
+
+if (isInvokedAsMainModule()) {
+  await createServerApp();
+}
