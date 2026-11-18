@@ -3541,3 +3541,140 @@ test('Final POS & accounting regression: split cash+electronic checkout GL (1010
     await rm(sDir, { recursive: true, force: true }).catch(() => {});
   }
 });
+
+
+test('RBAC guards: stock transfer destination store authorization and auditor shift rejection', async () => {
+  const tDir = await mkdtemp(join(appDir, '.test-rbac-'));
+  const tPort = await reservePort();
+  const tUrl = `http://127.0.0.1:${tPort}`;
+  let tLog = '';
+
+  const startServer = async () => {
+    const proc = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+      cwd: workspace,
+      env: { ...process.env, PORT: String(tPort), RETAILOS_DATA_DIR: tDir, RETAILOS_COMPANY_NAME: 'شركة RBAC', RETAILOS_COMPANY_CODE: 'RBAC_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع الرئيسي' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    proc.stdout.on('data', (c) => { tLog += c.toString(); });
+    proc.stderr.on('data', (c) => { tLog += c.toString(); });
+    for (let i = 0; i < 600; i += 1) {
+      if (proc.exitCode !== null) throw new Error(`Server exited ${proc.exitCode}\n${tLog}`);
+      try { if ((await fetch(`${tUrl}/api/bootstrap`)).ok) return proc; } catch { /* wait */ }
+      await new Promise((r) => setTimeout(r, 125));
+    }
+    throw new Error(`Timeout\n${tLog}`);
+  };
+
+  const stopServer = async (proc) => {
+    if (proc && proc.exitCode === null) {
+      proc.kill('SIGTERM');
+      await Promise.race([once(proc, 'exit'), new Promise((r) => setTimeout(r, 4000))]);
+    }
+  };
+
+  const req = async (path, { method = 'GET', body, cookieStr } = {}) => {
+    const headers = { Origin: tUrl };
+    if (body) headers['Content-Type'] = 'application/json';
+    if (cookieStr) headers.Cookie = cookieStr;
+    const response = await fetch(`${tUrl}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const payload = await response.json();
+    return { response, payload };
+  };
+
+  let srv = null;
+  try {
+    srv = await startServer();
+
+    // Setup owner
+    assert.equal((await req('/api/setup', { method: 'POST', body: { ownerName: 'مالك RBAC', ownerUsername: 'rbac_owner', password: 'RBAC-Owner-Password-2026' } })).response.status, 201, tLog);
+    const ownerLogin = await req('/api/login', { method: 'POST', body: { username: 'rbac_owner', password: 'RBAC-Owner-Password-2026' } });
+    assert.equal(ownerLogin.response.status, 200);
+    const ownerCookie = ownerLogin.response.headers.get('set-cookie').split(';')[0];
+
+    const data0 = await req('/api/data', { cookieStr: ownerCookie });
+    const storeId = data0.payload.stores[0].id;
+
+    // Create a product + stock via supplier purchase so we can attempt a transfer
+    const prod = await req('/api/products', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        name: 'منتج RBAC',
+        sku: 'RBAC-PROD',
+        hasVariants: true,
+        options: [{ key: 'color', name: 'اللون', values: ['أسود'] }],
+        variants: [{ sku: 'RBAC-PROD-1', attributes: { color: 'أسود' }, retailPrice: '10000', reorderPoint: '0' }],
+      },
+    });
+    assert.equal(prod.response.status, 201, JSON.stringify(prod.payload));
+    const variantId = (await req(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie })).payload.products[0].variants[0].id;
+
+    const supRes = await req('/api/suppliers', { method: 'POST', cookieStr: ownerCookie, body: { name: 'تاجر RBAC' } });
+    assert.equal(supRes.response.status, 201);
+    const receive = await req('/api/purchases', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: {
+        storeId,
+        supplierId: supRes.payload.id,
+        idempotencyKey: randomUUID(),
+        totalAmount: '50000',
+        paidAmount: '50000',
+        paymentMethod: 'CASH',
+        items: [{ variantId, quantity: '10', unitCost: '5000' }],
+      },
+    });
+    assert.equal(receive.response.status, 201, JSON.stringify(receive.payload));
+
+    // Create a second store
+    const store2 = await req('/api/stores', { method: 'POST', cookieStr: ownerCookie, body: { code: 'RBAC2', name: 'فرع RBAC الثاني', address: 'عنوان', phone: '01000000000' } });
+    assert.equal(store2.response.status, 201);
+    const store2Id = store2.payload.id;
+
+    // ---- Test (a): Stock transfer destination store authorization ----
+
+    // Create a STORE_MANAGER scoped to store 1
+    const mgrCreate = await req('/api/users', { method: 'POST', cookieStr: ownerCookie, body: { username: 'rbac_mgr', password: 'RBAC-Mgr-Password-2026', fullName: 'مدير فرع RBAC', role: 'STORE_MANAGER', storeId } });
+    assert.equal(mgrCreate.response.status, 201);
+    const mgrLogin = await req('/api/login', { method: 'POST', body: { username: 'rbac_mgr', password: 'RBAC-Mgr-Password-2026' } });
+    assert.equal(mgrLogin.response.status, 200);
+    const mgrCookie = mgrLogin.response.headers.get('set-cookie').split(';')[0];
+
+    // Manager scoped to store1 tries to transfer TO store2 -> should get 403 (destination store access denied)
+    const blockedTransfer = await req('/api/inventory/transfer', {
+      method: 'POST',
+      cookieStr: mgrCookie,
+      body: { fromStoreId: storeId, toStoreId: store2Id, variantId, quantity: '1' },
+    });
+    assert.equal(blockedTransfer.response.status, 403, `Expected 403 for manager transferring to unauthorized store, got ${blockedTransfer.response.status}: ${JSON.stringify(blockedTransfer.payload)}`);
+
+    // Owner (no store scope) can transfer fine
+    const ownerTransfer = await req('/api/inventory/transfer', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { fromStoreId: storeId, toStoreId: store2Id, variantId, quantity: '1' },
+    });
+    assert.equal(ownerTransfer.response.status, 201, `Owner transfer should succeed: ${JSON.stringify(ownerTransfer.payload)}`);
+
+    // ---- Test (b): AUDITOR rejected on shift start/end ----
+
+    // Create an AUDITOR user
+    const auditorCreate = await req('/api/users', { method: 'POST', cookieStr: ownerCookie, body: { username: 'rbac_auditor', password: 'RBAC-Auditor-Password-2026', fullName: 'مراجع RBAC', role: 'AUDITOR' } });
+    assert.equal(auditorCreate.response.status, 201);
+    const auditorLogin = await req('/api/login', { method: 'POST', body: { username: 'rbac_auditor', password: 'RBAC-Auditor-Password-2026' } });
+    assert.equal(auditorLogin.response.status, 200);
+    const auditorCookie = auditorLogin.response.headers.get('set-cookie').split(';')[0];
+
+    // Auditor tries to start a shift -> 403
+    const auditorShiftStart = await req('/api/shifts/start', { method: 'POST', cookieStr: auditorCookie, body: { storeId, openingCash: '0' } });
+    assert.equal(auditorShiftStart.response.status, 403, `Auditor must be blocked from starting shift, got ${auditorShiftStart.response.status}`);
+
+    // Auditor tries to end a shift -> 403
+    const auditorShiftEnd = await req('/api/shifts/end', { method: 'POST', cookieStr: auditorCookie, body: { shiftId: randomUUID(), actualCash: '0', handoverCash: '0' } });
+    assert.equal(auditorShiftEnd.response.status, 403, `Auditor must be blocked from ending shift, got ${auditorShiftEnd.response.status}`);
+
+  } finally {
+    await stopServer(srv);
+    await rm(tDir, { recursive: true, force: true }).catch(() => {});
+  }
+});

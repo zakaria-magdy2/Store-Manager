@@ -71,15 +71,17 @@ const companyConfig = {
 };
 const port = Number.parseInt(process.env.PORT ?? '4173', 10);
 const origin = `http://127.0.0.1:${port}`;
-const databasePath = join(dataDir, 'retailos.sqlite');
-const dailyBackupDir = join(dataDir, 'backups', 'daily');
+const databasePath = process.env.RETAILOS_DB_PATH ? resolve(process.env.RETAILOS_DB_PATH) : join(dataDir, 'retailos.sqlite');
+const backupBaseDir = process.env.RETAILOS_BACKUP_DIR ? resolve(process.env.RETAILOS_BACKUP_DIR) : join(dataDir, 'backups');
+const dailyBackupDir = join(backupBaseDir, 'daily');
 const dailyBackupKeyPath = join(dataDir, '.retailos-daily.key');
-const preRestoreBackupDir = join(dataDir, 'backups', 'pre-restore');
-const quarantineBackupDir = join(dataDir, 'backups', 'quarantine');
+const preRestoreBackupDir = join(backupBaseDir, 'pre-restore');
+const quarantineBackupDir = join(backupBaseDir, 'quarantine');
 const backupSettingsPath = join(dataDir, 'backup-settings.json');
 const MAX_DAILY_BACKUPS = 30;
 const AUTO_DAILY_REFRESH_MS = 30 * 60 * 1000;
 await mkdir(dataDir, { recursive: true });
+await mkdir(dirname(databasePath), { recursive: true });
 await mkdir(dailyBackupDir, { recursive: true });
 await mkdir(preRestoreBackupDir, { recursive: true });
 const restoredAfterCrash = await recoverPendingSqliteRestore(dataDir, databasePath, companyConfig.code);
@@ -4727,6 +4729,7 @@ async function handleApi(req, res, url) {
 
   if (method === 'POST' && path === '/api/shifts/start') {
     const body = await readJson(req);
+    ctx.assertPermission(Permissions.POS_CHECKOUT);
     const stores = await storeRepo.listByTenant(ctx);
     const storeId = ctx.storeId ?? body.storeId ?? stores[0]?.id;
     if (!storeId || !stores.some((s) => s.id === storeId)) {
@@ -4823,6 +4826,7 @@ async function handleApi(req, res, url) {
 
   if (method === 'POST' && path === '/api/shifts/end') {
     const body = await readJson(req);
+    ctx.assertPermission(Permissions.POS_CHECKOUT);
     const shiftId = body.shiftId;
     if (!shiftId) throw Object.assign(new Error('معرف الشفت مطلوب'), { status: 400 });
     const closeIdempotencyKey = typeof body.idempotencyKey === 'string' && body.idempotencyKey.trim()
@@ -7423,7 +7427,7 @@ server.listen(port, '127.0.0.1', () => {
     console.warn('Could not write runtime control file', err);
   }
   console.log(`RetailOS is running locally at ${origin}`);
-  console.log(`Company database: ${join(dataDir, 'retailos.sqlite')}`);
+  console.log(`Company database: ${databasePath}`);
 });
 
 let shutdownPromise = null;

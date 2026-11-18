@@ -1,6 +1,8 @@
 node_modules/
 dist/
 build/
+out/
+release/
 .turbo/
 *.log
 *.tsbuildinfo
@@ -11,4 +13,6 @@ build/
 .env
 .env.local
 apps/web/.test-data-*/
+apps/web/.test-rbac-*/
 apps/web/data/
+apps/desktop/stage/

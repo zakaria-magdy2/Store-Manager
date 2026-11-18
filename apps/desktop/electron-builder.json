@@ -1,0 +1,50 @@
+{
+  "$schema": "https://www.schemastore.org/electron-builder.json",
+  "appId": "com.retailos.desktop",
+  "productName": "RetailOS",
+  "asar": true,
+  "npmRebuild": false,
+  "buildDependenciesFromSource": false,
+  "directories": {
+    "output": "release"
+  },
+  "afterPack": "scripts/after-pack.cjs",
+  "files": [
+    "dist/main.js",
+    "dist/runtime.js",
+    "dist/preload.cjs",
+    "package.json",
+    "!node_modules/**/*",
+    "!**/*.map",
+    "!**/*.d.ts"
+  ],
+  "extraResources": [
+    {
+      "from": "stage/web",
+      "to": "web",
+      "filter": ["**/*"]
+    }
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      },
+      {
+        "target": "dir",
+        "arch": ["x64"]
+      }
+    ],
+    "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
+    "signAndEditExecutable": false
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "RetailOS"
+  }
+}

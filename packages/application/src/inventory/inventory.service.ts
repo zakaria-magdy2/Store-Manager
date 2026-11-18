@@ -246,6 +246,7 @@ export class InventoryService {
   ): Promise<TransferOperationResult> {
     ctx.assertPermission(Permissions.INVENTORY_TRANSFER);
     this.assertStoreAccess(ctx, params.fromStoreId);
+    this.assertStoreAccess(ctx, params.toStoreId);
     this.assertPositiveQuantity(params.quantity, 'Transferred quantity');
     if (params.fromStoreId === params.toStoreId) {
       throw new InvalidStockOperationError('Source and destination stores must differ');

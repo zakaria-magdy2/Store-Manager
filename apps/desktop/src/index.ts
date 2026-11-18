@@ -6,63 +6,15 @@ import {
   SqliteOutboxRepository,
   type OutboxSyncTransport,
 } from '@retailos/infrastructure';
+import {
+  createDesktopWindowSecurityPolicy,
+  DESKTOP_IPC_CHANNELS,
+  type DesktopWindowSecurityPolicy,
+} from './runtime.js';
+
+export * from './runtime.js';
 
 type DatabaseHandle = ConstructorParameters<typeof SqliteOutboxRepository>[0];
-
-export const DESKTOP_IPC_CHANNELS = Object.freeze({
-  HOST_STATUS: 'retailos:host:status',
-  SYNC_RUN_BATCH: 'retailos:sync:run-batch',
-  SYNC_STATS: 'retailos:sync:stats',
-  AUDIT_VERIFY_CHAIN: 'retailos:audit:verify-chain',
-} as const);
-
-export type DesktopIpcChannel =
-  (typeof DESKTOP_IPC_CHANNELS)[keyof typeof DESKTOP_IPC_CHANNELS];
-
-const ALLOWED_IPC_CHANNEL_SET = new Set<string>(Object.values(DESKTOP_IPC_CHANNELS));
-
-export interface DesktopWindowSecurityPolicy {
-  readonly contextIsolation: true;
-  readonly nodeIntegration: false;
-  readonly sandbox: true;
-  readonly webSecurity: true;
-  readonly allowRunningInsecureContent: false;
-  readonly allowedOrigin: string;
-  isAllowedNavigationUrl(targetUrl: string): boolean;
-  isAllowedIpcChannel(channel: string): channel is DesktopIpcChannel;
-}
-
-export function createDesktopWindowSecurityPolicy(
-  localLoopbackOrigin = 'http://127.0.0.1:4310',
-): DesktopWindowSecurityPolicy {
-  const parsedOrigin = new URL(localLoopbackOrigin);
-  if (parsedOrigin.protocol !== 'http:' || parsedOrigin.hostname !== '127.0.0.1') {
-    throw new Error(
-      'DesktopSecurityError: localLoopbackOrigin must bind strictly to http://127.0.0.1',
-    );
-  }
-  const normalizedOrigin = parsedOrigin.origin;
-
-  return Object.freeze({
-    contextIsolation: true,
-    nodeIntegration: false,
-    sandbox: true,
-    webSecurity: true,
-    allowRunningInsecureContent: false,
-    allowedOrigin: normalizedOrigin,
-    isAllowedNavigationUrl(targetUrl: string): boolean {
-      try {
-        const parsed = new URL(targetUrl);
-        return parsed.origin === normalizedOrigin;
-      } catch {
-        return false;
-      }
-    },
-    isAllowedIpcChannel(channel: string): channel is DesktopIpcChannel {
-      return ALLOWED_IPC_CHANNEL_SET.has(channel);
-    },
-  });
-}
 
 export interface DesktopHostStatus {
   readonly mode: 'OFFLINE_FIRST_DESKTOP';

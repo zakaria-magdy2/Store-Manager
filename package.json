@@ -14,7 +14,11 @@
     "test": "turbo run test --concurrency=1",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
-    "clean": "turbo run clean"
+    "clean": "turbo run clean",
+    "desktop:dev": "pnpm --filter @retailos/desktop desktop:dev",
+    "desktop:build": "pnpm --filter @retailos/desktop desktop:build",
+    "desktop:pack:win": "pnpm --filter @retailos/desktop desktop:pack:win",
+    "desktop:dist:win": "pnpm --filter @retailos/desktop desktop:dist:win"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
