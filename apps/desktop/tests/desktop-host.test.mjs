@@ -229,13 +229,16 @@ test('resolveAvailableLoopbackPort falls back dynamically when preferred port is
   }
 });
 
-test('managed desktop server boots with temporary userData paths, verifies /api/bootstrap, and shuts down with zero orphan processes', async () => {
+test('managed desktop server boots with temporary userData paths via stdin secret handshake, verifies /api/bootstrap, and shuts down with zero orphan processes', async () => {
   const testDir = dirname(fileURLToPath(import.meta.url));
   const webServerPath = resolve(testDir, '..', '..', 'web', 'server.mjs');
   const tempUserData = await mkdtemp(join(tmpdir(), 'retailos-desktop-smoke-'));
   const paths = resolveDesktopDataPaths(tempUserData);
   const port = await resolveAvailableLoopbackPort(0);
   const origin = `http://127.0.0.1:${String(port)}`;
+  const watermarkSecret = await resolveOrCreateDesktopWatermarkSecret({
+    userDataDir: tempUserData,
+  });
   const env = buildServerProcessEnv(process.env, paths, port);
 
   let child = null;
@@ -245,6 +248,7 @@ test('managed desktop server boots with temporary userData paths, verifies /api/
       serverScriptPath: webServerPath,
       cwd: dirname(webServerPath),
       env,
+      watermarkSecret,
     });
     child = managed.child;
     const identity = await waitForServerReady({
@@ -256,6 +260,12 @@ test('managed desktop server boots with temporary userData paths, verifies /api/
     assert.equal(identity.configured, true);
     assert.equal(existsSync(paths.databasePath), true, 'SQLite DB must be created at RETAILOS_DB_PATH');
     assert.equal(existsSync(paths.dailyBackupDir), true, 'Daily backup dir must be created inside RETAILOS_BACKUP_DIR');
+    assert.equal(existsSync(join(paths.dataDir, '.retailos-watermark.key')), false, 'Plaintext watermark fallback file must not exist');
+
+    const licenseRes = await fetch(`${origin}/api/license/status`);
+    assert.equal(licenseRes.status, 200);
+    const licensePayload = await licenseRes.json();
+    assert.equal(licensePayload.status, 'UNLICENSED');
 
     const pid = child.pid;
     await stopManagedServerProcess({ child, dataDir: paths.dataDir, origin });
@@ -271,7 +281,7 @@ test('managed desktop server boots with temporary userData paths, verifies /api/
   }
 });
 
-test('resolveOrCreateDesktopWatermarkSecret persists DPAPI-sealed secret and passes RETAILOS_WATERMARK_SECRET', async () => {
+test('resolveOrCreateDesktopWatermarkSecret persists DPAPI-sealed secret and buildServerProcessEnv strips secret env vars', async () => {
   const tempUserData = await mkdtemp(join(tmpdir(), 'retailos-watermark-dpapi-'));
   try {
     const fakeDpapi = {
@@ -300,14 +310,15 @@ test('resolveOrCreateDesktopWatermarkSecret persists DPAPI-sealed secret and pas
     const paths = resolveDesktopDataPaths(tempUserData);
     const childEnv = buildServerProcessEnv(
       {
+        RETAILOS_WATERMARK_SECRET: secret1,
         RETAILOS_TEST_LICENSE_PUBLIC_KEY: 'should-be-stripped',
         RETAILOS_TEST_CLOCK_FILE: 'should-be-stripped',
       },
       paths,
       3210,
-      { runAsNode: true, desktopVersion: '0.1.0', watermarkSecret: secret1 },
+      { runAsNode: true, desktopVersion: '0.1.0' },
     );
-    assert.equal(childEnv.RETAILOS_WATERMARK_SECRET, secret1);
+    assert.equal(childEnv.RETAILOS_WATERMARK_SECRET, undefined);
     assert.equal(childEnv.RETAILOS_TEST_LICENSE_PUBLIC_KEY, undefined);
     assert.equal(childEnv.RETAILOS_TEST_CLOCK_FILE, undefined);
     assert.equal(childEnv.NODE_ENV, 'production');

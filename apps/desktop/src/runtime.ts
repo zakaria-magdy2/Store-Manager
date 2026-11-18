@@ -133,7 +133,6 @@ export function buildServerProcessEnv(
   options?: {
     readonly runAsNode?: boolean | undefined;
     readonly desktopVersion?: string | undefined;
-    readonly watermarkSecret?: string | undefined;
   },
 ): NodeJS.ProcessEnv {
   const nextEnv: NodeJS.ProcessEnv = {
@@ -143,11 +142,9 @@ export function buildServerProcessEnv(
     RETAILOS_DB_PATH: paths.databasePath,
     RETAILOS_BACKUP_DIR: paths.backupDir,
   };
+  delete nextEnv.RETAILOS_WATERMARK_SECRET;
   delete nextEnv.RETAILOS_TEST_LICENSE_PUBLIC_KEY;
   delete nextEnv.RETAILOS_TEST_CLOCK_FILE;
-  if (options?.watermarkSecret) {
-    nextEnv.RETAILOS_WATERMARK_SECRET = options.watermarkSecret;
-  }
   if (options?.runAsNode) {
     nextEnv.NODE_ENV = 'production';
     nextEnv.ELECTRON_RUN_AS_NODE = '1';
@@ -471,6 +468,7 @@ export function startManagedServerChild(options: {
   readonly serverScriptPath: string;
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
+  readonly watermarkSecret: string;
 }): { readonly child: ChildProcess; readonly logs: string[] } {
   const logs: string[] = [];
   const appendLog = (chunk: Buffer | string) => {
@@ -480,14 +478,21 @@ export function startManagedServerChild(options: {
     }
   };
 
-  const child = spawn(options.execPath, [options.serverScriptPath], {
+  const child = spawn(options.execPath, [options.serverScriptPath, '--electron-stdio-secret'], {
     cwd: options.cwd,
     env: options.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });
   child.stdout?.on('data', appendLog);
   child.stderr?.on('data', appendLog);
+
+  if (!child.stdin) {
+    throw new Error('Failed to open private stdin pipe for RetailOS watermark secret');
+  }
+  child.stdin.on('error', () => undefined);
+  child.stdin.write(`${JSON.stringify({ watermarkSecret: options.watermarkSecret })}\n`);
+  child.stdin.end();
 
   return { child, logs };
 }

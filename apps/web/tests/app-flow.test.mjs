@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createConnection, createServer } from 'node:net';
@@ -29,6 +29,7 @@ let serverLog = '';
 const { publicKey: flowLicensePublicKey, privateKey: flowLicensePrivateKey } =
   generateKeyPairSync('ed25519');
 const flowLicensePublicKeyPem = flowLicensePublicKey.export({ type: 'spki', format: 'pem' }).toString();
+const flowTestWatermarkSecret = randomBytes(32).toString('hex');
 
 function signFlowLicenseToken(payload, privateKey = flowLicensePrivateKey) {
   const encodedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
@@ -42,6 +43,7 @@ function testLicenseEnv(extraEnv) {
     ...process.env,
     NODE_ENV: 'test',
     RETAILOS_TEST_LICENSE_PUBLIC_KEY: flowLicensePublicKeyPem,
+    RETAILOS_TEST_WATERMARK_SECRET: flowTestWatermarkSecret,
     ...extraEnv,
   };
 }
@@ -3969,29 +3971,54 @@ test('Production server.mjs ignores env-var license overrides and enforces DB wa
     }
   };
 
-  // --- Part A: Direct server.mjs launch MUST ignore RETAILOS_TEST_LICENSE_PUBLIC_KEY ---
+  // --- Part A: Direct server.mjs fails closed without stdin handshake and ignores RETAILOS_WATERMARK_SECRET & RETAILOS_TEST_LICENSE_PUBLIC_KEY ---
   let prodProc = null;
   try {
+    // A1: Direct launch without --electron-stdio-secret must exit non-zero even if RETAILOS_WATERMARK_SECRET env var is set
+    const portFail = await reservePort();
+    let failLog = '';
+    const directFailProc = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        NODE_ENV: 'test',
+        PORT: String(portFail),
+        RETAILOS_DATA_DIR: dirA,
+        RETAILOS_WATERMARK_SECRET: 'e'.repeat(64),
+        RETAILOS_TEST_LICENSE_PUBLIC_KEY: flowLicensePublicKeyPem,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    directFailProc.stdout.on('data', (c) => { failLog += c.toString(); });
+    directFailProc.stderr.on('data', (c) => { failLog += c.toString(); });
+    const [failCode] = await once(directFailProc, 'exit');
+    assert.notEqual(failCode, 0, `Direct server.mjs without stdin handshake must fail closed, exited 0:\n${failLog}`);
+    assert.match(failLog, /Fatal: RetailOS server must be launched via the desktop host/);
+
+    // A2: Launch via --electron-stdio-secret + JSON stdin handshake succeeds, creates no plaintext key file, and still ignores RETAILOS_TEST_LICENSE_PUBLIC_KEY
     const portA = await reservePort();
     const urlA = `http://127.0.0.1:${portA}`;
     let logA = '';
-    prodProc = spawn(process.execPath, [join(appDir, 'server.mjs')], {
+    prodProc = spawn(process.execPath, [join(appDir, 'server.mjs'), '--electron-stdio-secret'], {
       cwd: workspace,
       env: {
         ...process.env,
         NODE_ENV: 'test',
         PORT: String(portA),
         RETAILOS_DATA_DIR: dirA,
+        RETAILOS_WATERMARK_SECRET: '0'.repeat(64),
         RETAILOS_TEST_LICENSE_PUBLIC_KEY: flowLicensePublicKeyPem,
         RETAILOS_COMPANY_NAME: 'اختبار الإنتاج',
         RETAILOS_COMPANY_CODE: 'PROD_KEY_TEST',
         RETAILOS_CURRENCY: 'EGP',
         RETAILOS_STORE_NAME: 'الفرع الرئيسي',
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
     prodProc.stdout.on('data', (c) => { logA += c.toString(); });
     prodProc.stderr.on('data', (c) => { logA += c.toString(); });
+    prodProc.stdin.write(`${JSON.stringify({ watermarkSecret: flowTestWatermarkSecret })}\n`);
+    prodProc.stdin.end();
 
     let readyA = false;
     for (let i = 0; i < 400; i += 1) {
@@ -4026,7 +4053,7 @@ test('Production server.mjs ignores env-var license overrides and enforces DB wa
       `Direct server.mjs MUST reject tokens signed by RETAILOS_TEST_LICENSE_PUBLIC_KEY, got ${actAttempt.status}`,
     );
     const filesInDirA = await readdir(dirA);
-    assert.ok(filesInDirA.includes('.retailos-watermark.key'), 'Headless per-install watermark secret file must be created');
+    assert.equal(filesInDirA.includes('.retailos-watermark.key'), false, 'Plaintext .retailos-watermark.key fallback must NEVER be created');
   } finally {
     await stopProc(prodProc);
     await rm(dirA, { recursive: true, force: true }).catch(() => {});

@@ -61,7 +61,74 @@ import { z } from 'zod';
 
 const serverFilePath = fileURLToPath(import.meta.url);
 
+async function resolveLicenseWatermarkSecret(providedSecret) {
+  const fromOption = typeof providedSecret === 'string' ? providedSecret.trim() : '';
+  if (fromOption.length >= 32) return fromOption;
+
+  if (process.argv.includes('--electron-stdio-secret')) {
+    const line = await new Promise((resolvePromise, rejectPromise) => {
+      let buffer = '';
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        process.stdin.off('data', onData);
+        process.stdin.off('end', onEnd);
+        process.stdin.off('error', onError);
+        process.stdin.pause();
+      };
+      const finish = (err, val) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (err) rejectPromise(err);
+        else resolvePromise(val);
+      };
+      const timer = setTimeout(() => {
+        finish(new Error('Fatal: RetailOS server timed out waiting for desktop host secret'));
+      }, 5000);
+      const onData = (chunk) => {
+        buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+        if (buffer.length > 8192) {
+          finish(new Error('Fatal: RetailOS desktop secret payload exceeded limit'));
+          return;
+        }
+        const nlIdx = buffer.indexOf('\n');
+        if (nlIdx !== -1) {
+          finish(null, buffer.slice(0, nlIdx).trim());
+        }
+      };
+      const onEnd = () => {
+        const trimmed = buffer.trim();
+        if (trimmed) finish(null, trimmed);
+        else finish(new Error('Fatal: RetailOS server must be launched via the desktop host'));
+      };
+      const onError = () => {
+        finish(new Error('Fatal: RetailOS server failed reading desktop host secret'));
+      };
+      process.stdin.setEncoding('utf8');
+      process.stdin.on('data', onData);
+      process.stdin.on('end', onEnd);
+      process.stdin.on('error', onError);
+      process.stdin.resume();
+    });
+
+    try {
+      const parsed = JSON.parse(line);
+      const parsedSecret = typeof parsed?.watermarkSecret === 'string' ? parsed.watermarkSecret.trim() : '';
+      if (parsedSecret.length >= 32) {
+        return parsedSecret;
+      }
+    } catch {
+      // Fall through to fail-closed error below
+    }
+    throw new Error('Fatal: RetailOS server must be launched via the desktop host');
+  }
+
+  throw new Error('Fatal: RetailOS server must be launched via the desktop host');
+}
+
 export async function createServerApp(options = {}) {
+const watermarkSecret = await resolveLicenseWatermarkSecret(options.watermarkSecret);
 const appDir = dirname(serverFilePath);
 const publicDir = resolve(appDir, 'public');
 const defaultDataDir = appDir.endsWith(`${sep}dist`) ? resolve(appDir, '..', 'data') : join(appDir, 'data');
@@ -263,24 +330,9 @@ const checkout = new CheckoutService(saleRepo, saleRepo, variantRepo, productRep
 const purchasing = new SqlitePurchasingRepository(db);
 const expenses = new SqliteExpenseRepository(db);
 const returns = new SqliteReturnRepository(db);
-function resolveLicenseWatermarkSecretSync() {
-  const fromOption = typeof options.watermarkSecret === 'string' ? options.watermarkSecret.trim() : '';
-  if (fromOption.length >= 32) return fromOption;
-  const fromEnv = (process.env.RETAILOS_WATERMARK_SECRET ?? '').trim();
-  if (fromEnv.length >= 32) return fromEnv;
-  const secretPath = join(dataDir, '.retailos-watermark.key');
-  if (existsSync(secretPath)) {
-    const existing = readFileSync(secretPath, 'utf8').trim();
-    if (existing.length >= 32) return existing;
-  }
-  const generated = randomBytes(32).toString('hex');
-  writeFileSync(secretPath, `${generated}\n`, { encoding: 'utf8', mode: 0o600 });
-  return generated;
-}
-
 const licenseService = new LicenseService(db, {
   publicKeyPem: typeof options.licensePublicKey === 'string' ? options.licensePublicKey : undefined,
-  watermarkSecret: resolveLicenseWatermarkSecretSync(),
+  watermarkSecret,
   nowProvider: typeof options.nowProvider === 'function' ? options.nowProvider : undefined,
 });
 await licenseService.getStatus();
@@ -7457,13 +7509,16 @@ function restartLocalServer() {
   server.close(() => {
     database.checkpointPassive();
     void database.close().then(() => {
-      const child = spawn(process.execPath, [serverFilePath], {
+      const child = spawn(process.execPath, [serverFilePath, '--electron-stdio-secret'], {
         cwd: appDir,
         env: process.env,
         detached: true,
-        stdio: 'ignore',
+        stdio: ['pipe', 'ignore', 'ignore'],
         windowsHide: true,
       });
+      child.stdin?.on('error', () => undefined);
+      child.stdin?.write(`${JSON.stringify({ watermarkSecret })}\n`);
+      child.stdin?.end();
       child.unref();
       setTimeout(() => process.exit(0), 250);
     }).catch((error) => {
@@ -7550,5 +7605,10 @@ function isInvokedAsMainModule() {
 }
 
 if (isInvokedAsMainModule()) {
-  await createServerApp();
+  try {
+    await createServerApp();
+  } catch (startupError) {
+    console.error(startupError instanceof Error ? startupError.message : String(startupError));
+    process.exit(1);
+  }
 }

@@ -320,7 +320,6 @@ async function bootDesktopApplication(): Promise<void> {
   const childEnv = buildServerProcessEnv(process.env, paths, port, {
     runAsNode: true,
     desktopVersion,
-    watermarkSecret,
   });
 
   const managed = startManagedServerChild({
@@ -328,6 +327,7 @@ async function bootDesktopApplication(): Promise<void> {
     serverScriptPath,
     cwd: dirname(serverScriptPath),
     env: childEnv,
+    watermarkSecret,
   });
   serverChild = managed.child;
 
