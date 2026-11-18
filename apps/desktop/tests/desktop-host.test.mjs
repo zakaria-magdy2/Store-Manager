@@ -41,6 +41,42 @@ test('createDesktopWindowSecurityPolicy enforces loopback origin, sandbox flags,
   assert.equal(policy.isAllowedNavigationUrl('https://evil.example.com'), false);
   assert.equal(policy.isAllowedNavigationUrl('file:///C:/Windows/System32/cmd.exe'), false);
 
+  assert.equal(policy.isAllowedChildNavigationUrl('http://127.0.0.1:4310/pos'), true);
+  assert.equal(policy.isAllowedChildNavigationUrl('https://evil.example.com'), false);
+  assert.equal(policy.isAllowedChildNavigationUrl('about:blank'), false);
+  assert.equal(policy.isAllowedChildNavigationUrl('file:///C:/Windows/System32/cmd.exe'), false);
+
+  assert.equal(
+    policy.isAllowedPermissionRequest('clipboard-read', 'http://127.0.0.1:4310/pos'),
+    true,
+  );
+  assert.equal(
+    policy.isAllowedPermissionRequest('clipboard-sanitized-write', 'http://127.0.0.1:4310/pos'),
+    true,
+  );
+  assert.equal(
+    policy.isAllowedPermissionRequest('clipboard-read', 'about:blank', 'http://127.0.0.1:4310/'),
+    true,
+  );
+  assert.equal(policy.isAllowedPermissionRequest('clipboard-read', 'about:blank'), false);
+  assert.equal(
+    policy.isAllowedPermissionRequest('clipboard-read', 'https://evil.example.com'),
+    false,
+  );
+  assert.equal(
+    policy.isAllowedPermissionRequest('clipboard-sanitized-write', 'http://127.0.0.1:9999/'),
+    false,
+  );
+  assert.equal(policy.isAllowedPermissionRequest('media', 'http://127.0.0.1:4310/pos'), false);
+  assert.equal(
+    policy.isAllowedPermissionRequest('geolocation', 'http://127.0.0.1:4310/pos'),
+    false,
+  );
+  assert.equal(
+    policy.isAllowedPermissionRequest('notifications', 'http://127.0.0.1:4310/pos'),
+    false,
+  );
+
   assert.equal(policy.isAllowedIpcChannel(DESKTOP_IPC_CHANNELS.HOST_STATUS), true);
   assert.equal(policy.isAllowedIpcChannel('retailos:shell:exec'), false);
 

@@ -26,8 +26,19 @@ export interface DesktopWindowSecurityPolicy {
   readonly allowRunningInsecureContent: false;
   readonly allowedOrigin: string;
   isAllowedNavigationUrl(targetUrl: string): boolean;
+  isAllowedChildNavigationUrl(targetUrl: string): boolean;
+  isAllowedPermissionRequest(
+    permission: string,
+    requestingOriginOrUrl: string,
+    openerOriginOrUrl?: string,
+  ): boolean;
   isAllowedIpcChannel(channel: string): channel is DesktopIpcChannel;
 }
+
+const ALLOWED_CLIPBOARD_PERMISSIONS = new Set<string>([
+  'clipboard-read',
+  'clipboard-sanitized-write',
+]);
 
 export function createDesktopWindowSecurityPolicy(
   localLoopbackOrigin = 'http://127.0.0.1:4310',
@@ -40,6 +51,15 @@ export function createDesktopWindowSecurityPolicy(
   }
   const normalizedOrigin = parsedOrigin.origin;
 
+  const isAllowedLoopbackUrl = (targetUrl: string): boolean => {
+    try {
+      const parsed = new URL(targetUrl);
+      return parsed.origin === normalizedOrigin;
+    } catch {
+      return false;
+    }
+  };
+
   return Object.freeze({
     contextIsolation: true,
     nodeIntegration: false,
@@ -48,12 +68,30 @@ export function createDesktopWindowSecurityPolicy(
     allowRunningInsecureContent: false,
     allowedOrigin: normalizedOrigin,
     isAllowedNavigationUrl(targetUrl: string): boolean {
-      try {
-        const parsed = new URL(targetUrl);
-        return parsed.origin === normalizedOrigin;
-      } catch {
+      return isAllowedLoopbackUrl(targetUrl);
+    },
+    isAllowedChildNavigationUrl(targetUrl: string): boolean {
+      return isAllowedLoopbackUrl(targetUrl);
+    },
+    isAllowedPermissionRequest(
+      permission: string,
+      requestingOriginOrUrl: string,
+      openerOriginOrUrl?: string,
+    ): boolean {
+      if (!ALLOWED_CLIPBOARD_PERMISSIONS.has(permission)) {
         return false;
       }
+      if (isAllowedLoopbackUrl(requestingOriginOrUrl)) {
+        return true;
+      }
+      if (
+        requestingOriginOrUrl === 'about:blank' &&
+        typeof openerOriginOrUrl === 'string' &&
+        isAllowedLoopbackUrl(openerOriginOrUrl)
+      ) {
+        return true;
+      }
+      return false;
     },
     isAllowedIpcChannel(channel: string): channel is DesktopIpcChannel {
       return ALLOWED_IPC_CHANNEL_SET.has(channel);

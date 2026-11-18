@@ -53,6 +53,8 @@ let desktopPaths: DesktopDataPaths | null = null;
 let activeSecurityPolicy: DesktopWindowSecurityPolicy | null = null;
 let quitHandled = false;
 let shutdownInFlight: Promise<void> | null = null;
+let webContentsGuardInstalled = false;
+const trustedPopupWebContentsIds = new Set<number>();
 
 function writeDesktopLog(message: string, force = false): void {
   if (!force && process.env.RETAILOS_DESKTOP_LOG !== '1') {
@@ -195,6 +197,19 @@ function createMainWindow(origin: string, securityPolicy: DesktopWindowSecurityP
     }
   });
 
+  win.webContents.on('did-create-window', (childWindow, details) => {
+    const childContentsId = childWindow.webContents.id;
+    if (
+      activeSecurityPolicy &&
+      (details.url === 'about:blank' || activeSecurityPolicy.isAllowedNavigationUrl(details.url))
+    ) {
+      trustedPopupWebContentsIds.add(childContentsId);
+      childWindow.webContents.once('destroyed', () => {
+        trustedPopupWebContentsIds.delete(childContentsId);
+      });
+    }
+  });
+
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (url === 'about:blank' || securityPolicy.isAllowedNavigationUrl(url)) {
       return {
@@ -256,6 +271,29 @@ function createMainWindow(origin: string, securityPolicy: DesktopWindowSecurityP
   return win;
 }
 
+function installGlobalWebContentsGuards(): void {
+  if (webContentsGuardInstalled) {
+    return;
+  }
+  webContentsGuardInstalled = true;
+
+  app.on('web-contents-created', (_event, contents) => {
+    contents.on('will-navigate', (navEvent, targetUrl) => {
+      if (!activeSecurityPolicy || !activeSecurityPolicy.isAllowedChildNavigationUrl(targetUrl)) {
+        navEvent.preventDefault();
+      }
+    });
+
+    // Lock down any child / popup WebContents (including about:blank print windows)
+    // so it cannot spawn nested popups or navigate off-origin.
+    contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+
+    contents.once('destroyed', () => {
+      trustedPopupWebContentsIds.delete(contents.id);
+    });
+  });
+}
+
 async function bootDesktopApplication(): Promise<void> {
   const userDataDir = app.getPath('userData');
   const paths = resolveDesktopDataPaths(userDataDir);
@@ -292,8 +330,33 @@ async function bootDesktopApplication(): Promise<void> {
   });
   writeDesktopLog(`server ready at ${serverOrigin}`);
 
-  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
-    callback(permission === 'clipboard-read' || permission === 'clipboard-sanitized-write');
+  installGlobalWebContentsGuards();
+
+  session.defaultSession.setPermissionRequestHandler(
+    (webContents, permission, callback, details) => {
+      const requestingUrl = details.requestingUrl || webContents.getURL();
+      const openerOrigin = trustedPopupWebContentsIds.has(webContents.id)
+        ? serverOrigin
+        : undefined;
+      callback(
+        Boolean(
+          activeSecurityPolicy?.isAllowedPermissionRequest(
+            permission,
+            requestingUrl,
+            openerOrigin,
+          ),
+        ),
+      );
+    },
+  );
+
+  session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
+    const targetUrl = requestingOrigin || webContents?.getURL() || '';
+    const openerOrigin =
+      webContents && trustedPopupWebContentsIds.has(webContents.id) ? serverOrigin : undefined;
+    return Boolean(
+      activeSecurityPolicy?.isAllowedPermissionRequest(permission, targetUrl, openerOrigin),
+    );
   });
 
   registerIpcHandlers();

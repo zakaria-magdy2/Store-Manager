@@ -3673,6 +3673,23 @@ test('RBAC guards: stock transfer destination store authorization and auditor sh
     const auditorShiftEnd = await req('/api/shifts/end', { method: 'POST', cookieStr: auditorCookie, body: { shiftId: randomUUID(), actualCash: '0', handoverCash: '0' } });
     assert.equal(auditorShiftEnd.response.status, 403, `Auditor must be blocked from ending shift, got ${auditorShiftEnd.response.status}`);
 
+    // CASHIER and OWNER hold POS_CHECKOUT and succeed on start/end shifts
+    const cashierCreate = await req('/api/users', { method: 'POST', cookieStr: ownerCookie, body: { username: 'rbac_cashier', password: 'RBAC-Cashier-Password-2026', fullName: 'كاشير RBAC', role: 'CASHIER', storeId } });
+    assert.equal(cashierCreate.response.status, 201);
+    const cashierLogin = await req('/api/login', { method: 'POST', body: { username: 'rbac_cashier', password: 'RBAC-Cashier-Password-2026' } });
+    assert.equal(cashierLogin.response.status, 200);
+    const cashierCookie = cashierLogin.response.headers.get('set-cookie').split(';')[0];
+
+    const cashierStart = await req('/api/shifts/start', { method: 'POST', cookieStr: cashierCookie, body: { storeId, openingCash: '0' } });
+    assert.equal(cashierStart.response.status, 201, `Cashier must succeed starting shift: ${JSON.stringify(cashierStart.payload)}`);
+    const cashierEnd = await req('/api/shifts/end', { method: 'POST', cookieStr: cashierCookie, body: { shiftId: cashierStart.payload.shift.id, actualCash: '0', handoverCash: '0' } });
+    assert.equal(cashierEnd.response.status, 200, `Cashier must succeed ending shift: ${JSON.stringify(cashierEnd.payload)}`);
+
+    const ownerStart = await req('/api/shifts/start', { method: 'POST', cookieStr: ownerCookie, body: { storeId, openingCash: '0' } });
+    assert.equal(ownerStart.response.status, 201, `Owner must succeed starting shift: ${JSON.stringify(ownerStart.payload)}`);
+    const ownerEnd = await req('/api/shifts/end', { method: 'POST', cookieStr: ownerCookie, body: { shiftId: ownerStart.payload.shift.id, actualCash: '0', handoverCash: '0' } });
+    assert.equal(ownerEnd.response.status, 200, `Owner must succeed ending shift: ${JSON.stringify(ownerEnd.payload)}`);
+
   } finally {
     await stopServer(srv);
     await rm(tDir, { recursive: true, force: true }).catch(() => {});
