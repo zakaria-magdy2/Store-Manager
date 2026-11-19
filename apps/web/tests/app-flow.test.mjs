@@ -8,6 +8,13 @@ import { fileURLToPath } from 'node:url';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { SqliteDatabaseManager } from '@retailos/infrastructure';
+import {
+  cleanupTempDir,
+  createTestTempDir,
+  DEFAULT_HARNESS_READY_TIMEOUT_MS,
+  terminateChildProcessTree,
+  waitForHarnessReady,
+} from './e2e-server-harness.mjs';
 
 function cairoDateIso(d = new Date()) {
   return new Intl.DateTimeFormat('en-CA', {
@@ -82,15 +89,7 @@ async function reservePort() {
 }
 
 async function waitForApp() {
-  for (let attempt = 0; attempt < 600; attempt += 1) {
-    if (serverProcess.exitCode !== null) throw new Error(`App server exited with ${serverProcess.exitCode}`);
-    try {
-      const response = await fetch(`${baseUrl}/api/bootstrap`);
-      if (response.ok) return;
-    } catch { /* Wait until the local server is listening. */ }
-    await new Promise((resolve) => setTimeout(resolve, 125));
-  }
-  throw new Error('App server did not become ready');
+  await waitForHarnessReady(baseUrl, serverProcess, () => serverLog, DEFAULT_HARNESS_READY_TIMEOUT_MS);
 }
 
 async function request(path, { method = 'GET', body, authenticated = true } = {}) {
@@ -103,7 +102,7 @@ async function request(path, { method = 'GET', body, authenticated = true } = {}
 }
 
 before(async () => {
-  dataDir = await mkdtemp(join(appDir, '.test-data-'));
+  dataDir = await createTestTempDir('retailos-data-');
   const port = await reservePort();
   baseUrl = `http://127.0.0.1:${port}`;
   serverProcess = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
@@ -118,11 +117,9 @@ before(async () => {
 });
 
 after(async () => {
-  if (serverProcess && serverProcess.exitCode === null) {
-    serverProcess.kill('SIGTERM');
-    await Promise.race([once(serverProcess, 'exit'), new Promise((resolve) => setTimeout(resolve, 3000))]);
-  }
-  if (dataDir) await rm(dataDir, { recursive: true, force: true });
+  await terminateChildProcessTree(serverProcess);
+  serverProcess = null;
+  await cleanupTempDir(dataDir);
 });
 
 test('configured store, owner account, supplier ledger, products, stock receipt, and checkout persist in SQLite', async () => {
@@ -971,7 +968,7 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
 });
 
 test('executes full professional stocktake lifecycle with permissions, blind count, barcode scan, atomic reconciliation, and CSV export', async () => {
-  const stkDataDir = await mkdtemp(join(appDir, '.test-stk-data-'));
+  const stkDataDir = await createTestTempDir('retailos-stk-data-');
   const stkPort = await reservePort();
   const stkUrl = `http://127.0.0.1:${stkPort}`;
   let stkLog = '';
@@ -999,16 +996,7 @@ test('executes full professional stocktake lifecycle with permissions, blind cou
   };
 
   try {
-    let stkReady = false;
-    for (let i = 0; i < 240; i += 1) {
-      if (stkServer.exitCode !== null) throw new Error(`stkServer exited early (${stkServer.exitCode}): ${stkLog}`);
-      try {
-        const res = await fetch(`${stkUrl}/api/bootstrap`);
-        if (res.ok) { stkReady = true; break; }
-      } catch { /* transient failure: keep waiting or fall back */ }
-      await new Promise((r) => setTimeout(r, 125));
-    }
-    assert.ok(stkReady, `stkServer did not become ready: ${stkLog}`);
+    await waitForHarnessReady(stkUrl, stkServer, () => stkLog, DEFAULT_HARNESS_READY_TIMEOUT_MS);
     await activateTestLicense(stkUrl);
 
     assert.equal((await stkReq('/api/setup', {
@@ -1322,16 +1310,13 @@ test('executes full professional stocktake lifecycle with permissions, blind cou
     assert.ok(actions.has('STOCKTAKE_COMMITTED'));
     assert.ok(actions.has('STOCKTAKE_CANCELLED'));
   } finally {
-    if (stkServer.exitCode === null) {
-      stkServer.kill('SIGTERM');
-      await Promise.race([once(stkServer, 'exit'), new Promise((resolve) => setTimeout(resolve, 3000))]);
-    }
-    await rm(stkDataDir, { recursive: true, force: true }).catch(() => {});
+    await terminateChildProcessTree(stkServer);
+    await cleanupTempDir(stkDataDir);
   }
 });
 
 test('supports unpriced product catalog creation, supplier purchase wholesale+retail pricing with optional target profit %, and POS checkout guard', async () => {
-  const purDataDir = await mkdtemp(join(appDir, '.test-purchase-pricing-'));
+  const purDataDir = await createTestTempDir('retailos-purchase-pricing-');
   const purPort = await reservePort();
   const purUrl = `http://127.0.0.1:${purPort}`;
   let purLog = '';
@@ -1359,16 +1344,7 @@ test('supports unpriced product catalog creation, supplier purchase wholesale+re
   };
 
   try {
-    let purReady = false;
-    for (let i = 0; i < 240; i += 1) {
-      if (purServer.exitCode !== null) throw new Error(`purServer exited early (${purServer.exitCode}): ${purLog}`);
-      try {
-        const res = await fetch(`${purUrl}/api/bootstrap`);
-        if (res.ok) { purReady = true; break; }
-      } catch { /* transient failure: keep waiting or fall back */ }
-      await new Promise((r) => setTimeout(r, 125));
-    }
-    assert.ok(purReady, `purServer did not become ready: ${purLog}`);
+    await waitForHarnessReady(purUrl, purServer, () => purLog, DEFAULT_HARNESS_READY_TIMEOUT_MS);
     await activateTestLicense(purUrl);
 
     assert.equal((await purReq('/api/setup', {
@@ -1526,16 +1502,13 @@ test('supports unpriced product catalog creation, supplier purchase wholesale+re
     const afterEdit = await purReq(`/api/data?storeId=${storeId}`, { cookieStr: ownerCookie });
     assert.equal(afterEdit.payload.products.find((p) => p.id === p3.payload.id).variants[0].price.amount, '12500');
   } finally {
-    if (purServer.exitCode === null) {
-      purServer.kill('SIGTERM');
-      await Promise.race([once(purServer, 'exit'), new Promise((resolve) => setTimeout(resolve, 3000))]);
-    }
-    await rm(purDataDir, { recursive: true, force: true }).catch(() => {});
+    await terminateChildProcessTree(purServer);
+    await cleanupTempDir(purDataDir);
   }
 });
 
 test('updates all financial views (sales summary, shifts, shift sales, dashboard, growth forecast) after customer returns and exposes itemized supplier payments in profit-loss report', async () => {
-  const finDataDir = await mkdtemp(join(appDir, '.test-fin-returns-'));
+  const finDataDir = await createTestTempDir('retailos-fin-returns-');
   const finPort = await reservePort();
   const finUrl = `http://127.0.0.1:${finPort}`;
   let finLog = '';
@@ -1563,16 +1536,7 @@ test('updates all financial views (sales summary, shifts, shift sales, dashboard
   };
 
   try {
-    let finReady = false;
-    for (let i = 0; i < 240; i += 1) {
-      if (finServer.exitCode !== null) throw new Error(`finServer exited early (${finServer.exitCode}): ${finLog}`);
-      try {
-        const res = await fetch(`${finUrl}/api/bootstrap`);
-        if (res.ok) { finReady = true; break; }
-      } catch { /* transient failure: keep waiting or fall back */ }
-      await new Promise((r) => setTimeout(r, 125));
-    }
-    assert.ok(finReady, `finServer did not become ready: ${finLog}`);
+    await waitForHarnessReady(finUrl, finServer, () => finLog, DEFAULT_HARNESS_READY_TIMEOUT_MS);
     await activateTestLicense(finUrl);
 
     assert.equal((await finReq('/api/setup', {
@@ -1781,17 +1745,14 @@ test('updates all financial views (sales summary, shifts, shift sales, dashboard
     assert.equal(finalData.payload.products.find((p) => p.id === product.payload.id).variants[0].quantity, '50');
     assert.equal(finalData.payload.summary.todayRevenue.amount, '0');
   } finally {
-    if (finServer.exitCode === null) {
-      finServer.kill('SIGTERM');
-      await Promise.race([once(finServer, 'exit'), new Promise((resolve) => setTimeout(resolve, 3000))]);
-    }
-    await rm(finDataDir, { recursive: true, force: true }).catch(() => {});
+    await terminateChildProcessTree(finServer);
+    await cleanupTempDir(finDataDir);
   }
 });
 
 
 test('keeps /api/sales strictly pure while separating profit-loss expenses and financial-map full cash & inventory trail', async () => {
-  const sepDataDir = await mkdtemp(join(appDir, '.test-sep-reports-'));
+  const sepDataDir = await createTestTempDir('retailos-sep-reports-');
   const sepPort = await reservePort();
   const sepUrl = `http://127.0.0.1:${sepPort}`;
   let sepLog = '';
@@ -1819,16 +1780,7 @@ test('keeps /api/sales strictly pure while separating profit-loss expenses and f
   };
 
   try {
-    let sepReady = false;
-    for (let i = 0; i < 240; i += 1) {
-      if (sepServer.exitCode !== null) throw new Error(`sepServer exited early (${sepServer.exitCode}): ${sepLog}`);
-      try {
-        const res = await fetch(`${sepUrl}/api/bootstrap`);
-        if (res.ok) { sepReady = true; break; }
-      } catch { /* transient failure: keep waiting or fall back */ }
-      await new Promise((r) => setTimeout(r, 125));
-    }
-    assert.ok(sepReady, `sepServer did not become ready: ${sepLog}`);
+    await waitForHarnessReady(sepUrl, sepServer, () => sepLog, DEFAULT_HARNESS_READY_TIMEOUT_MS);
     await activateTestLicense(sepUrl);
 
     assert.equal((await sepReq('/api/setup', {
@@ -1991,18 +1943,18 @@ test('keeps /api/sales strictly pure while separating profit-loss expenses and f
     const supPayEvent = fmReport.payload.timeline.find((e) => e.type === 'SUPPLIER_PAYMENT');
     assert.ok(supPayEvent.title.includes('سددت'));
   } finally {
-    if (sepServer.exitCode === null) sepServer.kill('SIGTERM');
-    await once(sepServer, 'exit').catch(() => {});
-    await rm(sepDataDir, { recursive: true, force: true }).catch(() => {});
+    await terminateChildProcessTree(sepServer);
+    await cleanupTempDir(sepDataDir);
   }
 });
 
 test('release readiness: full paged history (>200 purchases, journals, returns, expenses) and SQLite-persistent auth throttling across restart', async () => {
-  const rrDataDir = await mkdtemp(join(appDir, '.test-readiness-'));
+  const rrDataDir = await createTestTempDir('retailos-readiness-');
   let rrPort = await reservePort();
   let rrUrl = `http://127.0.0.1:${rrPort}`;
   let rrLog = '';
 
+  let rrServer = null;
   const startSrv = async () => {
     const child = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
       cwd: workspace,
@@ -2016,22 +1968,13 @@ test('release readiness: full paged history (>200 purchases, journals, returns, 
       }),
       stdio: ['ignore', 'ignore', 'pipe'],
     });
+    rrServer = child;
     child.stderr.on('data', (chunk) => { rrLog += chunk.toString(); });
-    for (let i = 0; i < 160; i += 1) {
-      if (child.exitCode !== null) throw new Error(`rrServer exited (${child.exitCode}): ${rrLog}`);
-      try {
-        const res = await fetch(`${rrUrl}/api/bootstrap`);
-        if (res.ok) {
-          await activateTestLicense(rrUrl);
-          return child;
-        }
-      } catch { /* transient failure: keep waiting or fall back */ }
-      await new Promise((r) => setTimeout(r, 125));
-    }
-    throw new Error(`rrServer did not become ready: ${rrLog}`);
+    await waitForHarnessReady(rrUrl, child, () => rrLog, DEFAULT_HARNESS_READY_TIMEOUT_MS);
+    await activateTestLicense(rrUrl);
+    return child;
   };
 
-  let rrServer = await startSrv();
   const rrReq = async (path, { method = 'GET', body, cookieStr } = {}) => {
     const headers = { Origin: rrUrl };
     if (body) headers['Content-Type'] = 'application/json';
@@ -2042,6 +1985,7 @@ test('release readiness: full paged history (>200 purchases, journals, returns, 
   };
 
   try {
+    rrServer = await startSrv();
     assert.equal((await rrReq('/api/setup', {
       method: 'POST',
       body: { ownerUsername: 'rr_owner', ownerName: 'مدير الجاهزية', password: 'Readiness-Password-2026' },
@@ -2162,8 +2106,8 @@ test('release readiness: full paged history (>200 purchases, journals, returns, 
     });
     assert.equal(lockedBeforeRestart.response.status, 429);
 
-    rrServer.kill('SIGTERM');
-    await once(rrServer, 'exit').catch(() => {});
+    await terminateChildProcessTree(rrServer);
+    rrServer = null;
     rrPort = await reservePort();
     rrUrl = `http://127.0.0.1:${rrPort}`;
     rrServer = await startSrv();
@@ -2174,26 +2118,20 @@ test('release readiness: full paged history (>200 purchases, journals, returns, 
     });
     assert.equal(lockedAfterRestart.response.status, 429);
   } finally {
-    if (rrServer && rrServer.exitCode === null) {
-      rrServer.kill('SIGTERM');
-      await once(rrServer, 'exit').catch(() => {});
-    }
-    await rm(rrDataDir, { recursive: true, force: true }).catch(() => {});
+    await terminateChildProcessTree(rrServer);
+    await cleanupTempDir(rrDataDir);
   }
 });
 
 test('multi-unit sale with line and cart discounts keeps P&L, Financial Map, Sales, and Shifts aligned via net_revenue', async () => {
-  const discDataDir = await mkdtemp(join(appDir, '.test-discount-'));
+  const discDataDir = await createTestTempDir('retailos-discount-');
   const discPort = await reservePort();
   const discUrl = `http://127.0.0.1:${discPort}`;
   let discLog = '';
 
-  const stopChild = async (child) => {
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    child.kill('SIGTERM');
-    await Promise.race([once(child, 'exit'), new Promise((resolve) => setTimeout(resolve, 3000))]).catch(() => {});
-  };
+  const stopChild = (child) => terminateChildProcessTree(child);
 
+  let discServer = null;
   const startSrv = async () => {
     const child = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
       cwd: workspace,
@@ -2207,22 +2145,13 @@ test('multi-unit sale with line and cart discounts keeps P&L, Financial Map, Sal
       }),
       stdio: ['ignore', 'ignore', 'pipe'],
     });
+    discServer = child;
     child.stderr.on('data', (chunk) => { discLog += chunk.toString(); });
-    for (let i = 0; i < 240; i += 1) {
-      if (child.exitCode !== null) throw new Error(`discServer exited (${child.exitCode}): ${discLog}`);
-      try {
-        const res = await fetch(`${discUrl}/api/bootstrap`);
-        if (res.ok) {
-          await activateTestLicense(discUrl);
-          return child;
-        }
-      } catch { /* transient failure: keep waiting or fall back */ }
-      await new Promise((r) => setTimeout(r, 125));
-    }
-    throw new Error(`discServer did not become ready: ${discLog}`);
+    await waitForHarnessReady(discUrl, child, () => discLog, DEFAULT_HARNESS_READY_TIMEOUT_MS);
+    await activateTestLicense(discUrl);
+    return child;
   };
 
-  const discServer = await startSrv();
   const dReq = async (path, { method = 'GET', body, cookieStr } = {}) => {
     const headers = { Origin: discUrl };
     if (body) headers['Content-Type'] = 'application/json';
@@ -2233,6 +2162,7 @@ test('multi-unit sale with line and cart discounts keeps P&L, Financial Map, Sal
   };
 
   try {
+    discServer = await startSrv();
     assert.equal((await dReq('/api/setup', {
       method: 'POST',
       body: { ownerUsername: 'disc_owner', ownerName: 'مدير الخصم', password: 'Discount-Password-2026' },
@@ -2345,22 +2275,19 @@ test('multi-unit sale with line and cart discounts keeps P&L, Financial Map, Sal
     assert.equal(shiftsRes.payload.summary.totalProfit, '20000');
   } finally {
     await stopChild(discServer);
-    await rm(discDataDir, { recursive: true, force: true }).catch(() => {});
+    await cleanupTempDir(discDataDir);
   }
 });
 
 test('adversarial POS stress suite: race conditions, dirty inputs, discounted partial return, cross-shift swap, last-item concurrency, crash rollback, RBAC & expense soft-delete', async () => {
-  const sDir = await mkdtemp(join(appDir, '.test-stress-'));
+  const sDir = await createTestTempDir('retailos-stress-');
   const sPort = await reservePort();
   const sUrl = `http://127.0.0.1:${sPort}`;
   let sLog = '';
 
-  const stopSrv = async (child) => {
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    child.kill('SIGTERM');
-    await Promise.race([once(child, 'exit'), new Promise((resolve) => setTimeout(resolve, 3000))]).catch(() => {});
-  };
+  const stopSrv = (child) => terminateChildProcessTree(child);
 
+  let sServer = null;
   const startSrv = async () => {
     const child = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
       cwd: workspace,
@@ -2374,23 +2301,14 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
       }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    sServer = child;
     child.stdout.on('data', (chunk) => { sLog += chunk.toString(); });
     child.stderr.on('data', (chunk) => { sLog += chunk.toString(); });
-    for (let i = 0; i < 600; i += 1) {
-      if (child.exitCode !== null) throw new Error(`stressServer exited (${child.exitCode}): ${sLog}`);
-      try {
-        const res = await fetch(`${sUrl}/api/bootstrap`);
-        if (res.ok) {
-          await activateTestLicense(sUrl);
-          return child;
-        }
-      } catch { /* transient failure: keep waiting or fall back */ }
-      await new Promise((r) => setTimeout(r, 125));
-    }
-    throw new Error(`stressServer did not become ready: ${sLog}`);
+    await waitForHarnessReady(sUrl, child, () => sLog, DEFAULT_HARNESS_READY_TIMEOUT_MS);
+    await activateTestLicense(sUrl);
+    return child;
   };
 
-  let sServer = await startSrv();
   const sReq = async (path, { method = 'GET', body, cookieStr } = {}) => {
     const headers = { Origin: sUrl };
     if (body) headers['Content-Type'] = 'application/json';
@@ -2403,6 +2321,7 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
   };
 
   try {
+    sServer = await startSrv();
     assert.equal((await sReq('/api/setup', {
       method: 'POST',
       body: { ownerUsername: 'st_owner', ownerName: 'مدير الاختبار الشاق', password: 'Stress-Owner-Password-2026' },
@@ -2986,14 +2905,14 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
     sServer = null;
   } finally {
     await stopSrv(sServer);
-    await rm(sDir, { recursive: true, force: true }).catch(() => {});
+    await cleanupTempDir(sDir);
   }
 });
 
 test('Stage 1 supplier balance regression: search+refunds, pagination+search, legacy initial_paid_amount deduplication, isolation, and settlement', async () => {
   const port = await reservePort();
   const sUrl = `http://127.0.0.1:${port}`;
-  const sDir = await mkdtemp(join(appDir, '.test-data-supreg-'));
+  const sDir = await createTestTempDir('retailos-data-supreg-');
   let log = '';
   let srv = null;
 
@@ -3003,22 +2922,15 @@ test('Stage 1 supplier balance regression: search+refunds, pagination+search, le
       env: testLicenseEnv({ PORT: String(port), RETAILOS_DATA_DIR: sDir, RETAILOS_COMPANY_NAME: 'شركة الموردين', RETAILOS_COMPANY_CODE: 'SUP_REG', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع' }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    srv = proc;
     proc.stdout.on('data', (c) => { log += c.toString(); });
     proc.stderr.on('data', (c) => { log += c.toString(); });
-    for (let i = 0; i < 600; i += 1) {
-      if (proc.exitCode !== null) throw new Error(`Server exited ${proc.exitCode}\n${log}`);
-      try { if ((await fetch(`${sUrl}/api/bootstrap`)).ok) { await activateTestLicense(sUrl); return proc; } } catch { /* wait */ }
-      await new Promise((r) => setTimeout(r, 125));
-    }
-    throw new Error(`Timeout\n${log}`);
+    await waitForHarnessReady(sUrl, proc, () => log, DEFAULT_HARNESS_READY_TIMEOUT_MS);
+    await activateTestLicense(sUrl);
+    return proc;
   };
 
-  const stopTestServer = async (proc) => {
-    if (proc && proc.exitCode === null) {
-      proc.kill('SIGTERM');
-      await Promise.race([once(proc, 'exit'), new Promise((r) => setTimeout(r, 4000))]);
-    }
-  };
+  const stopTestServer = (proc) => terminateChildProcessTree(proc);
 
   const sReq = async (path, { method = 'GET', body, cookieStr } = {}) => {
     const headers = { Origin: sUrl };
@@ -3187,14 +3099,14 @@ test('Stage 1 supplier balance regression: search+refunds, pagination+search, le
     assert.equal(totalDueAcrossAllSuppliers, net2010Credit, 'Total supplier balances must equal GL Account 2010 payable');
   } finally {
     await stopTestServer(srv);
-    await rm(sDir, { recursive: true, force: true }).catch(() => {});
+    await cleanupTempDir(sDir);
   }
 });
 
 test('Pre-launch hardening: duplicate opening balances 409 guard and Trial Balance cumulative balances across date boundaries', async () => {
   const port = await reservePort();
   const hUrl = `http://127.0.0.1:${port}`;
-  const hDir = await mkdtemp(join(appDir, '.test-data-harden-'));
+  const hDir = await createTestTempDir('retailos-data-harden-');
   let log = '';
   let srv = null;
 
@@ -3204,22 +3116,15 @@ test('Pre-launch hardening: duplicate opening balances 409 guard and Trial Balan
       env: testLicenseEnv({ PORT: String(port), RETAILOS_DATA_DIR: hDir, RETAILOS_COMPANY_NAME: 'شركة التحصين', RETAILOS_COMPANY_CODE: 'HARDEN_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع' }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    srv = proc;
     proc.stdout.on('data', (c) => { log += c.toString(); });
     proc.stderr.on('data', (c) => { log += c.toString(); });
-    for (let i = 0; i < 600; i += 1) {
-      if (proc.exitCode !== null) throw new Error(`Server exited ${proc.exitCode}\n${log}`);
-      try { if ((await fetch(`${hUrl}/api/bootstrap`)).ok) { await activateTestLicense(hUrl); return proc; } } catch { /* wait */ }
-      await new Promise((r) => setTimeout(r, 125));
-    }
-    throw new Error(`Timeout\n${log}`);
+    await waitForHarnessReady(hUrl, proc, () => log, DEFAULT_HARNESS_READY_TIMEOUT_MS);
+    await activateTestLicense(hUrl);
+    return proc;
   };
 
-  const stopServer = async (proc) => {
-    if (proc && proc.exitCode === null) {
-      proc.kill('SIGTERM');
-      await Promise.race([once(proc, 'exit'), new Promise((r) => setTimeout(r, 4000))]);
-    }
-  };
+  const stopServer = (proc) => terminateChildProcessTree(proc);
 
   const hReq = async (path, { method = 'GET', body, cookieStr } = {}) => {
     const headers = { Origin: hUrl };
@@ -3311,14 +3216,14 @@ test('Pre-launch hardening: duplicate opening balances 409 guard and Trial Balan
     assert.equal(novTb.payload.totals.creditBalanceTotal.amount, '300000');
   } finally {
     await stopServer(srv);
-    await rm(hDir, { recursive: true, force: true }).catch(() => {});
+    await cleanupTempDir(hDir);
   }
 });
 
 test('Final POS & accounting regression: split cash+electronic checkout GL (1010/1020/4010) and cumulative Trial Balance across pre-opening, opening, and reversed expenses', async () => {
   const port = await reservePort();
   const sUrl = `http://127.0.0.1:${port}`;
-  const sDir = await mkdtemp(join(appDir, '.test-data-split-'));
+  const sDir = await createTestTempDir('retailos-data-split-');
   let log = '';
   let srv = null;
 
@@ -3328,22 +3233,15 @@ test('Final POS & accounting regression: split cash+electronic checkout GL (1010
       env: testLicenseEnv({ PORT: String(port), RETAILOS_DATA_DIR: sDir, RETAILOS_COMPANY_NAME: 'شركة الدفع المجزأ', RETAILOS_COMPANY_CODE: 'SPLIT_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع' }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    srv = proc;
     proc.stdout.on('data', (c) => { log += c.toString(); });
     proc.stderr.on('data', (c) => { log += c.toString(); });
-    for (let i = 0; i < 600; i += 1) {
-      if (proc.exitCode !== null) throw new Error(`Server exited ${proc.exitCode}\n${log}`);
-      try { if ((await fetch(`${sUrl}/api/bootstrap`)).ok) { await activateTestLicense(sUrl); return proc; } } catch { /* wait */ }
-      await new Promise((r) => setTimeout(r, 125));
-    }
-    throw new Error(`Timeout\n${log}`);
+    await waitForHarnessReady(sUrl, proc, () => log, DEFAULT_HARNESS_READY_TIMEOUT_MS);
+    await activateTestLicense(sUrl);
+    return proc;
   };
 
-  const stopServer = async (proc) => {
-    if (proc && proc.exitCode === null) {
-      proc.kill('SIGTERM');
-      await Promise.race([once(proc, 'exit'), new Promise((r) => setTimeout(r, 4000))]);
-    }
-  };
+  const stopServer = (proc) => terminateChildProcessTree(proc);
 
   const req = async (path, { method = 'GET', body, cookieStr } = {}) => {
     const headers = { Origin: sUrl };
@@ -3597,33 +3495,27 @@ test('Final POS & accounting regression: split cash+electronic checkout GL (1010
 
 
 test('RBAC guards: stock transfer destination store authorization and auditor shift rejection', async () => {
-  const tDir = await mkdtemp(join(appDir, '.test-rbac-'));
+  const tDir = await createTestTempDir('retailos-rbac-');
   const tPort = await reservePort();
   const tUrl = `http://127.0.0.1:${tPort}`;
   let tLog = '';
 
+  let srv = null;
   const startServer = async () => {
     const proc = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
       cwd: workspace,
       env: testLicenseEnv({ PORT: String(tPort), RETAILOS_DATA_DIR: tDir, RETAILOS_COMPANY_NAME: 'شركة RBAC', RETAILOS_COMPANY_CODE: 'RBAC_TEST', RETAILOS_CURRENCY: 'EGP', RETAILOS_STORE_NAME: 'الفرع الرئيسي' }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    srv = proc;
     proc.stdout.on('data', (c) => { tLog += c.toString(); });
     proc.stderr.on('data', (c) => { tLog += c.toString(); });
-    for (let i = 0; i < 600; i += 1) {
-      if (proc.exitCode !== null) throw new Error(`Server exited ${proc.exitCode}\n${tLog}`);
-      try { if ((await fetch(`${tUrl}/api/bootstrap`)).ok) { await activateTestLicense(tUrl); return proc; } } catch { /* wait */ }
-      await new Promise((r) => setTimeout(r, 125));
-    }
-    throw new Error(`Timeout\n${tLog}`);
+    await waitForHarnessReady(tUrl, proc, () => tLog, DEFAULT_HARNESS_READY_TIMEOUT_MS);
+    await activateTestLicense(tUrl);
+    return proc;
   };
 
-  const stopServer = async (proc) => {
-    if (proc && proc.exitCode === null) {
-      proc.kill('SIGTERM');
-      await Promise.race([once(proc, 'exit'), new Promise((r) => setTimeout(r, 4000))]);
-    }
-  };
+  const stopServer = (proc) => terminateChildProcessTree(proc);
 
   const req = async (path, { method = 'GET', body, cookieStr } = {}) => {
     const headers = { Origin: tUrl };
@@ -3634,7 +3526,6 @@ test('RBAC guards: stock transfer destination store authorization and auditor sh
     return { response, payload };
   };
 
-  let srv = null;
   try {
     srv = await startServer();
 
@@ -3745,12 +3636,12 @@ test('RBAC guards: stock transfer destination store authorization and auditor sh
 
   } finally {
     await stopServer(srv);
-    await rm(tDir, { recursive: true, force: true }).catch(() => {});
+    await cleanupTempDir(tDir);
   }
 });
 
 test('Offline Ed25519 licensing: 402 enforcement, token validation, persistence, anti-clock tampering & expiration', async () => {
-  const lDir = await mkdtemp(join(appDir, '.test-lic-data-'));
+  const lDir = await createTestTempDir('retailos-lic-data-');
   const clockFile = join(lDir, 'mock-clock-ms.txt');
   const baseNow = Date.now();
   await writeFile(clockFile, String(baseNow), 'utf8');
@@ -3758,6 +3649,7 @@ test('Offline Ed25519 licensing: 402 enforcement, token validation, persistence,
   const lPort = await reservePort();
   const lUrl = `http://127.0.0.1:${lPort}`;
   let lLog = '';
+  let srv = null;
 
   const startServer = async () => {
     const proc = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
@@ -3773,22 +3665,14 @@ test('Offline Ed25519 licensing: 402 enforcement, token validation, persistence,
       }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    srv = proc;
     proc.stdout.on('data', (c) => { lLog += c.toString(); });
     proc.stderr.on('data', (c) => { lLog += c.toString(); });
-    for (let i = 0; i < 600; i += 1) {
-      if (proc.exitCode !== null) throw new Error(`Server exited ${proc.exitCode}\n${lLog}`);
-      try { if ((await fetch(`${lUrl}/api/bootstrap`)).ok) return proc; } catch { /* wait */ }
-      await new Promise((r) => setTimeout(r, 125));
-    }
-    throw new Error(`Timeout\n${lLog}`);
+    await waitForHarnessReady(lUrl, proc, () => lLog, DEFAULT_HARNESS_READY_TIMEOUT_MS);
+    return proc;
   };
 
-  const stopServer = async (proc) => {
-    if (proc && proc.exitCode === null) {
-      proc.kill('SIGTERM');
-      await Promise.race([once(proc, 'exit'), new Promise((r) => setTimeout(r, 3000))]);
-    }
-  };
+  const stopServer = (proc) => terminateChildProcessTree(proc);
 
   const req = async (path, { method = 'GET', body, cookieStr } = {}) => {
     const headers = { Origin: lUrl };
@@ -3800,8 +3684,8 @@ test('Offline Ed25519 licensing: 402 enforcement, token validation, persistence,
     return { response, payload };
   };
 
-  let srv = await startServer();
   try {
+    srv = await startServer();
     // 1. Unlicensed fresh boot -> UNLICENSED + valid machineId
     const initialStatus = await req('/api/license/status');
     assert.equal(initialStatus.response.status, 200);
@@ -3957,19 +3841,14 @@ test('Offline Ed25519 licensing: 402 enforcement, token validation, persistence,
     assert.equal(blockedExpired.payload.licenseStatus, 'EXPIRED');
   } finally {
     await stopServer(srv);
-    await rm(lDir, { recursive: true, force: true }).catch(() => {});
+    await cleanupTempDir(lDir);
   }
 });
 
 test('Production server.mjs ignores env-var license overrides and enforces DB watermark & ledger hardening', async () => {
-  const dirA = await mkdtemp(join(appDir, '.test-direct-srv-'));
-  const dirB = await mkdtemp(join(appDir, '.test-ledger-harden-'));
-  const stopProc = async (proc) => {
-    if (proc && proc.exitCode === null) {
-      proc.kill('SIGTERM');
-      await Promise.race([once(proc, 'exit'), new Promise((r) => setTimeout(r, 3000))]);
-    }
-  };
+  const dirA = await createTestTempDir('retailos-direct-srv-');
+  const dirB = await createTestTempDir('retailos-ledger-harden-');
+  const stopProc = (proc) => terminateChildProcessTree(proc);
 
   // --- Part A: Direct server.mjs fails closed without stdin handshake and ignores RETAILOS_WATERMARK_SECRET & RETAILOS_TEST_LICENSE_PUBLIC_KEY ---
   let prodProc = null;
@@ -4046,13 +3925,7 @@ test('Production server.mjs ignores env-var license overrides and enforces DB wa
     );
     prodProc.stdin.end();
 
-    let readyA = false;
-    for (let i = 0; i < 400; i += 1) {
-      if (prodProc.exitCode !== null) throw new Error(`Direct server exited ${prodProc.exitCode}\n${logA}`);
-      try { if ((await fetch(`${urlA}/api/bootstrap`)).ok) { readyA = true; break; } } catch { /* wait */ }
-      await new Promise((r) => setTimeout(r, 125));
-    }
-    assert.ok(readyA, `Direct server timeout\n${logA}`);
+    await waitForHarnessReady(urlA, prodProc, () => logA, DEFAULT_HARNESS_READY_TIMEOUT_MS);
 
     const stRes = await fetch(`${urlA}/api/license/status`);
     assert.equal(stRes.status, 200);
@@ -4083,7 +3956,7 @@ test('Production server.mjs ignores env-var license overrides and enforces DB wa
     assert.equal(filesInDirA.includes('.retailos-daily.key'), false, 'Plaintext .retailos-daily.key fallback must NEVER be created');
   } finally {
     await stopProc(prodProc);
-    await rm(dirA, { recursive: true, force: true }).catch(() => {});
+    await cleanupTempDir(dirA);
   }
 
   // --- Part B: Deleting system_licensing row after audit/sales activity triggers CLOCK_TAMPERED ---
@@ -4110,14 +3983,11 @@ test('Production server.mjs ignores env-var license overrides and enforces DB wa
         }),
         stdio: ['ignore', 'pipe', 'pipe'],
       });
+      harnessProc = proc;
       proc.stdout.on('data', (c) => { logB += c.toString(); });
       proc.stderr.on('data', (c) => { logB += c.toString(); });
-      for (let i = 0; i < 400; i += 1) {
-        if (proc.exitCode !== null) throw new Error(`Harness exited ${proc.exitCode}\n${logB}`);
-        try { if ((await fetch(`${urlB}/api/bootstrap`)).ok) return proc; } catch { /* wait */ }
-        await new Promise((r) => setTimeout(r, 125));
-      }
-      throw new Error(`Harness timeout\n${logB}`);
+      await waitForHarnessReady(urlB, proc, () => logB, DEFAULT_HARNESS_READY_TIMEOUT_MS);
+      return proc;
     };
 
     const reqB = async (path, { method = 'GET', body, cookieStr } = {}) => {
@@ -4179,12 +4049,12 @@ test('Production server.mjs ignores env-var license overrides and enforces DB wa
     assert.equal(blockedWrite.payload.licenseStatus, 'CLOCK_TAMPERED');
   } finally {
     await stopProc(harnessProc);
-    await rm(dirB, { recursive: true, force: true }).catch(() => {});
+    await cleanupTempDir(dirB);
   }
 });
 
 test('Hardening regression: external clock rewind protection, /api/auth/* non-exemption, and BigInt stocktake & growth forecast', async () => {
-  const dirC = await mkdtemp(join(appDir, '.test-hardening-c-'));
+  const dirC = await createTestTempDir('retailos-hardening-c-');
   const clockFileC = join(dirC, 'mock-clock.txt');
   const extClockFileC = join(dirC, 'ext-clock.txt');
   const baseMs = Date.now();
@@ -4192,6 +4062,7 @@ test('Hardening regression: external clock rewind protection, /api/auth/* non-ex
   const portC = await reservePort();
   const urlC = `http://127.0.0.1:${portC}`;
   let logC = '';
+  let procC = null;
 
   const startHarness = async () => {
     const proc = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
@@ -4208,22 +4079,14 @@ test('Hardening regression: external clock rewind protection, /api/auth/* non-ex
       }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    procC = proc;
     proc.stdout.on('data', (c) => { logC += c.toString(); });
     proc.stderr.on('data', (c) => { logC += c.toString(); });
-    for (let i = 0; i < 400; i += 1) {
-      if (proc.exitCode !== null) throw new Error(`Harness exited ${proc.exitCode}\n${logC}`);
-      try { if ((await fetch(`${urlC}/api/bootstrap`)).ok) return proc; } catch { /* wait */ }
-      await new Promise((r) => setTimeout(r, 125));
-    }
-    throw new Error(`Harness timeout\n${logC}`);
+    await waitForHarnessReady(urlC, proc, () => logC, DEFAULT_HARNESS_READY_TIMEOUT_MS);
+    return proc;
   };
 
-  const stopHarness = async (proc) => {
-    if (proc && proc.exitCode === null) {
-      proc.kill('SIGTERM');
-      await Promise.race([once(proc, 'exit'), new Promise((r) => setTimeout(r, 3000))]);
-    }
-  };
+  const stopHarness = (proc) => terminateChildProcessTree(proc);
 
   const reqC = async (path, { method = 'GET', body, cookieStr } = {}) => {
     const headers = { Origin: urlC };
@@ -4234,8 +4097,8 @@ test('Hardening regression: external clock rewind protection, /api/auth/* non-ex
     return { response, payload };
   };
 
-  let procC = await startHarness();
   try {
+    procC = await startHarness();
     // 1. P2-06: /api/auth/* is no longer exempt when unlicensed -> returns 402 LICENSE_REQUIRED after auth
     const setupC = await reqC('/api/setup', {
       method: 'POST',
@@ -4367,6 +4230,6 @@ test('Hardening regression: external clock rewind protection, /api/auth/* non-ex
     assert.equal(blockedAfterRewind.payload.licenseStatus, 'CLOCK_TAMPERED');
   } finally {
     await stopHarness(procC);
-    await rm(dirC, { recursive: true, force: true }).catch(() => {});
+    await cleanupTempDir(dirC);
   }
 });

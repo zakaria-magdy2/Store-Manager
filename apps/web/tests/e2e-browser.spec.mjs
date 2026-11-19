@@ -1,11 +1,17 @@
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, test } from '@playwright/test';
+import {
+  cleanupTempDir,
+  createTestTempDir,
+  DEFAULT_HARNESS_READY_TIMEOUT_MS,
+  terminateChildProcessTree,
+  waitForHarnessReady,
+} from './e2e-server-harness.mjs';
 
 const appDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const workspace = dirname(dirname(appDir));
@@ -44,19 +50,7 @@ async function reservePort() {
 }
 
 async function waitForApp() {
-  for (let attempt = 0; attempt < 400; attempt += 1) {
-    if (serverProcess.exitCode !== null) {
-      throw new Error(`App server exited with ${serverProcess.exitCode}\n${serverLog}`);
-    }
-    try {
-      const response = await fetch(`${baseUrl}/api/bootstrap`);
-      if (response.ok) return;
-    } catch {
-      // wait for server
-    }
-    await new Promise((resolve) => setTimeout(resolve, 125));
-  }
-  throw new Error(`App server did not become ready\n${serverLog}`);
+  await waitForHarnessReady(baseUrl, serverProcess, () => serverLog, DEFAULT_HARNESS_READY_TIMEOUT_MS);
 }
 
 async function acceptConfirmModal(p) {
@@ -67,7 +61,7 @@ async function acceptConfirmModal(p) {
 
 test.describe.serial('RetailOS Real-Browser E2E Suite (1366x768 RTL)', () => {
   test.beforeAll(async ({ browser }) => {
-    dataDir = await mkdtemp(join(appDir, '.test-e2e-'));
+    dataDir = await createTestTempDir('retailos-e2e-');
     const port = await reservePort();
     baseUrl = `http://127.0.0.1:${port}`;
     serverProcess = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
@@ -118,16 +112,9 @@ test.describe.serial('RetailOS Real-Browser E2E Suite (1366x768 RTL)', () => {
     if (sharedContext) {
       await sharedContext.close().catch(() => {});
     }
-    if (serverProcess && serverProcess.exitCode === null) {
-      serverProcess.kill('SIGTERM');
-      await Promise.race([
-        once(serverProcess, 'exit'),
-        new Promise((resolve) => setTimeout(resolve, 4000)),
-      ]);
-    }
-    if (dataDir) {
-      await rm(dataDir, { recursive: true, force: true }).catch(() => {});
-    }
+    await terminateChildProcessTree(serverProcess);
+    serverProcess = null;
+    await cleanupTempDir(dataDir);
   });
 
   test('1. License Activation, Setup, Login, Logout & Two-User RBAC Boundaries (OWNER vs read-only AUDITOR)', async () => {

@@ -16,7 +16,7 @@ import {
   type LicenseStatus,
 } from '@retailos/core';
 import type { RetailOSDatabase, SystemLicensingTable } from '../database/types.js';
-import { getMachineId } from './machine-fingerprint.js';
+import { resolveMachineIdentity } from './machine-fingerprint.js';
 import { EMBEDDED_LICENSE_PUBLIC_KEY_PEM } from './public-key.js';
 
 export const CLOCK_SKEW_TOLERANCE_MS = 5 * 60 * 1000;
@@ -54,6 +54,24 @@ export class LicenseEnforcementError extends Error {
   }
 }
 
+export class LicenseHardwareIdentityError extends Error {
+  public readonly status = 503;
+  public readonly code = 'HARDWARE_IDENTITY_UNAVAILABLE';
+  public readonly retryable = true;
+
+  constructor(
+    message = 'تعذر التحقق المؤقت من معرف الجهاز أثناء تشغيل نظام التشغيل — يرجى إعادة المحاولة خلال لحظات',
+  ) {
+    super(message);
+    this.name = 'LicenseHardwareIdentityError';
+  }
+}
+
+export interface LicenseMachineIdentityResolution {
+  readonly machineId: string;
+  readonly isHardwareBacked: boolean;
+}
+
 export interface LicenseServiceOptions {
   readonly publicKeyPem?: string | undefined;
   readonly watermarkSecret?: string | undefined;
@@ -61,6 +79,8 @@ export interface LicenseServiceOptions {
   readonly externalWatermarkTampered?: boolean | undefined;
   readonly onWatermarkAdvance?: ((clockMs: number) => void) | undefined;
   readonly machineIdOverride?: string | undefined;
+  readonly isHardwareBackedOverride?: boolean | undefined;
+  readonly identityProvider?: (() => LicenseMachineIdentityResolution) | undefined;
   readonly nowProvider?: (() => number) | undefined;
 }
 
@@ -71,7 +91,10 @@ export class LicenseService {
   private externalWatermarkMs: number;
   private readonly externalWatermarkTampered: boolean;
   private readonly onWatermarkAdvance: ((clockMs: number) => void) | undefined;
-  private readonly machineId: string;
+  private readonly machineIdOverride: string | undefined;
+  private readonly isHardwareBackedOverride: boolean | undefined;
+  private readonly identityProvider: (() => LicenseMachineIdentityResolution) | undefined;
+  private pinnedHardwareIdentity: LicenseMachineIdentityResolution | null = null;
   private readonly nowProvider: () => number;
 
   constructor(
@@ -92,8 +115,32 @@ export class LicenseService {
         : 0;
     this.externalWatermarkTampered = Boolean(options?.externalWatermarkTampered);
     this.onWatermarkAdvance = options?.onWatermarkAdvance;
-    this.machineId = options?.machineIdOverride ?? getMachineId();
+    this.machineIdOverride = options?.machineIdOverride;
+    this.isHardwareBackedOverride = options?.isHardwareBackedOverride;
+    this.identityProvider = options?.identityProvider;
     this.nowProvider = options?.nowProvider ?? (() => Date.now());
+  }
+
+  private resolveCurrentIdentity(): LicenseMachineIdentityResolution {
+    if (this.machineIdOverride !== undefined) {
+      return {
+        machineId: this.machineIdOverride,
+        isHardwareBacked: this.isHardwareBackedOverride ?? true,
+      };
+    }
+    if (this.pinnedHardwareIdentity !== null) {
+      return this.pinnedHardwareIdentity;
+    }
+    const resolved = this.identityProvider
+      ? this.identityProvider()
+      : resolveMachineIdentity();
+    if (resolved.isHardwareBacked) {
+      this.pinnedHardwareIdentity = {
+        machineId: resolved.machineId,
+        isHardwareBacked: true,
+      };
+    }
+    return resolved;
   }
 
   public getExternalWatermarkMs(): number {
@@ -108,7 +155,7 @@ export class LicenseService {
   }
 
   public getMachineId(): string {
-    return this.machineId;
+    return this.resolveCurrentIdentity().machineId;
   }
 
   public verifyRawToken(rawToken: string): LicensePayload | null {
@@ -148,17 +195,30 @@ export class LicenseService {
 
   public async getStatus(): Promise<LicenseEvaluation> {
     const nowMs = this.nowProvider();
+    const identity = this.resolveCurrentIdentity();
     if (this.externalWatermarkTampered) {
       return this.buildEvaluation(
         'CLOCK_TAMPERED',
         null,
         nowMs,
         'تم رصد عبث بملف توثيق التوقيت الخارجي للنظام',
+        identity.machineId,
       );
     }
 
+    const existingRow = await this.db
+      .selectFrom('system_licensing')
+      .selectAll()
+      .where('id', '=', 1)
+      .executeTakeFirst();
+
+    if (existingRow?.activation_token?.trim() && !identity.isHardwareBacked) {
+      // Fail safely with a retryable error instead of evaluating/overwriting against a degraded digest.
+      throw new LicenseHardwareIdentityError();
+    }
+
     const ledgerBaseline = await this.getOperationalLedgerBaseline();
-    const row = await this.ensureWatermarkRow(nowMs, ledgerBaseline);
+    const row = existingRow ?? (await this.ensureWatermarkRow(nowMs, ledgerBaseline, identity.machineId));
 
     if (!row) {
       return this.buildEvaluation(
@@ -166,11 +226,12 @@ export class LicenseService {
         null,
         nowMs,
         'تم رصد حذف أو العبث بسجل توثيق التوقيت في قاعدة البيانات',
+        identity.machineId,
       );
     }
 
     const token = row.activation_token?.trim() || null;
-    const hmacValid = this.isWatermarkHmacValid(row);
+    const hmacValid = this.isWatermarkHmacValid(row, identity.machineId);
     const effectiveWatermarkMs = Math.max(
       row.last_verified_clock_ms,
       this.externalWatermarkMs,
@@ -184,14 +245,21 @@ export class LicenseService {
           null,
           nowMs,
           'تم رصد تلاعب في تاريخ وساعة الجهاز أو سجل التوقيت',
+          identity.machineId,
         );
       }
       const nextWatermarkMs = Math.max(nowMs, row.last_verified_clock_ms, this.externalWatermarkMs);
       if (nextWatermarkMs > row.last_verified_clock_ms) {
-        await this.updateWatermarkRow(null, nextWatermarkMs);
+        await this.updateWatermarkRow(null, nextWatermarkMs, identity.machineId);
       }
       this.recordWatermarkAdvance(nextWatermarkMs);
-      return this.buildEvaluation('UNLICENSED', null, nowMs, 'البرنامج غير مفعّل على هذا الجهاز');
+      return this.buildEvaluation(
+        'UNLICENSED',
+        null,
+        nowMs,
+        'البرنامج غير مفعّل على هذا الجهاز',
+        identity.machineId,
+      );
     }
 
     const payload = this.verifyRawToken(token);
@@ -202,17 +270,25 @@ export class LicenseService {
           null,
           nowMs,
           'تم رصد عبث بسجل توثيق التوقيت في قاعدة البيانات',
+          identity.machineId,
         );
       }
-      return this.buildEvaluation('UNLICENSED', null, nowMs, 'كود التفعيل المحفوظ غير صالح');
+      return this.buildEvaluation(
+        'UNLICENSED',
+        null,
+        nowMs,
+        'كود التفعيل المحفوظ غير صالح',
+        identity.machineId,
+      );
     }
 
-    if (payload.machineId !== this.machineId) {
+    if (payload.machineId !== identity.machineId) {
       return this.buildEvaluation(
         'MACHINE_MISMATCH',
         payload,
         nowMs,
         'كود التفعيل المحفوظ مخصص لجهاز آخر',
+        identity.machineId,
       );
     }
 
@@ -222,6 +298,7 @@ export class LicenseService {
         payload,
         nowMs,
         'تاريخ وساعة الجهاز متأخران عن آخر تشغيل أو عملية مسجلة — يرجى ضبط التاريخ والوقت الصحيحين',
+        identity.machineId,
       );
     }
 
@@ -229,7 +306,7 @@ export class LicenseService {
     const expiresMs = Date.parse(payload.expiresAt);
     if (nowMs >= expiresMs) {
       if (nextWatermarkMs > row.last_verified_clock_ms) {
-        await this.updateWatermarkRow(token, nextWatermarkMs);
+        await this.updateWatermarkRow(token, nextWatermarkMs, identity.machineId);
       }
       this.recordWatermarkAdvance(nextWatermarkMs);
       return this.buildEvaluation(
@@ -237,20 +314,22 @@ export class LicenseService {
         payload,
         nowMs,
         'انتهت صلاحية الاشتراك — يرجى تجديد التفعيل',
+        identity.machineId,
       );
     }
 
     if (nextWatermarkMs > row.last_verified_clock_ms) {
-      await this.updateWatermarkRow(token, nextWatermarkMs);
+      await this.updateWatermarkRow(token, nextWatermarkMs, identity.machineId);
     }
     this.recordWatermarkAdvance(nextWatermarkMs);
 
-    return this.buildEvaluation('ACTIVE', payload, nowMs, null);
+    return this.buildEvaluation('ACTIVE', payload, nowMs, null, identity.machineId);
   }
 
   public async activate(rawToken: string): Promise<LicenseEvaluation> {
     const trimmed = rawToken.trim();
     const nowMs = this.nowProvider();
+    const identity = this.resolveCurrentIdentity();
     if (this.externalWatermarkTampered) {
       throw Object.assign(
         new Error('تم رصد عبث بملف توثيق التوقيت الخارجي ولا يمكن التفعيل قبل إصلاحه'),
@@ -258,8 +337,18 @@ export class LicenseService {
       );
     }
 
+    const existingPrecheck = await this.db
+      .selectFrom('system_licensing')
+      .selectAll()
+      .where('id', '=', 1)
+      .executeTakeFirst();
+    if (existingPrecheck?.activation_token?.trim() && !identity.isHardwareBacked) {
+      throw new LicenseHardwareIdentityError();
+    }
+
     const ledgerBaseline = await this.getOperationalLedgerBaseline();
-    const existingRow = await this.ensureWatermarkRow(nowMs, ledgerBaseline);
+    const existingRow =
+      existingPrecheck ?? (await this.ensureWatermarkRow(nowMs, ledgerBaseline, identity.machineId));
 
     if (!existingRow) {
       throw Object.assign(
@@ -275,15 +364,18 @@ export class LicenseService {
       });
     }
 
-    if (payload.machineId !== this.machineId) {
+    if (payload.machineId !== identity.machineId) {
+      if (!identity.isHardwareBacked) {
+        throw new LicenseHardwareIdentityError();
+      }
       throw Object.assign(
-        new Error(`كود التفعيل مخصص لجهاز آخر (${payload.machineId}) ولا يعمل على هذا الجهاز (${this.machineId})`),
+        new Error(`كود التفعيل مخصص لجهاز آخر (${payload.machineId}) ولا يعمل على هذا الجهاز (${identity.machineId})`),
         { status: 400 },
       );
     }
 
     // Enforce monotonic high-watermark across SQLite row, external DPAPI clock, and operational ledger.
-    const existingWatermarkValid = this.isWatermarkHmacValid(existingRow);
+    const existingWatermarkValid = this.isWatermarkHmacValid(existingRow, identity.machineId);
     const watermarkBaseline = existingWatermarkValid ? existingRow.last_verified_clock_ms : 0;
     const ledgerMax = ledgerBaseline.maxTimestampMs ?? 0;
     const baselineClockMs = Math.max(watermarkBaseline, this.externalWatermarkMs, ledgerMax, nowMs);
@@ -302,9 +394,9 @@ export class LicenseService {
       });
     }
 
-    await this.updateWatermarkRow(trimmed, baselineClockMs);
+    await this.updateWatermarkRow(trimmed, baselineClockMs, identity.machineId);
     this.recordWatermarkAdvance(baselineClockMs);
-    return this.buildEvaluation('ACTIVE', payload, nowMs, null);
+    return this.buildEvaluation('ACTIVE', payload, nowMs, null, identity.machineId);
   }
 
   public async touchWatermarkOnCheckout(): Promise<LicenseEvaluation> {
@@ -364,6 +456,7 @@ export class LicenseService {
   private async ensureWatermarkRow(
     nowMs: number,
     ledgerBaseline: OperationalLedgerBaseline,
+    machineId: string,
   ): Promise<SystemLicensingTable | null> {
     const existing = await this.db
       .selectFrom('system_licensing')
@@ -379,7 +472,7 @@ export class LicenseService {
       return null;
     }
 
-    const initialHmac = this.computeWatermarkHmac(nowMs, null);
+    const initialHmac = this.computeWatermarkHmac(nowMs, null, machineId);
     const nowIso = new Date(nowMs).toISOString();
     await this.db
       .insertInto('system_licensing')
@@ -404,8 +497,9 @@ export class LicenseService {
   private async updateWatermarkRow(
     activationToken: string | null,
     lastVerifiedClockMs: number,
+    machineId: string,
   ): Promise<void> {
-    const nextHmac = this.computeWatermarkHmac(lastVerifiedClockMs, activationToken);
+    const nextHmac = this.computeWatermarkHmac(lastVerifiedClockMs, activationToken, machineId);
     const nowIso = new Date(lastVerifiedClockMs).toISOString();
     await this.db
       .updateTable('system_licensing')
@@ -419,16 +513,21 @@ export class LicenseService {
       .execute();
   }
 
-  private computeWatermarkHmac(clockMs: number, activationToken: string | null): string {
+  private computeWatermarkHmac(
+    clockMs: number,
+    activationToken: string | null,
+    machineId: string,
+  ): string {
     return createHmac('sha256', Buffer.from(this.watermarkSecret, 'utf8'))
-      .update(`RetailOS-Clock-Watermark-v2:${this.machineId}:${String(clockMs)}:${activationToken ?? ''}`)
+      .update(`RetailOS-Clock-Watermark-v2:${machineId}:${String(clockMs)}:${activationToken ?? ''}`)
       .digest('hex');
   }
 
-  private isWatermarkHmacValid(row: SystemLicensingTable): boolean {
+  private isWatermarkHmacValid(row: SystemLicensingTable, machineId: string): boolean {
     const expected = this.computeWatermarkHmac(
       row.last_verified_clock_ms,
       row.activation_token ?? null,
+      machineId,
     );
     const actualBuf = Buffer.from(row.clock_hmac || '', 'utf8');
     const expectedBuf = Buffer.from(expected, 'utf8');
@@ -443,11 +542,12 @@ export class LicenseService {
     payload: LicensePayload | null,
     nowMs: number,
     reason: string | null,
+    machineId: string,
   ): LicenseEvaluation {
     if (!payload) {
       return {
         status,
-        machineId: this.machineId,
+        machineId,
         customerName: null,
         planName: null,
         issuedAt: null,
@@ -464,7 +564,7 @@ export class LicenseService {
 
     return {
       status,
-      machineId: this.machineId,
+      machineId,
       customerName: payload.customerName,
       planName: payload.planName,
       issuedAt: payload.issuedAt,

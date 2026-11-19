@@ -54,6 +54,7 @@ import {
   applyStockMovementInTransaction,
   allocateDocumentNumberInTransaction,
   LicenseEnforcementError,
+  LicenseHardwareIdentityError,
   LicenseService,
 } from '@retailos/infrastructure';
 import { CreateProductSchema, CreateUserSchema, UpdateProductSchema } from '@retailos/shared';
@@ -7550,14 +7551,19 @@ const server = createServer(async (req, res) => {
     if (status >= 500) {
       console.error('Request failed with status:', Number(status));
     }
-    const message = status >= 500
-      ? 'حصل خطأ داخلي. لم يتم تنفيذ العملية.'
-      : isInsufficientStock
-        ? 'الكمية المطلوبة غير متوفرة في المخزون (تم بيعها أو نفد الرصيد)'
-        : (error?.message ?? 'حدث خطأ غير متوقع');
+    const isTransientHardware = error instanceof LicenseHardwareIdentityError;
+    const message = isTransientHardware
+      ? error.message
+      : status >= 500
+        ? 'حصل خطأ داخلي. لم يتم تنفيذ العملية.'
+        : isInsufficientStock
+          ? 'الكمية المطلوبة غير متوفرة في المخزون (تم بيعها أو نفد الرصيد)'
+          : (error?.message ?? 'حدث خطأ غير متوقع');
     const errorBody = error instanceof LicenseEnforcementError
       ? { error: message, code: error.code, licenseStatus: error.licenseStatus }
-      : { error: message };
+      : isTransientHardware
+        ? { error: message, code: error.code, retryable: true }
+        : { error: message };
     json(res, status, errorBody);
   }
 });

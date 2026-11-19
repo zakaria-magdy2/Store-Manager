@@ -6,7 +6,9 @@ import {
   DatabaseMigrator,
   deriveMachineIdFromSeed,
   LicenseEnforcementError,
+  LicenseHardwareIdentityError,
   LicenseService,
+  resolveHardwareIdentityDetails,
   SqliteDatabaseManager,
 } from '../src/index.js';
 
@@ -436,6 +438,107 @@ describe('Offline Hardware-Locked Ed25519 Licensing Engine', () => {
       nowMs = Date.parse('2026-11-26T10:00:00.000Z');
       expect((await rewoundService.getStatus()).status).toBe('ACTIVE');
       expect(capturedAdvance).toBe(nowMs);
+    } finally {
+      await dbManager.close();
+    }
+  });
+
+  it('retries slow hardware probes, falls back to hardware UUID, and never yields false MACHINE_MISMATCH on transient failure', async () => {
+    // 1. Retries transient reg.exe failures up to 3 times with 200ms backoff before succeeding
+    let regAttempts = 0;
+    const sleepCalls: number[] = [];
+    const retried = resolveHardwareIdentityDetails({
+      platformOverride: 'win32',
+      readWinGuidFn: () => {
+        regAttempts += 1;
+        return regAttempts < 3 ? null : '11111111-2222-3333-4444-555555555555';
+      },
+      readWinUuidFn: () => '99999999-aaaa-bbbb-cccc-dddddddddddd',
+      sleepFn: (ms) => sleepCalls.push(ms),
+    });
+    expect(regAttempts).toBe(3);
+    expect(sleepCalls).toEqual([200, 200]);
+    expect(retried.isHardwareBacked).toBe(true);
+    expect(retried.source).toBe('win32-guid');
+
+    // 2. Falls back to hardware UUID when all 3 MachineGuid attempts fail
+    let regFailCount = 0;
+    const uuidFallback = resolveHardwareIdentityDetails({
+      platformOverride: 'win32',
+      readWinGuidFn: () => {
+        regFailCount += 1;
+        return null;
+      },
+      readWinUuidFn: () => 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      sleepFn: () => undefined,
+    });
+    expect(regFailCount).toBe(3);
+    expect(uuidFallback.isHardwareBacked).toBe(true);
+    expect(uuidFallback.source).toBe('win32-uuid');
+    expect(uuidFallback.machineId).toBe(
+      deriveMachineIdFromSeed('win32-uuid:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'),
+    );
+
+    // 3. Degraded fallback is marked isHardwareBacked=false and LicenseService refuses false MACHINE_MISMATCH
+    const degraded = resolveHardwareIdentityDetails({
+      platformOverride: 'win32',
+      readWinGuidFn: () => null,
+      readWinUuidFn: () => null,
+      sleepFn: () => undefined,
+    });
+    expect(degraded.isHardwareBacked).toBe(false);
+    expect(degraded.source).toBe('fallback');
+
+    const dbManager = new SqliteDatabaseManager({ filename: ':memory:' });
+    dbManager.connect();
+    try {
+      const db = dbManager.getDb();
+      await new DatabaseMigrator(db).migrateToLatest();
+      const { publicKey, privateKey } = createTestKeyPair();
+      const nowMs = Date.parse('2026-11-18T10:00:00.000Z');
+      const token = signTestToken(privateKey, {
+        customerName: 'متجر الصمود',
+        machineId: retried.machineId,
+        issuedAt: '2026-11-01T00:00:00.000Z',
+        expiresAt: '2027-11-01T00:00:00.000Z',
+        planName: 'سنوية',
+      });
+
+      const bootService = new LicenseService(db, {
+        publicKeyPem: publicKey,
+        watermarkSecret: 'e'.repeat(64),
+        identityProvider: () => ({ machineId: retried.machineId, isHardwareBacked: true }),
+        nowProvider: () => nowMs,
+      });
+      await bootService.activate(token);
+
+      // Simulate subsequent slow boot where hardware lookup transiently degrades
+      let hardwareAvailable = false;
+      const slowBootService = new LicenseService(db, {
+        publicKeyPem: publicKey,
+        watermarkSecret: 'e'.repeat(64),
+        identityProvider: () =>
+          hardwareAvailable
+            ? { machineId: retried.machineId, isHardwareBacked: true }
+            : { machineId: degraded.machineId, isHardwareBacked: false },
+        nowProvider: () => nowMs + 60_000,
+      });
+
+      await expect(slowBootService.getStatus()).rejects.toMatchObject({
+        name: 'LicenseHardwareIdentityError',
+        status: 503,
+        code: 'HARDWARE_IDENTITY_UNAVAILABLE',
+        retryable: true,
+      });
+      await expect(slowBootService.assertOperationalAccess()).rejects.toBeInstanceOf(
+        LicenseHardwareIdentityError,
+      );
+
+      // Once OS hardware subsystem responds, the active license evaluates ACTIVE with zero corruption
+      hardwareAvailable = true;
+      const recovered = await slowBootService.getStatus();
+      expect(recovered.status).toBe('ACTIVE');
+      expect(recovered.machineId).toBe(retried.machineId);
     } finally {
       await dbManager.close();
     }
