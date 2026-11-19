@@ -15,8 +15,8 @@
     "test": "tsc -b && node scripts/build-preload.mjs && node --test tests/*.test.mjs",
     "desktop:dev": "pnpm run desktop:build && electron .",
     "desktop:build": "pnpm --filter @retailos/web... build && pnpm run build && node scripts/stage-web-runtime.mjs",
-    "desktop:pack:win": "pnpm run desktop:build && electron-builder --win --dir --config electron-builder.json",
-    "desktop:dist:win": "pnpm run desktop:build && electron-builder --win --config electron-builder.json"
+    "desktop:pack:win": "node -e \"import('node:child_process').then(({spawnSync})=>{const w=process.platform==='win32';const cmd='pnpm run desktop:build && electron-builder --win --dir --config electron-builder.json';const r=spawnSync(w?'cmd.exe':'sh',w?['/d','/s','/c',cmd]:['-c',cmd],{stdio:'inherit',env:{...process.env,RETAILOS_REQUIRE_SIGNED_MANIFEST:'1'}});process.exit(r.status??1);})\"",
+    "desktop:dist:win": "node -e \"import('node:child_process').then(({spawnSync})=>{const w=process.platform==='win32';const cmd='pnpm run desktop:build && electron-builder --win --config electron-builder.json';const r=spawnSync(w?'cmd.exe':'sh',w?['/d','/s','/c',cmd]:['-c',cmd],{stdio:'inherit',env:{...process.env,RETAILOS_REQUIRE_SIGNED_MANIFEST:'1'}});process.exit(r.status??1);})\""
   },
   "dependencies": {
     "@retailos/application": "workspace:*",
