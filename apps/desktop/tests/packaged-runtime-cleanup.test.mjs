@@ -503,7 +503,8 @@ test('stops tree traversal when root PID does not exist or was reused and tracks
     creationDate: '2026-11-19T18:30:00.0000000Z',
   });
 
-  // 1a: Root PID does not exist, even though unrelated process has ParentProcessId == mainId.pid
+  // 1a: Root PID does not exist, and an unproven process has ParentProcessId == mainId.pid
+  // -> Do NOT kill PID 9150, record it as unverified blocker, and preserve tempSandbox
   const orphanTableWithAbsentRoot = new Map([
     [
       9150,
@@ -522,8 +523,44 @@ test('stops tree traversal when root PID does not exist or was reused and tracks
   });
   assert.equal(missingRootTree.rootStatus, 'ROOT_EXITED');
   assert.equal(missingRootTree.identities.size, 0);
+  assert.equal(missingRootTree.unverifiedDescendants.length, 1);
+  assert.equal(missingRootTree.unverifiedDescendants[0].identity.pid, 9150);
 
-  // 1b: Root PID reused by unrelated process that has its own child and grandchild
+  const sandboxAbsentRoot = await mkdtemp(join(tmpdir(), 'retailos-test-exited-root-'));
+  try {
+    const sentinel = join(sandboxAbsentRoot, 'keep-exited.txt');
+    await writeFile(sentinel, 'preserve', 'utf8');
+    const killedOnExited = [];
+    await assert.rejects(
+      () =>
+        cleanupPackagedTestRun({
+          ownedProcesses: new Map([[mainId.pid, { identity: mainId, depth: 0 }]]),
+          spawnedMainIdentity: mainId,
+          expectedExePath: TEST_EXE,
+          expectedServerScriptPath: TEST_SERVER_SCRIPT,
+          preExistingPids: new Set(),
+          tempSandbox: sandboxAbsentRoot,
+          queryProcessTable: () => new Map(orphanTableWithAbsentRoot),
+          killSinglePid: (pid) => killedOnExited.push(pid),
+          waitTimeoutMs: 200,
+          pollIntervalMs: 20,
+          platform: 'win32',
+        }),
+      (err) => {
+        assert.match(err.message, /Preserving temporary sandbox/);
+        assert.match(err.message, /PID=9150/);
+        return true;
+      },
+    );
+    assert.deepEqual(killedOnExited, [], 'Must NEVER kill unproven potential descendant PID 9150');
+    assert.equal(existsSync(sandboxAbsentRoot), true, 'Sandbox MUST NOT be deleted when unproven PID 9150 exists');
+    assert.equal(existsSync(sentinel), true);
+  } finally {
+    await rm(sandboxAbsentRoot, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  // 1b-i: Root PID reused by unrelated process with children referencing ParentProcessId == 9100
+  // -> Do NOT kill reused root or any child/grandchild/orphan, fail closed and preserve sandbox
   const reusedRoot = makeIdentity({
     pid: 9100,
     parentPid: 100,
@@ -545,42 +582,100 @@ test('stops tree traversal when root PID does not exist or was reused and tracks
     executablePath: 'C:\\Windows\\System32\\cmd.exe',
     creationDate: '2026-11-19T18:40:03.0000000Z',
   });
-  const reusedTable = new Map([
+  const orphanChildOfOldRoot = makeIdentity({
+    pid: 9103,
+    parentPid: 9100,
+    name: 'helper.exe',
+    executablePath: 'C:\\Tools\\helper.exe',
+    creationDate: '2026-11-19T18:30:05.0000000Z',
+  });
+  const reusedTableWithChildren = new Map([
     [reusedRoot.pid, reusedRoot],
     [reusedRootChild.pid, reusedRootChild],
     [reusedRootGrandchild.pid, reusedRootGrandchild],
+    [orphanChildOfOldRoot.pid, orphanChildOfOldRoot],
   ]);
   const reusedTree = collectProcessTreeIdentities(mainId, {
-    queryProcessTable: () => reusedTable,
+    queryProcessTable: () => reusedTableWithChildren,
     platform: 'win32',
   });
   assert.equal(reusedTree.rootStatus, 'ROOT_REUSED');
   assert.equal(reusedTree.identities.size, 0);
+  const flaggedReusedChildren = reusedTree.unverifiedDescendants.map((d) => d.identity.pid).sort((a, b) => a - b);
+  assert.deepEqual(flaggedReusedChildren, [9101, 9103]);
 
-  const sandboxReused = await mkdtemp(join(tmpdir(), 'retailos-test-reused-root-'));
+  const sandboxReusedWithChildren = await mkdtemp(join(tmpdir(), 'retailos-test-reused-root-children-'));
   try {
-    const killedOnReused = [];
+    const sentinel = join(sandboxReusedWithChildren, 'keep-reused.txt');
+    await writeFile(sentinel, 'preserve', 'utf8');
+    const killedOnReusedChildren = [];
+    await assert.rejects(
+      () =>
+        cleanupPackagedTestRun({
+          ownedProcesses: new Map([[mainId.pid, { identity: mainId, depth: 0 }]]),
+          spawnedMainIdentity: mainId,
+          expectedExePath: TEST_EXE,
+          expectedServerScriptPath: TEST_SERVER_SCRIPT,
+          preExistingPids: new Set(),
+          tempSandbox: sandboxReusedWithChildren,
+          queryProcessTable: () => new Map(reusedTableWithChildren),
+          killSinglePid: (pid) => killedOnReusedChildren.push(pid),
+          waitTimeoutMs: 200,
+          pollIntervalMs: 20,
+          platform: 'win32',
+        }),
+      (err) => {
+        assert.match(err.message, /Preserving temporary sandbox/);
+        assert.match(err.message, /PID=9101/);
+        assert.match(err.message, /PID=9103/);
+        return true;
+      },
+    );
+    assert.deepEqual(
+      killedOnReusedChildren,
+      [],
+      'Must NEVER kill reused root or any potential/grandchild processes',
+    );
+    assert.equal(
+      existsSync(sandboxReusedWithChildren),
+      true,
+      'Sandbox MUST NOT be deleted when processes reference reused root PID 9100',
+    );
+    assert.equal(existsSync(sentinel), true);
+  } finally {
+    await rm(sandboxReusedWithChildren, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  // 1b-ii: Root PID reused with NO processes referencing ParentProcessId == 9100
+  // -> Never kills reused root and cleanly removes tempSandbox
+  const reusedTableClean = new Map([[reusedRoot.pid, reusedRoot]]);
+  const sandboxReusedClean = await mkdtemp(join(tmpdir(), 'retailos-test-reused-root-clean-'));
+  try {
+    const killedOnReusedClean = [];
     const cleanupReused = await cleanupPackagedTestRun({
       ownedProcesses: new Map([[mainId.pid, { identity: mainId, depth: 0 }]]),
       spawnedMainIdentity: mainId,
       expectedExePath: TEST_EXE,
       expectedServerScriptPath: TEST_SERVER_SCRIPT,
       preExistingPids: new Set(),
-      tempSandbox: sandboxReused,
-      queryProcessTable: () => new Map(reusedTable),
-      killSinglePid: (pid) => killedOnReused.push(pid),
+      tempSandbox: sandboxReusedClean,
+      queryProcessTable: () => new Map(reusedTableClean),
+      killSinglePid: (pid) => killedOnReusedClean.push(pid),
       waitTimeoutMs: 200,
       pollIntervalMs: 20,
       platform: 'win32',
     });
-    assert.deepEqual(killedOnReused, [], 'Must NEVER kill reused root or any of its children');
+    assert.deepEqual(killedOnReusedClean, [], 'Must NEVER kill reused root');
     assert.equal(cleanupReused.reusedPids.some((r) => r.pid === 9100), true);
+    assert.equal(cleanupReused.cleanedSandbox, true);
+    assert.equal(existsSync(sandboxReusedClean), false);
   } finally {
-    await rm(sandboxReused, { recursive: true, force: true }).catch(() => undefined);
+    await rm(sandboxReusedClean, { recursive: true, force: true }).catch(() => undefined);
   }
 
-  // 1c: Root exited, unrelated process holds ParentProcessId == mainId.pid, but verified Server tree is still tracked cleanly
-  const sandboxServerTree = await mkdtemp(join(tmpdir(), 'retailos-test-srv-tree-'));
+  // 1c-i: Root exited, verified Server tree (9201 -> 9202) and unrelated process (parentPid=555)
+  // -> Cleans verified server tree, never touches PID 9301, deletes sandbox
+  const sandboxServerTreeClean = await mkdtemp(join(tmpdir(), 'retailos-test-srv-tree-clean-'));
   try {
     const verifiedServer = makeIdentity({
       pid: 9201,
@@ -595,19 +690,19 @@ test('stops tree traversal when root PID does not exist or was reused and tracks
       executablePath: 'C:\\Windows\\System32\\conhost.exe',
       creationDate: '2026-11-19T18:30:03.0000000Z',
     });
-    const unrelatedCoincidentalChild = makeIdentity({
-      pid: 9300,
-      parentPid: 9100, // Parent PID belonged to already-exited root, NOT our verified server
+    const unrelatedOtherParent = makeIdentity({
+      pid: 9301,
+      parentPid: 555,
       name: 'unrelated.exe',
       executablePath: 'C:\\Tools\\unrelated.exe',
       creationDate: '2026-11-19T18:35:00.0000000Z',
     });
-    const mixedTable = new Map([
+    const cleanMixedTable = new Map([
       [verifiedServer.pid, verifiedServer],
       [verifiedServerWorker.pid, verifiedServerWorker],
-      [unrelatedCoincidentalChild.pid, unrelatedCoincidentalChild],
+      [unrelatedOtherParent.pid, unrelatedOtherParent],
     ]);
-    const killedPids = [];
+    const killedPidsClean = [];
 
     const result = await cleanupPackagedTestRun({
       ownedProcesses: new Map([
@@ -619,11 +714,11 @@ test('stops tree traversal when root PID does not exist or was reused and tracks
       expectedExePath: TEST_EXE,
       expectedServerScriptPath: TEST_SERVER_SCRIPT,
       preExistingPids: new Set(),
-      tempSandbox: sandboxServerTree,
-      queryProcessTable: () => new Map(mixedTable),
+      tempSandbox: sandboxServerTreeClean,
+      queryProcessTable: () => new Map(cleanMixedTable),
       killSinglePid: (pid) => {
-        killedPids.push(pid);
-        mixedTable.delete(pid);
+        killedPidsClean.push(pid);
+        cleanMixedTable.delete(pid);
       },
       waitTimeoutMs: 400,
       pollIntervalMs: 25,
@@ -631,15 +726,89 @@ test('stops tree traversal when root PID does not exist or was reused and tracks
     });
 
     assert.deepEqual(
-      killedPids,
+      killedPidsClean,
       [9202, 9201],
-      'Should terminate verified server child then verified server, NEVER unrelated PID 9300',
+      'Should terminate verified server child then verified server, NEVER unrelated PID 9301',
+    );
+    assert.equal(cleanMixedTable.has(9301), true);
+    assert.equal(result.cleanedSandbox, true);
+    assert.equal(existsSync(sandboxServerTreeClean), false);
+  } finally {
+    await rm(sandboxServerTreeClean, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  // 1c-ii: Root exited, verified Server tree (9201 -> 9202) PLUS unproven process 9300 referencing ParentProcessId == 9100
+  // -> Terminates verified [9202, 9201], NEVER kills 9300, fails closed & preserves sandbox
+  const sandboxServerTreeMixed = await mkdtemp(join(tmpdir(), 'retailos-test-srv-tree-mixed-'));
+  try {
+    const sentinel = join(sandboxServerTreeMixed, 'keep-mixed.txt');
+    await writeFile(sentinel, 'preserve', 'utf8');
+    const verifiedServer = makeIdentity({
+      pid: 9201,
+      parentPid: 9100,
+      commandLine: `"${TEST_EXE}" "${TEST_SERVER_SCRIPT}" --electron-stdio-secret`,
+      creationDate: '2026-11-19T18:30:02.0000000Z',
+    });
+    const verifiedServerWorker = makeIdentity({
+      pid: 9202,
+      parentPid: 9201,
+      name: 'conhost.exe',
+      executablePath: 'C:\\Windows\\System32\\conhost.exe',
+      creationDate: '2026-11-19T18:30:03.0000000Z',
+    });
+    const unprovenCoincidentalChild = makeIdentity({
+      pid: 9300,
+      parentPid: 9100,
+      name: 'unrelated.exe',
+      executablePath: 'C:\\Tools\\unrelated.exe',
+      creationDate: '2026-11-19T18:35:00.0000000Z',
+    });
+    const mixedTable = new Map([
+      [verifiedServer.pid, verifiedServer],
+      [verifiedServerWorker.pid, verifiedServerWorker],
+      [unprovenCoincidentalChild.pid, unprovenCoincidentalChild],
+    ]);
+    const killedPidsMixed = [];
+
+    await assert.rejects(
+      () =>
+        cleanupPackagedTestRun({
+          ownedProcesses: new Map([
+            [mainId.pid, { identity: mainId, depth: 0 }],
+            [verifiedServer.pid, { identity: verifiedServer, depth: 1 }],
+          ]),
+          spawnedMainIdentity: mainId,
+          trackedServerIdentity: verifiedServer,
+          expectedExePath: TEST_EXE,
+          expectedServerScriptPath: TEST_SERVER_SCRIPT,
+          preExistingPids: new Set(),
+          tempSandbox: sandboxServerTreeMixed,
+          queryProcessTable: () => new Map(mixedTable),
+          killSinglePid: (pid) => {
+            killedPidsMixed.push(pid);
+            mixedTable.delete(pid);
+          },
+          waitTimeoutMs: 400,
+          pollIntervalMs: 25,
+          platform: 'win32',
+        }),
+      (err) => {
+        assert.match(err.message, /Preserving temporary sandbox/);
+        assert.match(err.message, /PID=9300/);
+        return true;
+      },
+    );
+
+    assert.deepEqual(
+      killedPidsMixed,
+      [9202, 9201],
+      'Should terminate verified server tree ONLY and NEVER kill unproven PID 9300',
     );
     assert.equal(mixedTable.has(9300), true);
-    assert.equal(result.cleanedSandbox, true);
-    assert.equal(existsSync(sandboxServerTree), false);
+    assert.equal(existsSync(sandboxServerTreeMixed), true, 'Sandbox MUST NOT be deleted when unproven PID 9300 exists');
+    assert.equal(existsSync(sentinel), true);
   } finally {
-    await rm(sandboxServerTree, { recursive: true, force: true }).catch(() => undefined);
+    await rm(sandboxServerTreeMixed, { recursive: true, force: true }).catch(() => undefined);
   }
 });
 
@@ -832,5 +1001,176 @@ test('assertSafeTestEnvironment blocks Symlink/Junction bypasses pointing into p
     assert.equal(pre.size, 0);
   } finally {
     await rm(rootTmp, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('validateServerProcessOwnership verifies live parent identity and rejects Parent PID reuse', async () => {
+  const mainId = makeIdentity({
+    pid: 4100,
+    parentPid: 100,
+    creationDate: '2026-11-19T18:00:00.0000000Z',
+  });
+  const candidateServer = makeIdentity({
+    pid: 4200,
+    parentPid: 4100,
+    executablePath: TEST_EXE,
+    commandLine: `"${TEST_EXE}" "${TEST_SERVER_SCRIPT}" --electron-stdio-secret`,
+    creationDate: '2026-11-19T18:00:03.0000000Z',
+  });
+
+  // 1. Parent PID reused by different executable (even when server candidate cmdline matches) -> REJECT
+  const reusedParentDiffExe = makeIdentity({
+    pid: 4100,
+    parentPid: 100,
+    name: 'pwsh.exe',
+    executablePath: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+    creationDate: '2026-11-19T18:05:00.0000000Z',
+  });
+  const resDiffExe = validateServerProcessOwnership(candidateServer, {
+    expectedExePath: TEST_EXE,
+    expectedParentPid: mainId.pid,
+    expectedServerScriptPath: TEST_SERVER_SCRIPT,
+    preExistingPids: new Set(),
+    spawnedMainIdentity: mainId,
+    processTable: new Map([
+      [reusedParentDiffExe.pid, reusedParentDiffExe],
+      [candidateServer.pid, candidateServer],
+    ]),
+    platform: 'win32',
+  });
+  assert.equal(resDiffExe.valid, false);
+  assert.equal(resDiffExe.parentPidReused, true);
+  assert.equal(resDiffExe.unverified, true);
+  assert.match(resDiffExe.reason, /parent PID.*reused/i);
+
+  // 2. Parent PID reused by same RetailOS executable with different CreationDate -> REJECT
+  const reusedParentSameExe = makeIdentity({
+    pid: 4100,
+    parentPid: 100,
+    executablePath: TEST_EXE,
+    creationDate: '2026-11-19T18:09:00.0000000Z',
+  });
+  const resSameExe = validateServerProcessOwnership(candidateServer, {
+    expectedExePath: TEST_EXE,
+    expectedParentPid: mainId.pid,
+    expectedServerScriptPath: TEST_SERVER_SCRIPT,
+    preExistingPids: new Set(),
+    spawnedMainIdentity: mainId,
+    processTable: new Map([
+      [reusedParentSameExe.pid, reusedParentSameExe],
+      [candidateServer.pid, candidateServer],
+    ]),
+    platform: 'win32',
+  });
+  assert.equal(resSameExe.valid, false);
+  assert.equal(resSameExe.parentPidReused, true);
+  assert.equal(resSameExe.unverified, true);
+
+  // 3. ParentProcessId alone (parent absent / not verified in processTable AND no matching CommandLine) -> REJECT
+  const candidateNoCmd = makeIdentity({
+    pid: 4201,
+    parentPid: 4100,
+    executablePath: TEST_EXE,
+    commandLine: `"${TEST_EXE}"`,
+    creationDate: '2026-11-19T18:00:03.0000000Z',
+  });
+  const resParentPidOnly = validateServerProcessOwnership(candidateNoCmd, {
+    expectedExePath: TEST_EXE,
+    expectedParentPid: mainId.pid,
+    expectedServerScriptPath: TEST_SERVER_SCRIPT,
+    preExistingPids: new Set(),
+    spawnedMainIdentity: mainId,
+    processTable: new Map([[candidateNoCmd.pid, candidateNoCmd]]),
+    platform: 'win32',
+  });
+  assert.equal(resParentPidOnly.valid, false);
+  assert.equal(resParentPidOnly.unverified, true);
+  assert.match(resParentPidOnly.reason, /parent identity was not verified/i);
+
+  // 4. Incomplete live parent identity (missing ExecutablePath & CreationDate) -> REJECT fail-closed
+  const incompleteLiveParent = {
+    pid: 4100,
+    parentPid: 100,
+    name: 'RetailOS.exe',
+    executablePath: null,
+    commandLine: null,
+    creationDate: null,
+  };
+  const resIncompleteParent = validateServerProcessOwnership(candidateServer, {
+    expectedExePath: TEST_EXE,
+    expectedParentPid: mainId.pid,
+    expectedServerScriptPath: TEST_SERVER_SCRIPT,
+    preExistingPids: new Set(),
+    spawnedMainIdentity: mainId,
+    processTable: new Map([
+      [incompleteLiveParent.pid, incompleteLiveParent],
+      [candidateServer.pid, candidateServer],
+    ]),
+    platform: 'win32',
+  });
+  assert.equal(resIncompleteParent.valid, false);
+  assert.equal(resIncompleteParent.unverified, true);
+  assert.match(resIncompleteParent.reason, /incomplete identity/i);
+
+  // 5. Verified live parent identity matches spawnedMainIdentity -> VALID
+  const resVerified = validateServerProcessOwnership(candidateServer, {
+    expectedExePath: TEST_EXE,
+    expectedParentPid: mainId.pid,
+    expectedServerScriptPath: TEST_SERVER_SCRIPT,
+    preExistingPids: new Set(),
+    spawnedMainIdentity: mainId,
+    processTable: new Map([
+      [mainId.pid, mainId],
+      [candidateServer.pid, candidateServer],
+    ]),
+    platform: 'win32',
+  });
+  assert.equal(resVerified.valid, true);
+  assert.equal(resVerified.identity.pid, 4200);
+
+  // 6. End-to-end cleanupPackagedTestRun with control file referencing candidate whose parent PID was reused
+  // -> MUST NOT kill candidate or reused parent, MUST reject & preserve tempSandbox
+  const sandbox = await mkdtemp(join(tmpdir(), 'retailos-test-parent-reuse-'));
+  try {
+    const sentinel = join(sandbox, 'sentinel-parent-reuse.txt');
+    await writeFile(sentinel, 'preserve', 'utf8');
+    const controlFilePath = join(sandbox, '.retailos-control.json');
+    await writeFile(controlFilePath, JSON.stringify({ pid: candidateServer.pid, port: 3210 }), 'utf8');
+
+    const tableWithReusedParent = new Map([
+      [reusedParentDiffExe.pid, reusedParentDiffExe],
+      [candidateServer.pid, candidateServer],
+    ]);
+    const killedPids = [];
+
+    await assert.rejects(
+      () =>
+        cleanupPackagedTestRun({
+          ownedProcesses: new Map([[mainId.pid, { identity: mainId, depth: 0 }]]),
+          spawnedMainIdentity: mainId,
+          controlFilePath,
+          expectedExePath: TEST_EXE,
+          expectedServerScriptPath: TEST_SERVER_SCRIPT,
+          preExistingPids: new Set(),
+          tempSandbox: sandbox,
+          queryProcessTable: () => new Map(tableWithReusedParent),
+          killSinglePid: (pid) => killedPids.push(pid),
+          waitTimeoutMs: 200,
+          pollIntervalMs: 20,
+          platform: 'win32',
+        }),
+      (err) => {
+        assert.match(err.message, /Preserving temporary sandbox/);
+        assert.match(err.message, /PID=4200/);
+        assert.match(err.message, /parent PID 4100 was reused/i);
+        return true;
+      },
+    );
+
+    assert.deepEqual(killedPids, [], 'Must NEVER kill candidate server or reused parent process');
+    assert.equal(existsSync(sandbox), true, 'Sandbox MUST NOT be deleted when parent PID reuse blocks verification');
+    assert.equal(existsSync(sentinel), true);
+  } finally {
+    await rm(sandbox, { recursive: true, force: true }).catch(() => undefined);
   }
 });

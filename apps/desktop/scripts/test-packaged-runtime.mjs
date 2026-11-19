@@ -285,24 +285,29 @@ export function validateServerProcessOwnership(
     expectedServerScriptPath,
     preExistingPids = new Set(),
     spawnedMainIdentity = null,
+    processTable = null,
+    liveParentIdentity = undefined,
     platform = process.platform,
   },
 ) {
   if (!isCompleteProcessIdentity(candidateIdentity)) {
     return {
       valid: false,
+      unverified: true,
       reason: `Incomplete server process identity (${formatProcessIdentity(candidateIdentity)})`,
     };
   }
   if (preExistingPids.has(candidateIdentity.pid)) {
     return {
       valid: false,
+      unverified: false,
       reason: `PID ${candidateIdentity.pid} existed before this test started`,
     };
   }
   if (!pathsEqual(candidateIdentity.executablePath, expectedExePath, platform)) {
     return {
       valid: false,
+      unverified: false,
       reason: `ExecutablePath mismatch for PID ${candidateIdentity.pid}: expected "${expectedExePath}", got "${candidateIdentity.executablePath}"`,
     };
   }
@@ -313,15 +318,62 @@ export function validateServerProcessOwnership(
     if (Number.isFinite(serverCreatedMs) && Number.isFinite(mainCreatedMs) && serverCreatedMs < mainCreatedMs - 1000) {
       return {
         valid: false,
+        unverified: false,
         reason: `CreationDate ${candidateIdentity.creationDate} precedes spawned parent creation ${spawnedMainIdentity.creationDate}`,
       };
     }
   }
 
-  const parentMatches =
-    expectedParentPid !== null &&
-    expectedParentPid !== undefined &&
-    candidateIdentity.parentPid === expectedParentPid;
+  const effectiveExpectedParentPid = spawnedMainIdentity?.pid ?? expectedParentPid;
+  let liveParent = null;
+  if (liveParentIdentity !== undefined) {
+    liveParent = liveParentIdentity;
+  } else if (
+    processTable &&
+    Number.isInteger(effectiveExpectedParentPid) &&
+    effectiveExpectedParentPid > 0
+  ) {
+    liveParent = processTable.get(effectiveExpectedParentPid) ?? null;
+  }
+
+  if (spawnedMainIdentity && isCompleteProcessIdentity(spawnedMainIdentity) && liveParent !== null) {
+    if (!isCompleteProcessIdentity(liveParent)) {
+      return {
+        valid: false,
+        unverified: true,
+        reason: `Ownership proof failed for PID ${candidateIdentity.pid}: live parent PID ${spawnedMainIdentity.pid} has incomplete identity (${formatProcessIdentity(liveParent)})`,
+      };
+    }
+    if (!isSameProcessIdentity(spawnedMainIdentity, liveParent, { platform })) {
+      return {
+        valid: false,
+        parentPidReused: true,
+        unverified: true,
+        reason: `Ownership proof failed for PID ${candidateIdentity.pid}: parent PID ${spawnedMainIdentity.pid} was reused by another process (expected [${formatProcessIdentity(spawnedMainIdentity)}], actual [${formatProcessIdentity(liveParent)}])`,
+      };
+    }
+  }
+
+  const parentVerified = Boolean(
+    spawnedMainIdentity &&
+      isCompleteProcessIdentity(spawnedMainIdentity) &&
+      liveParent &&
+      isCompleteProcessIdentity(liveParent) &&
+      isSameProcessIdentity(spawnedMainIdentity, liveParent, { platform }) &&
+      candidateIdentity.parentPid === spawnedMainIdentity.pid,
+  );
+
+  if (
+    effectiveExpectedParentPid !== null &&
+    effectiveExpectedParentPid !== undefined &&
+    candidateIdentity.parentPid !== effectiveExpectedParentPid
+  ) {
+    return {
+      valid: false,
+      unverified: false,
+      reason: `Ownership proof failed for PID ${candidateIdentity.pid}: ParentProcessId (${String(candidateIdentity.parentPid)}) does not match expected parent PID ${String(effectiveExpectedParentPid)}`,
+    };
+  }
 
   let cmdMatches = false;
   if (typeof candidateIdentity.commandLine === 'string' && expectedServerScriptPath) {
@@ -337,14 +389,68 @@ export function validateServerProcessOwnership(
       cmdText.includes('--electron-stdio-secret') && cmdText.includes(expectedScript);
   }
 
-  if (!parentMatches && !cmdMatches) {
+  if (!parentVerified && !cmdMatches) {
     return {
       valid: false,
-      reason: `Ownership proof failed for PID ${candidateIdentity.pid}: neither ParentProcessId (${String(candidateIdentity.parentPid)}) matches ${String(expectedParentPid)} nor CommandLine references "${expectedServerScriptPath}" with --electron-stdio-secret`,
+      unverified: Boolean(
+        effectiveExpectedParentPid !== null &&
+          effectiveExpectedParentPid !== undefined &&
+          candidateIdentity.parentPid === effectiveExpectedParentPid,
+      ),
+      reason: `Ownership proof failed for PID ${candidateIdentity.pid}: parent identity was not verified against spawnedMainIdentity and CommandLine did not reference "${expectedServerScriptPath}" with --electron-stdio-secret`,
     };
   }
 
   return { valid: true, identity: candidateIdentity };
+}
+
+function findUnverifiedPotentialChildren(
+  table,
+  rootIdentity,
+  rootStatus,
+  { preExistingPids = new Set(), knownOwnedIdentities = new Map(), platform = process.platform } = {},
+) {
+  const rootCreatedMs =
+    typeof rootIdentity?.creationDate === 'string' && rootIdentity.creationDate.trim()
+      ? Date.parse(rootIdentity.creationDate)
+      : Number.NaN;
+  const statusLabel =
+    rootStatus === 'ROOT_REUSED'
+      ? 'reused'
+      : rootStatus === 'ROOT_UNVERIFIED'
+        ? 'unverified'
+        : 'exited';
+
+  const unverified = [];
+  for (const entry of table.values()) {
+    if (!entry || entry.parentPid !== rootIdentity.pid) {
+      continue;
+    }
+    if (entry.pid === rootIdentity.pid || preExistingPids.has(entry.pid)) {
+      continue;
+    }
+    const knownOwned = knownOwnedIdentities.get(entry.pid);
+    if (knownOwned && isSameProcessIdentity(knownOwned, entry, { platform })) {
+      continue;
+    }
+    if (typeof entry.creationDate === 'string' && entry.creationDate.trim()) {
+      const entryCreatedMs = Date.parse(entry.creationDate);
+      if (
+        Number.isFinite(rootCreatedMs) &&
+        Number.isFinite(entryCreatedMs) &&
+        entryCreatedMs < rootCreatedMs - 1000
+      ) {
+        continue;
+      }
+    }
+    unverified.push({
+      identity: entry,
+      parentPid: rootIdentity.pid,
+      depth: 1,
+      reason: `Potential descendant PID ${entry.pid} has ParentProcessId=${rootIdentity.pid} matching ${statusLabel} root PID; cannot verify test ownership (${formatProcessIdentity(entry)})`,
+    });
+  }
+  return unverified;
 }
 
 export function collectProcessTreeIdentities(
@@ -352,6 +458,7 @@ export function collectProcessTreeIdentities(
   {
     queryProcessTable = () => queryWindowsProcessTable(),
     preExistingPids = new Set(),
+    knownOwnedIdentities = new Map(),
     platform = process.platform,
   } = {},
 ) {
@@ -370,7 +477,12 @@ export function collectProcessTreeIdentities(
       rootStatus: 'ROOT_EXITED',
       identities: new Map(),
       depths: new Map(),
-      unverifiedDescendants: [],
+      unverifiedDescendants: findUnverifiedPotentialChildren(
+        table,
+        rootIdentity,
+        'ROOT_EXITED',
+        { preExistingPids, knownOwnedIdentities, platform },
+      ),
     };
   }
 
@@ -386,6 +498,11 @@ export function collectProcessTreeIdentities(
           depth: 0,
           reason: `Live root PID ${rootIdentity.pid} has incomplete identity (${formatProcessIdentity(liveRoot)})`,
         },
+        ...findUnverifiedPotentialChildren(table, rootIdentity, 'ROOT_UNVERIFIED', {
+          preExistingPids,
+          knownOwnedIdentities,
+          platform,
+        }),
       ],
     };
   }
@@ -396,7 +513,12 @@ export function collectProcessTreeIdentities(
       actualRoot: liveRoot,
       identities: new Map(),
       depths: new Map(),
-      unverifiedDescendants: [],
+      unverifiedDescendants: findUnverifiedPotentialChildren(
+        table,
+        rootIdentity,
+        'ROOT_REUSED',
+        { preExistingPids, knownOwnedIdentities, platform },
+      ),
     };
   }
 
@@ -813,6 +935,18 @@ export function assertSafeTestEnvironment(
   return preExistingPids;
 }
 
+function pushUnverifiedBlocker(unverifiedOwned, entry) {
+  const pid = entry?.identity?.pid ?? null;
+  const reason = entry?.reason ?? '';
+  if (
+    !unverifiedOwned.some(
+      (existing) => (existing?.identity?.pid ?? null) === pid && existing?.reason === reason,
+    )
+  ) {
+    unverifiedOwned.push(entry);
+  }
+}
+
 export async function cleanupPackagedTestRun({
   ownedProcesses,
   spawnedMainIdentity = null,
@@ -833,7 +967,10 @@ export async function cleanupPackagedTestRun({
   platform = process.platform,
 }) {
   const cleanupErrors = [];
-  const unverifiedOwned = [...extraUnverified];
+  const unverifiedOwned = [];
+  for (const extra of extraUnverified) {
+    pushUnverifiedBlocker(unverifiedOwned, extra);
+  }
   const remainingOwned = [];
   const reusedPids = [];
 
@@ -850,7 +987,7 @@ export async function cleanupPackagedTestRun({
   }
 
   if (unverifiedMainPid !== null && !ownedProcesses.has(unverifiedMainPid)) {
-    unverifiedOwned.push({
+    pushUnverifiedBlocker(unverifiedOwned, {
       identity: {
         pid: unverifiedMainPid,
         executablePath: expectedExePath,
@@ -884,15 +1021,28 @@ export async function cleanupPackagedTestRun({
                 expectedServerScriptPath,
                 preExistingPids,
                 spawnedMainIdentity,
+                processTable: table,
                 platform,
               });
               if (ownership.valid) {
                 ownedProcesses.set(candidatePid, { identity: ownership.identity, depth: 1 });
-              } else if (!isCompleteProcessIdentity(liveCandidate)) {
-                unverifiedOwned.push({
+              } else if (!isCompleteProcessIdentity(liveCandidate) || ownership.unverified) {
+                pushUnverifiedBlocker(unverifiedOwned, {
                   identity: liveCandidate,
                   reason: ownership.reason,
                 });
+                if (ownership.parentPidReused) {
+                  reusedPids.push({
+                    pid: candidatePid,
+                    expected: {
+                      pid: candidatePid,
+                      executablePath: expectedExePath,
+                      creationDate: 'owned-server',
+                    },
+                    actual: liveCandidate,
+                    reason: ownership.reason,
+                  });
+                }
               } else {
                 reusedPids.push({
                   pid: candidatePid,
@@ -907,7 +1057,7 @@ export async function cleanupPackagedTestRun({
               }
             }
           } catch (enumErr) {
-            unverifiedOwned.push({
+            pushUnverifiedBlocker(unverifiedOwned, {
               identity: {
                 pid: candidatePid,
                 executablePath: expectedExePath,
@@ -942,13 +1092,34 @@ export async function cleanupPackagedTestRun({
     }
   }
 
+  const knownOwnedIdentities = new Map();
+  for (const [pid, record] of verifiedRoots.entries()) {
+    knownOwnedIdentities.set(pid, record.identity);
+  }
+  for (const [pid, record] of ownedProcesses.entries()) {
+    if (
+      !knownOwnedIdentities.has(pid) &&
+      isCompleteProcessIdentity(record.identity) &&
+      !preExistingPids.has(pid)
+    ) {
+      knownOwnedIdentities.set(pid, record.identity);
+    }
+  }
+
   for (const rootRecord of verifiedRoots.values()) {
     try {
       const tree = collectProcessTreeIdentities(rootRecord.identity, {
         queryProcessTable,
         preExistingPids,
+        knownOwnedIdentities,
         platform,
       });
+
+      if (tree.unverifiedDescendants.length > 0) {
+        for (const unverified of tree.unverifiedDescendants) {
+          pushUnverifiedBlocker(unverifiedOwned, unverified);
+        }
+      }
 
       if (tree.rootStatus === 'ROOT_REUSED') {
         if (!reusedPids.some((r) => r.pid === rootRecord.identity.pid)) {
@@ -962,12 +1133,6 @@ export async function cleanupPackagedTestRun({
         continue;
       }
 
-      if (tree.rootStatus === 'ROOT_UNVERIFIED' || tree.unverifiedDescendants.length > 0) {
-        for (const unverified of tree.unverifiedDescendants) {
-          unverifiedOwned.push(unverified);
-        }
-      }
-
       if (tree.rootStatus === 'LIVE_VERIFIED') {
         for (const [pid, identity] of tree.identities.entries()) {
           if (!preExistingPids.has(pid) && !ownedProcesses.has(pid)) {
@@ -976,10 +1141,11 @@ export async function cleanupPackagedTestRun({
               depth: rootRecord.depth + (tree.depths.get(pid) ?? 0),
             });
           }
+          knownOwnedIdentities.set(pid, identity);
         }
       }
     } catch (treeErr) {
-      unverifiedOwned.push({
+      pushUnverifiedBlocker(unverifiedOwned, {
         identity: rootRecord.identity,
         reason: `Failed to enumerate process tree for cleanup: ${treeErr instanceof Error ? treeErr.message : String(treeErr)}`,
       });
@@ -1259,6 +1425,7 @@ export async function runPackagedRuntimeTest({ argv = process.argv } = {}) {
                 expectedServerScriptPath,
                 preExistingPids,
                 spawnedMainIdentity,
+                processTable: table,
               });
               if (!ownership.valid) {
                 throw new Error(
@@ -1311,12 +1478,19 @@ export async function runPackagedRuntimeTest({ argv = process.argv } = {}) {
     assert.match(logText, /webContents did-finish-load/);
     assert.doesNotMatch(logText, /ERR_MODULE_NOT_FOUND|fatal startup error/);
 
+    const knownSnapshotOwned = new Map();
+    for (const [pid, rec] of ownedProcesses.entries()) {
+      if (isCompleteProcessIdentity(rec.identity) && !preExistingPids.has(pid)) {
+        knownSnapshotOwned.set(pid, rec.identity);
+      }
+    }
     for (const [rootIdentity, baseDepth] of [
       [spawnedMainIdentity, 0],
       [trackedServerIdentity, 1],
     ]) {
       const treeSnapshot = collectProcessTreeIdentities(rootIdentity, {
         preExistingPids,
+        knownOwnedIdentities: knownSnapshotOwned,
       });
       if (treeSnapshot.unverifiedDescendants.length > 0) {
         unverifiedDuringRun.push(...treeSnapshot.unverifiedDescendants);
@@ -1328,6 +1502,7 @@ export async function runPackagedRuntimeTest({ argv = process.argv } = {}) {
             depth: baseDepth + (treeSnapshot.depths.get(pid) ?? 0),
           });
         }
+        knownSnapshotOwned.set(pid, identity);
       }
     }
     assert.deepEqual(
