@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -244,6 +244,9 @@ test('managed desktop server boots with temporary userData paths via stdin secre
   const watermarkSecret = await resolveOrCreateDesktopWatermarkSecret({
     userDataDir: tempUserData,
   });
+  const dailyBackupSecret = await resolveOrCreateDesktopDailyBackupSecret({
+    userDataDir: tempUserData,
+  });
   const env = buildServerProcessEnv(process.env, paths, port);
 
   let child = null;
@@ -254,6 +257,7 @@ test('managed desktop server boots with temporary userData paths via stdin secre
       cwd: dirname(webServerPath),
       env,
       watermarkSecret,
+      dailyBackupSecret,
     });
     child = managed.child;
     const identity = await waitForServerReady({
@@ -266,6 +270,7 @@ test('managed desktop server boots with temporary userData paths via stdin secre
     assert.equal(existsSync(paths.databasePath), true, 'SQLite DB must be created at RETAILOS_DB_PATH');
     assert.equal(existsSync(paths.dailyBackupDir), true, 'Daily backup dir must be created inside RETAILOS_BACKUP_DIR');
     assert.equal(existsSync(join(paths.dataDir, '.retailos-watermark.key')), false, 'Plaintext watermark fallback file must not exist');
+    assert.equal(existsSync(join(paths.dataDir, '.retailos-daily.key')), false, 'Plaintext daily backup fallback file must not exist');
 
     const licenseRes = await fetch(`${origin}/api/license/status`);
     assert.equal(licenseRes.status, 200);
@@ -393,7 +398,82 @@ test('resolveOrCreateDesktopWatermarkSecret persists DPAPI-sealed secret and bui
   }
 });
 
-test('verifyStagedRuntimeIntegrity validates Ed25519 manifest and rejects tampered or unmanifested files', async () => {
+test('resolveOrCreateDesktopWatermarkSecret migrates legacy key safely (write-before-delete crash safety)', async () => {
+  const tempUserData = await mkdtemp(join(tmpdir(), 'retailos-wm-migrate-'));
+  try {
+    const dataDir = join(tempUserData, 'data');
+    await mkdir(dataDir, { recursive: true });
+    const legacyWmPath = join(dataDir, '.retailos-watermark.key');
+    const legacyWmSecret = 'a1b2c3d4'.repeat(8);
+    await writeFile(legacyWmPath, `${legacyWmSecret}\n`, 'utf8');
+
+    const failingDpapi = {
+      isEncryptionAvailable: () => true,
+      encryptString: () => {
+        throw new Error('Simulated crash during DPAPI encryption');
+      },
+      decryptString: () => '',
+    };
+    await assert.rejects(
+      () =>
+        resolveOrCreateDesktopWatermarkSecret({
+          userDataDir: tempUserData,
+          safeStorage: failingDpapi,
+          requireDpapi: true,
+          legacyPlaintextKeyPath: legacyWmPath,
+        }),
+      /Simulated crash/,
+    );
+    assert.equal(existsSync(legacyWmPath), true, 'Legacy watermark key MUST NOT be deleted before .bin is written');
+    assert.equal((await readFile(legacyWmPath, 'utf8')).trim(), legacyWmSecret);
+    assert.equal(existsSync(join(tempUserData, 'license-watermark.bin')), false);
+
+    const legacyDailyPath = join(dataDir, '.retailos-daily.key');
+    const legacyDailySecret = 'LegacyDailyBackupSecret-12345';
+    await writeFile(legacyDailyPath, `${legacyDailySecret}\n`, 'utf8');
+    await assert.rejects(
+      () =>
+        resolveOrCreateDesktopDailyBackupSecret({
+          userDataDir: tempUserData,
+          safeStorage: failingDpapi,
+          requireDpapi: true,
+          legacyPlaintextKeyPath: legacyDailyPath,
+        }),
+      /Simulated crash/,
+    );
+    assert.equal(existsSync(legacyDailyPath), true, 'Legacy daily backup key MUST NOT be deleted before .bin is written');
+
+    const fakeDpapi = {
+      isEncryptionAvailable: () => true,
+      encryptString: (plain) => Buffer.from(`dpapi:${plain}`, 'utf8'),
+      decryptString: (blob) => blob.toString('utf8').replace(/^dpapi:/, ''),
+    };
+
+    const migratedWm = await resolveOrCreateDesktopWatermarkSecret({
+      userDataDir: tempUserData,
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+      legacyPlaintextKeyPath: legacyWmPath,
+    });
+    assert.equal(migratedWm, legacyWmSecret);
+    assert.equal(existsSync(join(tempUserData, 'license-watermark.bin')), true);
+    assert.equal(existsSync(legacyWmPath), false, 'Legacy watermark file must be deleted AFTER .bin is written');
+
+    const migratedDaily = await resolveOrCreateDesktopDailyBackupSecret({
+      userDataDir: tempUserData,
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+      legacyPlaintextKeyPath: legacyDailyPath,
+    });
+    assert.equal(migratedDaily, legacyDailySecret);
+    assert.equal(existsSync(join(tempUserData, 'daily-backup.bin')), true);
+    assert.equal(existsSync(legacyDailyPath), false, 'Legacy daily backup file must be deleted AFTER .bin is written');
+  } finally {
+    await rm(tempUserData, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('verifyStagedRuntimeIntegrity validates Ed25519 manifest including @retailos/* packages and enforces requireManifest', async () => {
   const tempWebDir = await mkdtemp(join(tmpdir(), 'retailos-manifest-'));
   try {
     const { publicKey, privateKey } = generateKeyPairSync('ed25519', {
@@ -403,21 +483,37 @@ test('verifyStagedRuntimeIntegrity validates Ed25519 manifest and rejects tamper
     const publicKeyPem = String(publicKey);
     const privateKeyPem = String(privateKey);
 
-    await writeFile(join(tempWebDir, 'server.mjs'), 'console.log("server");\n', 'utf8');
-    await writeFile(join(tempWebDir, 'index.html'), '<html><body>ok</body></html>\n', 'utf8');
+    await mkdir(join(tempWebDir, 'node_modules', '@retailos', 'infrastructure', 'dist', 'licensing'), {
+      recursive: true,
+    });
+    await mkdir(join(tempWebDir, 'node_modules', 'third-party-pkg'), { recursive: true });
+
+    const serverSrc = 'console.log("server");\n';
+    const htmlSrc = '<html><body>ok</body></html>\n';
+    const licSrc = 'export const VERIFIED = true;\n';
+    await writeFile(join(tempWebDir, 'server.mjs'), serverSrc, 'utf8');
+    await writeFile(join(tempWebDir, 'index.html'), htmlSrc, 'utf8');
+    await writeFile(
+      join(tempWebDir, 'node_modules', '@retailos', 'infrastructure', 'dist', 'licensing', 'license.service.js'),
+      licSrc,
+      'utf8',
+    );
+    await writeFile(join(tempWebDir, 'node_modules', 'third-party-pkg', 'index.js'), 'module.exports = {};\n', 'utf8');
 
     const files = {
-      'index.html': createHash('sha256')
-        .update('<html><body>ok</body></html>\n', 'utf8')
+      'index.html': createHash('sha256').update(htmlSrc, 'utf8').digest('hex'),
+      'node_modules/@retailos/infrastructure/dist/licensing/license.service.js': createHash('sha256')
+        .update(licSrc, 'utf8')
         .digest('hex'),
-      'server.mjs': createHash('sha256').update('console.log("server");\n', 'utf8').digest('hex'),
+      'server.mjs': createHash('sha256').update(serverSrc, 'utf8').digest('hex'),
     };
     const canonical = JSON.stringify({ version: 1, algorithm: 'sha256', files });
     const sig = sign(null, Buffer.from(`ROS-MANIFEST-V1:${canonical}`, 'utf8'), privateKeyPem).toString(
       'base64url',
     );
+    const manifestPath = join(tempWebDir, 'integrity-manifest.json');
     await writeFile(
-      join(tempWebDir, 'integrity-manifest.json'),
+      manifestPath,
       JSON.stringify({ version: 1, algorithm: 'sha256', files, signature: sig }, null, 2),
       'utf8',
     );
@@ -427,7 +523,23 @@ test('verifyStagedRuntimeIntegrity validates Ed25519 manifest and rejects tamper
       publicKeyPem,
       requireManifest: true,
     });
-    assert.deepEqual(ok, { checked: true, verifiedFiles: 2 });
+    assert.deepEqual(ok, { checked: true, verifiedFiles: 3 });
+
+    // Tampering with @retailos/infrastructure/dist/licensing/license.service.js must fail immediately
+    await writeFile(
+      join(tempWebDir, 'node_modules', '@retailos', 'infrastructure', 'dist', 'licensing', 'license.service.js'),
+      'export const VERIFIED = false; /* bypassed */\n',
+      'utf8',
+    );
+    await assert.rejects(
+      () => verifyStagedRuntimeIntegrity({ webDir: tempWebDir, publicKeyPem, requireManifest: true }),
+      /تم تعديل ملف تشغيل/,
+    );
+    await writeFile(
+      join(tempWebDir, 'node_modules', '@retailos', 'infrastructure', 'dist', 'licensing', 'license.service.js'),
+      licSrc,
+      'utf8',
+    );
 
     // Dropping an unmanifested .mjs file must fail immediately
     await writeFile(join(tempWebDir, 'injected.mjs'), 'evil();\n', 'utf8');
@@ -437,11 +549,20 @@ test('verifyStagedRuntimeIntegrity validates Ed25519 manifest and rejects tamper
     );
     await rm(join(tempWebDir, 'injected.mjs'), { force: true });
 
-    // Modifying server.mjs must fail immediately
-    await writeFile(join(tempWebDir, 'server.mjs'), 'console.log("tampered");\n', 'utf8');
+    // Dropping an unmanifested .js inside node_modules/@retailos must also fail immediately
+    const injectedPkgFile = join(tempWebDir, 'node_modules', '@retailos', 'infrastructure', 'dist', 'licensing', 'evil.js');
+    await writeFile(injectedPkgFile, 'evil();\n', 'utf8');
     await assert.rejects(
       () => verifyStagedRuntimeIntegrity({ webDir: tempWebDir, publicKeyPem, requireManifest: true }),
-      /تم تعديل ملف تشغيل/,
+      /غير موقّع/,
+    );
+    await rm(injectedPkgFile, { force: true });
+
+    // Deleting integrity-manifest.json when requireManifest: true must abort startup immediately
+    await rm(manifestPath, { force: true });
+    await assert.rejects(
+      () => verifyStagedRuntimeIntegrity({ webDir: tempWebDir, publicKeyPem, requireManifest: true }),
+      /integrity-manifest\.json/,
     );
   } finally {
     await rm(tempWebDir, { recursive: true, force: true }).catch(() => undefined);

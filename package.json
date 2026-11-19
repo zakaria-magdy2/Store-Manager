@@ -18,7 +18,7 @@
     "desktop:dev": "pnpm --filter @retailos/desktop desktop:dev",
     "desktop:build": "pnpm --filter @retailos/desktop desktop:build",
     "desktop:pack:win": "pnpm --filter @retailos/desktop desktop:pack:win",
-    "desktop:dist:win": "pnpm --filter @retailos/desktop desktop:dist:win"
+    "desktop:dist:win": "node -e \"import('node:child_process').then(({spawnSync})=>{const w=process.platform==='win32';const r=spawnSync(w?'cmd.exe':'pnpm',w?['/d','/s','/c','pnpm','--filter','@retailos/desktop','desktop:dist:win']:['--filter','@retailos/desktop','desktop:dist:win'],{stdio:'inherit',env:{...process.env,RETAILOS_REQUIRE_SIGNED_MANIFEST:'1'}});process.exit(r.status??1);})\""
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

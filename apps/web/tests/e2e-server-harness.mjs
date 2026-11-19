@@ -13,6 +13,7 @@ const watermarkSecret =
   rawWatermarkSecret && rawWatermarkSecret.length >= 32
     ? rawWatermarkSecret
     : randomBytes(32).toString('hex');
+const dailyBackupSecret = randomBytes(32).toString('base64url');
 const testClockFile = process.env.RETAILOS_TEST_CLOCK_FILE?.trim() || null;
 const testExternalClockFile = process.env.RETAILOS_TEST_EXTERNAL_CLOCK_FILE?.trim() || null;
 
@@ -29,6 +30,7 @@ if (testExternalClockFile && existsSync(testExternalClockFile)) {
 await createServerApp({
   licensePublicKey,
   watermarkSecret,
+  dailyBackupSecret,
   externalWatermarkMs: initialExternalWatermarkMs,
   onWatermarkAdvance: testExternalClockFile
     ? (clockMs) => {

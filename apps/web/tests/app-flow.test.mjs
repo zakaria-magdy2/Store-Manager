@@ -3995,7 +3995,28 @@ test('Production server.mjs ignores env-var license overrides and enforces DB wa
     assert.notEqual(failCode, 0, `Direct server.mjs without stdin handshake must fail closed, exited 0:\n${failLog}`);
     assert.match(failLog, /Fatal: RetailOS server must be launched via the desktop host/);
 
-    // A2: Launch via --electron-stdio-secret + JSON stdin handshake succeeds, creates no plaintext key file, and still ignores RETAILOS_TEST_LICENSE_PUBLIC_KEY
+    // A1b: Missing dailyBackupSecret in --electron-stdio-secret handshake must also fail closed
+    const portMissingDaily = await reservePort();
+    let missingDailyLog = '';
+    const missingDailyProc = spawn(process.execPath, [join(appDir, 'server.mjs'), '--electron-stdio-secret'], {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        NODE_ENV: 'test',
+        PORT: String(portMissingDaily),
+        RETAILOS_DATA_DIR: dirA,
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    missingDailyProc.stdout.on('data', (c) => { missingDailyLog += c.toString(); });
+    missingDailyProc.stderr.on('data', (c) => { missingDailyLog += c.toString(); });
+    missingDailyProc.stdin.write(`${JSON.stringify({ watermarkSecret: flowTestWatermarkSecret })}\n`);
+    missingDailyProc.stdin.end();
+    const [missingDailyCode] = await once(missingDailyProc, 'exit');
+    assert.notEqual(missingDailyCode, 0, `server.mjs --electron-stdio-secret without dailyBackupSecret must fail closed:\n${missingDailyLog}`);
+    assert.match(missingDailyLog, /Fatal: RetailOS server must be launched via the desktop host/);
+
+    // A2: Launch via --electron-stdio-secret + JSON stdin handshake succeeds, creates no plaintext key files, and still ignores RETAILOS_TEST_LICENSE_PUBLIC_KEY
     const portA = await reservePort();
     const urlA = `http://127.0.0.1:${portA}`;
     let logA = '';
@@ -4017,7 +4038,12 @@ test('Production server.mjs ignores env-var license overrides and enforces DB wa
     });
     prodProc.stdout.on('data', (c) => { logA += c.toString(); });
     prodProc.stderr.on('data', (c) => { logA += c.toString(); });
-    prodProc.stdin.write(`${JSON.stringify({ watermarkSecret: flowTestWatermarkSecret })}\n`);
+    prodProc.stdin.write(
+      `${JSON.stringify({
+        watermarkSecret: flowTestWatermarkSecret,
+        dailyBackupSecret: randomBytes(32).toString('base64url'),
+      })}\n`,
+    );
     prodProc.stdin.end();
 
     let readyA = false;
@@ -4054,6 +4080,7 @@ test('Production server.mjs ignores env-var license overrides and enforces DB wa
     );
     const filesInDirA = await readdir(dirA);
     assert.equal(filesInDirA.includes('.retailos-watermark.key'), false, 'Plaintext .retailos-watermark.key fallback must NEVER be created');
+    assert.equal(filesInDirA.includes('.retailos-daily.key'), false, 'Plaintext .retailos-daily.key fallback must NEVER be created');
   } finally {
     await stopProc(prodProc);
     await rm(dirA, { recursive: true, force: true }).catch(() => {});

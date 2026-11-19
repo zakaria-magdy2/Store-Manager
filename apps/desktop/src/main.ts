@@ -319,12 +319,16 @@ async function bootDesktopApplication(): Promise<void> {
 
   const requireDpapi = process.platform === 'win32' && (app.isPackaged || process.env.NODE_ENV === 'production');
   const serverScriptPath = resolveWebServerScriptPath();
-  await verifyStagedRuntimeIntegrity({ webDir: dirname(serverScriptPath) });
+  await verifyStagedRuntimeIntegrity({
+    webDir: dirname(serverScriptPath),
+    requireManifest: app.isPackaged || process.env.NODE_ENV === 'production',
+  });
 
   const watermarkSecret = await resolveOrCreateDesktopWatermarkSecret({
     userDataDir: paths.userDataDir,
     safeStorage,
     requireDpapi,
+    legacyPlaintextKeyPath: join(paths.dataDir, '.retailos-watermark.key'),
   });
   const dailyBackupSecret = await resolveOrCreateDesktopDailyBackupSecret({
     userDataDir: paths.userDataDir,

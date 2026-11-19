@@ -210,6 +210,9 @@ async function resolveOrCreateDpapiSecret(options: {
         const encrypted = await readFile(dpapiFilePath);
         const decrypted = dpapi.decryptString(encrypted).trim();
         if (options.pattern.test(decrypted)) {
+          if (options.legacyPlaintextKeyPath && existsSync(options.legacyPlaintextKeyPath)) {
+            await rm(options.legacyPlaintextKeyPath, { force: true }).catch(() => undefined);
+          }
           return decrypted;
         }
       } catch {
@@ -218,12 +221,13 @@ async function resolveOrCreateDpapiSecret(options: {
     }
 
     let secretToSeal: string | null = null;
+    let hasLegacyFileToRemove = false;
     if (options.legacyPlaintextKeyPath && existsSync(options.legacyPlaintextKeyPath)) {
       try {
         const legacy = (await readFile(options.legacyPlaintextKeyPath, 'utf8')).trim();
         if (options.pattern.test(legacy)) {
           secretToSeal = legacy;
-          await rm(options.legacyPlaintextKeyPath, { force: true }).catch(() => undefined);
+          hasLegacyFileToRemove = true;
         }
       } catch {
         secretToSeal = null;
@@ -232,6 +236,9 @@ async function resolveOrCreateDpapiSecret(options: {
     const finalSecret = secretToSeal ?? randomBytes(32).toString(options.encoding);
     const encryptedBlob = dpapi.encryptString(finalSecret);
     await atomicWriteFile(dpapiFilePath, encryptedBlob);
+    if (hasLegacyFileToRemove && options.legacyPlaintextKeyPath) {
+      await rm(options.legacyPlaintextKeyPath, { force: true }).catch(() => undefined);
+    }
     return finalSecret;
   }
 
@@ -259,6 +266,7 @@ export function resolveOrCreateDesktopWatermarkSecret(options: {
   readonly userDataDir: string;
   readonly safeStorage?: SafeStorageAdapter | undefined;
   readonly requireDpapi?: boolean | undefined;
+  readonly legacyPlaintextKeyPath?: string | undefined;
 }): Promise<string> {
   return resolveOrCreateDpapiSecret({
     userDataDir: options.userDataDir,
@@ -268,6 +276,7 @@ export function resolveOrCreateDesktopWatermarkSecret(options: {
     pattern: /^[0-9a-f]{64}$/i,
     safeStorage: options.safeStorage,
     requireDpapi: options.requireDpapi,
+    legacyPlaintextKeyPath: options.legacyPlaintextKeyPath,
   });
 }
 
@@ -393,10 +402,19 @@ export async function writeExternalClockWatermark(options: {
 async function listRuntimeCodeFiles(dirPath: string, baseDir = dirPath, acc: string[] = []): Promise<string[]> {
   const entries = await readdir(dirPath, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.name === 'node_modules' || entry.name === 'integrity-manifest.json') {
+    if (entry.name === 'integrity-manifest.json') {
       continue;
     }
     const fullPath = join(dirPath, entry.name);
+    if (entry.name === 'node_modules') {
+      if (dirPath === baseDir) {
+        const retailosScopeDir = join(fullPath, '@retailos');
+        if (existsSync(retailosScopeDir)) {
+          await listRuntimeCodeFiles(retailosScopeDir, baseDir, acc);
+        }
+      }
+      continue;
+    }
     if (entry.isDirectory()) {
       await listRuntimeCodeFiles(fullPath, baseDir, acc);
       continue;

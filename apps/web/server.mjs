@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { homedir } from 'node:os';
 import { Transform } from 'node:stream';
-import { createReadStream, createWriteStream, existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, join, normalize, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -75,7 +75,7 @@ async function resolveHostStartupSecrets(options = {}) {
   if (optWatermark.length >= 32) {
     return {
       watermarkSecret: optWatermark,
-      dailyBackupSecret: optDailyBackup.length >= 12 ? optDailyBackup.slice(0, 256) : null,
+      dailyBackupSecret: optDailyBackup.length >= 12 ? optDailyBackup.slice(0, 256) : randomBytes(32).toString('base64url'),
       externalClockMs: optExternalClockMs,
       externalClockTampered: optExternalTampered,
     };
@@ -131,11 +131,9 @@ async function resolveHostStartupSecrets(options = {}) {
     try {
       const parsed = JSON.parse(line);
       const parsedSecret = typeof parsed?.watermarkSecret === 'string' ? parsed.watermarkSecret.trim() : '';
-      if (parsedSecret.length >= 32) {
-        const parsedDaily =
-          typeof parsed?.dailyBackupSecret === 'string' && parsed.dailyBackupSecret.trim().length >= 12
-            ? parsed.dailyBackupSecret.trim().slice(0, 256)
-            : null;
+      const parsedDaily =
+        typeof parsed?.dailyBackupSecret === 'string' ? parsed.dailyBackupSecret.trim().slice(0, 256) : '';
+      if (parsedSecret.length >= 32 && parsedDaily.length >= 12) {
         const parsedExtClock =
           typeof parsed?.externalClockMs === 'number' &&
           Number.isSafeInteger(parsed.externalClockMs) &&
@@ -161,7 +159,7 @@ async function resolveHostStartupSecrets(options = {}) {
 export async function createServerApp(options = {}) {
 const hostSecrets = await resolveHostStartupSecrets(options);
 const watermarkSecret = hostSecrets.watermarkSecret;
-let dailyBackupSecret = hostSecrets.dailyBackupSecret;
+const dailyBackupSecret = hostSecrets.dailyBackupSecret;
 let latestExternalClockMs = hostSecrets.externalClockMs;
 const appDir = dirname(serverFilePath);
 const publicDir = resolve(appDir, 'public');
@@ -180,7 +178,6 @@ const origin = `http://127.0.0.1:${port}`;
 const databasePath = process.env.RETAILOS_DB_PATH ? resolve(process.env.RETAILOS_DB_PATH) : join(dataDir, 'retailos.sqlite');
 const backupBaseDir = process.env.RETAILOS_BACKUP_DIR ? resolve(process.env.RETAILOS_BACKUP_DIR) : join(dataDir, 'backups');
 const dailyBackupDir = join(backupBaseDir, 'daily');
-const dailyBackupKeyPath = join(dataDir, '.retailos-daily.key');
 const preRestoreBackupDir = join(backupBaseDir, 'pre-restore');
 const quarantineBackupDir = join(backupBaseDir, 'quarantine');
 const backupSettingsPath = join(dataDir, 'backup-settings.json');
@@ -198,14 +195,7 @@ function resolveDailyBackupPassphraseSync() {
   }
   const envKey = (process.env.RETAILOS_DAILY_BACKUP_KEY ?? '').trim();
   if (envKey.length >= 12) return envKey.slice(0, 256);
-  if (existsSync(dailyBackupKeyPath)) {
-    const existing = readFileSync(dailyBackupKeyPath, 'utf8').trim();
-    if (existing.length >= 12) return existing.slice(0, 256);
-  }
-  const generated = randomBytes(32).toString('base64url');
-  writeFileSync(dailyBackupKeyPath, `${generated}\n`, { encoding: 'utf8', mode: 0o600 });
-  dailyBackupSecret = generated;
-  return generated;
+  throw new Error('Fatal: Daily backup passphrase must be supplied by the desktop host');
 }
 
 async function readBackupSettings() {
@@ -1428,7 +1418,25 @@ function assertStoreScope(ctx, storeId) {
 
 function signedMoneyJson(minorValue, currency) {
   const currencyCode = typeof currency === 'string' ? currency : (currency?.code ?? 'EGP');
-  const minor = typeof minorValue === 'bigint' ? minorValue : BigInt(Math.trunc(Number(minorValue ?? 0)));
+  let minor;
+  if (typeof minorValue === 'bigint') {
+    minor = minorValue;
+  } else if (minorValue === null || minorValue === undefined) {
+    minor = 0n;
+  } else if (typeof minorValue === 'number') {
+    if (!Number.isSafeInteger(minorValue)) {
+      throw new Error(`Invalid safe integer monetary minor value: ${String(minorValue)}`);
+    }
+    minor = BigInt(minorValue);
+  } else if (typeof minorValue === 'string') {
+    const trimmed = minorValue.trim();
+    if (!/^-?\d+$/.test(trimmed)) {
+      throw new Error(`Invalid integer string monetary minor value: ${trimmed}`);
+    }
+    minor = BigInt(trimmed);
+  } else {
+    throw new Error(`Unsupported monetary minor value type: ${typeof minorValue}`);
+  }
   const meta = Money.zero(currencyCode).toJSON();
   return { amount: minor.toString(), currency: currencyCode, decimals: meta.decimals };
 }
@@ -4647,14 +4655,14 @@ async function handleApi(req, res, url) {
       entityType: 'BACKUP',
       entityId: ctx.userId,
       summary: 'عرض/نسخ مفتاح فك تشفير النسخ اليومية التلقائية للاسترداد على جهاز بديل',
-      metadata: { source: (process.env.RETAILOS_DAILY_BACKUP_KEY ?? '').trim().length >= 12 ? 'ENV' : 'LOCAL_KEY_FILE' },
+      metadata: { source: (process.env.RETAILOS_DAILY_BACKUP_KEY ?? '').trim().length >= 12 ? 'ENV' : 'DESKTOP_DPAPI' },
     });
     return json(
       res,
       200,
       {
         dailyBackupKey,
-        keySource: (process.env.RETAILOS_DAILY_BACKUP_KEY ?? '').trim().length >= 12 ? 'ENV' : 'LOCAL_KEY_FILE',
+        keySource: (process.env.RETAILOS_DAILY_BACKUP_KEY ?? '').trim().length >= 12 ? 'ENV' : 'DESKTOP_DPAPI',
         restoreInstructions: 'احتفظ بهذا المفتاح في مكان آمن خارج الجهاز. عند استعادة ملف retailos-daily-*.rfbackup على جهاز جديد، ضعه في خانة «كلمة مرور النسخة» بنموذج الاستعادة أو عيّن RETAILOS_DAILY_BACKUP_KEY.',
       },
       { 'Cache-Control': 'no-store' },
@@ -7174,7 +7182,7 @@ async function handleApi(req, res, url) {
             if (patch.countedQuantity !== null) lineSet.last_counted_at = nowIso;
           }
           if (patch.overrideUnitCost !== undefined) {
-            lineSet.override_unit_cost = patch.overrideUnitCost === null ? null : Math.max(0, Math.trunc(Number(patch.overrideUnitCost)));
+            lineSet.override_unit_cost = patch.overrideUnitCost === null ? null : BigInt(patch.overrideUnitCost);
           }
           if (patch.reason !== undefined) {
             lineSet.reason = patch.reason?.trim() || null;

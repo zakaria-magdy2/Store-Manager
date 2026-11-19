@@ -223,10 +223,19 @@ await assertNoPrivateKeysStaged(stageWebDir);
 async function collectManifestTargetFiles(dirPath, baseDir = dirPath, acc = []) {
   const entries = await readdir(dirPath, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.name === 'node_modules' || entry.name === 'integrity-manifest.json') {
+    if (entry.name === 'integrity-manifest.json') {
       continue;
     }
     const fullPath = join(dirPath, entry.name);
+    if (entry.name === 'node_modules') {
+      if (dirPath === baseDir) {
+        const retailosScopeDir = join(fullPath, '@retailos');
+        if (existsSync(retailosScopeDir)) {
+          await collectManifestTargetFiles(retailosScopeDir, baseDir, acc);
+        }
+      }
+      continue;
+    }
     if (entry.isDirectory()) {
       await collectManifestTargetFiles(fullPath, baseDir, acc);
       continue;
@@ -246,6 +255,7 @@ async function collectManifestTargetFiles(dirPath, baseDir = dirPath, acc = []) 
 const manifestPath = join(stageWebDir, 'integrity-manifest.json');
 await rm(manifestPath, { force: true });
 const privateKeyPath = join(workspaceDir, 'tools', 'vendor-keygen', 'keys', 'private.pem');
+const requireSignedManifest = process.env.RETAILOS_REQUIRE_SIGNED_MANIFEST === '1';
 if (existsSync(privateKeyPath)) {
   const targetFiles = await collectManifestTargetFiles(stageWebDir);
   targetFiles.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
@@ -274,6 +284,10 @@ if (existsSync(privateKeyPath)) {
   );
   console.log(
     `Signed runtime integrity manifest (${Object.keys(files).length} files) at ${manifestPath}`,
+  );
+} else if (requireSignedManifest) {
+  throw new Error(
+    `Fatal: RETAILOS_REQUIRE_SIGNED_MANIFEST=1 requires vendor private key at ${privateKeyPath} to sign integrity-manifest.json`,
   );
 } else {
   console.log(
