@@ -11,6 +11,17 @@ const workspaceDir = dirname(dirname(desktopDir));
 const stageRootDir = join(desktopDir, 'stage');
 const stageWebDir = join(stageRootDir, 'web');
 
+const syncCheckResult = spawnSync(
+  process.execPath,
+  [join(scriptsDir, 'sync-license-public-key.mjs'), '--check'],
+  { cwd: desktopDir, stdio: 'inherit' },
+);
+if (syncCheckResult.status !== 0) {
+  throw new Error(
+    `Desktop embedded license public key check failed (exit ${String(syncCheckResult.status ?? 1)})`,
+  );
+}
+
 await rm(stageRootDir, { recursive: true, force: true });
 
 const pnpmArgs = [

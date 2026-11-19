@@ -12,7 +12,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join, resolve, sep } from 'node:path';
-import { EMBEDDED_LICENSE_PUBLIC_KEY_PEM } from '@retailos/infrastructure';
+import { EMBEDDED_LICENSE_PUBLIC_KEY_PEM } from './license-public-key.generated.js';
 
 export const DEFAULT_DESKTOP_PORT = 3210;
 

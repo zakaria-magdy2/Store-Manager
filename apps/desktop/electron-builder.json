@@ -12,6 +12,7 @@
   "files": [
     "dist/main.js",
     "dist/runtime.js",
+    "dist/license-public-key.generated.js",
     "dist/preload.cjs",
     "package.json",
     "!node_modules/**/*",

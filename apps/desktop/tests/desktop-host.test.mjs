@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -11,6 +12,7 @@ import { ScopedExecutionContext } from '@retailos/application';
 import { Tenant } from '@retailos/core';
 import {
   DatabaseMigrator,
+  EMBEDDED_LICENSE_PUBLIC_KEY_PEM,
   SqliteAuditLogRepository,
   SqliteDatabaseManager,
   SqliteOutboxRepository,
@@ -660,5 +662,119 @@ test('updateDesktopDailyBackupSecret preserves historical keys in DPAPI keyring 
     assert.equal(capturedKey, emittedSecret);
   } finally {
     await rm(tempUserData, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('packaged Electron runtime files forbid workspace/node_modules imports and match canonical public key', async () => {
+  const testDir = dirname(fileURLToPath(import.meta.url));
+  const desktopDir = dirname(testDir);
+  const builderConfig = JSON.parse(
+    await readFile(join(desktopDir, 'electron-builder.json'), 'utf8'),
+  );
+  const packagedRelFiles = builderConfig.files.filter(
+    (entry) =>
+      typeof entry === 'string' &&
+      !entry.startsWith('!') &&
+      (entry.endsWith('.js') || entry.endsWith('.cjs') || entry === 'package.json'),
+  );
+
+  for (const relPath of [
+    'dist/main.js',
+    'dist/runtime.js',
+    'dist/license-public-key.generated.js',
+    'dist/preload.cjs',
+  ]) {
+    assert.ok(
+      packagedRelFiles.includes(relPath),
+      `electron-builder.json files must include ${relPath}`,
+    );
+    assert.ok(existsSync(join(desktopDir, relPath)), `Compiled runtime file missing: ${relPath}`);
+  }
+
+  // Verify generated key matches canonical source in @retailos/infrastructure byte-for-byte.
+  const syncCheck = spawnSync(
+    process.execPath,
+    [join(desktopDir, 'scripts', 'sync-license-public-key.mjs'), '--check'],
+    { cwd: desktopDir, encoding: 'utf8' },
+  );
+  assert.equal(
+    syncCheck.status,
+    0,
+    `sync-license-public-key.mjs --check failed:\n${syncCheck.stderr}\n${syncCheck.stdout}`,
+  );
+
+  const generatedKeyModule = await import('../dist/license-public-key.generated.js');
+  assert.equal(generatedKeyModule.EMBEDDED_LICENSE_PUBLIC_KEY_PEM, EMBEDDED_LICENSE_PUBLIC_KEY_PEM);
+
+  const allowedPackagedModules = new Set(packagedRelFiles);
+  const staticImportPattern = /\bimport\s+(?:[^'"()]+?\s+from\s+)?['"]([^'"]+)['"]/g;
+  const dynamicImportPattern = /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+  const requirePattern = /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+
+  for (const relPath of [
+    'dist/main.js',
+    'dist/runtime.js',
+    'dist/license-public-key.generated.js',
+    'dist/preload.cjs',
+  ]) {
+    const code = await readFile(join(desktopDir, relPath), 'utf8');
+    const specifiers = new Set();
+    for (const pattern of [staticImportPattern, dynamicImportPattern, requirePattern]) {
+      pattern.lastIndex = 0;
+      let match;
+      while ((match = pattern.exec(code)) !== null) {
+        if (match[1]) specifiers.add(match[1]);
+      }
+    }
+
+    for (const specifier of specifiers) {
+      if (specifier === 'electron' || specifier.startsWith('node:')) {
+        continue;
+      }
+      assert.ok(
+        specifier.startsWith('./') || specifier.startsWith('../'),
+        `Forbidden non-builtin/non-relative import "${specifier}" in packaged Electron file ${relPath}`,
+      );
+      const resolvedRel = resolve(dirname(join(desktopDir, relPath)), specifier)
+        .slice(desktopDir.length + 1)
+        .replace(/\\/g, '/');
+      assert.ok(
+        allowedPackagedModules.has(resolvedRel),
+        `Relative import "${specifier}" (${resolvedRel}) in ${relPath} is missing from electron-builder.json files`,
+      );
+    }
+  }
+
+  // Simulate isolated app.asar execution with zero node_modules directory anywhere in the temp tree.
+  const isolatedRoot = await mkdtemp(join(tmpdir(), 'retailos-isolated-asar-'));
+  try {
+    await mkdir(join(isolatedRoot, 'dist'), { recursive: true });
+    for (const relPath of packagedRelFiles) {
+      await copyFile(join(desktopDir, relPath), join(isolatedRoot, relPath));
+    }
+
+    const probe = spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        [
+          "import assert from 'node:assert/strict';",
+          "const rt = await import('./dist/runtime.js');",
+          "assert.equal(typeof rt.verifyStagedRuntimeIntegrity, 'function');",
+          "assert.equal(typeof rt.resolveDesktopDataPaths, 'function');",
+          "console.log('ISOLATED_RUNTIME_OK');",
+        ].join(' '),
+      ],
+      { cwd: isolatedRoot, encoding: 'utf8' },
+    );
+    assert.equal(
+      probe.status,
+      0,
+      `Isolated runtime import failed without node_modules:\n${probe.stderr}\n${probe.stdout}`,
+    );
+    assert.match(probe.stdout, /ISOLATED_RUNTIME_OK/);
+  } finally {
+    await rm(isolatedRoot, { recursive: true, force: true }).catch(() => undefined);
   }
 });
