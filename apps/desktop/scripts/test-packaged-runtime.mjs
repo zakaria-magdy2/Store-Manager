@@ -362,6 +362,44 @@ export function collectProcessTreeIdentities(
   }
 
   const table = queryProcessTable();
+  const liveRoot = table.get(rootIdentity.pid);
+
+  // Never walk children from an unverified, exited, or reused Root PID.
+  if (!liveRoot) {
+    return {
+      rootStatus: 'ROOT_EXITED',
+      identities: new Map(),
+      depths: new Map(),
+      unverifiedDescendants: [],
+    };
+  }
+
+  if (!isCompleteProcessIdentity(liveRoot)) {
+    return {
+      rootStatus: 'ROOT_UNVERIFIED',
+      identities: new Map(),
+      depths: new Map(),
+      unverifiedDescendants: [
+        {
+          identity: liveRoot,
+          parentPid: rootIdentity.parentPid ?? null,
+          depth: 0,
+          reason: `Live root PID ${rootIdentity.pid} has incomplete identity (${formatProcessIdentity(liveRoot)})`,
+        },
+      ],
+    };
+  }
+
+  if (!isSameProcessIdentity(rootIdentity, liveRoot, { platform })) {
+    return {
+      rootStatus: 'ROOT_REUSED',
+      actualRoot: liveRoot,
+      identities: new Map(),
+      depths: new Map(),
+      unverifiedDescendants: [],
+    };
+  }
+
   const childrenByParent = new Map();
   for (const entry of table.values()) {
     if (entry.parentPid !== null && entry.parentPid !== undefined) {
@@ -372,16 +410,12 @@ export function collectProcessTreeIdentities(
     }
   }
 
-  const identities = new Map();
-  const depths = new Map();
-  const liveRoot = table.get(rootIdentity.pid);
-  if (liveRoot && isSameProcessIdentity(rootIdentity, liveRoot, { platform })) {
-    identities.set(liveRoot.pid, liveRoot);
-    depths.set(liveRoot.pid, 0);
-  }
+  const identities = new Map([[liveRoot.pid, liveRoot]]);
+  const depths = new Map([[liveRoot.pid, 0]]);
+  const unverifiedDescendants = [];
 
-  const queue = [{ pid: rootIdentity.pid, creationDate: rootIdentity.creationDate, depth: 0 }];
-  const visited = new Set([rootIdentity.pid]);
+  const queue = [{ pid: liveRoot.pid, creationDate: liveRoot.creationDate, depth: 0 }];
+  const visited = new Set([liveRoot.pid]);
 
   while (queue.length > 0) {
     const current = queue.shift();
@@ -390,18 +424,29 @@ export function collectProcessTreeIdentities(
       if (visited.has(childEntry.pid) || preExistingPids.has(childEntry.pid)) {
         continue;
       }
-      if (!isCompleteProcessIdentity(childEntry)) {
-        continue;
-      }
-      const childCreatedMs = Date.parse(childEntry.creationDate);
-      if (
-        Number.isFinite(currentCreatedMs) &&
-        Number.isFinite(childCreatedMs) &&
-        childCreatedMs < currentCreatedMs - 1000
-      ) {
-        continue;
-      }
       visited.add(childEntry.pid);
+
+      if (typeof childEntry.creationDate === 'string' && childEntry.creationDate.trim()) {
+        const childCreatedMs = Date.parse(childEntry.creationDate);
+        if (
+          Number.isFinite(currentCreatedMs) &&
+          Number.isFinite(childCreatedMs) &&
+          childCreatedMs < currentCreatedMs - 1000
+        ) {
+          continue;
+        }
+      }
+
+      if (!isCompleteProcessIdentity(childEntry)) {
+        unverifiedDescendants.push({
+          identity: childEntry,
+          parentPid: current.pid,
+          depth: current.depth + 1,
+          reason: `Descendant PID ${childEntry.pid} (parent PID ${current.pid}) has incomplete identity (${formatProcessIdentity(childEntry)})`,
+        });
+        continue;
+      }
+
       identities.set(childEntry.pid, childEntry);
       depths.set(childEntry.pid, current.depth + 1);
       queue.push({
@@ -412,7 +457,12 @@ export function collectProcessTreeIdentities(
     }
   }
 
-  return { identities, depths };
+  return {
+    rootStatus: 'LIVE_VERIFIED',
+    identities,
+    depths,
+    unverifiedDescendants,
+  };
 }
 
 function defaultKillSinglePid(pid) {
@@ -622,10 +672,38 @@ export async function removeDirWithRetries(dirPath, { maxAttempts = 10, delayMs 
   );
 }
 
+export function resolveRealPathBestEffort(
+  targetPath,
+  { realpathFn = realpathSync, existsFn = existsSync } = {},
+) {
+  const abs = resolve(targetPath);
+  if (existsFn(abs)) {
+    return realpathFn(abs);
+  }
+  const tailSegments = [];
+  let current = abs;
+  while (!existsFn(current)) {
+    const parent = dirname(current);
+    if (parent === current) {
+      return abs;
+    }
+    tailSegments.push(current.slice(parent.length).replace(/^[\\/]+/, ''));
+    current = parent;
+  }
+  const realBase = realpathFn(current);
+  return tailSegments.length > 0 ? join(realBase, ...tailSegments.reverse()) : realBase;
+}
+
 export function assertSafeTestEnvironment(
   explicitExe,
   tempUserDataDir,
-  { listRunningPids = () => listRunningRetailOsPids(), platform = process.platform } = {},
+  {
+    listRunningPids = () => listRunningRetailOsPids(),
+    platform = process.platform,
+    protectedInstallDirs: customProtectedInstallDirs,
+    realpathFn = realpathSync,
+    existsFn = existsSync,
+  } = {},
 ) {
   const runningCheck = listRunningPids();
   if (!runningCheck || runningCheck.ok !== true) {
@@ -646,14 +724,24 @@ export function assertSafeTestEnvironment(
   }
 
   const systemTmp = resolve(tmpdir());
+  const realTmp = resolveRealPathBestEffort(systemTmp, { realpathFn, existsFn });
+  const resolvedUserDataDir = resolve(tempUserDataDir);
+  const realUserDataDir = resolveRealPathBestEffort(resolvedUserDataDir, { realpathFn, existsFn });
+
   assert.ok(
-    isPathInsideOrEqual(tempUserDataDir, systemTmp, platform) &&
-      !pathsEqual(tempUserDataDir, systemTmp, platform),
+    isPathInsideOrEqual(resolvedUserDataDir, systemTmp, platform) &&
+      !pathsEqual(resolvedUserDataDir, systemTmp, platform) &&
+      isPathInsideOrEqual(realUserDataDir, realTmp, platform) &&
+      !pathsEqual(realUserDataDir, realTmp, platform),
     `Unsafe test userDataDir outside system temp: ${tempUserDataDir}`,
   );
   if (process.env.APPDATA) {
+    const logicalAppData = resolve(process.env.APPDATA);
+    const realAppData = resolveRealPathBestEffort(logicalAppData, { realpathFn, existsFn });
     assert.equal(
-      isPathInsideOrEqual(tempUserDataDir, process.env.APPDATA, platform),
+      isPathInsideOrEqual(resolvedUserDataDir, logicalAppData, platform) ||
+        isPathInsideOrEqual(realUserDataDir, logicalAppData, platform) ||
+        isPathInsideOrEqual(realUserDataDir, realAppData, platform),
       false,
       `Refusing to run with userDataDir inside live APPDATA: ${tempUserDataDir}`,
     );
@@ -661,31 +749,64 @@ export function assertSafeTestEnvironment(
 
   if (explicitExe) {
     const resolvedExe = resolve(explicitExe);
-    const protectedInstallDirs = [];
-    if (process.env.LOCALAPPDATA) {
-      protectedInstallDirs.push(join(process.env.LOCALAPPDATA, 'Programs', 'RetailOS'));
-      protectedInstallDirs.push(join(process.env.LOCALAPPDATA, 'RetailOS'));
-    }
-    if (process.env.ProgramFiles) {
-      protectedInstallDirs.push(join(process.env.ProgramFiles, 'RetailOS'));
-    }
-    if (process.env['ProgramFiles(x86)']) {
-      protectedInstallDirs.push(join(process.env['ProgramFiles(x86)'], 'RetailOS'));
-    }
-    if (process.env.APPDATA) {
-      protectedInstallDirs.push(process.env.APPDATA);
+    const rawProtectedInstallDirs = Array.isArray(customProtectedInstallDirs)
+      ? [...customProtectedInstallDirs]
+      : [];
+
+    if (!Array.isArray(customProtectedInstallDirs)) {
+      if (process.env.LOCALAPPDATA) {
+        rawProtectedInstallDirs.push(join(process.env.LOCALAPPDATA, 'Programs', 'RetailOS'));
+        rawProtectedInstallDirs.push(join(process.env.LOCALAPPDATA, 'RetailOS'));
+      }
+      if (process.env.ProgramFiles) {
+        rawProtectedInstallDirs.push(join(process.env.ProgramFiles, 'RetailOS'));
+      }
+      if (process.env['ProgramFiles(x86)']) {
+        rawProtectedInstallDirs.push(join(process.env['ProgramFiles(x86)'], 'RetailOS'));
+      }
+      if (process.env.APPDATA) {
+        rawProtectedInstallDirs.push(process.env.APPDATA);
+      }
     }
 
-    for (const protectedDir of protectedInstallDirs) {
-      if (isPathInsideOrEqual(resolvedExe, protectedDir, platform)) {
+    const protectedTargets = [];
+    for (const protectedDir of rawProtectedInstallDirs) {
+      if (typeof protectedDir !== 'string' || !protectedDir.trim()) {
+        continue;
+      }
+      const logicalProtected = resolve(protectedDir);
+      const realProtected = resolveRealPathBestEffort(logicalProtected, { realpathFn, existsFn });
+      protectedTargets.push(logicalProtected);
+      if (!pathsEqual(logicalProtected, realProtected, platform)) {
+        protectedTargets.push(realProtected);
+      }
+    }
+
+    for (const protectedTarget of protectedTargets) {
+      if (isPathInsideOrEqual(resolvedExe, protectedTarget, platform)) {
         throw new Error(
           `Refusing to target a live RetailOS installation path via --exe: ${resolvedExe}. Use a temporary isolated install directory inside temp instead.`,
         );
       }
     }
 
-    if (!existsSync(resolvedExe)) {
+    if (!existsFn(resolvedExe)) {
       throw new Error(`Specified --exe path does not exist: ${resolvedExe}`);
+    }
+
+    // Resolve symlinks and Windows junctions fail-closed before running or cleaning target files.
+    const realExe = realpathFn(resolvedExe);
+    const realExeDir = realpathFn(dirname(resolvedExe));
+
+    for (const protectedTarget of protectedTargets) {
+      if (
+        isPathInsideOrEqual(realExe, protectedTarget, platform) ||
+        isPathInsideOrEqual(realExeDir, protectedTarget, platform)
+      ) {
+        throw new Error(
+          `Refusing to target a live RetailOS installation path via --exe Symlink/Junction: logical="${resolvedExe}", real="${realExe}" resolves inside protected path "${protectedTarget}".`,
+        );
+      }
     }
   }
 
@@ -695,7 +816,9 @@ export function assertSafeTestEnvironment(
 export async function cleanupPackagedTestRun({
   ownedProcesses,
   spawnedMainIdentity = null,
+  trackedServerIdentity = null,
   unverifiedMainPid = null,
+  extraUnverified = [],
   controlFilePath = null,
   expectedExePath,
   expectedServerScriptPath,
@@ -710,9 +833,21 @@ export async function cleanupPackagedTestRun({
   platform = process.platform,
 }) {
   const cleanupErrors = [];
-  const unverifiedOwned = [];
+  const unverifiedOwned = [...extraUnverified];
   const remainingOwned = [];
   const reusedPids = [];
+
+  if (
+    trackedServerIdentity &&
+    isCompleteProcessIdentity(trackedServerIdentity) &&
+    !preExistingPids.has(trackedServerIdentity.pid) &&
+    !ownedProcesses.has(trackedServerIdentity.pid)
+  ) {
+    ownedProcesses.set(trackedServerIdentity.pid, {
+      identity: trackedServerIdentity,
+      depth: 1,
+    });
+  }
 
   if (unverifiedMainPid !== null && !ownedProcesses.has(unverifiedMainPid)) {
     unverifiedOwned.push({
@@ -753,26 +888,22 @@ export async function cleanupPackagedTestRun({
               });
               if (ownership.valid) {
                 ownedProcesses.set(candidatePid, { identity: ownership.identity, depth: 1 });
+              } else if (!isCompleteProcessIdentity(liveCandidate)) {
+                unverifiedOwned.push({
+                  identity: liveCandidate,
+                  reason: ownership.reason,
+                });
               } else {
-                // If live process is clearly not our server (reused/unrelated), refuse kill; do not misclassify reused PID as ours,
-                // UNLESS identity itself was incomplete (unable to verify)
-                if (!isCompleteProcessIdentity(liveCandidate)) {
-                  unverifiedOwned.push({
-                    identity: liveCandidate,
-                    reason: ownership.reason,
-                  });
-                } else {
-                  reusedPids.push({
+                reusedPids.push({
+                  pid: candidatePid,
+                  expected: {
                     pid: candidatePid,
-                    expected: {
-                      pid: candidatePid,
-                      executablePath: expectedExePath,
-                      creationDate: 'owned-server',
-                    },
-                    actual: liveCandidate,
-                    reason: ownership.reason,
-                  });
-                }
+                    executablePath: expectedExePath,
+                    creationDate: 'owned-server',
+                  },
+                  actual: liveCandidate,
+                  reason: ownership.reason,
+                });
               }
             }
           } catch (enumErr) {
@@ -793,21 +924,63 @@ export async function cleanupPackagedTestRun({
     }
   }
 
-  if (spawnedMainIdentity) {
+  // Build verified roots to traverse (including independently verified server processes even if main exited).
+  const verifiedRoots = new Map();
+  if (spawnedMainIdentity && isCompleteProcessIdentity(spawnedMainIdentity)) {
+    verifiedRoots.set(spawnedMainIdentity.pid, { identity: spawnedMainIdentity, depth: 0 });
+  }
+  if (
+    trackedServerIdentity &&
+    isCompleteProcessIdentity(trackedServerIdentity) &&
+    !preExistingPids.has(trackedServerIdentity.pid)
+  ) {
+    verifiedRoots.set(trackedServerIdentity.pid, { identity: trackedServerIdentity, depth: 1 });
+  }
+  for (const [pid, record] of ownedProcesses.entries()) {
+    if (!verifiedRoots.has(pid) && isCompleteProcessIdentity(record.identity) && !preExistingPids.has(pid)) {
+      verifiedRoots.set(pid, record);
+    }
+  }
+
+  for (const rootRecord of verifiedRoots.values()) {
     try {
-      const { identities, depths } = collectProcessTreeIdentities(spawnedMainIdentity, {
+      const tree = collectProcessTreeIdentities(rootRecord.identity, {
         queryProcessTable,
         preExistingPids,
         platform,
       });
-      for (const [pid, identity] of identities.entries()) {
-        if (!preExistingPids.has(pid) && !ownedProcesses.has(pid)) {
-          ownedProcesses.set(pid, { identity, depth: depths.get(pid) ?? 1 });
+
+      if (tree.rootStatus === 'ROOT_REUSED') {
+        if (!reusedPids.some((r) => r.pid === rootRecord.identity.pid)) {
+          reusedPids.push({
+            pid: rootRecord.identity.pid,
+            expected: rootRecord.identity,
+            actual: tree.actualRoot,
+            reason: `Root PID ${rootRecord.identity.pid} was reused by another process; skipped tree traversal`,
+          });
+        }
+        continue;
+      }
+
+      if (tree.rootStatus === 'ROOT_UNVERIFIED' || tree.unverifiedDescendants.length > 0) {
+        for (const unverified of tree.unverifiedDescendants) {
+          unverifiedOwned.push(unverified);
+        }
+      }
+
+      if (tree.rootStatus === 'LIVE_VERIFIED') {
+        for (const [pid, identity] of tree.identities.entries()) {
+          if (!preExistingPids.has(pid) && !ownedProcesses.has(pid)) {
+            ownedProcesses.set(pid, {
+              identity,
+              depth: rootRecord.depth + (tree.depths.get(pid) ?? 0),
+            });
+          }
         }
       }
     } catch (treeErr) {
       unverifiedOwned.push({
-        identity: spawnedMainIdentity,
+        identity: rootRecord.identity,
         reason: `Failed to enumerate process tree for cleanup: ${treeErr instanceof Error ? treeErr.message : String(treeErr)}`,
       });
     }
@@ -958,7 +1131,9 @@ export async function runPackagedRuntimeTest({ argv = process.argv } = {}) {
   let preExistingPids = new Set();
   let child = null;
   let spawnedMainIdentity = null;
+  let trackedServerIdentity = null;
   let unverifiedMainPid = null;
+  const unverifiedDuringRun = [];
   let targetExePath = join(unpackedSourceDir, 'RetailOS.exe');
   let expectedServerScriptPath = join(unpackedSourceDir, 'resources', 'web', 'server.mjs');
   const ownedProcesses = new Map();
@@ -971,7 +1146,7 @@ export async function runPackagedRuntimeTest({ argv = process.argv } = {}) {
     let copiedOutOfRepo = false;
 
     if (explicitExe) {
-      targetExePath = resolve(explicitExe);
+      targetExePath = realpathSync(resolve(explicitExe));
       targetAppDir = dirname(targetExePath);
     } else {
       assert.ok(
@@ -1056,7 +1231,6 @@ export async function runPackagedRuntimeTest({ argv = process.argv } = {}) {
     unverifiedMainPid = null;
     ownedProcesses.set(spawnedMainIdentity.pid, { identity: spawnedMainIdentity, depth: 0 });
 
-    let trackedServerIdentity = null;
     let bootstrapJson = null;
     let licenseStatus = null;
     const deadline = Date.now() + 45_000;
@@ -1137,17 +1311,30 @@ export async function runPackagedRuntimeTest({ argv = process.argv } = {}) {
     assert.match(logText, /webContents did-finish-load/);
     assert.doesNotMatch(logText, /ERR_MODULE_NOT_FOUND|fatal startup error/);
 
-    const treeSnapshot = collectProcessTreeIdentities(spawnedMainIdentity, {
-      preExistingPids,
-    });
-    for (const [pid, identity] of treeSnapshot.identities.entries()) {
-      if (!ownedProcesses.has(pid)) {
-        ownedProcesses.set(pid, {
-          identity,
-          depth: treeSnapshot.depths.get(pid) ?? 1,
-        });
+    for (const [rootIdentity, baseDepth] of [
+      [spawnedMainIdentity, 0],
+      [trackedServerIdentity, 1],
+    ]) {
+      const treeSnapshot = collectProcessTreeIdentities(rootIdentity, {
+        preExistingPids,
+      });
+      if (treeSnapshot.unverifiedDescendants.length > 0) {
+        unverifiedDuringRun.push(...treeSnapshot.unverifiedDescendants);
+      }
+      for (const [pid, identity] of treeSnapshot.identities.entries()) {
+        if (!ownedProcesses.has(pid)) {
+          ownedProcesses.set(pid, {
+            identity,
+            depth: baseDepth + (treeSnapshot.depths.get(pid) ?? 0),
+          });
+        }
       }
     }
+    assert.deepEqual(
+      unverifiedDuringRun.map((u) => u.reason),
+      [],
+      'Encountered descendant process(es) with incomplete identity before closing desktop app',
+    );
 
     const exitPromise = new Promise((resolvePromise) => {
       child.once('exit', (code) => resolvePromise(code));
@@ -1228,7 +1415,9 @@ export async function runPackagedRuntimeTest({ argv = process.argv } = {}) {
     await cleanupPackagedTestRun({
       ownedProcesses,
       spawnedMainIdentity,
+      trackedServerIdentity,
       unverifiedMainPid,
+      extraUnverified: unverifiedDuringRun,
       controlFilePath,
       expectedExePath: targetExePath,
       expectedServerScriptPath,
