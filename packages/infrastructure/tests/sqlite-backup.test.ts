@@ -96,6 +96,10 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
       backupPath = backup.path;
       await expect(prepareEncryptedSqliteRestore(backup.path, workingDirectory, 'incorrect passphrase', restoreTenant)).rejects.toThrow();
       await expect(prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, { ...restoreTenant, id: 'another-company' })).rejects.toThrow(/different company/);
+      await expect(prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, { ...restoreTenant, code: 'OTHER_CO' }, { allowReplacementTenantId: true })).rejects.toThrow(/different company/);
+      const replacementPrepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, { ...restoreTenant, id: 'fresh-replacement-pc-id' }, { allowReplacementTenantId: true });
+      expect(replacementPrepared.tenant.code).toBe(restoreTenant.code);
+      await rm(replacementPrepared.workspace, { recursive: true, force: true });
       expect(readProbe(activePath)).toBe('keep-current-data');
     } finally {
       await source.close();

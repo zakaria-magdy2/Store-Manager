@@ -19,6 +19,7 @@ import {
   DEFAULT_DESKTOP_PORT,
   type DesktopDataPaths,
   type DesktopWindowSecurityPolicy,
+  readDesktopDailyBackupHistory,
   readExternalClockWatermark,
   resolveAvailableLoopbackPort,
   resolveDesktopDataPaths,
@@ -26,6 +27,7 @@ import {
   resolveOrCreateDesktopWatermarkSecret,
   startManagedServerChild,
   stopManagedServerProcess,
+  updateDesktopDailyBackupSecret,
   verifyStagedRuntimeIntegrity,
   waitForServerReady,
   writeExternalClockWatermark,
@@ -60,6 +62,7 @@ let activeSecurityPolicy: DesktopWindowSecurityPolicy | null = null;
 let quitHandled = false;
 let shutdownInFlight: Promise<void> | null = null;
 let pendingClockPersist: Promise<void> = Promise.resolve();
+let pendingDailyKeyPersist: Promise<void> = Promise.resolve();
 let webContentsGuardInstalled = false;
 const trustedPopupWebContentsIds = new Set<number>();
 
@@ -118,6 +121,7 @@ async function shutdownServerOnce(): Promise<void> {
       });
     }
     await pendingClockPersist.catch(() => undefined);
+    await pendingDailyKeyPersist.catch(() => undefined);
     serverChild = null;
   })();
   return shutdownInFlight;
@@ -336,6 +340,13 @@ async function bootDesktopApplication(): Promise<void> {
     requireDpapi,
     legacyPlaintextKeyPath: join(paths.dataDir, '.retailos-daily.key'),
   });
+  const dailyBackupKeyHistory = (
+    await readDesktopDailyBackupHistory({
+      userDataDir: paths.userDataDir,
+      safeStorage,
+      requireDpapi,
+    })
+  ).filter((item) => item !== dailyBackupSecret);
   const externalClock = await readExternalClockWatermark({
     userDataDir: paths.userDataDir,
     watermarkSecret,
@@ -355,6 +366,7 @@ async function bootDesktopApplication(): Promise<void> {
     env: childEnv,
     watermarkSecret,
     dailyBackupSecret,
+    dailyBackupKeyHistory,
     externalClockMs: externalClock.clockMs,
     externalClockTampered: externalClock.tampered,
     onClockAdvance: (nextClockMs) => {
@@ -368,6 +380,19 @@ async function bootDesktopApplication(): Promise<void> {
             requireDpapi,
           }),
         )
+        .catch(() => undefined);
+    },
+    onDailyBackupSecretUpdate: (nextSecret) => {
+      pendingDailyKeyPersist = pendingDailyKeyPersist
+        .then(() =>
+          updateDesktopDailyBackupSecret({
+            userDataDir: paths.userDataDir,
+            dailyBackupSecret: nextSecret,
+            safeStorage,
+            requireDpapi,
+          }),
+        )
+        .then(() => undefined)
         .catch(() => undefined);
     },
   });

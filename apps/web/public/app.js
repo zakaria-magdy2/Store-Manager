@@ -124,6 +124,10 @@ const state = {
   bootstrap: null,
   license: null,
   licenseBypassForBackups: false,
+  licenseBypassForLogin: false,
+  licenseRetryTimer: null,
+  licenseRetryInFlight: false,
+  postSetupDailyBackupKey: null,
   user: null,
   data: null,
   page: 'dashboard',
@@ -499,6 +503,18 @@ async function api(path, options = {}) {
         reason: result.error || 'يلزم تفعيل الاشتراك',
       };
       state.licenseBypassForBackups = false;
+      state.licenseBypassForLogin = false;
+      render();
+    }
+    if (response.status === 503 && result?.code === 'HARDWARE_IDENTITY_UNAVAILABLE') {
+      state.license = {
+        status: 'HARDWARE_UNAVAILABLE',
+        retryable: true,
+        machineId: '',
+        reason: result.error || 'تعذر التحقق المؤقت من معرف الجهاز أثناء بدء تشغيل نظام التشغيل — يرجى إعادة المحاولة خلال لحظات',
+      };
+      state.licenseBypassForBackups = false;
+      state.licenseBypassForLogin = false;
       render();
     }
     throw Object.assign(new Error(result.error || 'حصل خطأ، حاول مرة تانية'), { status: response.status, payload: result });
@@ -718,6 +734,57 @@ function applyRequestedRoute(fallbackDefault = 'dashboard') {
   toast(state.accessDeniedNotice, 'error');
 }
 
+function clearLicenseHardwareRetry() {
+  if (state.licenseRetryTimer) {
+    clearTimeout(state.licenseRetryTimer);
+    state.licenseRetryTimer = null;
+  }
+}
+
+async function fetchLicenseStatusSafe() {
+  try {
+    const lic = await api('/api/license/status');
+    clearLicenseHardwareRetry();
+    return lic;
+  } catch (error) {
+    if (error?.status === 503 || error?.payload?.code === 'HARDWARE_IDENTITY_UNAVAILABLE') {
+      return {
+        status: 'HARDWARE_UNAVAILABLE',
+        retryable: true,
+        machineId: '',
+        reason: error.message || 'تعذر التحقق المؤقت من معرف الجهاز أثناء بدء تشغيل نظام التشغيل — يرجى إعادة المحاولة خلال لحظات',
+      };
+    }
+    return null;
+  }
+}
+
+async function retryLicenseStatusNow() {
+  if (state.licenseRetryInFlight) return;
+  state.licenseRetryInFlight = true;
+  clearLicenseHardwareRetry();
+  try {
+    const lic = await fetchLicenseStatusSafe();
+    if (lic) {
+      state.license = lic;
+      if (lic.status === 'ACTIVE' && state.bootstrap?.configured && !state.data && state.user) {
+        await loadData().catch(() => {});
+      }
+      render();
+    }
+  } finally {
+    state.licenseRetryInFlight = false;
+  }
+}
+
+function scheduleLicenseHardwareRetry() {
+  clearLicenseHardwareRetry();
+  if (state.license?.status !== 'HARDWARE_UNAVAILABLE') return;
+  state.licenseRetryTimer = setTimeout(() => {
+    void retryLicenseStatusNow();
+  }, 3000);
+}
+
 async function start() {
   window.addEventListener('hashchange', () => {
     if (!state.user || !state.data) {
@@ -739,7 +806,7 @@ async function start() {
   try {
     const [boot, license] = await Promise.all([
       api('/api/bootstrap'),
-      api('/api/license/status').catch(() => null),
+      fetchLicenseStatusSafe(),
     ]);
     state.bootstrap = boot;
     if (license) state.license = license;
@@ -764,6 +831,14 @@ async function start() {
 
 function licenseStatusMeta(lic) {
   const status = lic?.status ?? 'UNLICENSED';
+  if (status === 'HARDWARE_UNAVAILABLE') {
+    return {
+      title: 'جاري التحقق من هوية الجهاز',
+      reason: lic?.reason || 'تعذر التحقق المؤقت من معرف الجهاز أثناء بدء تشغيل ويندوز — يعيد النظام المحاولة تلقائيًا.',
+      pillClass: 'status-low',
+      pillText: 'إعادة التحقق (503)',
+    };
+  }
   if (status === 'ACTIVE') {
     return {
       title: 'الترخيص نشط ومفعّل',
@@ -807,7 +882,9 @@ function licenseStatusMeta(lic) {
 function licenseActivationView() {
   const lic = state.license ?? { status: 'UNLICENSED', machineId: '' };
   const meta = licenseStatusMeta(lic);
+  const isHardwareUnavailable = lic.status === 'HARDWARE_UNAVAILABLE';
   const canEmergencyBackup = Boolean(state.user && state.data?.capabilities?.canManageBackups);
+  const canEmergencyLogin = Boolean(!state.user && state.bootstrap?.configured && !state.bootstrap?.setupRequired);
   return `<main id="license-activation-screen" class="license-screen" role="dialog" aria-modal="true" aria-labelledby="license-screen-title">
     <section class="license-card">
       <div class="license-card-head">
@@ -818,25 +895,35 @@ function licenseActivationView() {
         <h1 id="license-screen-title">${escapeHtml(meta.title)}</h1>
         <p id="license-status-reason" class="license-reason-banner" role="alert">${escapeHtml(meta.reason)}</p>
       </div>
-      <div class="license-machine-box">
-        <label class="license-machine-label">كود الجهاز (أرسله للدعم الفني للحصول على كود التفعيل)
-          <div class="license-machine-row">
-            <input id="license-machine-id" type="text" readonly dir="ltr" value="${escapeHtml(lic.machineId || '—')}">
-            <button type="button" id="copy-machine-id-btn" class="button button-secondary button-sm">نسخ الكود</button>
+      ${isHardwareUnavailable ? `
+        <div id="license-hardware-retry-box" class="form-stack">
+          <p style="margin:0;color:var(--text-secondary);font-size:13.5px;">بانتظار جاهزية خدمات تعريف الجهاز في ويندوز. يعيد البرنامج المحاولة تلقائيًا كل 3 ثوانٍ مع إبقاء العمليات المالية متوقفة مؤقتًا لحماية البيانات.</p>
+          <div class="license-actions-row">
+            <button type="button" id="retry-license-status-btn" class="button button-primary button-wide">إعادة المحاولة الآن</button>
           </div>
-        </label>
-      </div>
-      <form id="license-activation-form" class="form-stack">
-        <label>كود التفعيل (ROS1...)
-          <textarea id="license-token-input" name="token" rows="3" dir="ltr" required minlength="20" placeholder="الصق كود التفعيل هنا..."></textarea>
-        </label>
-        <div class="license-actions-row">
-          <button type="submit" id="activate-license-btn" class="button button-primary button-wide">تفعيل البرنامج</button>
         </div>
-      </form>
-      ${(canEmergencyBackup || state.user) ? `
+      ` : `
+        <div class="license-machine-box">
+          <label class="license-machine-label">كود الجهاز (أرسله للدعم الفني للحصول على كود التفعيل)
+            <div class="license-machine-row">
+              <input id="license-machine-id" type="text" readonly dir="ltr" value="${escapeHtml(lic.machineId || '—')}">
+              <button type="button" id="copy-machine-id-btn" class="button button-secondary button-sm">نسخ الكود</button>
+            </div>
+          </label>
+        </div>
+        <form id="license-activation-form" class="form-stack">
+          <label>كود التفعيل (ROS1...)
+            <textarea id="license-token-input" name="token" rows="3" dir="ltr" required minlength="20" placeholder="الصق كود التفعيل هنا..."></textarea>
+          </label>
+          <div class="license-actions-row">
+            <button type="submit" id="activate-license-btn" class="button button-primary button-wide">تفعيل البرنامج</button>
+          </div>
+        </form>
+      `}
+      ${(canEmergencyBackup || canEmergencyLogin || state.user) ? `
         <div class="license-footer-actions">
-          ${canEmergencyBackup ? '<button type="button" id="license-open-backups-btn" class="button button-secondary button-sm">تصدير نسخة احتياطية (.rfbackup)</button>' : ''}
+          ${canEmergencyBackup ? '<button type="button" id="license-open-backups-btn" class="button button-secondary button-sm">تصدير / استعادة نسخة احتياطية (.rfbackup)</button>' : ''}
+          ${canEmergencyLogin ? '<button type="button" id="license-open-login-btn" class="button button-secondary button-sm">تسجيل الدخول لتصدير أو استعادة نسخة احتياطية</button>' : ''}
           ${state.user ? '<button type="button" id="license-logout-btn" class="text-action">تسجيل الخروج</button>' : ''}
         </div>
       ` : ''}
@@ -845,6 +932,10 @@ function licenseActivationView() {
 }
 
 function bindLicenseActivation() {
+  document.querySelector('#retry-license-status-btn')?.addEventListener('click', () => {
+    void retryLicenseStatusNow();
+  });
+
   document.querySelector('#copy-machine-id-btn')?.addEventListener('click', async () => {
     const input = document.querySelector('#license-machine-id');
     const val = input?.value ?? '';
@@ -890,11 +981,17 @@ function bindLicenseActivation() {
     render();
   });
 
+  document.querySelector('#license-open-login-btn')?.addEventListener('click', () => {
+    state.licenseBypassForLogin = true;
+    render();
+  });
+
   document.querySelector('#license-logout-btn')?.addEventListener('click', async () => {
     await api('/api/logout', { method: 'POST', skipConfirm: true }).catch(() => {});
     state.user = null;
     state.data = null;
     state.licenseBypassForBackups = false;
+    state.licenseBypassForLogin = false;
     render();
   });
 }
@@ -992,6 +1089,11 @@ function bindLicenseView() {
 
 function render() {
   const root = document.querySelector('#app');
+  if (state.license?.status === 'HARDWARE_UNAVAILABLE') {
+    scheduleLicenseHardwareRetry();
+  } else {
+    clearLicenseHardwareRetry();
+  }
   const licenseBlocked = Boolean(state.license && state.license.status !== 'ACTIVE');
   const allowEmergencyBackupScreen = Boolean(
     state.licenseBypassForBackups &&
@@ -999,7 +1101,13 @@ function render() {
     state.data?.capabilities?.canManageBackups &&
     state.page === 'backups',
   );
-  if (licenseBlocked && !allowEmergencyBackupScreen) {
+  const allowEmergencyLoginScreen = Boolean(
+    state.licenseBypassForLogin &&
+    !state.user &&
+    state.bootstrap?.configured &&
+    !state.bootstrap?.setupRequired,
+  );
+  if (licenseBlocked && !allowEmergencyBackupScreen && !allowEmergencyLoginScreen) {
     root.innerHTML = licenseActivationView();
     bindLicenseActivation();
     return;
@@ -1022,7 +1130,7 @@ function render() {
 }
 
 function setupView() {
-  return `<main class="auth-layout"><section class="auth-story"><div class="brand-lockup"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="auth-story-copy"><span class="eyebrow">نظام إدارة المتاجر</span><h1>كل شغلك<br>في مكان واحد.</h1><p>بيانات متجرك اتجهزت. أنشئ حساب المدير للبدء.</p><div class="story-stat"><span class="story-stat-dot"></span>${escapeHtml(state.bootstrap.companyName)} · ${escapeHtml(state.bootstrap.currency)}</div></div><div class="auth-story-footer">رَفّ · إدارة المتجر من مكان واحد</div></section><section class="auth-form-panel"><div class="auth-form-wrap"><span class="eyebrow eyebrow-dark">تجهيز حساب المدير</span><h2>مرحبًا بك</h2><p class="auth-subtitle">بيانات الدخول الخاصة بمدير المتجر</p><form id="setup-form" class="form-stack"><label>اسم المدير<input name="ownerName" required minlength="2" maxlength="100" placeholder="الاسم بالكامل" autocomplete="name"></label><label>اسم المستخدم<input name="ownerUsername" required minlength="3" maxlength="30" pattern="[a-z0-9_]+" placeholder="owner" autocomplete="username"><small>حروف إنجليزية صغيرة وأرقام وشرطة سفلية</small></label><label>كلمة المرور<input name="password" type="password" required minlength="12" maxlength="128" placeholder="12 حرفًا على الأقل" autocomplete="new-password"><small>استخدم عبارة مرور طويلة يصعب تخمينها</small></label><button class="button button-primary button-wide" type="submit">إنشاء حساب المدير <span>${icon('arrow', 18)}</span></button><p class="form-footnote">بيانات الشركة والفرع تأتي من إعداد النسخة.</p></form></div></section></main>`;
+  return `<main class="auth-layout"><section class="auth-story"><div class="brand-lockup"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="auth-story-copy"><span class="eyebrow">نظام إدارة المتاجر</span><h1>كل شغلك<br>في مكان واحد.</h1><p>بيانات متجرك اتجهزت. أنشئ حساب المدير للبدء.</p><div class="story-stat"><span class="story-stat-dot"></span>${escapeHtml(state.bootstrap.companyName)} · ${escapeHtml(state.bootstrap.currency)}</div></div><div class="auth-story-footer">رَفّ · إدارة المتجر من مكان واحد</div></section><section class="auth-form-panel"><div class="auth-form-wrap"><span class="eyebrow eyebrow-dark">تجهيز حساب المدير</span><h2>مرحبًا بك</h2><p class="auth-subtitle">بيانات الدخول الخاصة بمدير المتجر</p><form id="setup-form" class="form-stack"><label>اسم المدير<input name="ownerName" required minlength="2" maxlength="100" placeholder="الاسم بالكامل" autocomplete="name"></label><label>اسم المستخدم<input name="ownerUsername" required minlength="3" maxlength="30" pattern="[a-z0-9_]+" placeholder="owner" autocomplete="username"><small>حروف إنجليزية صغيرة وأرقام وشرطة سفلية</small></label><label>كلمة المرور<input name="password" type="password" required minlength="12" maxlength="128" placeholder="12 حرفًا على الأقل" autocomplete="new-password"><small>استخدم عبارة مرور طويلة يصعب تخمينها</small></label><label>عبارة استعادة النسخ الاحتياطي الرئيسية (اختياري — 12 حرفًا على الأقل)<input name="dailyBackupPassphrase" type="password" minlength="12" maxlength="256" placeholder="اتركها فارغة للتوليد التلقائي الآمن" autocomplete="new-password"><small>تُستخدم لفك تشفير النسخ اليومية (.rfbackup) على أي جهاز بديل عند تعطل الكمبيوتر</small></label><button class="button button-primary button-wide" type="submit">إنشاء حساب المدير <span>${icon('arrow', 18)}</span></button><p class="form-footnote">بيانات الشركة والفرع تأتي من إعداد النسخة.</p></form></div></section></main>`;
 }
 
 function bindSetup() {
@@ -1030,9 +1138,19 @@ function bindSetup() {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const button = event.currentTarget.querySelector('button');
+    const raw = Object.fromEntries(form);
+    const payload = {
+      ownerName: raw.ownerName,
+      ownerUsername: raw.ownerUsername,
+      password: raw.password,
+      ...(typeof raw.dailyBackupPassphrase === 'string' && raw.dailyBackupPassphrase.trim()
+        ? { dailyBackupPassphrase: raw.dailyBackupPassphrase.trim() }
+        : {}),
+    };
     button.disabled = true;
     try {
-      await api('/api/setup', { method: 'POST', body: JSON.stringify(Object.fromEntries(form)) });
+      const setupRes = await api('/api/setup', { method: 'POST', body: JSON.stringify(payload) });
+      state.postSetupDailyBackupKey = setupRes?.dailyBackupKey || null;
       state.bootstrap = await api('/api/bootstrap');
       toast('تم إنشاء حساب المدير. سجّل الدخول للبدء.');
       render();
@@ -1044,24 +1162,62 @@ function bindSetup() {
 }
 
 function loginView() {
-  return `<main class="auth-layout"><section class="auth-story"><div class="brand-lockup"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="auth-story-copy"><span class="eyebrow">أهلًا بعودتك</span><h1>متجرك شغال.<br>ابدأ يومك.</h1><p>سجّل دخولك لإدارة ${escapeHtml(state.bootstrap.companyName)}.</p><div class="story-stat"><span class="story-stat-dot"></span>بياناتك محفوظة محليًا · ${escapeHtml(state.bootstrap.currency)}</div></div><div class="auth-story-footer">رَفّ · نظام إدارة المتاجر · <a href="https://wa.me/201200562966" target="_blank" rel="noopener noreferrer" style="color:#b8b1fa;text-decoration:none;font-weight:700;">الدعم (واتساب): 01200562966</a></div></section><section class="auth-form-panel"><div class="auth-form-wrap login-form-wrap"><span class="eyebrow eyebrow-dark">تسجيل الدخول</span><h2>مرحبًا بك</h2><p class="auth-subtitle">أدخل بيانات حسابك للمتابعة</p><form id="login-form" class="form-stack"><label>اسم المستخدم<input name="username" required maxlength="30" autocomplete="username" placeholder="اسم المستخدم"></label><label>كلمة المرور<input name="password" type="password" required maxlength="128" autocomplete="current-password" placeholder="كلمة المرور"></label><button class="button button-primary button-wide" type="submit">تسجيل الدخول <span>${icon('arrow', 18)}</span></button></form><p class="form-footnote">${escapeHtml(state.bootstrap.companyName)} · مساحة عمل مستقلة</p></div></section></main>`;
+  const emergencyNotice = state.licenseBypassForLogin && state.license?.status !== 'ACTIVE'
+    ? `<div id="emergency-login-notice" class="license-reason-banner" style="margin-bottom:14px;">وضع الطوارئ: سجّل دخولك بحساب المالك للوصول إلى تصدير أو استعادة النسخ الاحتياطية أثناء تعليق الترخيص. <button type="button" id="back-to-license-btn" class="text-action" style="margin-right:6px;">العودة لشاشة التفعيل</button></div>`
+    : '';
+  const postSetupKeyBanner = state.postSetupDailyBackupKey
+    ? `<div id="post-setup-daily-key-banner" style="margin-bottom:14px;padding:12px 14px;border-radius:12px;border:1px solid rgba(15,118,110,0.35);background:rgba(15,118,110,0.08);display:flex;flex-direction:column;gap:8px;">
+        <strong style="font-size:13.5px;color:#0f766e;">احفظ مفتاح استعادة النسخ اليومية خارج هذا الجهاز الآن</strong>
+        <p style="margin:0;font-size:12.5px;color:var(--text-secondary);">إذا تلف القرص الصلب بالكامل، ستحتاج هذا المفتاح لاستعادة ملفات <code>.rfbackup</code> من Google Drive أو OneDrive على جهاز جديد:</p>
+        <div class="license-machine-row">
+          <input id="setup-daily-key-value" type="text" readonly dir="ltr" value="${escapeHtml(state.postSetupDailyBackupKey)}">
+          <button type="button" id="copy-setup-daily-key-btn" class="button button-secondary button-sm">نسخ المفتاح</button>
+        </div>
+      </div>`
+    : '';
+  return `<main class="auth-layout"><section class="auth-story"><div class="brand-lockup"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="auth-story-copy"><span class="eyebrow">أهلًا بعودتك</span><h1>متجرك شغال.<br>ابدأ يومك.</h1><p>سجّل دخولك لإدارة ${escapeHtml(state.bootstrap.companyName)}.</p><div class="story-stat"><span class="story-stat-dot"></span>بياناتك محفوظة محليًا · ${escapeHtml(state.bootstrap.currency)}</div></div><div class="auth-story-footer">رَفّ · نظام إدارة المتاجر · <a href="https://wa.me/201200562966" target="_blank" rel="noopener noreferrer" style="color:#b8b1fa;text-decoration:none;font-weight:700;">الدعم (واتساب): 01200562966</a></div></section><section class="auth-form-panel"><div class="auth-form-wrap login-form-wrap"><span class="eyebrow eyebrow-dark">تسجيل الدخول</span><h2>مرحبًا بك</h2><p class="auth-subtitle">أدخل بيانات حسابك للمتابعة</p>${emergencyNotice}${postSetupKeyBanner}<form id="login-form" class="form-stack"><label>اسم المستخدم<input name="username" required maxlength="30" autocomplete="username" placeholder="اسم المستخدم"></label><label>كلمة المرور<input name="password" type="password" required maxlength="128" autocomplete="current-password" placeholder="كلمة المرور"></label><button class="button button-primary button-wide" type="submit">تسجيل الدخول <span>${icon('arrow', 18)}</span></button></form><p class="form-footnote">${escapeHtml(state.bootstrap.companyName)} · مساحة عمل مستقلة</p></div></section></main>`;
 }
 
 function bindLogin() {
+  document.querySelector('#back-to-license-btn')?.addEventListener('click', () => {
+    state.licenseBypassForLogin = false;
+    render();
+  });
+
+  document.querySelector('#copy-setup-daily-key-btn')?.addEventListener('click', async () => {
+    const val = document.querySelector('#setup-daily-key-value')?.value ?? '';
+    if (!val) return;
+    try {
+      await navigator.clipboard.writeText(val);
+      toast('تم نسخ مفتاح استعادة النسخ الاحتياطية إلى الحافظة');
+    } catch {
+      document.querySelector('#setup-daily-key-value')?.select();
+      toast('انسخ المفتاح يدويًا من المربع أعلاه');
+    }
+  });
+
   document.querySelector('#login-form')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     const button = form.querySelector('button');
     button.disabled = true;
     try {
+      const wasEmergencyLogin = Boolean(state.licenseBypassForLogin);
       const values = Object.fromEntries(new FormData(form));
       const session = await api('/api/login', { method: 'POST', body: JSON.stringify(values) });
       state.user = session.user;
-      state.license = await api('/api/license/status').catch(() => state.license);
-      state.licenseBypassForBackups = false;
+      state.postSetupDailyBackupKey = null;
+      state.license = (await fetchLicenseStatusSafe()) ?? state.license;
+      state.licenseBypassForLogin = false;
       state.page = session.capabilities?.cashierMode ? 'pos' : 'dashboard';
       await loadData();
-      applyRequestedRoute(state.page);
+      if (state.license?.status !== 'ACTIVE' && wasEmergencyLogin && state.data?.capabilities?.canManageBackups) {
+        state.licenseBypassForBackups = true;
+        state.page = 'backups';
+      } else {
+        state.licenseBypassForBackups = false;
+        applyRequestedRoute(state.page);
+      }
       restorePendingCheckoutForStore();
       render();
     } catch (error) {
@@ -7449,8 +7605,10 @@ function backupView() {
           ` : ''}
           ${state.data?.user?.role === 'OWNER' ? `
             <button type="button" class="button button-secondary button-sm" id="export-daily-key-btn">استخراج مفتاح استعادة النسخ اليومية</button>
+            <button type="button" class="button button-secondary button-sm" id="set-daily-master-key-btn">تعيين / تحديث عبارة الاستعادة الرئيسية</button>
           ` : ''}
         </div>
+        ${daily?.historicalKeysCount ? `<div class="empty-row" style="margin-top:8px;">ملاحظة الأمان: يحتفظ النظام حاليًا بـ ${daily.historicalKeysCount} مفتاح استعادة سابق في المحفظة المشفرة (DPAPI) لتظل النسخ اليومية الأقدم قابلة للاستعادة دائمًا.</div>` : ''}
         ${mirror?.lastMirrorError ? `<div class="empty-row" style="color:var(--rose, #be123c);margin-top:8px;">${escapeHtml(mirror.lastMirrorError)}</div>` : ''}
       </form>
     </section>
@@ -7552,7 +7710,10 @@ function bindBackups() {
         <button type="submit" class="button button-primary">عرض مفتاح الاستعادة</button>
       </form>
       <div id="daily-key-output" style="display:none;margin-top:12px;">
-        <label>مفتاح فك تشفير النسخ اليومية<input id="daily-key-value" type="text" readonly dir="ltr" style="font-family:monospace;"></label>
+        <label>مفتاح فك تشفير النسخ اليومية الحالي<input id="daily-key-value" type="text" readonly dir="ltr" style="font-family:monospace;"></label>
+        <div id="daily-prev-keys-box" style="display:none;margin-top:8px;">
+          <label>مفاتيح سابقة محفوظة (للنسخ اليومية المنشأة قبل تغيير العبارة)<textarea id="daily-prev-keys-value" rows="3" readonly dir="ltr" style="font-family:monospace;"></textarea></label>
+        </div>
         <p id="daily-key-instructions" style="font-size:12.5px;color:var(--muted);"></p>
         <button type="button" class="button button-secondary button-sm" id="copy-daily-key-btn">نسخ المفتاح</button>
       </div>
@@ -7568,8 +7729,19 @@ function bindBackups() {
         const res = await api('/api/backups/daily/key-export', { method: 'POST', body: JSON.stringify({ currentPassword }) });
         const outBox = root.querySelector('#daily-key-output');
         const keyInput = root.querySelector('#daily-key-value');
+        const prevBox = root.querySelector('#daily-prev-keys-box');
+        const prevInput = root.querySelector('#daily-prev-keys-value');
         const instrEl = root.querySelector('#daily-key-instructions');
         if (keyInput) keyInput.value = res.dailyBackupKey;
+        const prevKeys = Array.isArray(res.previousDailyBackupKeys) ? res.previousDailyBackupKeys : [];
+        if (prevBox && prevInput) {
+          if (prevKeys.length > 0) {
+            prevInput.value = prevKeys.join('\n');
+            prevBox.style.display = 'block';
+          } else {
+            prevBox.style.display = 'none';
+          }
+        }
         if (instrEl) instrEl.textContent = res.restoreInstructions;
         if (outBox) outBox.style.display = 'block';
         form.reset();
@@ -7589,6 +7761,47 @@ function bindBackups() {
       } catch {
         root.querySelector('#daily-key-value')?.select();
         toast('انسخ المفتاح يدويًا من المربع أعلاه');
+      }
+    });
+  });
+  document.querySelector('#set-daily-master-key-btn')?.addEventListener('click', () => {
+    const root = getModalRoot();
+    root.innerHTML = `<div class="modal-backdrop"><section class="panel modal-card">
+      <div class="modal-heading"><div><h3>تعيين / تحديث عبارة الاستعادة الرئيسية (.rfbackup)</h3><p>حدّد عبارة استعادة مخصصة (12 حرفًا فأكثر) وتأكد من حفظها خارج الجهاز. يتم حفظ أي مفاتيح سابقة تلقائيًا في محفظة DPAPI حتى تظل النسخ الأقدم قابلة للاستعادة، مع تحديث نسخة اليوم والنسخة الخارجية فورًا بالعبارة الجديدة.</p></div><button type="button" class="button button-secondary button-sm" data-close-modal>إغلاق</button></div>
+      <form id="set-daily-master-key-form" class="form-stack">
+        <label>كلمة مرور المالك الحالية<input name="currentPassword" type="password" autocomplete="current-password" required></label>
+        <label>عبارة الاستعادة الرئيسية الجديدة (12 حرفًا على الأقل)<input name="masterPassphrase" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
+        <label>تأكيد عبارة الاستعادة الجديدة<input name="confirmMasterPassphrase" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
+        <button type="submit" class="button button-primary">حفظ عبارة الاستعادة وتحديث نسخة اليوم</button>
+      </form>
+    </section></div>`;
+    root.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
+    root.querySelector('#set-daily-master-key-form')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const form = ev.currentTarget;
+      const submitBtn = form.querySelector('[type="submit"]');
+      const data = Object.fromEntries(new FormData(form));
+      if (String(data.masterPassphrase ?? '').trim() !== String(data.confirmMasterPassphrase ?? '').trim()) {
+        toast('كلمتا عبارة الاستعادة غير متطابقتين', 'error');
+        return;
+      }
+      submitBtn.disabled = true;
+      try {
+        const res = await api('/api/backups/daily/master-key', {
+          method: 'POST',
+          body: JSON.stringify({
+            currentPassword: String(data.currentPassword ?? ''),
+            masterPassphrase: String(data.masterPassphrase ?? '').trim(),
+          }),
+        });
+        state.dailyBackups = res;
+        root.innerHTML = '';
+        render();
+        toast('تم تحديث عبارة الاستعادة الرئيسية وحفظ نسخة اليوم بها مع الاحتفاظ بالمفاتيح السابقة');
+      } catch (err) {
+        toast(err.message, 'error');
+      } finally {
+        submitBtn.disabled = false;
       }
     });
   });

@@ -174,6 +174,8 @@ const DPAPI_REQUIRED_ERROR_AR =
   'تعذر تهيئة الحماية الآمنة لنظام التشغيل (Windows DPAPI غير متاح). لا يمكن تشغيل النظام بأمان دون تشفير مفاتيح التفعيل والنسخ الاحتياطي.';
 
 export const CLOCK_ADVANCE_STDOUT_PREFIX = '__RETAILOS_CLOCK_ADVANCE__:';
+export const DAILY_KEY_UPDATE_STDOUT_PREFIX = '__RETAILOS_DAILY_KEY_UPDATE__:';
+const DAILY_BACKUP_SECRET_PATTERN = /^[^\p{Cc}]{12,256}$/u;
 
 function shouldFailClosedOnMissingDpapi(requireDpapi?: boolean): boolean {
   if (typeof requireDpapi === 'boolean') {
@@ -295,11 +297,148 @@ export function resolveOrCreateDesktopDailyBackupSecret(options: {
     dpapiFilename: 'daily-backup.bin',
     fallbackFilename: '.retailos-daily.key',
     encoding: 'base64url',
-    pattern: /^.{12,256}$/,
+    pattern: DAILY_BACKUP_SECRET_PATTERN,
     safeStorage: options.safeStorage,
     requireDpapi: options.requireDpapi,
     legacyPlaintextKeyPath: options.legacyPlaintextKeyPath,
   });
+}
+
+function normalizeDailyBackupHistoryList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const unique = new Set<string>();
+  for (const item of raw) {
+    if (typeof item === 'string') {
+      const trimmed = item.trim();
+      if (DAILY_BACKUP_SECRET_PATTERN.test(trimmed)) {
+        unique.add(trimmed);
+      }
+    }
+  }
+  return Array.from(unique);
+}
+
+/**
+ * Reads DPAPI-sealed historical daily backup passphrases preserved across key rotations
+ * so older daily `.rfbackup` archives remain recoverable on the same PC and exportable.
+ */
+export async function readDesktopDailyBackupHistory(options: {
+  readonly userDataDir: string;
+  readonly safeStorage?: SafeStorageAdapter | undefined;
+  readonly requireDpapi?: boolean | undefined;
+}): Promise<string[]> {
+  const userDataDir = resolve(options.userDataDir);
+  const keyringPath = join(userDataDir, 'daily-backup-keyring.bin');
+  const dpapi = options.safeStorage;
+
+  if (shouldFailClosedOnMissingDpapi(options.requireDpapi) && (!dpapi || !dpapi.isEncryptionAvailable())) {
+    throw new Error(DPAPI_REQUIRED_ERROR_AR);
+  }
+  if (!existsSync(keyringPath)) {
+    return [];
+  }
+  try {
+    const rawBytes = await readFile(keyringPath);
+    const jsonText =
+      dpapi && dpapi.isEncryptionAvailable()
+        ? dpapi.decryptString(rawBytes)
+        : rawBytes.toString('utf8');
+    return normalizeDailyBackupHistoryList(JSON.parse(jsonText));
+  } catch {
+    return [];
+  }
+}
+
+async function readCurrentDailyBackupSecretIfExists(options: {
+  readonly userDataDir: string;
+  readonly safeStorage?: SafeStorageAdapter | undefined;
+}): Promise<string | null> {
+  const userDataDir = resolve(options.userDataDir);
+  const dpapiFilePath = join(userDataDir, 'daily-backup.bin');
+  const fallbackKeyPath = join(userDataDir, '.retailos-daily.key');
+  const dpapi = options.safeStorage;
+  if (dpapi && dpapi.isEncryptionAvailable() && existsSync(dpapiFilePath)) {
+    try {
+      const decrypted = dpapi.decryptString(await readFile(dpapiFilePath)).trim();
+      if (DAILY_BACKUP_SECRET_PATTERN.test(decrypted)) {
+        return decrypted;
+      }
+    } catch {
+      return null;
+    }
+  }
+  if ((!dpapi || !dpapi.isEncryptionAvailable()) && existsSync(fallbackKeyPath)) {
+    try {
+      const fallback = (await readFile(fallbackKeyPath, 'utf8')).trim();
+      if (DAILY_BACKUP_SECRET_PATTERN.test(fallback)) {
+        return fallback;
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Updates the active DPAPI-sealed daily backup master passphrase while preserving any
+ * previous key(s) inside `daily-backup-keyring.bin` BEFORE overwriting `daily-backup.bin`.
+ */
+export async function updateDesktopDailyBackupSecret(options: {
+  readonly userDataDir: string;
+  readonly dailyBackupSecret: string;
+  readonly safeStorage?: SafeStorageAdapter | undefined;
+  readonly requireDpapi?: boolean | undefined;
+}): Promise<{ readonly updated: boolean; readonly historyCount: number }> {
+  const nextSecret = options.dailyBackupSecret.trim();
+  if (!DAILY_BACKUP_SECRET_PATTERN.test(nextSecret)) {
+    throw new Error('كلمة مرور النسخ الاحتياطي الرئيسية يجب أن تكون بين 12 و 256 حرفًا صالحًا');
+  }
+
+  const userDataDir = resolve(options.userDataDir);
+  const dpapi = options.safeStorage;
+  if (shouldFailClosedOnMissingDpapi(options.requireDpapi) && (!dpapi || !dpapi.isEncryptionAvailable())) {
+    throw new Error(DPAPI_REQUIRED_ERROR_AR);
+  }
+
+  await mkdir(userDataDir, { recursive: true });
+  const existingSecret = await readCurrentDailyBackupSecretIfExists({
+    userDataDir,
+    safeStorage: dpapi,
+  });
+  const history = await readDesktopDailyBackupHistory({
+    userDataDir,
+    safeStorage: dpapi,
+    requireDpapi: options.requireDpapi,
+  });
+
+  const preservedSet = new Set<string>(history);
+  if (existingSecret && existingSecret !== nextSecret) {
+    preservedSet.add(existingSecret);
+  }
+  const nextHistory = Array.from(preservedSet);
+
+  // Persist historical keyring BEFORE overwriting daily-backup.bin so no existing key is ever lost.
+  if (nextHistory.length > history.length) {
+    const keyringPath = join(userDataDir, 'daily-backup-keyring.bin');
+    const serialized = JSON.stringify(nextHistory);
+    const encodedHistory: Buffer | string =
+      dpapi && dpapi.isEncryptionAvailable() ? dpapi.encryptString(serialized) : serialized;
+    await atomicWriteFile(keyringPath, encodedHistory);
+  }
+
+  if (dpapi && dpapi.isEncryptionAvailable()) {
+    await atomicWriteFile(join(userDataDir, 'daily-backup.bin'), dpapi.encryptString(nextSecret));
+  } else {
+    await atomicWriteFile(join(userDataDir, '.retailos-daily.key'), `${nextSecret}\n`);
+  }
+
+  return {
+    updated: existingSecret !== nextSecret,
+    historyCount: nextHistory.length,
+  };
 }
 
 function computeExternalClockHmac(watermarkSecret: string, clockMs: number): string {
@@ -786,9 +925,11 @@ export function startManagedServerChild(options: {
   readonly env: NodeJS.ProcessEnv;
   readonly watermarkSecret: string;
   readonly dailyBackupSecret?: string | undefined;
+  readonly dailyBackupKeyHistory?: readonly string[] | undefined;
   readonly externalClockMs?: number | null | undefined;
   readonly externalClockTampered?: boolean | undefined;
   readonly onClockAdvance?: ((clockMs: number) => void) | undefined;
+  readonly onDailyBackupSecretUpdate?: ((nextSecret: string) => void) | undefined;
 }): { readonly child: ChildProcess; readonly logs: string[] } {
   const logs: string[] = [];
   const appendLog = (chunk: Buffer | string) => {
@@ -820,6 +961,18 @@ export function startManagedServerChild(options: {
             options.onClockAdvance?.(parsedMs);
           }
         }
+      } else if (line.startsWith(DAILY_KEY_UPDATE_STDOUT_PREFIX)) {
+        const encoded = line.slice(DAILY_KEY_UPDATE_STDOUT_PREFIX.length).trim();
+        if (encoded.length >= 16 && encoded.length <= 512) {
+          try {
+            const decoded = Buffer.from(encoded, 'base64url').toString('utf8').trim();
+            if (DAILY_BACKUP_SECRET_PATTERN.test(decoded)) {
+              options.onDailyBackupSecretUpdate?.(decoded);
+            }
+          } catch {
+            // Ignore malformed daily backup update signal
+          }
+        }
       } else if (line.length > 0) {
         appendLog(`${line}\n`);
       }
@@ -836,6 +989,9 @@ export function startManagedServerChild(options: {
     `${JSON.stringify({
       watermarkSecret: options.watermarkSecret,
       ...(options.dailyBackupSecret ? { dailyBackupSecret: options.dailyBackupSecret } : {}),
+      ...(options.dailyBackupKeyHistory && options.dailyBackupKeyHistory.length > 0
+        ? { dailyBackupKeyHistory: options.dailyBackupKeyHistory }
+        : {}),
       ...(typeof options.externalClockMs === 'number' && options.externalClockMs > 0
         ? { externalClockMs: options.externalClockMs }
         : {}),

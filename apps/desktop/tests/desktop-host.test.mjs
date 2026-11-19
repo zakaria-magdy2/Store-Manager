@@ -19,9 +19,11 @@ import {
 import {
   buildServerProcessEnv,
   createDesktopWindowSecurityPolicy,
+  DAILY_KEY_UPDATE_STDOUT_PREFIX,
   DESKTOP_IPC_CHANNELS,
   DesktopHostSupervisor,
   isProcessAlive,
+  readDesktopDailyBackupHistory,
   readExternalClockWatermark,
   resolveAvailableLoopbackPort,
   resolveDesktopDataPaths,
@@ -29,6 +31,7 @@ import {
   resolveOrCreateDesktopWatermarkSecret,
   startManagedServerChild,
   stopManagedServerProcess,
+  updateDesktopDailyBackupSecret,
   verifyStagedRuntimeIntegrity,
   waitForServerReady,
   writeExternalClockWatermark,
@@ -566,5 +569,96 @@ test('verifyStagedRuntimeIntegrity validates Ed25519 manifest including @retailo
     );
   } finally {
     await rm(tempWebDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('updateDesktopDailyBackupSecret preserves historical keys in DPAPI keyring and startManagedServerChild receives stdout updates', async () => {
+  const tempUserData = await mkdtemp(join(tmpdir(), 'retailos-daily-keyring-'));
+  try {
+    const fakeDpapi = {
+      isEncryptionAvailable: () => true,
+      encryptString: (plain) => Buffer.from(`dpapi:${plain}`, 'utf8'),
+      decryptString: (blob) => blob.toString('utf8').replace(/^dpapi:/, ''),
+    };
+
+    // Must fail closed on Windows when DPAPI is required but unavailable
+    await assert.rejects(
+      () =>
+        updateDesktopDailyBackupSecret({
+          userDataDir: tempUserData,
+          dailyBackupSecret: 'InitialMasterPass-2026!',
+          safeStorage: { isEncryptionAvailable: () => false, encryptString: () => Buffer.alloc(0), decryptString: () => '' },
+          requireDpapi: true,
+        }),
+      /DPAPI/,
+    );
+
+    const initialSecret = await resolveOrCreateDesktopDailyBackupSecret({
+      userDataDir: tempUserData,
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+    });
+    assert.equal(
+      (await readDesktopDailyBackupHistory({ userDataDir: tempUserData, safeStorage: fakeDpapi, requireDpapi: true })).length,
+      0,
+    );
+
+    const rot1 = await updateDesktopDailyBackupSecret({
+      userDataDir: tempUserData,
+      dailyBackupSecret: 'OperatorMasterPass-One-2026',
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+    });
+    assert.deepEqual(rot1, { updated: true, historyCount: 1 });
+
+    const rot2 = await updateDesktopDailyBackupSecret({
+      userDataDir: tempUserData,
+      dailyBackupSecret: 'OperatorMasterPass-Two-2026',
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+    });
+    assert.deepEqual(rot2, { updated: true, historyCount: 2 });
+
+    const history = await readDesktopDailyBackupHistory({
+      userDataDir: tempUserData,
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+    });
+    assert.deepEqual(history, [initialSecret, 'OperatorMasterPass-One-2026']);
+    assert.equal(existsSync(join(tempUserData, '.retailos-daily.key')), false);
+
+    // Confirm stdout __RETAILOS_DAILY_KEY_UPDATE__:<base64url> signal decodes cleanly
+    const mockScriptPath = join(tempUserData, 'emit-key-update.mjs');
+    const emittedSecret = 'ChildRotatedMasterKey-2026!';
+    await writeFile(
+      mockScriptPath,
+      [
+        "process.stdin.resume();",
+        "process.stdin.once('data', () => {",
+        `  process.stdout.write(${JSON.stringify(`${DAILY_KEY_UPDATE_STDOUT_PREFIX}${Buffer.from(emittedSecret, 'utf8').toString('base64url')}\n`)});`,
+        '  setTimeout(() => process.exit(0), 30);',
+        '});',
+      ].join('\n'),
+      'utf8',
+    );
+    let capturedKey = null;
+    const managed = startManagedServerChild({
+      execPath: process.execPath,
+      serverScriptPath: mockScriptPath,
+      cwd: tempUserData,
+      env: process.env,
+      watermarkSecret: 'b'.repeat(64),
+      dailyBackupSecret: 'OperatorMasterPass-Two-2026',
+      dailyBackupKeyHistory: history,
+      onDailyBackupSecretUpdate: (nextSecret) => {
+        capturedKey = nextSecret;
+      },
+    });
+    await new Promise((resolvePromise) => {
+      managed.child.once('exit', () => resolvePromise(undefined));
+    });
+    assert.equal(capturedKey, emittedSecret);
+  } finally {
+    await rm(tempUserData, { recursive: true, force: true }).catch(() => undefined);
   }
 });

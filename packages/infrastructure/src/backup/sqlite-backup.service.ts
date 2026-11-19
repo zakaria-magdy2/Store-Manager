@@ -136,7 +136,15 @@ export function checkSqliteFileQuick(path: string): { ok: boolean; messages: str
   }
 }
 
-export function verifySqliteFile(path: string, expectedTenant?: RestoreTenantIdentity): RestoreTenantIdentity {
+export interface VerifySqliteFileOptions {
+  readonly allowReplacementTenantId?: boolean | undefined;
+}
+
+export function verifySqliteFile(
+  path: string,
+  expectedTenant?: RestoreTenantIdentity,
+  options?: VerifySqliteFileOptions,
+): RestoreTenantIdentity {
   const verification = new Database(path, { readonly: true, fileMustExist: true });
   try {
     const integrity = verification.pragma('integrity_check') as { integrity_check: string }[];
@@ -155,7 +163,12 @@ export function verifySqliteFile(path: string, expectedTenant?: RestoreTenantIde
     const tenants = verification.prepare('SELECT id, code, currency FROM tenants').all() as RestoreTenantIdentity[];
     if (tenants.length !== 1) throw new Error('Backup must contain exactly one company');
     const tenant = tenants[0]!;
-    if (expectedTenant && (tenant.id !== expectedTenant.id || tenant.code !== expectedTenant.code || tenant.currency !== expectedTenant.currency)) throw new Error('Backup belongs to a different company');
+    if (expectedTenant) {
+      const idMismatch = !options?.allowReplacementTenantId && tenant.id !== expectedTenant.id;
+      if (idMismatch || tenant.code !== expectedTenant.code || tenant.currency !== expectedTenant.currency) {
+        throw new Error('Backup belongs to a different company');
+      }
+    }
     return tenant;
   } finally {
     verification.close();
@@ -178,6 +191,7 @@ export async function prepareEncryptedSqliteRestore(
   workingDirectory: string,
   passphrase: string,
   expectedTenant: RestoreTenantIdentity,
+  options?: VerifySqliteFileOptions,
 ): Promise<PreparedSqliteRestore> {
   const archive = await open(archivePath, 'r');
   const header = Buffer.alloc(HEADER_BYTES), tag = Buffer.alloc(TAG_BYTES);
@@ -196,7 +210,7 @@ export async function prepareEncryptedSqliteRestore(
     await pipeline(archive.createReadStream({ start: HEADER_BYTES, end: archiveStats.size - TAG_BYTES - 1, autoClose: false }), decipher, createWriteStream(candidatePath, { flags: 'wx', mode: 0o600 }));
     const candidateStats = await stat(candidatePath);
     if (candidateStats.size === 0 || candidateStats.size > MAX_DATABASE_BYTES) throw new Error('Restored database size is invalid');
-    const tenant = verifySqliteFile(candidatePath, expectedTenant);
+    const tenant = verifySqliteFile(candidatePath, expectedTenant, options);
     return { workspace, candidatePath, candidateSha256: await hashFile(candidatePath), tenant };
   } catch (error) {
     await rm(workspace, { recursive: true, force: true });

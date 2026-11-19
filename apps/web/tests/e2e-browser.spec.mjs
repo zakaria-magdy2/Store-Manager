@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { once } from 'node:events';
+import { writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -503,6 +504,138 @@ test.describe.serial('RetailOS Real-Browser E2E Suite (1366x768 RTL)', () => {
         metrics.scrollWidth,
         `Horizontal overflow detected on ${route.pageId}: scrollWidth=${metrics.scrollWidth} > innerWidth=${metrics.innerWidth}`,
       ).toBeLessThanOrEqual(metrics.innerWidth);
+    }
+  });
+});
+
+test.describe('RetailOS Pre-Pilot Browser Resilience: 503 Retry & Lockout Backup Export', () => {
+  test('6. Lockout screen allows Owner sign-in for emergency backup export, and 503 hardware unavailability recovers cleanly', async ({ browser }) => {
+    const tempDir = await createTestTempDir('retailos-e2e-lockout-');
+    const clockFile = join(tempDir, 'clock.txt');
+    const baseMs = Date.now();
+    await writeFile(clockFile, String(baseMs), 'utf8');
+
+    const port = await reservePort();
+    const url = `http://127.0.0.1:${port}`;
+    let procLog = '';
+    const proc = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        NODE_ENV: 'test',
+        RETAILOS_TEST_LICENSE_PUBLIC_KEY: e2eLicensePublicKeyPem,
+        RETAILOS_TEST_CLOCK_FILE: clockFile,
+        PORT: String(port),
+        RETAILOS_DATA_DIR: tempDir,
+        RETAILOS_COMPANY_NAME: 'متجر طوارئ E2E',
+        RETAILOS_COMPANY_CODE: 'E2E_LOCKOUT',
+        RETAILOS_CURRENCY: 'EGP',
+        RETAILOS_STORE_NAME: 'الفرع الرئيسي',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    proc.stdout.on('data', (c) => { procLog += c.toString(); });
+    proc.stderr.on('data', (c) => { procLog += c.toString(); });
+
+    const context = await browser.newContext({
+      viewport: { width: 1366, height: 768 },
+      locale: 'ar-EG',
+      timezoneId: 'Africa/Cairo',
+      acceptDownloads: true,
+    });
+    try {
+      await waitForHarnessReady(url, proc, () => procLog, DEFAULT_HARNESS_READY_TIMEOUT_MS);
+      const p = await context.newPage();
+      const errs = [];
+      p.on('pageerror', (err) => errs.push(err.message));
+
+      // 1. Activate short 2-day license + setup with custom master backup passphrase
+      await p.goto(url);
+      await expect(p.locator('#license-activation-screen')).toBeVisible();
+      const machineId = (await p.locator('#license-machine-id').inputValue()).trim();
+      const shortToken = signE2ELicenseToken({
+        licenseId: `E2E-SHORT-${randomUUID().slice(0, 6).toUpperCase()}`,
+        customerName: 'عميل طوارئ',
+        machineId,
+        issuedAt: new Date(baseMs).toISOString(),
+        expiresAt: new Date(baseMs + 2 * 86400000).toISOString(),
+        planName: '2-Day',
+      });
+      await p.fill('#license-token-input', shortToken);
+      await p.click('#activate-license-btn');
+
+      await expect(p.locator('#setup-form')).toBeVisible();
+      await p.fill('#setup-form input[name="ownerName"]', 'مالك الطوارئ');
+      await p.fill('#setup-form input[name="ownerUsername"]', 'lock_owner');
+      await p.fill('#setup-form input[name="password"]', 'Lockout-Owner-Pass-2026!');
+      await p.fill('#setup-form input[name="dailyBackupPassphrase"]', 'E2E-Master-Backup-Key-2026');
+      await p.click('#setup-form button[type="submit"]');
+      await acceptConfirmModal(p);
+
+      // Post-setup recovery key banner renders cleanly above login form
+      await expect(p.locator('#post-setup-daily-key-banner')).toBeVisible();
+      await expect(p.locator('#setup-daily-key-value')).toHaveValue('E2E-Master-Backup-Key-2026');
+
+      // 2. Simulate transient 503 HARDWARE_IDENTITY_UNAVAILABLE on unauthenticated reload -> retryable screen (never UNLICENSED)
+      let simulate503 = true;
+      await p.route('**/api/license/status', async (route) => {
+        if (simulate503) {
+          await route.fulfill({
+            status: 503,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              error: 'تعذر التحقق المؤقت من معرف الجهاز أثناء بدء التشغيل',
+              code: 'HARDWARE_IDENTITY_UNAVAILABLE',
+              retryable: true,
+            }),
+          });
+          return;
+        }
+        await route.continue();
+      });
+
+      await p.reload();
+      await expect(p.locator('#license-hardware-retry-box')).toBeVisible();
+      await expect(p.locator('#license-token-input')).toBeHidden();
+
+      simulate503 = false;
+      await p.click('#retry-license-status-btn');
+      await expect(p.locator('#login-form')).toBeVisible();
+      await p.unroute('**/api/license/status');
+
+      // 3. Advance clock past 2-day license expiry while unauthenticated -> EXPIRED lockout screen allows Owner login + backup export
+      await writeFile(clockFile, String(baseMs + 3 * 86400000), 'utf8');
+      await p.reload();
+      await expect(p.locator('#license-activation-screen')).toBeVisible();
+      await expect(p.locator('#license-open-login-btn')).toBeVisible();
+
+      await p.click('#license-open-login-btn');
+      await expect(p.locator('#login-form')).toBeVisible();
+      await expect(p.locator('#emergency-login-notice')).toBeVisible();
+
+      await p.fill('#login-form input[name="username"]', 'lock_owner');
+      await p.fill('#login-form input[name="password"]', 'Lockout-Owner-Pass-2026!');
+      await p.click('#login-form button[type="submit"]');
+
+      // Lands in emergency backups view under lockout banner and exports encrypted .rfbackup cleanly
+      await expect(p.locator('#license-unlicensed-backup-banner')).toBeVisible();
+      await expect(p.locator('#backup-export-form')).toBeVisible();
+
+      await p.fill('#backup-export-form input[name="passphrase"]', 'Emergency-Export-2026!');
+      await p.fill('#backup-export-form input[name="confirmPassphrase"]', 'Emergency-Export-2026!');
+      const [download] = await Promise.all([
+        p.waitForEvent('download'),
+        (async () => {
+          await p.click('#backup-export-form button[type="submit"]');
+          await acceptConfirmModal(p);
+        })(),
+      ]);
+      expect(download.suggestedFilename()).toMatch(/\.rfbackup$/);
+      expect(errs).toEqual([]);
+    } finally {
+      await context.close().catch(() => {});
+      await terminateChildProcessTree(proc);
+      await cleanupTempDir(tempDir);
     }
   });
 });

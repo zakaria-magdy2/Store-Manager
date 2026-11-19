@@ -62,9 +62,35 @@ import { z } from 'zod';
 
 const serverFilePath = fileURLToPath(import.meta.url);
 
+function isValidDailyBackupPassphrase(value) {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  if (trimmed.length < 12 || trimmed.length > 256) return false;
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const code = trimmed.charCodeAt(i);
+    if (code < 32 || code === 127) return false;
+  }
+  return true;
+}
+
+function normalizeDailyBackupHistoryInput(rawList) {
+  if (!Array.isArray(rawList)) return [];
+  const out = [];
+  for (const item of rawList) {
+    if (typeof item === 'string') {
+      const trimmed = item.trim();
+      if (isValidDailyBackupPassphrase(trimmed) && !out.includes(trimmed)) {
+        out.push(trimmed);
+      }
+    }
+  }
+  return out;
+}
+
 async function resolveHostStartupSecrets(options = {}) {
   const optWatermark = typeof options.watermarkSecret === 'string' ? options.watermarkSecret.trim() : '';
   const optDailyBackup = typeof options.dailyBackupSecret === 'string' ? options.dailyBackupSecret.trim() : '';
+  const optDailyHistory = normalizeDailyBackupHistoryInput(options.dailyBackupKeyHistory);
   const optExternalClockMs =
     typeof options.externalWatermarkMs === 'number' &&
     Number.isSafeInteger(options.externalWatermarkMs) &&
@@ -76,7 +102,8 @@ async function resolveHostStartupSecrets(options = {}) {
   if (optWatermark.length >= 32) {
     return {
       watermarkSecret: optWatermark,
-      dailyBackupSecret: optDailyBackup.length >= 12 ? optDailyBackup.slice(0, 256) : randomBytes(32).toString('base64url'),
+      dailyBackupSecret: isValidDailyBackupPassphrase(optDailyBackup) ? optDailyBackup : randomBytes(32).toString('base64url'),
+      dailyBackupKeyHistory: optDailyHistory,
       externalClockMs: optExternalClockMs,
       externalClockTampered: optExternalTampered,
     };
@@ -134,7 +161,8 @@ async function resolveHostStartupSecrets(options = {}) {
       const parsedSecret = typeof parsed?.watermarkSecret === 'string' ? parsed.watermarkSecret.trim() : '';
       const parsedDaily =
         typeof parsed?.dailyBackupSecret === 'string' ? parsed.dailyBackupSecret.trim().slice(0, 256) : '';
-      if (parsedSecret.length >= 32 && parsedDaily.length >= 12) {
+      const parsedDailyHistory = normalizeDailyBackupHistoryInput(parsed?.dailyBackupKeyHistory);
+      if (parsedSecret.length >= 32 && isValidDailyBackupPassphrase(parsedDaily)) {
         const parsedExtClock =
           typeof parsed?.externalClockMs === 'number' &&
           Number.isSafeInteger(parsed.externalClockMs) &&
@@ -144,6 +172,7 @@ async function resolveHostStartupSecrets(options = {}) {
         return {
           watermarkSecret: parsedSecret,
           dailyBackupSecret: parsedDaily,
+          dailyBackupKeyHistory: parsedDailyHistory,
           externalClockMs: parsedExtClock,
           externalClockTampered: Boolean(parsed?.externalClockTampered),
         };
@@ -160,7 +189,19 @@ async function resolveHostStartupSecrets(options = {}) {
 export async function createServerApp(options = {}) {
 const hostSecrets = await resolveHostStartupSecrets(options);
 const watermarkSecret = hostSecrets.watermarkSecret;
-const dailyBackupSecret = hostSecrets.dailyBackupSecret;
+let dailyBackupSecret = hostSecrets.dailyBackupSecret;
+const historicalDailyBackupKeys = [];
+function addHistoricalDailyBackupKey(key) {
+  const normalized = typeof key === 'string' ? key.trim() : '';
+  if (!isValidDailyBackupPassphrase(normalized)) return;
+  if (normalized === dailyBackupSecret) return;
+  if (!historicalDailyBackupKeys.includes(normalized)) {
+    historicalDailyBackupKeys.push(normalized);
+  }
+}
+for (const oldKey of hostSecrets.dailyBackupKeyHistory ?? []) {
+  addHistoricalDailyBackupKey(oldKey);
+}
 let latestExternalClockMs = hostSecrets.externalClockMs;
 const appDir = dirname(serverFilePath);
 const publicDir = resolve(appDir, 'public');
@@ -191,12 +232,48 @@ await mkdir(preRestoreBackupDir, { recursive: true });
 const restoredAfterCrash = await recoverPendingSqliteRestore(dataDir, databasePath, companyConfig.code);
 
 function resolveDailyBackupPassphraseSync() {
-  if (typeof dailyBackupSecret === 'string' && dailyBackupSecret.length >= 12) {
-    return dailyBackupSecret;
+  if (isValidDailyBackupPassphrase(dailyBackupSecret)) {
+    return dailyBackupSecret.trim();
   }
   const envKey = (process.env.RETAILOS_DAILY_BACKUP_KEY ?? '').trim();
-  if (envKey.length >= 12) return envKey.slice(0, 256);
+  if (isValidDailyBackupPassphrase(envKey)) return envKey;
   throw new Error('Fatal: Daily backup passphrase must be supplied by the desktop host');
+}
+
+function resolveDailyBackupCandidatePassphrases() {
+  const candidates = [];
+  try {
+    candidates.push(resolveDailyBackupPassphraseSync());
+  } catch {
+    // ignore if unavailable
+  }
+  const envKey = (process.env.RETAILOS_DAILY_BACKUP_KEY ?? '').trim();
+  if (isValidDailyBackupPassphrase(envKey) && !candidates.includes(envKey)) {
+    candidates.push(envKey);
+  }
+  for (const prev of historicalDailyBackupKeys) {
+    if (!candidates.includes(prev)) candidates.push(prev);
+  }
+  return candidates;
+}
+
+function persistDailyBackupMasterPassphrase(nextPassphrase) {
+  const trimmed = typeof nextPassphrase === 'string' ? nextPassphrase.trim() : '';
+  if (!isValidDailyBackupPassphrase(trimmed)) {
+    throw Object.assign(new Error('كلمة مرور النسخ الاحتياطي يجب أن تكون بين 12 و 256 حرفًا صالحًا'), { status: 400 });
+  }
+  const changed = trimmed !== dailyBackupSecret;
+  if (changed) {
+    const previousSecret = dailyBackupSecret;
+    dailyBackupSecret = trimmed;
+    addHistoricalDailyBackupKey(previousSecret);
+    if (process.argv.includes('--electron-stdio-secret')) {
+      const encoded = Buffer.from(trimmed, 'utf8').toString('base64url');
+      process.stdout.write(`__RETAILOS_DAILY_KEY_UPDATE__:${encoded}\n`);
+    }
+    options.onDailyBackupSecretUpdate?.(trimmed, [...historicalDailyBackupKeys]);
+  }
+  return { changed, dailyBackupSecret: trimmed, historicalKeysCount: historicalDailyBackupKeys.length };
 }
 
 async function readBackupSettings() {
@@ -243,18 +320,19 @@ async function findNewestVerifiedCandidate(extraDirs = []) {
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
   for (const item of candidates) {
     if (item.encrypted) {
-      try {
-        const passphrase = resolveDailyBackupPassphraseSync();
-        const archive = await readFile(item.path);
-        const { decryptBackupArchive } = await import('@retailos/infrastructure');
-        const sqliteBytes = decryptBackupArchive(archive, passphrase);
-        const tempWork = await mkdtemp(join(quarantineBackupDir, 'recover-'));
-        const decryptedPath = join(tempWork, 'candidate.sqlite');
-        await writeFile(decryptedPath, sqliteBytes, { mode: 0o600 });
-        const quick = checkSqliteFileQuick(decryptedPath);
-        if (quick.ok) return { ...item, path: decryptedPath, cleanupDir: tempWork };
-        await rm(tempWork, { recursive: true, force: true }).catch(() => undefined);
-      } catch { /* try older candidate */ }
+      for (const passphrase of resolveDailyBackupCandidatePassphrases()) {
+        try {
+          const archive = await readFile(item.path);
+          const { decryptBackupArchive } = await import('@retailos/infrastructure');
+          const sqliteBytes = decryptBackupArchive(archive, passphrase);
+          const tempWork = await mkdtemp(join(quarantineBackupDir, 'recover-'));
+          const decryptedPath = join(tempWork, 'candidate.sqlite');
+          await writeFile(decryptedPath, sqliteBytes, { mode: 0o600 });
+          const quick = checkSqliteFileQuick(decryptedPath);
+          if (quick.ok) return { ...item, path: decryptedPath, cleanupDir: tempWork };
+          await rm(tempWork, { recursive: true, force: true }).catch(() => undefined);
+        } catch { /* try historical or older candidate */ }
+      }
       continue;
     }
     const quick = checkSqliteFileQuick(item.path);
@@ -373,9 +451,9 @@ const licenseService = new LicenseService(db, {
       options.onWatermarkAdvance?.(clockMs);
     }
   },
+  identityProvider: typeof options.licenseIdentityProvider === 'function' ? options.licenseIdentityProvider : undefined,
   nowProvider: typeof options.nowProvider === 'function' ? options.nowProvider : undefined,
 });
-await licenseService.getStatus();
 const recurringExpenses = new SqliteRecurringExpenseRepository(db);
 const supplierReturnsRepo = new SqliteSupplierReturnRepository(db);
 const auditLogs = new SqliteAuditLogRepository(db);
@@ -418,6 +496,14 @@ const OwnerSchema = z.object({
   ownerUsername: z.string().min(3).max(30).regex(/^[a-z0-9_]+$/).trim(),
   ownerName: z.string().min(2).max(100).trim(),
   password: z.string().min(12).max(128),
+  dailyBackupPassphrase: z
+    .string()
+    .trim()
+    .max(256)
+    .optional()
+    .refine((value) => !value || isValidDailyBackupPassphrase(value), {
+      message: 'كلمة مرور النسخ الاحتياطي الرئيسية يجب أن تكون 12 حرفًا صالحة على الأقل',
+    }),
 });
 const CheckoutPaymentMethodSchema = z
   .string()
@@ -542,6 +628,17 @@ const CommitStocktakeSchema = z.object({
 const BackupSettingsSchema = z.object({ mirrorPath: z.string().max(500).trim().default(''), autoMirror: z.boolean().default(true) });
 const DailyRestoreSchema = z.object({ filename: z.string().regex(/^retailos-daily-\d{4}-\d{2}-\d{2}\.(rfbackup|sqlite)$/) });
 const DailyKeyExportSchema = z.object({ currentPassword: z.string().min(1).max(128) });
+const DailyMasterKeySchema = z.object({
+  currentPassword: z.string().min(1).max(128),
+  masterPassphrase: z
+    .string()
+    .trim()
+    .min(12, 'كلمة مرور النسخ الاحتياطي يجب أن تكون 12 حرفًا على الأقل')
+    .max(256)
+    .refine(isValidDailyBackupPassphrase, {
+      message: 'كلمة مرور النسخ الاحتياطي تحتوي على رموز غير مسموحة',
+    }),
+});
 const PasswordChangeSchema = z.object({ currentPassword: z.string().min(1).max(128), newPassword: z.string().min(12).max(128) });
 const EmployeeDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
   const date = new Date(`${value}T00:00:00.000Z`);
@@ -692,6 +789,23 @@ function parseNonNegativeMinorInput(value, label = 'القيمة النقدية'
     throw Object.assign(new Error(`${label} غير صالحة`), { status: 400 });
   }
   return BigInt(str);
+}
+
+function toNonNegativeBigInt(value) {
+  if (value === null || value === undefined || value === '') return 0n;
+  if (typeof value === 'bigint') return value > 0n ? value : 0n;
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value)) {
+      throw new Error(`Invalid safe integer monetary minor value: ${String(value)}`);
+    }
+    return value > 0 ? BigInt(value) : 0n;
+  }
+  const trimmed = String(value).trim();
+  if (!/^-?\d+$/.test(trimmed)) {
+    throw new Error(`Invalid integer string monetary minor value: ${trimmed}`);
+  }
+  const parsed = BigInt(trimmed);
+  return parsed > 0n ? parsed : 0n;
 }
 
 function paymentMethodArabicLabel(method) {
@@ -2287,6 +2401,7 @@ async function getBackupSafetyPayload() {
     },
     latestBackup: backups[0] ?? null,
     backups,
+    historicalKeysCount: historicalDailyBackupKeys.length,
   };
 }
 
@@ -4361,7 +4476,34 @@ async function handleApi(req, res, url) {
       await trx.insertInto('users').values({ id: user.id, tenant_id: user.tenantId, store_id: null, username: user.username, password_hash: user.passwordHash, full_name: user.fullName, role: user.role }).execute();
     });
     await recordAudit(systemContext, { storeId, actorUserId: user.id, actorUsername: user.username, actorRole: 'OWNER', action: 'OWNER_SETUP', entityType: 'USER', entityId: user.id, summary: `إنشاء حساب مدير النظام (${user.username})` });
-    return json(res, 201, { configured: true });
+    if (input.dailyBackupPassphrase) {
+      persistDailyBackupMasterPassphrase(input.dailyBackupPassphrase);
+      await ensureDailyBackup({ force: true, syncMirror: true }).catch(() => undefined);
+      await recordAudit(systemContext, {
+        storeId,
+        actorUserId: user.id,
+        actorUsername: user.username,
+        actorRole: 'OWNER',
+        action: 'DAILY_BACKUP_MASTER_KEY_SET',
+        entityType: 'BACKUP',
+        entityId: user.id,
+        summary: 'تعيين عبارة الاستعادة الرئيسية للنسخ الاحتياطي عند تجهيز المتجر',
+        metadata: { historicalKeysPreserved: historicalDailyBackupKeys.length },
+      });
+    } else {
+      await ensureDailyBackup({ force: false }).catch(() => undefined);
+    }
+    const activeDailyKey = resolveDailyBackupPassphraseSync();
+    return json(
+      res,
+      201,
+      {
+        configured: true,
+        dailyBackupKey: activeDailyKey,
+        historicalKeysCount: historicalDailyBackupKeys.length,
+      },
+      { 'Cache-Control': 'no-store' },
+    );
   }
 
   if (method === 'POST' && path === '/api/login') {
@@ -4656,15 +4798,64 @@ async function handleApi(req, res, url) {
       entityType: 'BACKUP',
       entityId: ctx.userId,
       summary: 'عرض/نسخ مفتاح فك تشفير النسخ اليومية التلقائية للاسترداد على جهاز بديل',
-      metadata: { source: (process.env.RETAILOS_DAILY_BACKUP_KEY ?? '').trim().length >= 12 ? 'ENV' : 'DESKTOP_DPAPI' },
+      metadata: {
+        source: (process.env.RETAILOS_DAILY_BACKUP_KEY ?? '').trim().length >= 12 ? 'ENV' : 'DESKTOP_DPAPI',
+        historicalKeysCount: historicalDailyBackupKeys.length,
+      },
     });
     return json(
       res,
       200,
       {
         dailyBackupKey,
+        historicalKeysCount: historicalDailyBackupKeys.length,
+        previousDailyBackupKeys: [...historicalDailyBackupKeys],
         keySource: (process.env.RETAILOS_DAILY_BACKUP_KEY ?? '').trim().length >= 12 ? 'ENV' : 'DESKTOP_DPAPI',
-        restoreInstructions: 'احتفظ بهذا المفتاح في مكان آمن خارج الجهاز. عند استعادة ملف retailos-daily-*.rfbackup على جهاز جديد، ضعه في خانة «كلمة مرور النسخة» بنموذج الاستعادة أو عيّن RETAILOS_DAILY_BACKUP_KEY.',
+        restoreInstructions: 'احتفظ بهذا المفتاح في مكان آمن خارج الجهاز (وكذلك أي مفاتيح سابقة إن وُجدت لملفات أقدم). عند استعادة ملف retailos-daily-*.rfbackup على جهاز جديد، ضعه في خانة «كلمة مرور النسخة» بنموذج الاستعادة.',
+      },
+      { 'Cache-Control': 'no-store' },
+    );
+  }
+
+  if (method === 'POST' && path === '/api/backups/daily/master-key') {
+    ctx.assertPermission(Permissions.SYSTEM_BACKUP_MANAGE);
+    if (ctx.roleId !== 'OWNER') {
+      throw Object.assign(new Error('متاح لمالك النظام فقط'), { status: 403 });
+    }
+    const body = validate(DailyMasterKeySchema, await readJson(req));
+    try {
+      await verifyCurrentUserPasswordOrThrow(ctx, body.currentPassword);
+    } catch (authError) {
+      await recordAudit(ctx, {
+        action: 'DAILY_BACKUP_MASTER_KEY_FAILED',
+        entityType: 'BACKUP',
+        entityId: ctx.userId,
+        summary: 'محاولة فاشلة لتغيير عبارة الاستعادة الرئيسية للنسخ اليومية',
+      });
+      throw authError;
+    }
+    const rotation = persistDailyBackupMasterPassphrase(body.masterPassphrase);
+    const backup = await ensureDailyBackup({ force: true, syncMirror: true });
+    await recordAudit(ctx, {
+      action: 'DAILY_BACKUP_MASTER_KEY_UPDATED',
+      entityType: 'BACKUP',
+      entityId: backup.filename,
+      summary: 'تحديث عبارة الاستعادة الرئيسية للنسخ الاحتياطي وتحديث نسخة اليوم مع حفظ المفاتيح السابقة بأمان',
+      metadata: {
+        changed: rotation.changed,
+        historicalKeysPreserved: rotation.historicalKeysCount,
+        backupFilename: backup.filename,
+      },
+    });
+    return json(
+      res,
+      200,
+      {
+        updated: true,
+        changed: rotation.changed,
+        historicalKeysCount: rotation.historicalKeysCount,
+        backup,
+        ...(await getBackupSafetyPayload()),
       },
       { 'Cache-Control': 'no-store' },
     );
@@ -4747,7 +4938,16 @@ async function handleApi(req, res, url) {
     let preparedRestore;
     try {
       if (body.filename.endsWith('.rfbackup')) {
-        preparedRestore = await prepareEncryptedSqliteRestore(targetPath, dataDir, resolveDailyBackupPassphraseSync(), currentTenant);
+        let lastRestoreError = null;
+        for (const passphrase of resolveDailyBackupCandidatePassphrases()) {
+          try {
+            preparedRestore = await prepareEncryptedSqliteRestore(targetPath, dataDir, passphrase, currentTenant);
+            break;
+          } catch (candidateErr) {
+            lastRestoreError = candidateErr;
+          }
+        }
+        if (!preparedRestore) throw lastRestoreError ?? new Error('Unable to decrypt daily backup');
       } else {
         preparedRestore = await preparePlainSqliteRestore(targetPath, dataDir, currentTenant);
       }
@@ -4837,8 +5037,15 @@ async function handleApi(req, res, url) {
       await pipeline(req, limit, createWriteStream(archivePath, { flags: 'wx', mode: 0o600 }));
       const currentTenant = await db.selectFrom('tenants').select(['id', 'code', 'currency']).where('id', '=', ctx.tenantId).executeTakeFirst();
       if (!currentTenant) throw Object.assign(new Error('Company not found'), { status: 404 });
+      const rawDb = database.getRawDatabase();
+      const salesCount = Number(rawDb.prepare('SELECT COUNT(*) AS cnt FROM sales WHERE tenant_id = ?').get(ctx.tenantId)?.cnt ?? 0);
+      const journalCount = Number(rawDb.prepare('SELECT COUNT(*) AS cnt FROM journal_entries WHERE tenant_id = ?').get(ctx.tenantId)?.cnt ?? 0);
+      const movementCount = Number(rawDb.prepare('SELECT COUNT(*) AS cnt FROM stock_movements WHERE tenant_id = ?').get(ctx.tenantId)?.cnt ?? 0);
+      const isFreshReplacementHost = salesCount === 0 && journalCount === 0 && movementCount === 0;
       try {
-        preparedRestore = await prepareEncryptedSqliteRestore(archivePath, dataDir, passphrase, currentTenant);
+        preparedRestore = await prepareEncryptedSqliteRestore(archivePath, dataDir, passphrase, currentTenant, {
+          allowReplacementTenantId: isFreshReplacementHost,
+        });
       } catch {
         throw Object.assign(new Error('Backup file or passphrase is invalid, or the backup belongs to another company'), { status: 400 });
       }
@@ -6782,8 +6989,8 @@ async function handleApi(req, res, url) {
             category_name: variant.category_name ?? null,
             expected_quantity: Math.max(0, Number(variant.quantity_on_hand ?? 0)),
             counted_quantity: null,
-            unit_wac: Math.max(0, Number(variant.wac_cost ?? 0)),
-            retail_price: Math.max(0, Number(variant.retail_price ?? 0)),
+            unit_wac: toNonNegativeBigInt(variant.wac_cost),
+            retail_price: toNonNegativeBigInt(variant.retail_price),
             override_unit_cost: null,
             scanned_count: 0,
             reason: null,
@@ -7067,8 +7274,8 @@ async function handleApi(req, res, url) {
                 category_name: picked.category_name ?? null,
                 expected_quantity: Math.max(0, Number(pickedInv?.quantity_on_hand ?? 0)),
                 counted_quantity: Math.max(0, step),
-                unit_wac: Math.max(0, Number(pickedInv?.wac_cost ?? 0)),
-                retail_price: Math.max(0, Number(picked.retail_price ?? 0)),
+                unit_wac: toNonNegativeBigInt(pickedInv?.wac_cost),
+                retail_price: toNonNegativeBigInt(picked.retail_price),
                 override_unit_cost: null,
                 scanned_count: 1,
                 reason: null,
@@ -7157,8 +7364,8 @@ async function handleApi(req, res, url) {
               category_name: v.category_name ?? null,
               expected_quantity: Math.max(0, Number(vInv?.quantity_on_hand ?? 0)),
               counted_quantity: body.addDelta !== undefined ? Math.max(0, body.addDelta) : null,
-              unit_wac: Math.max(0, Number(vInv?.wac_cost ?? 0)),
-              retail_price: Math.max(0, Number(v.retail_price ?? 0)),
+              unit_wac: toNonNegativeBigInt(vInv?.wac_cost),
+              retail_price: toNonNegativeBigInt(v.retail_price),
               override_unit_cost: null,
               scanned_count: 0,
               reason: null,
@@ -7603,6 +7810,7 @@ function restartLocalServer() {
       child.stdin?.write(`${JSON.stringify({
         watermarkSecret,
         ...(dailyBackupSecret ? { dailyBackupSecret } : {}),
+        ...(historicalDailyBackupKeys.length > 0 ? { dailyBackupKeyHistory: historicalDailyBackupKeys } : {}),
         ...(latestExternalClockMs > 0 ? { externalClockMs: latestExternalClockMs } : {}),
       })}\n`);
       child.stdin?.end();
@@ -7648,6 +7856,13 @@ server.listen(port, '127.0.0.1', () => {
   }
   console.log(`RetailOS is running locally at ${origin}`);
   console.log(`Company database: ${databasePath}`);
+  void licenseService.getStatus().catch((err) => {
+    if (err instanceof LicenseHardwareIdentityError) {
+      console.warn(`[RetailOS Licensing] Deferred initial hardware identity check: ${err.message}`);
+      return;
+    }
+    console.error('[RetailOS Licensing] Initial license probe failed:', err);
+  });
 });
 
 let shutdownPromise = null;

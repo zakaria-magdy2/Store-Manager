@@ -7,7 +7,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SqliteDatabaseManager } from '@retailos/infrastructure';
+import { prepareEncryptedSqliteRestore, SqliteDatabaseManager } from '@retailos/infrastructure';
+import { createServerApp } from '../server.mjs';
 import {
   cleanupTempDir,
   createTestTempDir,
@@ -4086,7 +4087,27 @@ test('Hardening regression: external clock rewind protection, /api/auth/* non-ex
     return proc;
   };
 
-  const stopHarness = (proc) => terminateChildProcessTree(proc);
+  const stopHarness = async (proc) => {
+    if (!proc || proc.exitCode !== null) return;
+    try {
+      const ctrlRaw = await readFile(join(dirC, '.retailos-control.json'), 'utf8');
+      const ctrl = JSON.parse(ctrlRaw);
+      if (ctrl?.port && ctrl?.token) {
+        const ctrlOrigin = `http://127.0.0.1:${ctrl.port}`;
+        await fetch(`${ctrlOrigin}/api/internal/shutdown`, {
+          method: 'POST',
+          headers: { Origin: ctrlOrigin, 'x-retailos-shutdown-token': ctrl.token },
+        }).catch(() => {});
+        await Promise.race([
+          once(proc, 'exit').catch(() => undefined),
+          new Promise((r) => setTimeout(r, 3000)),
+        ]);
+      }
+    } catch {
+      // Fallback to process termination below if control file unavailable
+    }
+    await terminateChildProcessTree(proc);
+  };
 
   const reqC = async (path, { method = 'GET', body, cookieStr } = {}) => {
     const headers = { Origin: urlC };
@@ -4231,5 +4252,313 @@ test('Hardening regression: external clock rewind protection, /api/auth/* non-ex
   } finally {
     await stopHarness(procC);
     await cleanupTempDir(dirC);
+  }
+});
+
+test('pre-pilot fixes: P1-1 fail-closed 503 startup/writes, P1-4 versioned master backup key rotation & cross-PC restore, and P2 BigInt stocktake snapshots', async () => {
+  const tempRoot = await createTestTempDir('retailos-prepilot-fixes-');
+  const dataDirA = join(tempRoot, 'pc-a-data');
+  const mirrorDir = join(tempRoot, 'cloud-mirror');
+  const archiveDir = join(tempRoot, 'external-archive');
+  const savedEnv = {
+    PORT: process.env.PORT,
+    RETAILOS_DATA_DIR: process.env.RETAILOS_DATA_DIR,
+    RETAILOS_DB_PATH: process.env.RETAILOS_DB_PATH,
+    RETAILOS_BACKUP_DIR: process.env.RETAILOS_BACKUP_DIR,
+    RETAILOS_COMPANY_NAME: process.env.RETAILOS_COMPANY_NAME,
+    RETAILOS_COMPANY_CODE: process.env.RETAILOS_COMPANY_CODE,
+    RETAILOS_CURRENCY: process.env.RETAILOS_CURRENCY,
+    RETAILOS_STORE_NAME: process.env.RETAILOS_STORE_NAME,
+  };
+
+  let appHandle = null;
+  let activeDailyKey = randomBytes(32).toString('base64url');
+  let historyKeys = [];
+  let hardwareAvailable = true;
+  const pcAMachineId = 'ROS-ABCD-EFGH-JKLM';
+
+  const bootPcA = async (port) => {
+    process.env.PORT = String(port);
+    process.env.RETAILOS_DATA_DIR = dataDirA;
+    delete process.env.RETAILOS_DB_PATH;
+    delete process.env.RETAILOS_BACKUP_DIR;
+    process.env.RETAILOS_COMPANY_NAME = 'متجر ما قبل الإطلاق';
+    process.env.RETAILOS_COMPANY_CODE = 'PREPILOT_FIX';
+    process.env.RETAILOS_CURRENCY = 'EGP';
+    process.env.RETAILOS_STORE_NAME = 'الفرع الرئيسي';
+
+    return createServerApp({
+      watermarkSecret: flowTestWatermarkSecret,
+      dailyBackupSecret: activeDailyKey,
+      dailyBackupKeyHistory: historyKeys,
+      licensePublicKey: flowLicensePublicKeyPem,
+      licenseIdentityProvider: () =>
+        hardwareAvailable
+          ? { machineId: pcAMachineId, isHardwareBacked: true }
+          : { machineId: 'ROS-DEGR-ADED-9999', isHardwareBacked: false },
+      onDailyBackupSecretUpdate: (nextSecret, nextHistory) => {
+        activeDailyKey = nextSecret;
+        historyKeys = [...nextHistory];
+      },
+    });
+  };
+
+  const reqJson = async (url, path, { method = 'GET', body, cookieStr, headers: extraHeaders } = {}) => {
+    const headers = { Origin: url, ...(extraHeaders ?? {}) };
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (cookieStr) headers.Cookie = cookieStr;
+    const response = await fetch(`${url}${path}`, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    const text = await response.text();
+    let payload;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      payload = text;
+    }
+    return { response, payload };
+  };
+
+  try {
+    await import('node:fs/promises').then(({ mkdir }) => Promise.all([mkdir(dataDirA, { recursive: true }), mkdir(mirrorDir, { recursive: true }), mkdir(archiveDir, { recursive: true })]));
+    const port1 = await reservePort();
+    appHandle = await bootPcA(port1);
+    const url1 = appHandle.origin;
+
+    // 1. Activate PC-A license
+    const nowMs = Date.now();
+    const tokenPcA = signFlowLicenseToken({
+      licenseId: 'PREPILOT-P1-TEST',
+      customerName: 'عميل ما قبل الإطلاق',
+      machineId: pcAMachineId,
+      issuedAt: new Date(nowMs).toISOString(),
+      expiresAt: new Date(nowMs + 365 * 86400000).toISOString(),
+      planName: 'Pilot Plan',
+    });
+    const act1 = await reqJson(url1, '/api/license/activate', { method: 'POST', body: { token: tokenPcA } });
+    assert.equal(act1.response.status, 200);
+    assert.equal(act1.payload.status, 'ACTIVE');
+
+    // 2. Setup with custom master backup passphrase #1 (P1-4)
+    const masterKey1 = 'PilotMasterKey-Phase1-2026!';
+    const setupRes = await reqJson(url1, '/api/setup', {
+      method: 'POST',
+      body: {
+        ownerUsername: 'pilot_owner',
+        ownerName: 'مالك التجربة',
+        password: 'Pilot-Owner-Strong-Pass-2026',
+        dailyBackupPassphrase: masterKey1,
+      },
+    });
+    assert.equal(setupRes.response.status, 201);
+    assert.equal(setupRes.payload.dailyBackupKey, masterKey1);
+    assert.equal(activeDailyKey, masterKey1);
+
+    const login1 = await reqJson(url1, '/api/login', {
+      method: 'POST',
+      body: { username: 'pilot_owner', password: 'Pilot-Owner-Strong-Pass-2026' },
+    });
+    assert.equal(login1.response.status, 200);
+    const cookie1 = login1.response.headers.get('set-cookie').split(';')[0];
+
+    // 3. Configure mirror dir and capture daily backup encrypted with masterKey1
+    const mirrorSave = await reqJson(url1, '/api/backups/settings', {
+      method: 'POST',
+      cookieStr: cookie1,
+      body: { mirrorPath: mirrorDir, autoMirror: true },
+    });
+    assert.equal(mirrorSave.response.status, 200);
+
+    const runNow1 = await reqJson(url1, '/api/backups/daily/run-now', {
+      method: 'POST',
+      cookieStr: cookie1,
+      body: {},
+    });
+    assert.equal(runNow1.response.status, 201);
+    const backup1Filename = runNow1.payload.backup.filename;
+    assert.match(backup1Filename, /^retailos-daily-\d{4}-\d{2}-\d{2}\.rfbackup$/);
+    const backup1Bytes = await readFile(join(mirrorDir, 'retailos-latest.rfbackup'));
+    const historicalSnapshotPath = join(archiveDir, 'pre-rotation-retailos-daily-2026-11-18.rfbackup');
+    await writeFile(historicalSnapshotPath, backup1Bytes);
+
+    // 4. Test P2 Stocktake BigInt snapshots + large integer minor amounts
+    const prodRes = await reqJson(url1, '/api/products', {
+      method: 'POST',
+      cookieStr: cookie1,
+      body: {
+        name: 'منتج جرد BigInt',
+        sku: 'STK-BIGINT-01',
+        variants: [{ sku: 'STK-BIGINT-01-V', barcode: '6229998887771', retailPrice: '1234567890123', reorderPoint: '1' }],
+      },
+    });
+    assert.equal(prodRes.response.status, 201);
+    const dataAfterProd = await reqJson(url1, '/api/data', { cookieStr: cookie1 });
+    const storeId = dataAfterProd.payload.stores[0].id;
+    const variantId = dataAfterProd.payload.products.find((p) => p.id === prodRes.payload.id).variants[0].id;
+
+    const supRes = await reqJson(url1, '/api/suppliers', {
+      method: 'POST',
+      cookieStr: cookie1,
+      body: { name: 'مورد BigInt جرد' },
+    });
+    assert.equal(supRes.response.status, 201);
+    const purRes = await reqJson(url1, '/api/purchases', {
+      method: 'POST',
+      cookieStr: cookie1,
+      body: {
+        storeId,
+        supplierId: supRes.payload.id,
+        idempotencyKey: randomUUID(),
+        totalAmount: '1000000000000',
+        paidAmount: '1000000000000',
+        paymentMethod: 'BANK_TRANSFER',
+        items: [{ variantId, quantity: '2', unitCost: '500000000000' }],
+      },
+    });
+    assert.equal(purRes.response.status, 201);
+
+    const stkStart = await reqJson(url1, '/api/stocktakes', {
+      method: 'POST',
+      cookieStr: cookie1,
+      body: { storeId, title: 'جرد BigInt دقة كاملة', scope: 'FULL' },
+    });
+    assert.equal(stkStart.response.status, 201);
+    assert.equal(stkStart.payload.lines[0].unitWac.amount, '500000000000');
+    assert.equal(stkStart.payload.lines[0].retailPrice.amount, '1234567890123');
+
+    const stkScan = await reqJson(url1, `/api/stocktakes/${stkStart.payload.session.id}/lines`, {
+      method: 'PATCH',
+      cookieStr: cookie1,
+      body: { scanCode: '6229998887771', delta: 3 },
+    });
+    assert.equal(stkScan.response.status, 200);
+    assert.equal(stkScan.payload.lines[0].varianceRetail.amount, '1234567890123');
+
+    // 5. Rotate master backup passphrase -> masterKey2 (P1-4 historical preservation + cross-PC recovery)
+    const badPwdRotate = await reqJson(url1, '/api/backups/daily/master-key', {
+      method: 'POST',
+      cookieStr: cookie1,
+      body: { currentPassword: 'Wrong-Password-123', masterPassphrase: 'PilotMasterKey-Phase2-2026!' },
+    });
+    assert.equal(badPwdRotate.response.status, 400);
+
+    const masterKey2 = 'PilotMasterKey-Phase2-2026!';
+    const rotateRes = await reqJson(url1, '/api/backups/daily/master-key', {
+      method: 'POST',
+      cookieStr: cookie1,
+      body: { currentPassword: 'Pilot-Owner-Strong-Pass-2026', masterPassphrase: masterKey2 },
+    });
+    assert.equal(rotateRes.response.status, 200);
+    assert.equal(rotateRes.payload.updated, true);
+    assert.ok(rotateRes.payload.historicalKeysCount >= 1);
+    assert.equal(activeDailyKey, masterKey2);
+    assert.ok(historyKeys.includes(masterKey1), 'Old masterKey1 MUST remain in preserved history');
+
+    const keyExportRes = await reqJson(url1, '/api/backups/daily/key-export', {
+      method: 'POST',
+      cookieStr: cookie1,
+      body: { currentPassword: 'Pilot-Owner-Strong-Pass-2026' },
+    });
+    assert.equal(keyExportRes.response.status, 200);
+    assert.equal(keyExportRes.payload.dailyBackupKey, masterKey2);
+    assert.ok(keyExportRes.payload.previousDailyBackupKeys.includes(masterKey1));
+
+    // Cross-PC decryption of mirrored latest.rfbackup with masterKey2 (NO PC-A DPAPI required, simulating a new replacement PC tenant UUID)
+    const crossPcWorkspace = join(tempRoot, 'cross-pc-work');
+    await import('node:fs/promises').then(({ mkdir }) => mkdir(crossPcWorkspace, { recursive: true }));
+    const preparedLatest = await prepareEncryptedSqliteRestore(
+      join(mirrorDir, 'retailos-latest.rfbackup'),
+      crossPcWorkspace,
+      masterKey2,
+      { id: dataAfterProd.payload.tenantId, code: 'PREPILOT_FIX', currency: 'EGP' },
+      { allowReplacementTenantId: true },
+    );
+    assert.equal(preparedLatest.tenant.code, 'PREPILOT_FIX');
+    await rm(preparedLatest.workspace, { recursive: true, force: true });
+
+    // Pre-rotation archive encrypted under masterKey1 MUST ALSO remain decryptable via masterKey1 (cross-PC replacement check too)
+    const preparedHistorical = await prepareEncryptedSqliteRestore(
+      historicalSnapshotPath,
+      crossPcWorkspace,
+      masterKey1,
+      { id: randomUUID(), code: 'PREPILOT_FIX', currency: 'EGP' },
+      { allowReplacementTenantId: true },
+    );
+    assert.equal(preparedHistorical.tenant.code, 'PREPILOT_FIX');
+    await rm(preparedHistorical.workspace, { recursive: true, force: true });
+
+    // Even if we place the old-key archive in daily/ with a previous day's name, the server decrypts it using historyKeys
+    await writeFile(join(dataDirA, 'backups', 'daily', 'retailos-daily-2026-11-18.rfbackup'), backup1Bytes);
+    const listDailyAfter = await reqJson(url1, '/api/backups/daily', { cookieStr: cookie1 });
+    assert.ok(listDailyAfter.payload.backups.some((b) => b.filename === 'retailos-daily-2026-11-18.rfbackup'));
+
+    // 6. Restart server with persistent boot hardware identity failure -> MUST start cleanly and fail closed with 503 (P1-1)
+    await appHandle.shutdown();
+    appHandle = null;
+
+    hardwareAvailable = false;
+    const port2 = await reservePort();
+    appHandle = await bootPcA(port2);
+    const url2 = appHandle.origin;
+
+    const bootCheck = await reqJson(url2, '/api/bootstrap');
+    assert.equal(bootCheck.response.status, 200);
+    assert.equal(bootCheck.payload.configured, true);
+
+    const status503 = await reqJson(url2, '/api/license/status');
+    assert.equal(status503.response.status, 503);
+    assert.equal(status503.payload.code, 'HARDWARE_IDENTITY_UNAVAILABLE');
+    assert.equal(status503.payload.retryable, true);
+
+    // Login still works cleanly for Owner even while hardware identity is degraded
+    const login2 = await reqJson(url2, '/api/login', {
+      method: 'POST',
+      body: { username: 'pilot_owner', password: 'Pilot-Owner-Strong-Pass-2026' },
+    });
+    assert.equal(login2.response.status, 200);
+    const cookie2 = login2.response.headers.get('set-cookie').split(';')[0];
+
+    // All operational/financial mutations MUST fail closed with 503 while hardware identity is unavailable
+    const blockedShift = await reqJson(url2, '/api/shifts/start', {
+      method: 'POST',
+      cookieStr: cookie2,
+      body: { storeId, openingCash: '5000' },
+    });
+    assert.equal(blockedShift.response.status, 503);
+    assert.equal(blockedShift.payload.code, 'HARDWARE_IDENTITY_UNAVAILABLE');
+    assert.equal(blockedShift.payload.retryable, true);
+
+    const blockedExpense = await reqJson(url2, '/api/expenses', {
+      method: 'POST',
+      cookieStr: cookie2,
+      body: { storeId, category: 'عامة', amount: '1000', expenseDate: cairoDateIso(), description: 'تجربة 503' },
+    });
+    assert.equal(blockedExpense.response.status, 503);
+    assert.equal(blockedExpense.payload.code, 'HARDWARE_IDENTITY_UNAVAILABLE');
+
+    // Recover hardware identity -> status returns 200 ACTIVE and financial mutations succeed
+    hardwareAvailable = true;
+    const recoveredStatus = await reqJson(url2, '/api/license/status');
+    assert.equal(recoveredStatus.response.status, 200);
+    assert.equal(recoveredStatus.payload.status, 'ACTIVE');
+
+    const allowedShift = await reqJson(url2, '/api/shifts/start', {
+      method: 'POST',
+      cookieStr: cookie2,
+      body: { storeId, openingCash: '5000' },
+    });
+    assert.equal(allowedShift.response.status, 201);
+  } finally {
+    if (appHandle) {
+      await appHandle.shutdown().catch(() => {});
+    }
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    await cleanupTempDir(tempRoot);
   }
 });
