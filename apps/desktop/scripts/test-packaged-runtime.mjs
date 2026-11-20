@@ -312,71 +312,11 @@ export function validateServerProcessOwnership(
     };
   }
 
-  if (spawnedMainIdentity?.creationDate) {
-    const serverCreatedMs = Date.parse(candidateIdentity.creationDate);
-    const mainCreatedMs = Date.parse(spawnedMainIdentity.creationDate);
-    if (Number.isFinite(serverCreatedMs) && Number.isFinite(mainCreatedMs) && serverCreatedMs < mainCreatedMs - 1000) {
-      return {
-        valid: false,
-        unverified: false,
-        reason: `CreationDate ${candidateIdentity.creationDate} precedes spawned parent creation ${spawnedMainIdentity.creationDate}`,
-      };
-    }
-  }
-
-  const effectiveExpectedParentPid = spawnedMainIdentity?.pid ?? expectedParentPid;
-  let liveParent = null;
-  if (liveParentIdentity !== undefined) {
-    liveParent = liveParentIdentity;
-  } else if (
-    processTable &&
-    Number.isInteger(effectiveExpectedParentPid) &&
-    effectiveExpectedParentPid > 0
-  ) {
-    liveParent = processTable.get(effectiveExpectedParentPid) ?? null;
-  }
-
-  if (spawnedMainIdentity && isCompleteProcessIdentity(spawnedMainIdentity) && liveParent !== null) {
-    if (!isCompleteProcessIdentity(liveParent)) {
-      return {
-        valid: false,
-        unverified: true,
-        reason: `Ownership proof failed for PID ${candidateIdentity.pid}: live parent PID ${spawnedMainIdentity.pid} has incomplete identity (${formatProcessIdentity(liveParent)})`,
-      };
-    }
-    if (!isSameProcessIdentity(spawnedMainIdentity, liveParent, { platform })) {
-      return {
-        valid: false,
-        parentPidReused: true,
-        unverified: true,
-        reason: `Ownership proof failed for PID ${candidateIdentity.pid}: parent PID ${spawnedMainIdentity.pid} was reused by another process (expected [${formatProcessIdentity(spawnedMainIdentity)}], actual [${formatProcessIdentity(liveParent)}])`,
-      };
-    }
-  }
-
-  const parentVerified = Boolean(
-    spawnedMainIdentity &&
-      isCompleteProcessIdentity(spawnedMainIdentity) &&
-      liveParent &&
-      isCompleteProcessIdentity(liveParent) &&
-      isSameProcessIdentity(spawnedMainIdentity, liveParent, { platform }) &&
-      candidateIdentity.parentPid === spawnedMainIdentity.pid,
-  );
-
-  if (
-    effectiveExpectedParentPid !== null &&
-    effectiveExpectedParentPid !== undefined &&
-    candidateIdentity.parentPid !== effectiveExpectedParentPid
-  ) {
-    return {
-      valid: false,
-      unverified: false,
-      reason: `Ownership proof failed for PID ${candidateIdentity.pid}: ParentProcessId (${String(candidateIdentity.parentPid)}) does not match expected parent PID ${String(effectiveExpectedParentPid)}`,
-    };
-  }
-
   let cmdMatches = false;
-  if (typeof candidateIdentity.commandLine === 'string' && expectedServerScriptPath) {
+  const hasCommandLine =
+    typeof candidateIdentity.commandLine === 'string' &&
+    candidateIdentity.commandLine.trim().length > 0;
+  if (hasCommandLine && expectedServerScriptPath) {
     const cmdText =
       platform === 'win32'
         ? candidateIdentity.commandLine.toLowerCase()
@@ -389,15 +329,82 @@ export function validateServerProcessOwnership(
       cmdText.includes('--electron-stdio-secret') && cmdText.includes(expectedScript);
   }
 
-  if (!parentVerified && !cmdMatches) {
+  if (!spawnedMainIdentity || !isCompleteProcessIdentity(spawnedMainIdentity)) {
     return {
       valid: false,
+      parentUnverified: true,
+      unverified: true,
+      reason: `Ownership proof failed for PID ${candidateIdentity.pid}: recorded spawnedMainIdentity is missing or incomplete (${formatProcessIdentity(spawnedMainIdentity)})`,
+    };
+  }
+
+  if (spawnedMainIdentity.creationDate) {
+    const serverCreatedMs = Date.parse(candidateIdentity.creationDate);
+    const mainCreatedMs = Date.parse(spawnedMainIdentity.creationDate);
+    if (Number.isFinite(serverCreatedMs) && Number.isFinite(mainCreatedMs) && serverCreatedMs < mainCreatedMs - 1000) {
+      return {
+        valid: false,
+        unverified: false,
+        reason: `CreationDate ${candidateIdentity.creationDate} precedes spawned parent creation ${spawnedMainIdentity.creationDate}`,
+      };
+    }
+  }
+
+  const effectiveExpectedParentPid = spawnedMainIdentity.pid ?? expectedParentPid;
+  let liveParent = null;
+  if (liveParentIdentity !== undefined) {
+    liveParent = liveParentIdentity;
+  } else if (
+    processTable &&
+    Number.isInteger(effectiveExpectedParentPid) &&
+    effectiveExpectedParentPid > 0
+  ) {
+    liveParent = processTable.get(effectiveExpectedParentPid) ?? null;
+  }
+
+  // Require a live, verified parent matching spawnedMainIdentity; NEVER let CommandLine bypass missing/reused parent.
+  if (!liveParent) {
+    return {
+      valid: false,
+      parentMissing: true,
       unverified: Boolean(
-        effectiveExpectedParentPid !== null &&
-          effectiveExpectedParentPid !== undefined &&
-          candidateIdentity.parentPid === effectiveExpectedParentPid,
+        candidateIdentity.parentPid === spawnedMainIdentity.pid || cmdMatches,
       ),
-      reason: `Ownership proof failed for PID ${candidateIdentity.pid}: parent identity was not verified against spawnedMainIdentity and CommandLine did not reference "${expectedServerScriptPath}" with --electron-stdio-secret`,
+      reason: `Ownership proof failed for PID ${candidateIdentity.pid}: live parent PID ${spawnedMainIdentity.pid} is not running or process table was unavailable`,
+    };
+  }
+
+  if (!isCompleteProcessIdentity(liveParent)) {
+    return {
+      valid: false,
+      parentUnverified: true,
+      unverified: true,
+      reason: `Ownership proof failed for PID ${candidateIdentity.pid}: live parent PID ${spawnedMainIdentity.pid} has incomplete identity (${formatProcessIdentity(liveParent)})`,
+    };
+  }
+
+  if (!isSameProcessIdentity(spawnedMainIdentity, liveParent, { platform })) {
+    return {
+      valid: false,
+      parentPidReused: true,
+      unverified: true,
+      reason: `Ownership proof failed for PID ${candidateIdentity.pid}: parent PID ${spawnedMainIdentity.pid} was reused by another process (expected [${formatProcessIdentity(spawnedMainIdentity)}], actual [${formatProcessIdentity(liveParent)}])`,
+    };
+  }
+
+  if (candidateIdentity.parentPid !== spawnedMainIdentity.pid) {
+    return {
+      valid: false,
+      unverified: false,
+      reason: `Ownership proof failed for PID ${candidateIdentity.pid}: ParentProcessId (${String(candidateIdentity.parentPid)}) does not match expected parent PID ${String(spawnedMainIdentity.pid)}`,
+    };
+  }
+
+  if (hasCommandLine && expectedServerScriptPath && !cmdMatches) {
+    return {
+      valid: false,
+      unverified: false,
+      reason: `Ownership proof failed for PID ${candidateIdentity.pid}: CommandLine does not reference "${expectedServerScriptPath}" with --electron-stdio-secret`,
     };
   }
 
@@ -1161,7 +1168,7 @@ export async function cleanupPackagedTestRun({
       platform,
     });
     if (termResult.status === 'VERIFICATION_FAILED') {
-      unverifiedOwned.push({
+      pushUnverifiedBlocker(unverifiedOwned, {
         identity: record.identity,
         reason: termResult.reason,
       });
@@ -1199,7 +1206,7 @@ export async function cleanupPackagedTestRun({
       });
     }
     for (const u of waitResult.unverified) {
-      unverifiedOwned.push(u);
+      pushUnverifiedBlocker(unverifiedOwned, u);
     }
     for (const reused of waitResult.reusedPids) {
       reusedPids.push(reused);

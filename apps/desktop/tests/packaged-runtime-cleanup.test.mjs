@@ -1066,26 +1066,57 @@ test('validateServerProcessOwnership verifies live parent identity and rejects P
   assert.equal(resSameExe.parentPidReused, true);
   assert.equal(resSameExe.unverified, true);
 
-  // 3. ParentProcessId alone (parent absent / not verified in processTable AND no matching CommandLine) -> REJECT
-  const candidateNoCmd = makeIdentity({
-    pid: 4201,
-    parentPid: 4100,
-    executablePath: TEST_EXE,
-    commandLine: `"${TEST_EXE}"`,
-    creationDate: '2026-11-19T18:00:03.0000000Z',
-  });
-  const resParentPidOnly = validateServerProcessOwnership(candidateNoCmd, {
+  // 3. Parent absent (ROOT_EXITED) -> MUST reject EVEN IF CommandLine matches server.mjs & --electron-stdio-secret!
+  const resMissingParentStrongCmd = validateServerProcessOwnership(candidateServer, {
     expectedExePath: TEST_EXE,
     expectedParentPid: mainId.pid,
     expectedServerScriptPath: TEST_SERVER_SCRIPT,
     preExistingPids: new Set(),
     spawnedMainIdentity: mainId,
-    processTable: new Map([[candidateNoCmd.pid, candidateNoCmd]]),
+    processTable: new Map([[candidateServer.pid, candidateServer]]), // Parent PID 4100 is absent
     platform: 'win32',
   });
-  assert.equal(resParentPidOnly.valid, false);
-  assert.equal(resParentPidOnly.unverified, true);
-  assert.match(resParentPidOnly.reason, /parent identity was not verified/i);
+  assert.equal(resMissingParentStrongCmd.valid, false);
+  assert.equal(resMissingParentStrongCmd.parentMissing, true);
+  assert.equal(resMissingParentStrongCmd.unverified, true);
+  assert.match(resMissingParentStrongCmd.reason, /live parent PID 4100 is not running/i);
+
+  // 3b. Omitted processTable -> NEVER allow CommandLine or ParentProcessId alone to validate
+  const resOmittedTable = validateServerProcessOwnership(candidateServer, {
+    expectedExePath: TEST_EXE,
+    expectedParentPid: mainId.pid,
+    expectedServerScriptPath: TEST_SERVER_SCRIPT,
+    preExistingPids: new Set(),
+    spawnedMainIdentity: mainId,
+    platform: 'win32',
+  });
+  assert.equal(resOmittedTable.valid, false);
+  assert.equal(resOmittedTable.parentMissing, true);
+  assert.equal(resOmittedTable.unverified, true);
+
+  // 3c. Non-server Electron child (e.g., --type=renderer) under a verified parent -> REJECT (not the server)
+  const rendererChild = makeIdentity({
+    pid: 4202,
+    parentPid: 4100,
+    executablePath: TEST_EXE,
+    commandLine: `"${TEST_EXE}" --type=renderer --app-user-model-id=com.retailos.desktop`,
+    creationDate: '2026-11-19T18:00:02.0000000Z',
+  });
+  const resRendererChild = validateServerProcessOwnership(rendererChild, {
+    expectedExePath: TEST_EXE,
+    expectedParentPid: mainId.pid,
+    expectedServerScriptPath: TEST_SERVER_SCRIPT,
+    preExistingPids: new Set(),
+    spawnedMainIdentity: mainId,
+    processTable: new Map([
+      [mainId.pid, mainId],
+      [rendererChild.pid, rendererChild],
+    ]),
+    platform: 'win32',
+  });
+  assert.equal(resRendererChild.valid, false);
+  assert.equal(resRendererChild.unverified, false);
+  assert.match(resRendererChild.reason, /CommandLine does not reference/i);
 
   // 4. Incomplete live parent identity (missing ExecutablePath & CreationDate) -> REJECT fail-closed
   const incompleteLiveParent = {
@@ -1109,6 +1140,7 @@ test('validateServerProcessOwnership verifies live parent identity and rejects P
     platform: 'win32',
   });
   assert.equal(resIncompleteParent.valid, false);
+  assert.equal(resIncompleteParent.parentUnverified, true);
   assert.equal(resIncompleteParent.unverified, true);
   assert.match(resIncompleteParent.reason, /incomplete identity/i);
 
@@ -1172,5 +1204,115 @@ test('validateServerProcessOwnership verifies live parent identity and rejects P
     assert.equal(existsSync(sentinel), true);
   } finally {
     await rm(sandbox, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  // 7. End-to-end cleanupPackagedTestRun with ROOT_EXITED + control file referencing server-like candidate
+  // -> Because live parent is absent, NEVER kill candidate (CommandLine cannot bypass), fail closed & preserve sandbox
+  const sandboxExitedParentCtrl = await mkdtemp(join(tmpdir(), 'retailos-test-exited-ctrl-'));
+  try {
+    const sentinel = join(sandboxExitedParentCtrl, 'keep-exited-ctrl.txt');
+    await writeFile(sentinel, 'preserve', 'utf8');
+    const controlFilePath = join(sandboxExitedParentCtrl, '.retailos-control.json');
+    await writeFile(controlFilePath, JSON.stringify({ pid: candidateServer.pid, port: 3210 }), 'utf8');
+
+    const tableParentExited = new Map([[candidateServer.pid, candidateServer]]);
+    const killedPids = [];
+
+    await assert.rejects(
+      () =>
+        cleanupPackagedTestRun({
+          ownedProcesses: new Map([[mainId.pid, { identity: mainId, depth: 0 }]]),
+          spawnedMainIdentity: mainId,
+          controlFilePath,
+          expectedExePath: TEST_EXE,
+          expectedServerScriptPath: TEST_SERVER_SCRIPT,
+          preExistingPids: new Set(),
+          tempSandbox: sandboxExitedParentCtrl,
+          queryProcessTable: () => new Map(tableParentExited),
+          killSinglePid: (pid) => killedPids.push(pid),
+          waitTimeoutMs: 200,
+          pollIntervalMs: 20,
+          platform: 'win32',
+        }),
+      (err) => {
+        assert.match(err.message, /Preserving temporary sandbox/);
+        assert.match(err.message, /PID=4200/);
+        return true;
+      },
+    );
+
+    assert.deepEqual(killedPids, [], 'Must NEVER kill unverified candidate when parent is absent');
+    assert.equal(existsSync(sandboxExitedParentCtrl), true);
+    assert.equal(existsSync(sentinel), true);
+  } finally {
+    await rm(sandboxExitedParentCtrl, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  // 8. ROOT_UNVERIFIED (incomplete live root) + potential child citing root PID
+  // -> Never kill root or potential child, flag both in unverifiedDescendants, preserve sandbox
+  const incompleteLiveRoot = {
+    pid: 4100,
+    parentPid: 100,
+    name: 'RetailOS.exe',
+    executablePath: null,
+    commandLine: null,
+    creationDate: null,
+  };
+  const potentialChildUnderUnverifiedRoot = makeIdentity({
+    pid: 4300,
+    parentPid: 4100,
+    name: 'helper.exe',
+    executablePath: 'C:\\Tools\\helper.exe',
+    creationDate: '2026-11-19T18:01:00.0000000Z',
+  });
+  const unverifiedRootTable = new Map([
+    [4100, incompleteLiveRoot],
+    [4300, potentialChildUnderUnverifiedRoot],
+  ]);
+  const unverifiedTree = collectProcessTreeIdentities(mainId, {
+    queryProcessTable: () => unverifiedRootTable,
+    platform: 'win32',
+  });
+  assert.equal(unverifiedTree.rootStatus, 'ROOT_UNVERIFIED');
+  assert.equal(unverifiedTree.identities.size, 0);
+  assert.deepEqual(
+    unverifiedTree.unverifiedDescendants.map((d) => d.identity.pid).sort((a, b) => a - b),
+    [4100, 4300],
+  );
+
+  const sandboxUnverifiedRoot = await mkdtemp(join(tmpdir(), 'retailos-test-unverified-root-'));
+  try {
+    const sentinel = join(sandboxUnverifiedRoot, 'keep-unverified-root.txt');
+    await writeFile(sentinel, 'preserve', 'utf8');
+    const killedPids = [];
+
+    await assert.rejects(
+      () =>
+        cleanupPackagedTestRun({
+          ownedProcesses: new Map([[mainId.pid, { identity: mainId, depth: 0 }]]),
+          spawnedMainIdentity: mainId,
+          expectedExePath: TEST_EXE,
+          expectedServerScriptPath: TEST_SERVER_SCRIPT,
+          preExistingPids: new Set(),
+          tempSandbox: sandboxUnverifiedRoot,
+          queryProcessTable: () => new Map(unverifiedRootTable),
+          killSinglePid: (pid) => killedPids.push(pid),
+          waitTimeoutMs: 200,
+          pollIntervalMs: 20,
+          platform: 'win32',
+        }),
+      (err) => {
+        assert.match(err.message, /Preserving temporary sandbox/);
+        assert.match(err.message, /PID=4100/);
+        assert.match(err.message, /PID=4300/);
+        return true;
+      },
+    );
+
+    assert.deepEqual(killedPids, []);
+    assert.equal(existsSync(sandboxUnverifiedRoot), true);
+    assert.equal(existsSync(sentinel), true);
+  } finally {
+    await rm(sandboxUnverifiedRoot, { recursive: true, force: true }).catch(() => undefined);
   }
 });

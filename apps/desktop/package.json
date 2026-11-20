@@ -14,6 +14,7 @@
     "lint": "eslint src --max-warnings 0",
     "test": "pnpm run build && node --test tests/*.test.mjs",
     "test:packaged": "node scripts/test-packaged-runtime.mjs",
+    "test:installed-acceptance": "node scripts/test-installed-acceptance.mjs",
     "desktop:dev": "pnpm run desktop:build && electron .",
     "desktop:build": "pnpm --filter @retailos/web... build && pnpm run build && node scripts/stage-web-runtime.mjs",
     "desktop:pack:win": "node -e \"import('node:child_process').then(({spawnSync})=>{const w=process.platform==='win32';const cmd='pnpm run desktop:build && electron-builder --win --dir --config electron-builder.json';const r=spawnSync(w?'cmd.exe':'sh',w?['/d','/s','/c',cmd]:['-c',cmd],{stdio:'inherit',env:{...process.env,RETAILOS_REQUIRE_SIGNED_MANIFEST:'1'}});process.exit(r.status??1);})\"",

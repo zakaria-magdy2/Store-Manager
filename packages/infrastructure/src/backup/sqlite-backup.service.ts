@@ -101,6 +101,74 @@ interface RestoreMarker {
   rollbackPath: string;
   candidateSha256: string;
   tenant: RestoreTenantIdentity;
+  /** Identity of the host database being replaced; rollback artifacts are verified against it. */
+  previousTenant?: RestoreTenantIdentity;
+}
+
+/**
+ * Tables that a freshly set-up host is allowed to contain rows in (schema bookkeeping, seeded
+ * chart of accounts / periods / categories, auth/session plumbing, setup audit trail, licensing).
+ * Every other table — including any table added by a future migration — must be empty for the
+ * host to qualify as a fresh replacement target (fail-closed).
+ */
+const FRESH_HOST_UNBOUNDED_TABLES: ReadonlySet<string> = new Set([
+  'kysely_migration',
+  'kysely_migration_lock',
+  'sqlite_sequence',
+  'accounts',
+  'accounting_periods',
+  'expense_categories',
+  'document_sequences',
+  'sessions',
+  'auth_rate_limits',
+  'outbox_events',
+  'audit_logs',
+  'system_licensing',
+]);
+/** Tables allowed a bounded number of rows on a fresh host (the setup owner and default branch). */
+const FRESH_HOST_BOUNDED_TABLES: ReadonlyMap<string, number> = new Map([
+  ['tenants', 1],
+  ['stores', 1],
+  ['users', 1],
+]);
+
+export interface FreshReplacementHostBlocker { table: string; rows: number; allowed: number }
+export interface FreshReplacementHostAssessment { fresh: boolean; blockers: FreshReplacementHostBlocker[] }
+
+/**
+ * Decides whether the live host database may be replaced by a backup that carries a different
+ * tenant id (cross-PC disaster recovery onto a newly installed machine). Only a host with no
+ * operational data qualifies. Any query failure is treated as "not fresh".
+ */
+export function assessFreshReplacementHost(database: DatabaseInstance, tenantId: string): FreshReplacementHostAssessment {
+  const blockers: FreshReplacementHostBlocker[] = [];
+  try {
+    const tenantIds = database.prepare('SELECT id FROM tenants').pluck().all();
+    if (tenantIds.length !== 1 || tenantIds[0] !== tenantId) {
+      blockers.push({ table: 'tenants', rows: tenantIds.length, allowed: 1 });
+    }
+    const tables = database
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+      .pluck()
+      .all() as string[];
+    for (const table of tables) {
+      if (FRESH_HOST_UNBOUNDED_TABLES.has(table) || table === 'tenants') continue;
+      const allowed = FRESH_HOST_BOUNDED_TABLES.get(table) ?? 0;
+      const quoted = `"${table.replace(/"/g, '""')}"`;
+      const rows = database.prepare(`SELECT COUNT(*) FROM ${quoted}`).pluck().get();
+      const count = typeof rows === 'number' ? rows : -1;
+      if (count < 0 || count > allowed) blockers.push({ table, rows: count, allowed });
+    }
+  } catch {
+    blockers.push({ table: '*', rows: -1, allowed: 0 });
+  }
+  return { fresh: blockers.length === 0, blockers };
+}
+
+function readSingleTenantIdentity(database: DatabaseInstance): RestoreTenantIdentity {
+  const tenants = database.prepare('SELECT id, code, currency FROM tenants').all() as RestoreTenantIdentity[];
+  if (tenants.length !== 1) throw new Error('Active database must contain exactly one company before restore');
+  return tenants[0]!;
 }
 
 function isSupportedBackupMigrationHistory(appliedMigrationNames: readonly string[]): boolean {
@@ -259,11 +327,24 @@ export async function installPreparedSqliteRestore(
   assertChildPath(workspace, prepared.candidatePath);
   const markerPath = join(root, RESTORE_MARKER);
   const previousPath = join(workspace, 'previous.sqlite'), rollbackPath = join(workspace, 'rollback.sqlite');
-  const marker: RestoreMarker = { version: 1, stage: 'PREPARED', workspace, activePath: resolve(activePath), candidatePath: resolve(prepared.candidatePath), previousPath, rollbackPath, candidateSha256: prepared.candidateSha256, tenant: prepared.tenant };
+  let previousTenant: RestoreTenantIdentity;
+  try {
+    previousTenant = readSingleTenantIdentity(database);
+  } catch (error) {
+    await rm(workspace, { recursive: true, force: true });
+    throw error;
+  }
+  if (previousTenant.code !== prepared.tenant.code || previousTenant.currency !== prepared.tenant.currency) {
+    await rm(workspace, { recursive: true, force: true });
+    throw new Error('Backup belongs to a different company');
+  }
+  const marker: RestoreMarker = { version: 1, stage: 'PREPARED', workspace, activePath: resolve(activePath), candidatePath: resolve(prepared.candidatePath), previousPath, rollbackPath, candidateSha256: prepared.candidateSha256, tenant: prepared.tenant, previousTenant };
   let markerCreated = false;
   try {
     await database.backup(rollbackPath);
-    verifySqliteFile(rollbackPath, prepared.tenant);
+    // The rollback snapshot is the *host* database: verify it against the host identity, not the
+    // candidate's (which may carry a replacement tenant id on cross-PC recovery).
+    verifySqliteFile(rollbackPath, previousTenant);
     await writeRestoreMarker(markerPath, marker);
     markerCreated = true;
     await closeDatabase();
@@ -291,7 +372,7 @@ export async function installPreparedSqliteRestore(
       } else {
         let activeIsOriginal = false;
         if (await stat(activePath).then(() => true, () => false)) {
-          try { verifySqliteFile(activePath, prepared.tenant); activeIsOriginal = await hashFile(activePath) !== prepared.candidateSha256; } catch { activeIsOriginal = false; }
+          try { verifySqliteFile(activePath, previousTenant); activeIsOriginal = await hashFile(activePath) !== prepared.candidateSha256; } catch { activeIsOriginal = false; }
         }
         if (!activeIsOriginal) {
           await rm(activePath, { force: true });
@@ -301,7 +382,7 @@ export async function installPreparedSqliteRestore(
           await copyFile(rollbackPath, activePath);
         }
       }
-      verifySqliteFile(activePath, prepared.tenant);
+      verifySqliteFile(activePath, previousTenant);
       await rm(markerPath, { force: true });
       await rm(workspace, { recursive: true, force: true });
     } catch {
@@ -326,6 +407,12 @@ export async function recoverPendingSqliteRestore(workingDirectory: string, acti
   assertChildPath(marker.workspace, marker.candidatePath);
   assertChildPath(marker.workspace, marker.previousPath);
   assertChildPath(marker.workspace, marker.rollbackPath);
+  // Legacy markers (written before previousTenant existed) only supported same-tenant restores.
+  const rollbackTenant = marker.previousTenant ?? marker.tenant;
+  if (
+    typeof rollbackTenant?.id !== 'string' || typeof rollbackTenant.code !== 'string' || typeof rollbackTenant.currency !== 'string'
+    || rollbackTenant.code !== expectedCompanyCode
+  ) throw new Error('Restore recovery marker is invalid; database was not opened');
   const activeIsCandidate = await stat(activePath).then(async () => await hashFile(activePath) === marker.candidateSha256, () => false);
   if (activeIsCandidate) {
     verifySqliteFile(activePath, marker.tenant);
@@ -341,7 +428,7 @@ export async function recoverPendingSqliteRestore(workingDirectory: string, acti
   } else {
     let activeIsValidOriginal = false;
     if (await stat(activePath).then(() => true, () => false)) {
-      try { verifySqliteFile(activePath, marker.tenant); activeIsValidOriginal = true; } catch { activeIsValidOriginal = false; }
+      try { verifySqliteFile(activePath, rollbackTenant); activeIsValidOriginal = true; } catch { activeIsValidOriginal = false; }
     }
     if (!activeIsValidOriginal) {
       await rm(activePath, { force: true });
@@ -351,7 +438,7 @@ export async function recoverPendingSqliteRestore(workingDirectory: string, acti
       await copyFile(marker.rollbackPath, activePath);
     }
   }
-  verifySqliteFile(activePath, marker.tenant);
+  verifySqliteFile(activePath, rollbackTenant);
   await rm(marker.workspace, { recursive: true, force: true });
   await rm(markerPath, { force: true });
   return false;

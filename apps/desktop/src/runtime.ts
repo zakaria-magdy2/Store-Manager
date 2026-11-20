@@ -175,7 +175,18 @@ const DPAPI_REQUIRED_ERROR_AR =
 
 export const CLOCK_ADVANCE_STDOUT_PREFIX = '__RETAILOS_CLOCK_ADVANCE__:';
 export const DAILY_KEY_UPDATE_STDOUT_PREFIX = '__RETAILOS_DAILY_KEY_UPDATE__:';
+export const DAILY_KEY_UPDATE_REQ_STDOUT_PREFIX = '__RETAILOS_DAILY_KEY_UPDATE_REQ__:';
+export const DAILY_KEY_UPDATE_ACK_STDIN_PREFIX = '__RETAILOS_DAILY_KEY_UPDATE_ACK__:';
 const DAILY_BACKUP_SECRET_PATTERN = /^[^\p{Cc}]{12,256}$/u;
+
+export interface DailyBackupSecretUpdateResult {
+  readonly updated?: boolean | undefined;
+  readonly historyCount?: number | undefined;
+}
+
+export type DailyBackupSecretUpdateHandler = (
+  nextSecret: string,
+) => DailyBackupSecretUpdateResult | void | Promise<DailyBackupSecretUpdateResult | void>;
 
 function shouldFailClosedOnMissingDpapi(requireDpapi?: boolean): boolean {
   if (typeof requireDpapi === 'boolean') {
@@ -929,7 +940,7 @@ export function startManagedServerChild(options: {
   readonly externalClockMs?: number | null | undefined;
   readonly externalClockTampered?: boolean | undefined;
   readonly onClockAdvance?: ((clockMs: number) => void) | undefined;
-  readonly onDailyBackupSecretUpdate?: ((nextSecret: string) => void) | undefined;
+  readonly onDailyBackupSecretUpdate?: DailyBackupSecretUpdateHandler | undefined;
 }): { readonly child: ChildProcess; readonly logs: string[] } {
   const logs: string[] = [];
   const appendLog = (chunk: Buffer | string) => {
@@ -946,6 +957,29 @@ export function startManagedServerChild(options: {
     windowsHide: true,
   });
 
+  if (!child.stdin) {
+    throw new Error('Failed to open private stdin pipe for RetailOS watermark secret');
+  }
+  const childStdin = child.stdin;
+  childStdin.on('error', () => undefined);
+
+  let dailyKeyAckQueue: Promise<void> = Promise.resolve();
+  const sendDailyKeyAck = (payload: {
+    readonly requestId: string;
+    readonly ok: boolean;
+    readonly historyCount?: number | undefined;
+    readonly error?: string | undefined;
+  }): void => {
+    if (childStdin.destroyed || !childStdin.writable) {
+      return;
+    }
+    try {
+      childStdin.write(`${DAILY_KEY_UPDATE_ACK_STDIN_PREFIX}${JSON.stringify(payload)}\n`);
+    } catch {
+      // Child stdin pipe may already be closed during teardown.
+    }
+  };
+
   let stdoutBuffer = '';
   child.stdout?.on('data', (chunk: Buffer | string) => {
     stdoutBuffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
@@ -961,13 +995,87 @@ export function startManagedServerChild(options: {
             options.onClockAdvance?.(parsedMs);
           }
         }
+      } else if (line.startsWith(DAILY_KEY_UPDATE_REQ_STDOUT_PREFIX)) {
+        const rawReq = line.slice(DAILY_KEY_UPDATE_REQ_STDOUT_PREFIX.length).trim();
+        let requestId = '';
+        let decodedKey = '';
+        let requestValid = false;
+        if (rawReq.length > 0 && rawReq.length <= 2048) {
+          try {
+            const parsedReq = JSON.parse(rawReq) as Record<string, unknown>;
+            if (
+              parsedReq &&
+              typeof parsedReq === 'object' &&
+              typeof parsedReq.requestId === 'string' &&
+              parsedReq.requestId.trim().length > 0 &&
+              parsedReq.requestId.trim().length <= 128 &&
+              typeof parsedReq.key === 'string' &&
+              parsedReq.key.trim().length >= 16 &&
+              parsedReq.key.trim().length <= 512
+            ) {
+              requestId = parsedReq.requestId.trim();
+              const candidateDecoded = Buffer.from(parsedReq.key.trim(), 'base64url')
+                .toString('utf8')
+                .trim();
+              if (DAILY_BACKUP_SECRET_PATTERN.test(candidateDecoded)) {
+                decodedKey = candidateDecoded;
+                requestValid = true;
+              }
+            }
+          } catch {
+            requestValid = false;
+          }
+        }
+        if (!requestValid) {
+          if (requestId) {
+            sendDailyKeyAck({
+              requestId,
+              ok: false,
+              error: 'طلب حفظ مفتاح النسخ الاحتياطي غير صالح',
+            });
+          }
+        } else {
+          const capturedRequestId = requestId;
+          const capturedKey = decodedKey;
+          dailyKeyAckQueue = dailyKeyAckQueue.then(async () => {
+            if (!options.onDailyBackupSecretUpdate) {
+              sendDailyKeyAck({
+                requestId: capturedRequestId,
+                ok: false,
+                error: 'معالج حفظ مفتاح النسخ الاحتياطي غير متاح في التطبيق الرئيسي',
+              });
+              return;
+            }
+            try {
+              const persistResult = await options.onDailyBackupSecretUpdate(capturedKey);
+              sendDailyKeyAck({
+                requestId: capturedRequestId,
+                ok: true,
+                ...(persistResult &&
+                typeof persistResult === 'object' &&
+                typeof persistResult.historyCount === 'number'
+                  ? { historyCount: persistResult.historyCount }
+                  : {}),
+              });
+            } catch (persistError) {
+              sendDailyKeyAck({
+                requestId: capturedRequestId,
+                ok: false,
+                error:
+                  persistError instanceof Error ? persistError.message : String(persistError),
+              });
+            }
+          });
+        }
       } else if (line.startsWith(DAILY_KEY_UPDATE_STDOUT_PREFIX)) {
         const encoded = line.slice(DAILY_KEY_UPDATE_STDOUT_PREFIX.length).trim();
         if (encoded.length >= 16 && encoded.length <= 512) {
           try {
             const decoded = Buffer.from(encoded, 'base64url').toString('utf8').trim();
             if (DAILY_BACKUP_SECRET_PATTERN.test(decoded)) {
-              options.onDailyBackupSecretUpdate?.(decoded);
+              void Promise.resolve(options.onDailyBackupSecretUpdate?.(decoded)).catch(
+                () => undefined,
+              );
             }
           } catch {
             // Ignore malformed daily backup update signal
@@ -981,13 +1089,11 @@ export function startManagedServerChild(options: {
   });
   child.stderr?.on('data', appendLog);
 
-  if (!child.stdin) {
-    throw new Error('Failed to open private stdin pipe for RetailOS watermark secret');
-  }
-  child.stdin.on('error', () => undefined);
-  child.stdin.write(
+  // Keep stdin open after startup handshake so the host can send ACK responses for key rotations.
+  childStdin.write(
     `${JSON.stringify({
       watermarkSecret: options.watermarkSecret,
+      supportsKeyPersistAck: true,
       ...(options.dailyBackupSecret ? { dailyBackupSecret: options.dailyBackupSecret } : {}),
       ...(options.dailyBackupKeyHistory && options.dailyBackupKeyHistory.length > 0
         ? { dailyBackupKeyHistory: options.dailyBackupKeyHistory }
@@ -998,7 +1104,15 @@ export function startManagedServerChild(options: {
       ...(options.externalClockTampered ? { externalClockTampered: true } : {}),
     })}\n`,
   );
-  child.stdin.end();
+  child.once('exit', () => {
+    try {
+      if (!childStdin.destroyed) {
+        childStdin.end();
+      }
+    } catch {
+      // Ignore already closed stdin pipe.
+    }
+  });
 
   return { child, logs };
 }

@@ -21,6 +21,8 @@ import {
 import {
   buildServerProcessEnv,
   createDesktopWindowSecurityPolicy,
+  DAILY_KEY_UPDATE_ACK_STDIN_PREFIX,
+  DAILY_KEY_UPDATE_REQ_STDOUT_PREFIX,
   DAILY_KEY_UPDATE_STDOUT_PREFIX,
   DESKTOP_IPC_CHANNELS,
   DesktopHostSupervisor,
@@ -776,5 +778,161 @@ test('packaged Electron runtime files forbid workspace/node_modules imports and 
     assert.match(probe.stdout, /ISOLATED_RUNTIME_OK/);
   } finally {
     await rm(isolatedRoot, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('startManagedServerChild Request/ACK protocol: child REQ → onDailyBackupSecretUpdate ACK → child receives ok/nack', async () => {
+  const tempUserData = await mkdtemp(join(tmpdir(), 'retailos-ack-protocol-'));
+  try {
+    const fakeDpapi = {
+      isEncryptionAvailable: () => true,
+      encryptString: (plain) => Buffer.from(`dpapi:${plain}`, 'utf8'),
+      decryptString: (blob) => blob.toString('utf8').replace(/^dpapi:/, ''),
+    };
+
+    const initialSecret = await resolveOrCreateDesktopDailyBackupSecret({
+      userDataDir: tempUserData,
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+    });
+
+    // Build a child script that sends a REQ, waits for ACK, and prints the result.
+    const childScript = join(tempUserData, 'req-ack-child.mjs');
+    const rotatedKey = 'RotatedAckTestKey-Phase2-2026!';
+    const encodedKey = Buffer.from(rotatedKey, 'utf8').toString('base64url');
+    await writeFile(childScript, [
+      "import { createInterface } from 'node:readline';",
+      "import { randomUUID } from 'node:crypto';",
+      "process.stdin.setEncoding('utf8');",
+      "let handshakeDone = false;",
+      "let buffer = '';",
+      `const REQ_PREFIX = ${JSON.stringify(DAILY_KEY_UPDATE_REQ_STDOUT_PREFIX)};`,
+      `const ACK_PREFIX = ${JSON.stringify(DAILY_KEY_UPDATE_ACK_STDIN_PREFIX)};`,
+      "process.stdin.on('data', (chunk) => {",
+      "  buffer += chunk;",
+      "  let nlIdx = buffer.indexOf('\\n');",
+      "  while (nlIdx !== -1) {",
+      "    const line = buffer.slice(0, nlIdx).replace(/\\r$/, '');",
+      "    buffer = buffer.slice(nlIdx + 1);",
+      "    if (!handshakeDone) {",
+      "      handshakeDone = true;",
+      "      const reqId = randomUUID();",
+      `      process.stdout.write(REQ_PREFIX + JSON.stringify({ requestId: reqId, key: ${JSON.stringify(encodedKey)} }) + '\\n');`,
+      "    } else if (line.startsWith(ACK_PREFIX)) {",
+      "      const ack = JSON.parse(line.slice(ACK_PREFIX.length));",
+      "      process.stdout.write('ACK_RESULT:' + JSON.stringify(ack) + '\\n');",
+      "      setTimeout(() => process.exit(0), 20);",
+      "    }",
+      "    nlIdx = buffer.indexOf('\\n');",
+      "  }",
+      "});",
+      "process.stdin.resume();",
+    ].join('\n'), 'utf8');
+
+    // Test 1: Successful persist → ok: true
+    let ackCapture = null;
+    const managed1 = startManagedServerChild({
+      execPath: process.execPath,
+      serverScriptPath: childScript,
+      cwd: tempUserData,
+      env: process.env,
+      watermarkSecret: 'c'.repeat(64),
+      dailyBackupSecret: initialSecret,
+      onDailyBackupSecretUpdate: async (nextSecret) => {
+        const result = await updateDesktopDailyBackupSecret({
+          userDataDir: tempUserData,
+          dailyBackupSecret: nextSecret,
+          safeStorage: fakeDpapi,
+          requireDpapi: true,
+        });
+        return { historyCount: result.historyCount };
+      },
+    });
+
+    const exitPromise1 = new Promise((resolve) => managed1.child.once('exit', resolve));
+    // Wait for the child to finish and collect stdout for the ACK_RESULT line
+    await exitPromise1;
+    const logs1 = managed1.logs.join('');
+    const ackLine1 = logs1.split('\n').find((l) => l.startsWith('ACK_RESULT:'));
+    assert.ok(ackLine1, 'Child must receive an ACK response from the host');
+    const ackPayload1 = JSON.parse(ackLine1.slice('ACK_RESULT:'.length));
+    assert.equal(ackPayload1.ok, true, 'ACK must indicate success');
+    assert.equal(typeof ackPayload1.historyCount, 'number', 'ACK must include historyCount');
+    assert.ok(ackPayload1.historyCount >= 1, 'History must include the previous key');
+
+    // Verify the key was actually persisted
+    const currentSecret = await resolveOrCreateDesktopDailyBackupSecret({
+      userDataDir: tempUserData,
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+    });
+    assert.equal(currentSecret, rotatedKey, 'Rotated key must be persisted in DPAPI store');
+    const history = await readDesktopDailyBackupHistory({
+      userDataDir: tempUserData,
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+    });
+    assert.ok(history.includes(initialSecret), 'Initial key must be preserved in history');
+
+    // Test 2: DPAPI failure → ok: false (NACK)
+    const failScript = join(tempUserData, 'req-ack-fail-child.mjs');
+    const failKey = 'FailedDpapiTestKey-2026!!';
+    const failEncodedKey = Buffer.from(failKey, 'utf8').toString('base64url');
+    await writeFile(failScript, [
+      "process.stdin.setEncoding('utf8');",
+      "let handshakeDone = false;",
+      "let buffer = '';",
+      `const REQ_PREFIX = ${JSON.stringify(DAILY_KEY_UPDATE_REQ_STDOUT_PREFIX)};`,
+      `const ACK_PREFIX = ${JSON.stringify(DAILY_KEY_UPDATE_ACK_STDIN_PREFIX)};`,
+      "process.stdin.on('data', (chunk) => {",
+      "  buffer += chunk;",
+      "  let nlIdx = buffer.indexOf('\\n');",
+      "  while (nlIdx !== -1) {",
+      "    const line = buffer.slice(0, nlIdx).replace(/\\r$/, '');",
+      "    buffer = buffer.slice(nlIdx + 1);",
+      "    if (!handshakeDone) {",
+      "      handshakeDone = true;",
+      "      const reqId = 'fail-req-' + Date.now();",
+      `      process.stdout.write(REQ_PREFIX + JSON.stringify({ requestId: reqId, key: ${JSON.stringify(failEncodedKey)} }) + '\\n');`,
+      "    } else if (line.startsWith(ACK_PREFIX)) {",
+      "      const ack = JSON.parse(line.slice(ACK_PREFIX.length));",
+      "      process.stdout.write('ACK_RESULT:' + JSON.stringify(ack) + '\\n');",
+      "      setTimeout(() => process.exit(0), 20);",
+      "    }",
+      "    nlIdx = buffer.indexOf('\\n');",
+      "  }",
+      "});",
+      "process.stdin.resume();",
+    ].join('\n'), 'utf8');
+
+    const managed2 = startManagedServerChild({
+      execPath: process.execPath,
+      serverScriptPath: failScript,
+      cwd: tempUserData,
+      env: process.env,
+      watermarkSecret: 'd'.repeat(64),
+      dailyBackupSecret: rotatedKey,
+      onDailyBackupSecretUpdate: async () => {
+        throw new Error('Simulated DPAPI encryption failure');
+      },
+    });
+
+    await new Promise((resolve) => managed2.child.once('exit', resolve));
+    const logs2 = managed2.logs.join('');
+    const ackLine2 = logs2.split('\n').find((l) => l.startsWith('ACK_RESULT:'));
+    assert.ok(ackLine2, 'Child must receive a NACK response on DPAPI failure');
+    const ackPayload2 = JSON.parse(ackLine2.slice('ACK_RESULT:'.length));
+    assert.equal(ackPayload2.ok, false, 'NACK must indicate failure');
+    assert.ok(ackPayload2.error?.length > 0, 'NACK must include an error message');
+
+    // Key must NOT have been changed after DPAPI failure
+    const stillRotated = await resolveOrCreateDesktopDailyBackupSecret({
+      userDataDir: tempUserData,
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+    });
+    assert.equal(stillRotated, rotatedKey, 'Key must remain unchanged after DPAPI failure NACK');
+  } finally {
+    await rm(tempUserData, { recursive: true, force: true }).catch(() => undefined);
   }
 });

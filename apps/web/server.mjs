@@ -46,6 +46,7 @@ import {
   preparePlainSqliteRestore,
   recoverPendingSqliteRestore,
   checkSqliteFileQuick,
+  assessFreshReplacementHost,
   EscPosReceiptPrinter,
   businessDateInTimeZone,
   resolveValidTimeZone,
@@ -106,11 +107,13 @@ async function resolveHostStartupSecrets(options = {}) {
       dailyBackupKeyHistory: optDailyHistory,
       externalClockMs: optExternalClockMs,
       externalClockTampered: optExternalTampered,
+      hostChannel: null,
+      closeHostChannel: null,
     };
   }
 
   if (process.argv.includes('--electron-stdio-secret')) {
-    const line = await new Promise((resolvePromise, rejectPromise) => {
+    const handshake = await new Promise((resolvePromise, rejectPromise) => {
       let buffer = '';
       let settled = false;
       const cleanup = () => {
@@ -118,32 +121,38 @@ async function resolveHostStartupSecrets(options = {}) {
         process.stdin.off('data', onData);
         process.stdin.off('end', onEnd);
         process.stdin.off('error', onError);
-        process.stdin.pause();
       };
       const finish = (err, val) => {
         if (settled) return;
         settled = true;
         cleanup();
-        if (err) rejectPromise(err);
-        else resolvePromise(val);
+        if (err) {
+          process.stdin.pause();
+          rejectPromise(err);
+        } else {
+          resolvePromise(val);
+        }
       };
       const timer = setTimeout(() => {
         finish(new Error('Fatal: RetailOS server timed out waiting for desktop host secret'));
       }, 5000);
       const onData = (chunk) => {
         buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-        if (buffer.length > 16384) {
+        if (buffer.length > 16384 && !buffer.includes('\n')) {
           finish(new Error('Fatal: RetailOS desktop secret payload exceeded limit'));
           return;
         }
         const nlIdx = buffer.indexOf('\n');
         if (nlIdx !== -1) {
-          finish(null, buffer.slice(0, nlIdx).trim());
+          finish(null, {
+            line: buffer.slice(0, nlIdx).trim(),
+            remainder: buffer.slice(nlIdx + 1),
+          });
         }
       };
       const onEnd = () => {
         const trimmed = buffer.trim();
-        if (trimmed) finish(null, trimmed);
+        if (trimmed) finish(null, { line: trimmed, remainder: '', stdinEnded: true });
         else finish(new Error('Fatal: RetailOS server must be launched via the desktop host'));
       };
       const onError = () => {
@@ -157,7 +166,7 @@ async function resolveHostStartupSecrets(options = {}) {
     });
 
     try {
-      const parsed = JSON.parse(line);
+      const parsed = JSON.parse(handshake.line);
       const parsedSecret = typeof parsed?.watermarkSecret === 'string' ? parsed.watermarkSecret.trim() : '';
       const parsedDaily =
         typeof parsed?.dailyBackupSecret === 'string' ? parsed.dailyBackupSecret.trim().slice(0, 256) : '';
@@ -169,17 +178,170 @@ async function resolveHostStartupSecrets(options = {}) {
           parsed.externalClockMs > 0
             ? parsed.externalClockMs
             : 0;
+
+        const DAILY_KEY_REQ_PREFIX = '__RETAILOS_DAILY_KEY_UPDATE_REQ__:';
+        const DAILY_KEY_ACK_PREFIX = '__RETAILOS_DAILY_KEY_UPDATE_ACK__:';
+        const pendingDailyKeyAcks = new Map();
+        let controlBuffer = handshake.remainder ?? '';
+        let channelClosed = Boolean(handshake.stdinEnded);
+
+        const rejectAllPendingAcks = (err) => {
+          for (const [reqId, pending] of pendingDailyKeyAcks.entries()) {
+            pendingDailyKeyAcks.delete(reqId);
+            clearTimeout(pending.timer);
+            pending.reject(err);
+          }
+        };
+
+        const processControlBuffer = () => {
+          let nlIndex = controlBuffer.indexOf('\n');
+          while (nlIndex !== -1) {
+            const controlLine = controlBuffer.slice(0, nlIndex).replace(/\r$/, '');
+            controlBuffer = controlBuffer.slice(nlIndex + 1);
+            if (controlLine.startsWith(DAILY_KEY_ACK_PREFIX)) {
+              try {
+                const ack = JSON.parse(controlLine.slice(DAILY_KEY_ACK_PREFIX.length).trim());
+                if (ack && typeof ack.requestId === 'string') {
+                  const pending = pendingDailyKeyAcks.get(ack.requestId);
+                  if (pending) {
+                    pendingDailyKeyAcks.delete(ack.requestId);
+                    clearTimeout(pending.timer);
+                    if (ack.ok === true) {
+                      pending.resolve({
+                        historyCount: typeof ack.historyCount === 'number' ? ack.historyCount : undefined,
+                      });
+                    } else {
+                      pending.reject(
+                        Object.assign(
+                          new Error(ack.error || 'فشل تأكيد حفظ مفتاح النسخ الاحتياطي داخل مخزن النظام الآمن (DPAPI)'),
+                          { status: 503, code: 'BACKUP_KEY_PERSIST_FAILED', exposeMessage: true },
+                        ),
+                      );
+                    }
+                  }
+                }
+              } catch {
+                // Ignore malformed ACK payload
+              }
+            }
+            nlIndex = controlBuffer.indexOf('\n');
+          }
+        };
+
+        const hostChannel = {
+          active: true,
+          supportsKeyPersistAck: Boolean(parsed?.supportsKeyPersistAck),
+          connected: !channelClosed,
+          requestDailyKeyPersist(nextPassphrase, timeoutMs = 10_000) {
+            if (channelClosed || !hostChannel.connected) {
+              return Promise.reject(
+                Object.assign(
+                  new Error('انقطع اتصال حفظ مفتاح التشفير مع نافذة التطبيق الرئيسية — لم يتم تعديل المفتاح أو النسخة'),
+                  { status: 503, code: 'BACKUP_KEY_PERSIST_DISCONNECTED', exposeMessage: true },
+                ),
+              );
+            }
+            if (!hostChannel.supportsKeyPersistAck) {
+              return Promise.reject(
+                Object.assign(
+                  new Error('نافذة التطبيق الرئيسية لا تدعم بروتوكول تأكيد حفظ مفتاح التشفير'),
+                  { status: 503, code: 'BACKUP_KEY_PERSIST_UNSUPPORTED', exposeMessage: true },
+                ),
+              );
+            }
+            const requestId = randomUUID();
+            const encodedKey = Buffer.from(nextPassphrase, 'utf8').toString('base64url');
+            return new Promise((resolveAck, rejectAck) => {
+              const timer = setTimeout(() => {
+                pendingDailyKeyAcks.delete(requestId);
+                rejectAck(
+                  Object.assign(
+                    new Error('انتهت مهلة تأكيد حفظ مفتاح النسخ الاحتياطي داخل نظام الحماية (DPAPI) — لم يتم تعديل المفتاح أو النسخة'),
+                    { status: 504, code: 'BACKUP_KEY_PERSIST_TIMEOUT', exposeMessage: true },
+                  ),
+                );
+              }, timeoutMs);
+              timer.unref?.();
+              pendingDailyKeyAcks.set(requestId, {
+                resolve: resolveAck,
+                reject: rejectAck,
+                timer,
+              });
+              try {
+                process.stdout.write(
+                  `${DAILY_KEY_REQ_PREFIX}${JSON.stringify({ requestId, key: encodedKey })}\n`,
+                );
+              } catch (writeErr) {
+                clearTimeout(timer);
+                pendingDailyKeyAcks.delete(requestId);
+                rejectAck(
+                  Object.assign(
+                    new Error('تعذر إرسال طلب حفظ مفتاح التشفير إلى التطبيق الرئيسي'),
+                    { status: 503, code: 'BACKUP_KEY_PERSIST_DISCONNECTED', exposeMessage: true, cause: writeErr },
+                  ),
+                );
+              }
+            });
+          },
+          close() {
+            if (channelClosed) return;
+            channelClosed = true;
+            hostChannel.connected = false;
+            rejectAllPendingAcks(
+              Object.assign(
+                new Error('أُغلق اتصال التطبيق الرئيسي قبل تأكيد حفظ مفتاح النسخ الاحتياطي'),
+                { status: 503, code: 'BACKUP_KEY_PERSIST_DISCONNECTED', exposeMessage: true },
+              ),
+            );
+            process.stdin.off('data', onControlData);
+            process.stdin.off('end', onControlDisconnect);
+            process.stdin.off('close', onControlDisconnect);
+            process.stdin.off('error', onControlDisconnect);
+            process.stdin.pause();
+          },
+        };
+
+        const onControlData = (chunk) => {
+          controlBuffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+          if (controlBuffer.length > 65536 && !controlBuffer.includes('\n')) {
+            controlBuffer = '';
+            return;
+          }
+          processControlBuffer();
+        };
+        const onControlDisconnect = () => {
+          hostChannel.close();
+        };
+
+        if (!channelClosed) {
+          process.stdin.setEncoding('utf8');
+          process.stdin.on('data', onControlData);
+          process.stdin.on('end', onControlDisconnect);
+          process.stdin.on('close', onControlDisconnect);
+          process.stdin.on('error', onControlDisconnect);
+          process.stdin.resume();
+          process.stdin.unref?.();
+          if (controlBuffer.length > 0) {
+            processControlBuffer();
+          }
+        } else {
+          process.stdin.pause();
+        }
+
         return {
           watermarkSecret: parsedSecret,
           dailyBackupSecret: parsedDaily,
           dailyBackupKeyHistory: parsedDailyHistory,
           externalClockMs: parsedExtClock,
           externalClockTampered: Boolean(parsed?.externalClockTampered),
+          hostChannel,
+          closeHostChannel: () => hostChannel.close(),
         };
       }
     } catch {
       // Fall through to fail-closed error below
     }
+    process.stdin.pause();
     throw new Error('Fatal: RetailOS server must be launched via the desktop host');
   }
 
@@ -257,23 +419,113 @@ function resolveDailyBackupCandidatePassphrases() {
   return candidates;
 }
 
-function persistDailyBackupMasterPassphrase(nextPassphrase) {
+let activeDailyKeyPersistPromise = null;
+async function persistDailyBackupMasterPassphrase(nextPassphrase) {
   const trimmed = typeof nextPassphrase === 'string' ? nextPassphrase.trim() : '';
   if (!isValidDailyBackupPassphrase(trimmed)) {
     throw Object.assign(new Error('كلمة مرور النسخ الاحتياطي يجب أن تكون بين 12 و 256 حرفًا صالحًا'), { status: 400 });
   }
-  const changed = trimmed !== dailyBackupSecret;
-  if (changed) {
+  if (activeDailyKeyPersistPromise) {
+    throw Object.assign(
+      new Error('توجد عملية حفظ جارية لمفتاح النسخ الاحتياطي — انتظر اكتمالها ثم أعد المحاولة'),
+      { status: 409, code: 'BACKUP_KEY_PERSIST_IN_PROGRESS', exposeMessage: true },
+    );
+  }
+  if (trimmed === dailyBackupSecret) {
+    return {
+      changed: false,
+      persisted: true,
+      dailyBackupSecret: trimmed,
+      historicalKeysCount: historicalDailyBackupKeys.length,
+    };
+  }
+
+  const runPersist = (async () => {
+    if (activeBackupPromise) {
+      await activeBackupPromise.catch(() => undefined);
+    }
     const previousSecret = dailyBackupSecret;
+    const nextHistoryPreview = [...historicalDailyBackupKeys];
+    if (
+      isValidDailyBackupPassphrase(previousSecret) &&
+      previousSecret !== trimmed &&
+      !nextHistoryPreview.includes(previousSecret)
+    ) {
+      nextHistoryPreview.push(previousSecret);
+    }
+
+    const persistTimeoutMs =
+      Number.isInteger(options.dailyBackupKeyPersistTimeoutMs) &&
+      options.dailyBackupKeyPersistTimeoutMs > 0
+        ? options.dailyBackupKeyPersistTimeoutMs
+        : 10_000;
+
+    if (process.argv.includes('--electron-stdio-secret')) {
+      if (!hostSecrets.hostChannel?.connected || !hostSecrets.hostChannel?.supportsKeyPersistAck) {
+        throw Object.assign(
+          new Error('تعذر تأكيد حفظ مفتاح النسخ الاحتياطي عبر التطبيق الرئيسي — أعد تشغيل البرنامج ثم حاول مجددًا'),
+          { status: 503, code: 'BACKUP_KEY_PERSIST_DISCONNECTED', exposeMessage: true },
+        );
+      }
+      await hostSecrets.hostChannel.requestDailyKeyPersist(trimmed, persistTimeoutMs);
+    } else if (typeof options.onDailyBackupSecretUpdate === 'function') {
+      let timeoutHandle = null;
+      try {
+        await Promise.race([
+          Promise.resolve().then(() => options.onDailyBackupSecretUpdate(trimmed, nextHistoryPreview)),
+          new Promise((_, rejectPromise) => {
+            timeoutHandle = setTimeout(() => {
+              rejectPromise(
+                Object.assign(
+                  new Error('انتهت مهلة تأكيد حفظ مفتاح النسخ الاحتياطي — لم يتم تعديل المفتاح أو النسخة'),
+                  { status: 504, code: 'BACKUP_KEY_PERSIST_TIMEOUT', exposeMessage: true },
+                ),
+              );
+            }, persistTimeoutMs);
+            timeoutHandle.unref?.();
+          }),
+        ]);
+      } catch (persistErr) {
+        if (persistErr && typeof persistErr === 'object' && 'status' in persistErr) {
+          persistErr.exposeMessage = true;
+          throw persistErr;
+        }
+        throw Object.assign(
+          new Error(
+            persistErr instanceof Error && persistErr.message
+              ? persistErr.message
+              : 'فشل تأكيد حفظ مفتاح النسخ الاحتياطي داخل مخزن النظام الآمن',
+          ),
+          { status: 503, code: 'BACKUP_KEY_PERSIST_FAILED', exposeMessage: true, cause: persistErr },
+        );
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+      }
+    } else if (process.env.NODE_ENV !== 'test') {
+      throw Object.assign(
+        new Error('لا يمكن حفظ مفتاح النسخ الاحتياطي الرئيسي بدون قناة حفظ آمنة مع التطبيق الرئيسي'),
+        { status: 503, code: 'BACKUP_KEY_PERSIST_UNAVAILABLE', exposeMessage: true },
+      );
+    }
+
     dailyBackupSecret = trimmed;
     addHistoricalDailyBackupKey(previousSecret);
-    if (process.argv.includes('--electron-stdio-secret')) {
-      const encoded = Buffer.from(trimmed, 'utf8').toString('base64url');
-      process.stdout.write(`__RETAILOS_DAILY_KEY_UPDATE__:${encoded}\n`);
+    return {
+      changed: true,
+      persisted: true,
+      dailyBackupSecret: trimmed,
+      historicalKeysCount: historicalDailyBackupKeys.length,
+    };
+  })();
+
+  activeDailyKeyPersistPromise = runPersist;
+  try {
+    return await runPersist;
+  } finally {
+    if (activeDailyKeyPersistPromise === runPersist) {
+      activeDailyKeyPersistPromise = null;
     }
-    options.onDailyBackupSecretUpdate?.(trimmed, [...historicalDailyBackupKeys]);
   }
-  return { changed, dailyBackupSecret: trimmed, historicalKeysCount: historicalDailyBackupKeys.length };
 }
 
 async function readBackupSettings() {
@@ -2220,9 +2472,6 @@ async function copyFileAtomic(sourcePath, destinationPath) {
   const tempPath = join(destDir, `.tmp-${randomUUID().slice(0, 8)}-${parse(destinationPath).base}`);
   try {
     await copyFile(sourcePath, tempPath);
-    if (existsSync(destinationPath)) {
-      await rm(destinationPath, { force: true }).catch(() => undefined);
-    }
     await rename(tempPath, destinationPath);
   } finally {
     if (existsSync(tempPath)) await rm(tempPath, { force: true }).catch(() => undefined);
@@ -2283,6 +2532,12 @@ async function syncDailyBackupToMirror(sourceDailyPath, dailyFilename, currentSe
 }
 
 async function ensureDailyBackup({ force = false, minAgeMs = AUTO_DAILY_REFRESH_MS, syncMirror = true } = {}) {
+  if (activeDailyKeyPersistPromise) {
+    throw Object.assign(
+      new Error('لا يمكن إنشاء أو تحديث نسخة احتياطية أثناء حفظ مفتاح التشفير الرئيسي — أعد المحاولة بعد اكتمال الحفظ'),
+      { status: 409, code: 'BACKUP_KEY_PERSIST_IN_PROGRESS', exposeMessage: true },
+    );
+  }
   if (activeBackupPromise) return activeBackupPromise;
   activeBackupPromise = (async () => {
     await mkdir(dailyBackupDir, { recursive: true });
@@ -2310,9 +2565,6 @@ async function ensureDailyBackup({ force = false, minAgeMs = AUTO_DAILY_REFRESH_
     try {
       database.checkpointPassive();
       createdBackup = await createEncryptedSqliteBackup(database.getRawDatabase(), dailyBackupDir, dailyPassphrase);
-      if (existsSync(targetPath)) {
-        await rm(targetPath, { force: true }).catch(() => undefined);
-      }
       await copyFileAtomic(createdBackup.path, targetPath);
     } finally {
       if (createdBackup?.path) {
@@ -2354,8 +2606,21 @@ async function createPreRestoreSafetySnapshot() {
   await mkdir(preRestoreBackupDir, { recursive: true });
   const preStamp = new Date().toISOString().replace(/[:.]/g, '-');
   const preRestorePath = join(preRestoreBackupDir, `retailos-pre-restore-${preStamp}.sqlite`);
+  const tempPath = `${preRestorePath}.${randomBytes(6).toString('hex')}.tmp`;
   database.checkpointPassive();
-  await database.getRawDatabase().backup(preRestorePath);
+  try {
+    // Write to a temp file, verify it, then atomically publish; a torn/corrupt snapshot never
+    // appears under the final name and the restore is aborted before touching the live database.
+    await database.getRawDatabase().backup(tempPath);
+    const quick = checkSqliteFileQuick(tempPath);
+    if (!quick.ok) {
+      throw Object.assign(new Error('Pre-restore safety snapshot failed verification; restore aborted'), { status: 500 });
+    }
+    await rename(tempPath, preRestorePath);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
   const existing = (await readdir(preRestoreBackupDir))
     .filter((f) => /^retailos-pre-restore-.*\.sqlite$/.test(f))
     .sort()
@@ -4470,6 +4735,9 @@ async function handleApi(req, res, url) {
     const userId = randomUUID();
     const passwordHash = await passwordHasher.hash(input.password);
     const user = User.create({ id: userId, tenantId: id, username: input.ownerUsername, passwordHash, fullName: input.ownerName, role: 'OWNER' });
+    if (input.dailyBackupPassphrase) {
+      await persistDailyBackupMasterPassphrase(input.dailyBackupPassphrase);
+    }
     await db.transaction().execute(async (trx) => {
       const existingOwner = await trx.selectFrom('users').select('id').where('tenant_id', '=', id).where('role', '=', 'OWNER').executeTakeFirst();
       if (existingOwner) throw Object.assign(new Error('تم إنشاء حساب المدير بالفعل'), { status: 409 });
@@ -4477,7 +4745,6 @@ async function handleApi(req, res, url) {
     });
     await recordAudit(systemContext, { storeId, actorUserId: user.id, actorUsername: user.username, actorRole: 'OWNER', action: 'OWNER_SETUP', entityType: 'USER', entityId: user.id, summary: `إنشاء حساب مدير النظام (${user.username})` });
     if (input.dailyBackupPassphrase) {
-      persistDailyBackupMasterPassphrase(input.dailyBackupPassphrase);
       await ensureDailyBackup({ force: true, syncMirror: true }).catch(() => undefined);
       await recordAudit(systemContext, {
         storeId,
@@ -4834,7 +5101,7 @@ async function handleApi(req, res, url) {
       });
       throw authError;
     }
-    const rotation = persistDailyBackupMasterPassphrase(body.masterPassphrase);
+    const rotation = await persistDailyBackupMasterPassphrase(body.masterPassphrase);
     const backup = await ensureDailyBackup({ force: true, syncMirror: true });
     await recordAudit(ctx, {
       action: 'DAILY_BACKUP_MASTER_KEY_UPDATED',
@@ -5038,10 +5305,10 @@ async function handleApi(req, res, url) {
       const currentTenant = await db.selectFrom('tenants').select(['id', 'code', 'currency']).where('id', '=', ctx.tenantId).executeTakeFirst();
       if (!currentTenant) throw Object.assign(new Error('Company not found'), { status: 404 });
       const rawDb = database.getRawDatabase();
-      const salesCount = Number(rawDb.prepare('SELECT COUNT(*) AS cnt FROM sales WHERE tenant_id = ?').get(ctx.tenantId)?.cnt ?? 0);
-      const journalCount = Number(rawDb.prepare('SELECT COUNT(*) AS cnt FROM journal_entries WHERE tenant_id = ?').get(ctx.tenantId)?.cnt ?? 0);
-      const movementCount = Number(rawDb.prepare('SELECT COUNT(*) AS cnt FROM stock_movements WHERE tenant_id = ?').get(ctx.tenantId)?.cnt ?? 0);
-      const isFreshReplacementHost = salesCount === 0 && journalCount === 0 && movementCount === 0;
+      // Cross-PC replacement (different tenant id, same company code) is only permitted onto a host
+      // with no operational data at all; every non-baseline table must be empty (fail-closed).
+      const freshHostAssessment = assessFreshReplacementHost(rawDb, ctx.tenantId);
+      const isFreshReplacementHost = freshHostAssessment.fresh;
       try {
         preparedRestore = await prepareEncryptedSqliteRestore(archivePath, dataDir, passphrase, currentTenant, {
           allowReplacementTenantId: isFreshReplacementHost,
@@ -7759,18 +8026,23 @@ const server = createServer(async (req, res) => {
       console.error('Request failed with status:', Number(status));
     }
     const isTransientHardware = error instanceof LicenseHardwareIdentityError;
+    const isExposedError = Boolean(error?.exposeMessage);
     const message = isTransientHardware
       ? error.message
-      : status >= 500
-        ? 'حصل خطأ داخلي. لم يتم تنفيذ العملية.'
-        : isInsufficientStock
-          ? 'الكمية المطلوبة غير متوفرة في المخزون (تم بيعها أو نفد الرصيد)'
-          : (error?.message ?? 'حدث خطأ غير متوقع');
+      : isExposedError && typeof error?.message === 'string' && error.message
+        ? error.message
+        : status >= 500
+          ? 'حصل خطأ داخلي. لم يتم تنفيذ العملية.'
+          : isInsufficientStock
+            ? 'الكمية المطلوبة غير متوفرة في المخزون (تم بيعها أو نفد الرصيد)'
+            : (error?.message ?? 'حدث خطأ غير متوقع');
     const errorBody = error instanceof LicenseEnforcementError
       ? { error: message, code: error.code, licenseStatus: error.licenseStatus }
       : isTransientHardware
         ? { error: message, code: error.code, retryable: true }
-        : { error: message };
+        : isExposedError && typeof error?.code === 'string'
+          ? { error: message, code: error.code }
+          : { error: message };
     json(res, status, errorBody);
   }
 });
@@ -7796,6 +8068,7 @@ function restartLocalServer() {
   if (restartScheduled) return;
   restartScheduled = true;
   clearInterval(walCheckpointTimer);
+  hostSecrets.closeHostChannel?.();
   server.close(() => {
     database.checkpointPassive();
     void database.close().then(() => {
@@ -7870,6 +8143,7 @@ async function shutdown() {
   if (shutdownPromise) return shutdownPromise;
   shutdownPromise = (async () => {
     clearInterval(walCheckpointTimer);
+    hostSecrets.closeHostChannel?.();
     await new Promise((resolve) => {
       const timeout = setTimeout(() => resolve(undefined), 2000);
       timeout.unref();

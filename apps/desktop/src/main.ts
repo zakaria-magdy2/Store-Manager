@@ -383,17 +383,19 @@ async function bootDesktopApplication(): Promise<void> {
         .catch(() => undefined);
     },
     onDailyBackupSecretUpdate: (nextSecret) => {
-      pendingDailyKeyPersist = pendingDailyKeyPersist
-        .then(() =>
-          updateDesktopDailyBackupSecret({
-            userDataDir: paths.userDataDir,
-            dailyBackupSecret: nextSecret,
-            safeStorage,
-            requireDpapi,
-          }),
-        )
-        .then(() => undefined)
-        .catch(() => undefined);
+      const task = pendingDailyKeyPersist.then(() =>
+        updateDesktopDailyBackupSecret({
+          userDataDir: paths.userDataDir,
+          dailyBackupSecret: nextSecret,
+          safeStorage,
+          requireDpapi,
+        }),
+      );
+      pendingDailyKeyPersist = task.then(
+        () => undefined,
+        () => undefined,
+      );
+      return task;
     },
   });
   serverChild = managed.child;

@@ -741,21 +741,67 @@ function clearLicenseHardwareRetry() {
   }
 }
 
+const RETRYABLE_LICENSE_STATUSES = ['HARDWARE_UNAVAILABLE', 'LICENSE_CHECK_RETRYABLE'];
+
+function isRetryableLicenseStatus(lic) {
+  if (!lic || typeof lic !== 'object') return true;
+  return lic.retryable === true || RETRYABLE_LICENSE_STATUSES.includes(lic.status);
+}
+
+function buildRetryableLicenseState(error, fallbackReason) {
+  const hardware = error?.status === 503 && error?.payload?.code === 'HARDWARE_IDENTITY_UNAVAILABLE';
+  return {
+    status: hardware ? 'HARDWARE_UNAVAILABLE' : 'LICENSE_CHECK_RETRYABLE',
+    retryable: true,
+    machineId: state.license?.machineId || '',
+    reason: (hardware && error?.message)
+      || fallbackReason
+      || 'تعذر التحقق من حالة الترخيص مؤقتًا — يعيد النظام المحاولة تلقائيًا مع إيقاف العمليات المالية لحماية البيانات.',
+  };
+}
+
+// Never returns null: any failure yields a retryable, fail-closed (non-ACTIVE) license state.
 async function fetchLicenseStatusSafe() {
   try {
     const lic = await api('/api/license/status');
-    clearLicenseHardwareRetry();
+    if (!lic || typeof lic !== 'object' || typeof lic.status !== 'string') {
+      return buildRetryableLicenseState(null, 'استجابة غير صالحة من خادم الترخيص المحلي — جاري إعادة المحاولة.');
+    }
+    if (!isRetryableLicenseStatus(lic)) clearLicenseHardwareRetry();
     return lic;
   } catch (error) {
-    if (error?.status === 503 || error?.payload?.code === 'HARDWARE_IDENTITY_UNAVAILABLE') {
-      return {
-        status: 'HARDWARE_UNAVAILABLE',
-        retryable: true,
-        machineId: '',
-        reason: error.message || 'تعذر التحقق المؤقت من معرف الجهاز أثناء بدء تشغيل نظام التشغيل — يرجى إعادة المحاولة خلال لحظات',
-      };
+    if (error?.status === 503 && error?.payload?.code === 'HARDWARE_IDENTITY_UNAVAILABLE') {
+      return buildRetryableLicenseState(error);
     }
-    return null;
+    return buildRetryableLicenseState(error, error?.isNetworkError
+      ? 'تعذر الاتصال بالخادم المحلي للتحقق من الترخيص — جاري إعادة المحاولة تلقائيًا.'
+      : undefined);
+  }
+}
+
+function isUnauthenticatedError(error) {
+  if (error?.status === 401) return true;
+  const message = String(error?.message ?? '');
+  return message.includes('تسجيل الدخول') || message.includes('انتهت الجلسة');
+}
+
+// Restores an existing server session (cookie) into state. Returns true when a session was hydrated.
+async function hydrateAuthenticatedSession() {
+  try {
+    const session = await api(`/api/data?tzOffset=${encodeURIComponent(String(new Date().getTimezoneOffset()))}`);
+    state.user = session.user;
+    state.data = session;
+    state.page = session.capabilities?.cashierMode ? 'pos' : 'dashboard';
+    applyRequestedRoute(state.page);
+    restorePendingCheckoutForStore();
+    return true;
+  } catch (error) {
+    if (isUnauthenticatedError(error)) {
+      state.user = null;
+      state.data = null;
+      return false;
+    }
+    throw error;
   }
 }
 
@@ -764,22 +810,31 @@ async function retryLicenseStatusNow() {
   state.licenseRetryInFlight = true;
   clearLicenseHardwareRetry();
   try {
-    const lic = await fetchLicenseStatusSafe();
-    if (lic) {
-      state.license = lic;
-      if (lic.status === 'ACTIVE' && state.bootstrap?.configured && !state.data && state.user) {
-        await loadData().catch(() => {});
+    if (!state.bootstrap) {
+      try {
+        state.bootstrap = await api('/api/bootstrap');
+      } catch (error) {
+        state.license = buildRetryableLicenseState(error, 'تعذر الاتصال بالخادم المحلي — جاري إعادة المحاولة تلقائيًا.');
+        return;
       }
-      render();
+    }
+    state.license = await fetchLicenseStatusSafe();
+    if (state.license.status === 'ACTIVE' && state.bootstrap?.configured && !state.data) {
+      try {
+        await hydrateAuthenticatedSession();
+      } catch (error) {
+        state.license = buildRetryableLicenseState(error, 'تعذر تحميل بيانات الجلسة — جاري إعادة المحاولة تلقائيًا.');
+      }
     }
   } finally {
     state.licenseRetryInFlight = false;
+    render();
   }
 }
 
 function scheduleLicenseHardwareRetry() {
   clearLicenseHardwareRetry();
-  if (state.license?.status !== 'HARDWARE_UNAVAILABLE') return;
+  if (!isRetryableLicenseStatus(state.license)) return;
   state.licenseRetryTimer = setTimeout(() => {
     void retryLicenseStatusNow();
   }, 3000);
@@ -809,24 +864,22 @@ async function start() {
       fetchLicenseStatusSafe(),
     ]);
     state.bootstrap = boot;
-    if (license) state.license = license;
-    if (state.bootstrap.configured) {
-      try {
-        const session = await api(`/api/data?tzOffset=${encodeURIComponent(String(new Date().getTimezoneOffset()))}`);
-        state.user = session.user;
-        state.data = session;
-        state.page = session.capabilities?.cashierMode ? 'pos' : 'dashboard';
-        applyRequestedRoute(state.page);
-        restorePendingCheckoutForStore();
-      } catch (error) {
-        if (!String(error.message).includes('تسجيل الدخول') && !String(error.message).includes('انتهت الجلسة')) throw error;
-      }
-    }
-    render();
+    state.license = license;
   } catch (error) {
-    document.querySelector('#app').innerHTML = `<main class="fatal-state"><div class="brand-mark">ر</div><h1>تعذر تشغيل رَفّ</h1><p>${escapeHtml(error.message)}</p><button type="button" class="button button-primary" id="fatal-reload-btn">إعادة المحاولة</button></main>`;
-    document.querySelector('#fatal-reload-btn')?.addEventListener('click', () => window.location.reload());
+    // Bootstrap/transport failure is transient on slow Windows boots: stay fail-closed and retry, never fatal.
+    state.bootstrap = null;
+    state.license = buildRetryableLicenseState(error, 'تعذر الاتصال بالخادم المحلي أثناء بدء التشغيل — جاري إعادة المحاولة تلقائيًا.');
+    render();
+    return;
   }
+  if (state.bootstrap?.configured && state.license?.status === 'ACTIVE') {
+    try {
+      await hydrateAuthenticatedSession();
+    } catch (error) {
+      state.license = buildRetryableLicenseState(error, 'تعذر تحميل بيانات الجلسة — جاري إعادة المحاولة تلقائيًا.');
+    }
+  }
+  render();
 }
 
 function licenseStatusMeta(lic) {
@@ -837,6 +890,14 @@ function licenseStatusMeta(lic) {
       reason: lic?.reason || 'تعذر التحقق المؤقت من معرف الجهاز أثناء بدء تشغيل ويندوز — يعيد النظام المحاولة تلقائيًا.',
       pillClass: 'status-low',
       pillText: 'إعادة التحقق (503)',
+    };
+  }
+  if (status === 'LICENSE_CHECK_RETRYABLE') {
+    return {
+      title: 'جاري التحقق من حالة الترخيص',
+      reason: lic?.reason || 'تعذر التحقق من حالة الترخيص مؤقتًا — يعيد النظام المحاولة تلقائيًا.',
+      pillClass: 'status-low',
+      pillText: 'إعادة التحقق',
     };
   }
   if (status === 'ACTIVE') {
@@ -880,9 +941,9 @@ function licenseStatusMeta(lic) {
 }
 
 function licenseActivationView() {
-  const lic = state.license ?? { status: 'UNLICENSED', machineId: '' };
+  const lic = state.license ?? buildRetryableLicenseState(null);
   const meta = licenseStatusMeta(lic);
-  const isHardwareUnavailable = lic.status === 'HARDWARE_UNAVAILABLE';
+  const isHardwareUnavailable = isRetryableLicenseStatus(lic);
   const canEmergencyBackup = Boolean(state.user && state.data?.capabilities?.canManageBackups);
   const canEmergencyLogin = Boolean(!state.user && state.bootstrap?.configured && !state.bootstrap?.setupRequired);
   return `<main id="license-activation-screen" class="license-screen" role="dialog" aria-modal="true" aria-labelledby="license-screen-title">
@@ -897,7 +958,7 @@ function licenseActivationView() {
       </div>
       ${isHardwareUnavailable ? `
         <div id="license-hardware-retry-box" class="form-stack">
-          <p style="margin:0;color:var(--text-secondary);font-size:13.5px;">بانتظار جاهزية خدمات تعريف الجهاز في ويندوز. يعيد البرنامج المحاولة تلقائيًا كل 3 ثوانٍ مع إبقاء العمليات المالية متوقفة مؤقتًا لحماية البيانات.</p>
+          <p style="margin:0;color:var(--text-secondary);font-size:13.5px;">بانتظار جاهزية التحقق من الترخيص وخدمات تعريف الجهاز في ويندوز. يعيد البرنامج المحاولة تلقائيًا كل 3 ثوانٍ مع إبقاء العمليات المالية متوقفة مؤقتًا لحماية البيانات.</p>
           <div class="license-actions-row">
             <button type="button" id="retry-license-status-btn" class="button button-primary button-wide">إعادة المحاولة الآن</button>
           </div>
@@ -1089,12 +1150,13 @@ function bindLicenseView() {
 
 function render() {
   const root = document.querySelector('#app');
-  if (state.license?.status === 'HARDWARE_UNAVAILABLE') {
+  if (isRetryableLicenseStatus(state.license)) {
     scheduleLicenseHardwareRetry();
   } else {
     clearLicenseHardwareRetry();
   }
-  const licenseBlocked = Boolean(state.license && state.license.status !== 'ACTIVE');
+  // Fail-closed: anything other than a confirmed ACTIVE license (including a missing state) blocks operations.
+  const licenseBlocked = !state.license || state.license.status !== 'ACTIVE';
   const allowEmergencyBackupScreen = Boolean(
     state.licenseBypassForBackups &&
     state.user &&
@@ -1207,11 +1269,16 @@ function bindLogin() {
       const session = await api('/api/login', { method: 'POST', body: JSON.stringify(values) });
       state.user = session.user;
       state.postSetupDailyBackupKey = null;
-      state.license = (await fetchLicenseStatusSafe()) ?? state.license;
+      state.license = await fetchLicenseStatusSafe();
       state.licenseBypassForLogin = false;
       state.page = session.capabilities?.cashierMode ? 'pos' : 'dashboard';
-      await loadData();
-      if (state.license?.status !== 'ACTIVE' && wasEmergencyLogin && state.data?.capabilities?.canManageBackups) {
+      const licenseActive = state.license?.status === 'ACTIVE';
+      // Fail-closed: only load operational data with a confirmed ACTIVE license, or for an explicit
+      // emergency (backup export/restore) login on a definitive, non-retryable license block.
+      if (licenseActive || (wasEmergencyLogin && !isRetryableLicenseStatus(state.license))) {
+        await loadData();
+      }
+      if (!licenseActive && wasEmergencyLogin && state.data?.capabilities?.canManageBackups) {
         state.licenseBypassForBackups = true;
         state.page = 'backups';
       } else {
@@ -11230,4 +11297,7 @@ function bindStocktake() {
   });
 }
 
-start();
+// Test harnesses (node:vm) set this flag to drive start() deterministically; production always auto-starts.
+if (window.__RETAILOS_DISABLE_AUTOSTART__ !== true) {
+  start();
+}
