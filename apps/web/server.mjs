@@ -2385,6 +2385,98 @@ async function profitLossReport(ctx, url) {
 }
 
 let activeBackupPromise = null;
+let restoreMaintenanceMode = false;
+let activeApiRequestCount = 0;
+let walCheckpointTimer = null;
+let initialDailyBackupTimer = null;
+const scheduledDatabaseTasks = new Set();
+
+function runScheduledDatabaseTask(task) {
+  if (restoreMaintenanceMode) return;
+  const pending = Promise.resolve().then(async () => {
+    if (process.env.NODE_ENV === 'test' && typeof options.beforeScheduledDatabaseTask === 'function') {
+      await options.beforeScheduledDatabaseTask();
+    }
+    return task();
+  });
+  scheduledDatabaseTasks.add(pending);
+  void pending.then(
+    () => scheduledDatabaseTasks.delete(pending),
+    () => scheduledDatabaseTasks.delete(pending),
+  );
+}
+
+function stopScheduledDatabaseTasks() {
+  if (walCheckpointTimer) clearInterval(walCheckpointTimer);
+  if (initialDailyBackupTimer) clearTimeout(initialDailyBackupTimer);
+  walCheckpointTimer = null;
+  initialDailyBackupTimer = null;
+}
+
+function startScheduledDatabaseTasks() {
+  if (restoreMaintenanceMode || walCheckpointTimer) return;
+  walCheckpointTimer = setInterval(() => {
+    runScheduledDatabaseTask(async () => {
+      database.checkpointPassive();
+      pruneFailedLogins();
+      pruneFailedPasswordChanges();
+      await ensureDailyBackup({ force: false }).catch(() => undefined);
+      await db
+        .deleteFrom('sessions')
+        .where((eb) => eb.or([eb('is_revoked', '=', 1), eb('expires_at', '<', new Date().toISOString())]))
+        .execute()
+        .catch(() => undefined);
+    });
+  }, 5 * 60 * 1000);
+  walCheckpointTimer.unref();
+  initialDailyBackupTimer = setTimeout(() => {
+    initialDailyBackupTimer = null;
+    runScheduledDatabaseTask(() => ensureDailyBackup({ force: false }));
+  }, 1500);
+  initialDailyBackupTimer.unref();
+}
+
+async function enterRestoreMaintenanceMode() {
+  if (restoreMaintenanceMode) {
+    throw Object.assign(new Error('Database restore is already in progress'), { status: 503, code: 'RESTORE_IN_PROGRESS' });
+  }
+  restoreMaintenanceMode = true;
+  stopScheduledDatabaseTasks();
+  if (process.env.NODE_ENV === 'test' && typeof options.onRestoreMaintenanceStarted === 'function') {
+    options.onRestoreMaintenanceStarted();
+  }
+  const deadline = Date.now() + 30_000;
+  try {
+    // The restoring request itself is counted; wait for every other API request to finish.
+    while (activeApiRequestCount > 1) {
+      if (Date.now() >= deadline) {
+        throw Object.assign(new Error('Timed out waiting for active requests before restore'), { status: 503, code: 'RESTORE_DRAIN_TIMEOUT' });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    if (activeBackupPromise) await activeBackupPromise;
+    while (scheduledDatabaseTasks.size > 0) {
+      if (Date.now() >= deadline) {
+        throw Object.assign(new Error('Timed out waiting for scheduled database work before restore'), { status: 503, code: 'RESTORE_TASK_DRAIN_TIMEOUT' });
+      }
+      await Promise.all(Array.from(scheduledDatabaseTasks));
+    }
+  } catch (error) {
+    restoreMaintenanceMode = false;
+    startScheduledDatabaseTasks();
+    throw error;
+  }
+}
+
+async function waitAtRestoreTestBarrier() {
+  if (process.env.NODE_ENV === 'test' && typeof options.beforeRestoreInstall === 'function') {
+    await options.beforeRestoreInstall();
+  }
+}
+
+function restoreFileOperationsForTest() {
+  return process.env.NODE_ENV === 'test' ? options.restoreFileOperations : undefined;
+}
 
 function validateMirrorPath(rawInput) {
   const trimmed = String(rawInput ?? '').trim();
@@ -5222,17 +5314,22 @@ async function handleApi(req, res, url) {
       throw Object.assign(new Error('ملف النسخة اليومية تالف أو لا يخص هذا المتجر'), { status: 400 });
     }
     let restartRequired = false;
+    let restoreInstallStarted = false;
     try {
-      await createPreRestoreSafetySnapshot();
+      await enterRestoreMaintenanceMode();
+      database.beginMaintenanceMode();
       restartRequired = true;
-      await installPreparedSqliteRestore(database.getRawDatabase(), () => database.close(), databasePath, dataDir, preparedRestore);
-      res.once('finish', () => restartLocalServer());
+      await waitAtRestoreTestBarrier();
+      await createPreRestoreSafetySnapshot();
+      restoreInstallStarted = true;
+      await installPreparedSqliteRestore(database.getRawDatabase(), () => database.closeForRestore(), databasePath, dataDir, preparedRestore, restoreFileOperationsForTest());
+      schedulePostRestoreRestart(res);
       return json(res, 202, { restored: true, restarting: true, restoredFrom: body.filename });
     } catch (error) {
-      if (restartRequired) res.once('finish', () => restartLocalServer());
+      if (restartRequired) schedulePostRestoreRestart(res);
       throw error;
     } finally {
-      if (preparedRestore && !restartRequired) await rm(preparedRestore.workspace, { recursive: true, force: true });
+      if (preparedRestore && !restoreInstallStarted) await rm(preparedRestore.workspace, { recursive: true, force: true });
     }
   }
 
@@ -5294,6 +5391,7 @@ async function handleApi(req, res, url) {
     const archivePath = join(uploadWorkspace, 'upload.rfbackup');
     let preparedRestore;
     let restartRequired = false;
+    let restoreInstallStarted = false;
     try {
       let uploadSize = 0;
       const limit = new Transform({ transform(chunk, _encoding, callback) {
@@ -5316,17 +5414,21 @@ async function handleApi(req, res, url) {
       } catch {
         throw Object.assign(new Error('Backup file or passphrase is invalid, or the backup belongs to another company'), { status: 400 });
       }
-      await createPreRestoreSafetySnapshot();
+      await enterRestoreMaintenanceMode();
+      database.beginMaintenanceMode();
       restartRequired = true;
-      await installPreparedSqliteRestore(database.getRawDatabase(), () => database.close(), databasePath, dataDir, preparedRestore);
-      res.once('finish', () => restartLocalServer());
+      await waitAtRestoreTestBarrier();
+      await createPreRestoreSafetySnapshot();
+      restoreInstallStarted = true;
+      await installPreparedSqliteRestore(database.getRawDatabase(), () => database.closeForRestore(), databasePath, dataDir, preparedRestore, restoreFileOperationsForTest());
+      schedulePostRestoreRestart(res);
       return json(res, 202, { restored: true, restarting: true });
     } catch (error) {
-      if (restartRequired) res.once('finish', () => restartLocalServer());
+      if (restartRequired) schedulePostRestoreRestart(res);
       throw error;
     } finally {
       await rm(uploadWorkspace, { recursive: true, force: true });
-      if (preparedRestore && !restartRequired) await rm(preparedRestore.workspace, { recursive: true, force: true });
+      if (preparedRestore && !restoreInstallStarted) await rm(preparedRestore.workspace, { recursive: true, force: true });
     }
   }
 
@@ -7996,7 +8098,20 @@ const server = createServer(async (req, res) => {
     const host = req.headers.host;
     if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) throw Object.assign(new Error('استخدم عنوان التطبيق المحلي'), { status: 421 });
     const url = new URL(req.url ?? '/', origin);
-    if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
+    if (url.pathname.startsWith('/api/')) {
+      if (restoreMaintenanceMode) {
+        return json(res, 503, { error: 'النظام في وضع الصيانة لاستعادة قاعدة البيانات', code: 'RESTORE_IN_PROGRESS', retryable: true });
+      }
+      activeApiRequestCount += 1;
+      try {
+        if (process.env.NODE_ENV === 'test' && typeof options.beforeApiRequest === 'function') {
+          await options.beforeApiRequest(url);
+        }
+        return await handleApi(req, res, url);
+      } finally {
+        activeApiRequestCount -= 1;
+      }
+    }
     if (req.method !== 'GET' && req.method !== 'HEAD') throw Object.assign(new Error('الطريقة غير مسموحة'), { status: 405 });
     let relativePath;
     try {
@@ -8024,6 +8139,9 @@ const server = createServer(async (req, res) => {
     const status = Number.isInteger(error?.status) ? error.status : error?.message?.startsWith('UnauthorizedError') ? 403 : databaseConflict ? 409 : isDomainClientError ? 400 : 500;
     if (status >= 500) {
       console.error('Request failed with status:', Number(status));
+      if (process.env.NODE_ENV === 'test' && typeof options.onRequestFailure === 'function') {
+        options.onRequestFailure({ status, code: typeof error?.code === 'string' ? error.code : undefined, message: error instanceof Error ? error.message : String(error) });
+      }
     }
     const isTransientHardware = error instanceof LicenseHardwareIdentityError;
     const isExposedError = Boolean(error?.exposeMessage);
@@ -8047,27 +8165,26 @@ const server = createServer(async (req, res) => {
   }
 });
 
-const walCheckpointTimer = setInterval(() => {
-  database.checkpointPassive();
-  pruneFailedLogins();
-  pruneFailedPasswordChanges();
-  void ensureDailyBackup({ force: false }).catch(() => undefined);
-  void db
-    .deleteFrom('sessions')
-    .where((eb) => eb.or([eb('is_revoked', '=', 1), eb('expires_at', '<', new Date().toISOString())]))
-    .execute()
-    .catch(() => undefined);
-}, 5 * 60 * 1000);
-walCheckpointTimer.unref();
-setTimeout(() => {
-  void ensureDailyBackup({ force: false }).catch(() => undefined);
-}, 1500).unref();
+startScheduledDatabaseTasks();
 
 let restartScheduled = false;
+function schedulePostRestoreRestart(res) {
+  res.once('finish', () => {
+    if (process.env.NODE_ENV === 'test' && typeof options.onRestoreRestartRequested === 'function') {
+      void Promise.resolve().then(() => options.onRestoreRestartRequested()).catch((error) => {
+        console.error('Test restore restart callback failed:', error instanceof Error ? error.message : String(error));
+      });
+      return;
+    }
+    restartLocalServer();
+  });
+}
+
 function restartLocalServer() {
   if (restartScheduled) return;
   restartScheduled = true;
-  clearInterval(walCheckpointTimer);
+  restoreMaintenanceMode = true;
+  stopScheduledDatabaseTasks();
   hostSecrets.closeHostChannel?.();
   server.close(() => {
     database.checkpointPassive();
@@ -8142,7 +8259,8 @@ let shutdownPromise = null;
 async function shutdown() {
   if (shutdownPromise) return shutdownPromise;
   shutdownPromise = (async () => {
-    clearInterval(walCheckpointTimer);
+    restoreMaintenanceMode = true;
+    stopScheduledDatabaseTasks();
     hostSecrets.closeHostChannel?.();
     await new Promise((resolve) => {
       const timeout = setTimeout(() => resolve(undefined), 2000);

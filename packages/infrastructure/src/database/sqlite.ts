@@ -11,6 +11,7 @@ export interface SqliteConnectionOptions {
 export class SqliteDatabaseManager {
   private rawDb: DatabaseInstance | null = null;
   private kyselyDb: Kysely<RetailOSDatabase> | null = null;
+  private maintenanceMode = false;
   private readonly logger: Logger;
 
   constructor(private readonly options: SqliteConnectionOptions) {
@@ -32,6 +33,9 @@ export class SqliteDatabaseManager {
   }
 
   public connect(): void {
+    if (this.maintenanceMode) {
+      throw new Error('SQLite is unavailable while database maintenance is in progress');
+    }
     if (this.rawDb) {
       return;
     }
@@ -69,6 +73,55 @@ export class SqliteDatabaseManager {
       this.rawDb.pragma('wal_checkpoint(PASSIVE)');
     } catch (err) {
       this.logger.warn(`Passive WAL checkpoint returned notice: ${String(err)}`);
+    }
+  }
+
+  /** Prevent lazy connection creation while a restore is replacing the database files. */
+  public beginMaintenanceMode(): void {
+    this.maintenanceMode = true;
+  }
+
+  /** Resume only when the existing connection is still open and the restore has not begun. */
+  public cancelMaintenanceMode(): void {
+    if (!this.rawDb?.open) {
+      throw new Error('Cannot resume SQLite after its connection has been closed');
+    }
+    this.maintenanceMode = false;
+  }
+
+  /** Strict restore shutdown: checkpoint must complete and every native connection is closed. */
+  public async closeForRestore(): Promise<void> {
+    this.maintenanceMode = true;
+    const rawDb = this.rawDb;
+    if (!rawDb?.open) {
+      throw new Error('SQLite connection is not open for restore');
+    }
+
+    const checkpointRows = rawDb.pragma('wal_checkpoint(TRUNCATE)') as {
+      busy?: number;
+      log?: number;
+      checkpointed?: number;
+    }[];
+    const checkpoint = checkpointRows[0];
+    if (!checkpoint || checkpoint.busy !== 0 || checkpoint.checkpointed !== checkpoint.log) {
+      throw new Error('SQLite WAL checkpoint did not finish; restore was aborted');
+    }
+
+    const kyselyDb = this.kyselyDb;
+    try {
+      if (kyselyDb) {
+        await kyselyDb.destroy();
+      } else if (rawDb.open) {
+        rawDb.close();
+      }
+    } finally {
+      if (!rawDb.open) {
+        this.kyselyDb = null;
+        this.rawDb = null;
+      }
+    }
+    if (rawDb.open) {
+      throw new Error('SQLite connection remained open after restore shutdown');
     }
   }
 

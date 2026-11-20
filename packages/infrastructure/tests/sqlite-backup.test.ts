@@ -1,10 +1,10 @@
 import Database from 'better-sqlite3';
-import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { assessFreshReplacementHost, checkSqliteFileQuick, createEncryptedSqliteBackup, decryptBackupArchive, installPreparedSqliteRestore, prepareEncryptedSqliteRestore, preparePlainSqliteRestore, recoverPendingSqliteRestore, removeBackupArtifact } from '../src/backup/sqlite-backup.service.js';
+import { assessFreshReplacementHost, checkSqliteFileQuick, createEncryptedSqliteBackup, decryptBackupArchive, installPreparedSqliteRestore, prepareEncryptedSqliteRestore, preparePlainSqliteRestore, recoverPendingSqliteRestore, removeBackupArtifact, verifySqliteFile } from '../src/backup/sqlite-backup.service.js';
 import { SqliteDatabaseManager } from '../src/database/sqlite.js';
 import { DatabaseMigrator } from '../src/database/migrator.js';
 
@@ -87,6 +87,339 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
       await expect(recoverPendingSqliteRestore(workingDirectory, activePath, restoreTenant.code)).resolves.toBe(true);
       expect(readProbe(activePath)).toBe('from-backup');
       expect(await readFile(join(workingDirectory, '.retailos-restore.json')).catch(() => null)).toBeNull();
+    } finally {
+      await source.close();
+      await active.close();
+    }
+  });
+
+  it('strict restore shutdown checkpoints, closes the native handle, and forbids lazy reconnection', async () => {
+    workingDirectory = await mkdtemp(join(tmpdir(), 'retailos-restore-close-'));
+    const activePath = join(workingDirectory, 'active.sqlite');
+    const active = await makeMigratedDatabase(activePath, 'kept-before-restore');
+    const raw = active.getRawDatabase();
+    try {
+      active.beginMaintenanceMode();
+      await active.closeForRestore();
+      expect(raw.open).toBe(false);
+      expect(() => active.getRawDatabase()).toThrow(/maintenance is in progress/);
+
+      const reopened = new Database(activePath, { readonly: true, fileMustExist: true });
+      try {
+        expect(reopened.prepare('SELECT value FROM restore_probe').get()).toEqual({ value: 'kept-before-restore' });
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      await active.close();
+    }
+  });
+
+  it('aborts strict restore shutdown when WAL checkpoint reports a live reader', async () => {
+    workingDirectory = await mkdtemp(join(tmpdir(), 'retailos-restore-checkpoint-busy-'));
+    const activePath = join(workingDirectory, 'active.sqlite');
+    const active = await makeMigratedDatabase(activePath, 'kept-on-checkpoint-failure');
+    const writer = active.getRawDatabase();
+    const reader = new Database(activePath);
+    try {
+      writer.exec('CREATE TABLE checkpoint_probe(value TEXT NOT NULL)');
+      reader.exec('BEGIN');
+      reader.prepare('SELECT * FROM checkpoint_probe').all();
+      writer.prepare('INSERT INTO checkpoint_probe(value) VALUES (?)').run('committed-after-reader-snapshot');
+
+      active.beginMaintenanceMode();
+      await expect(active.closeForRestore()).rejects.toThrow(/WAL checkpoint did not finish/);
+      expect(writer.open).toBe(true);
+      expect(() => active.connect()).toThrow(/maintenance is in progress/);
+      expect(await stat(activePath).then(() => true, () => false)).toBe(true);
+    } finally {
+      if (reader.inTransaction) reader.exec('ROLLBACK');
+      reader.close();
+      await active.close();
+    }
+  });
+
+  it('rolls back immediately when the installed candidate fails post-swap verification', async () => {
+    workingDirectory = await mkdtemp(join(tmpdir(), 'retailos-restore-rollback-'));
+    const source = await makeMigratedDatabase(join(workingDirectory, 'source.sqlite'), 'candidate-data');
+    const activePath = join(workingDirectory, 'active.sqlite');
+    const active = await makeMigratedDatabase(activePath, 'original-data');
+    try {
+      const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
+      backupPath = backup.path;
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      await writeFile(prepared.candidatePath, 'tampered after preparation');
+
+      active.beginMaintenanceMode();
+      await expect(installPreparedSqliteRestore(
+        active.getRawDatabase(),
+        () => active.closeForRestore(),
+        activePath,
+        workingDirectory,
+        prepared,
+      )).rejects.toThrow(/does not match/);
+
+      expect(checkSqliteFileQuick(activePath).ok).toBe(true);
+      expect(readProbe(activePath)).toBe('original-data');
+      expect(await readFile(join(workingDirectory, '.retailos-restore.json')).catch(() => null)).toBeNull();
+    } finally {
+      await source.close();
+      await active.close();
+    }
+  });
+
+  it('preserves the original database when native shutdown fails before the swap', async () => {
+    workingDirectory = await mkdtemp(join(tmpdir(), 'retailos-restore-close-failure-'));
+    const source = await makeMigratedDatabase(join(workingDirectory, 'source.sqlite'), 'candidate-data');
+    const activePath = join(workingDirectory, 'active.sqlite');
+    const active = await makeMigratedDatabase(activePath, 'original-data');
+    try {
+      const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
+      backupPath = backup.path;
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      active.beginMaintenanceMode();
+
+      await expect(installPreparedSqliteRestore(
+        active.getRawDatabase(),
+        () => { throw new Error('simulated native close failure'); },
+        activePath,
+        workingDirectory,
+        prepared,
+      )).rejects.toThrow(/simulated native close failure/);
+
+      expect(active.getRawDatabase().open).toBe(true);
+      expect(checkSqliteFileQuick(activePath).ok).toBe(true);
+      expect(readProbe(activePath)).toBe('original-data');
+      expect(await readFile(join(workingDirectory, '.retailos-restore.json')).catch(() => null)).toBeNull();
+    } finally {
+      await source.close();
+      await active.close();
+    }
+  });
+
+  it('keeps the original recoverable when WAL cleanup fails and finalizes rollback on restart', async () => {
+    workingDirectory = await mkdtemp(join(tmpdir(), 'retailos-restore-wal-delete-failure-'));
+    const source = await makeMigratedDatabase(join(workingDirectory, 'source.sqlite'), 'candidate-data');
+    const activePath = join(workingDirectory, 'active.sqlite');
+    const active = await makeMigratedDatabase(activePath, 'original-data');
+    let obstructionPath: string | undefined;
+    try {
+      const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
+      backupPath = backup.path;
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      active.beginMaintenanceMode();
+
+      await expect(installPreparedSqliteRestore(
+        active.getRawDatabase(),
+        async () => {
+          await active.closeForRestore();
+          obstructionPath = `${activePath}-wal`;
+          await mkdir(obstructionPath);
+        },
+        activePath,
+        workingDirectory,
+        prepared,
+      )).rejects.toThrow();
+
+      expect(await stat(join(workingDirectory, '.retailos-restore.json')).then(() => true, () => false)).toBe(true);
+      expect(await stat(join(prepared.workspace, 'previous.sqlite')).then(() => true, () => false)).toBe(true);
+      expect(await stat(activePath).then(() => true, () => false)).toBe(false);
+
+      await rm(obstructionPath!, { recursive: true, force: true });
+      await expect(recoverPendingSqliteRestore(workingDirectory, activePath, restoreTenant.code)).resolves.toBe(false);
+      expect(checkSqliteFileQuick(activePath).ok).toBe(true);
+      expect(readProbe(activePath)).toBe('original-data');
+      expect(await readFile(join(workingDirectory, '.retailos-restore.json')).catch(() => null)).toBeNull();
+    } finally {
+      await source.close();
+      await active.close();
+    }
+  });
+
+  it.each(['-wal', '-shm'] as const)('restores the original when deleting the %s sidecar fails', async (sidecar) => {
+    workingDirectory = await mkdtemp(join(tmpdir(), `retailos-restore-delete-${sidecar.slice(1)}-`));
+    const source = await makeMigratedDatabase(join(workingDirectory, 'source.sqlite'), 'candidate-data');
+    const activePath = join(workingDirectory, 'active.sqlite');
+    const active = await makeMigratedDatabase(activePath, 'original-data');
+    let injected = false;
+    try {
+      const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
+      backupPath = backup.path;
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      active.beginMaintenanceMode();
+      await expect(installPreparedSqliteRestore(active.getRawDatabase(), async () => {
+        await active.closeForRestore();
+        await writeFile(`${activePath}${sidecar}`, 'synthetic sidecar obstruction');
+      }, activePath, workingDirectory, prepared, {
+        removeFile: async (path, options) => {
+          if (!injected && path === `${activePath}${sidecar}`) {
+            injected = true;
+            throw new Error(`simulated ${sidecar} deletion failure`);
+          }
+          return rm(path, options);
+        },
+      })).rejects.toThrow(`simulated ${sidecar} deletion failure`);
+      expect(checkSqliteFileQuick(activePath).ok).toBe(true);
+      expect(readProbe(activePath)).toBe('original-data');
+      expect(await readFile(join(workingDirectory, '.retailos-restore.json')).catch(() => null)).toBeNull();
+    } finally {
+      await source.close();
+      await active.close();
+    }
+  });
+
+  it('does not report success when moving the candidate into place fails', async () => {
+    workingDirectory = await mkdtemp(join(tmpdir(), 'retailos-restore-install-move-failure-'));
+    const source = await makeMigratedDatabase(join(workingDirectory, 'source.sqlite'), 'candidate-data');
+    const activePath = join(workingDirectory, 'active.sqlite');
+    const active = await makeMigratedDatabase(activePath, 'original-data');
+    let injected = false;
+    try {
+      const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
+      backupPath = backup.path;
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      active.beginMaintenanceMode();
+      await expect(installPreparedSqliteRestore(active.getRawDatabase(), () => active.closeForRestore(), activePath, workingDirectory, prepared, {
+        renameFile: async (from, to) => {
+          if (!injected && from === prepared.candidatePath && to === activePath) {
+            injected = true;
+            throw new Error('simulated candidate install move failure');
+          }
+          return rename(from, to);
+        },
+      })).rejects.toThrow('simulated candidate install move failure');
+      expect(checkSqliteFileQuick(activePath).ok).toBe(true);
+      expect(readProbe(activePath)).toBe('original-data');
+      expect(await readFile(join(workingDirectory, '.retailos-restore.json')).catch(() => null)).toBeNull();
+    } finally {
+      await source.close();
+      await active.close();
+    }
+  });
+
+  it('preserves recovery artifacts if the rollback move fails, then recovers the original safely', async () => {
+    workingDirectory = await mkdtemp(join(tmpdir(), 'retailos-restore-rollback-move-failure-'));
+    const source = await makeMigratedDatabase(join(workingDirectory, 'source.sqlite'), 'candidate-data');
+    const activePath = join(workingDirectory, 'active.sqlite');
+    const active = await makeMigratedDatabase(activePath, 'original-data');
+    let candidateMoveFailed = false;
+    let rollbackMoveFailed = false;
+    try {
+      const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
+      backupPath = backup.path;
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      active.beginMaintenanceMode();
+      await expect(installPreparedSqliteRestore(active.getRawDatabase(), () => active.closeForRestore(), activePath, workingDirectory, prepared, {
+        renameFile: async (from, to) => {
+          if (!candidateMoveFailed && from === prepared.candidatePath && to === activePath) {
+            candidateMoveFailed = true;
+            throw new Error('simulated candidate install failure');
+          }
+          if (candidateMoveFailed && !rollbackMoveFailed && typeof from === 'string' && from.endsWith('previous.sqlite') && to === activePath) {
+            rollbackMoveFailed = true;
+            throw new Error('simulated rollback move failure');
+          }
+          return rename(from, to);
+        },
+      })).rejects.toThrow(/rollback was incomplete/);
+      const markerPath = join(workingDirectory, '.retailos-restore.json');
+      const marker = JSON.parse(await readFile(markerPath, 'utf8')) as { previousPath: string; rollbackPath: string };
+      expect(await stat(marker.previousPath).then(() => true, () => false)).toBe(true);
+      expect(await stat(marker.rollbackPath).then(() => true, () => false)).toBe(true);
+      expect(await stat(activePath).then(() => true, () => false)).toBe(false);
+      await expect(recoverPendingSqliteRestore(workingDirectory, activePath, restoreTenant.code)).resolves.toBe(false);
+      expect(checkSqliteFileQuick(activePath).ok).toBe(true);
+      expect(readProbe(activePath)).toBe('original-data');
+    } finally {
+      await source.close();
+      await active.close();
+    }
+  });
+
+  it('reports post-install validation failure and restores the original database', async () => {
+    workingDirectory = await mkdtemp(join(tmpdir(), 'retailos-restore-validation-failure-'));
+    const source = await makeMigratedDatabase(join(workingDirectory, 'source.sqlite'), 'candidate-data');
+    const activePath = join(workingDirectory, 'active.sqlite');
+    const active = await makeMigratedDatabase(activePath, 'original-data');
+    let injected = false;
+    try {
+      const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
+      backupPath = backup.path;
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      active.beginMaintenanceMode();
+      await expect(installPreparedSqliteRestore(active.getRawDatabase(), () => active.closeForRestore(), activePath, workingDirectory, prepared, {
+        verifyFile: (path, tenant, options) => {
+          if (!injected && path === activePath) {
+            injected = true;
+            throw new Error('simulated post-install validation failure');
+          }
+          return verifySqliteFile(path, tenant, options);
+        },
+      })).rejects.toThrow('simulated post-install validation failure');
+      expect(checkSqliteFileQuick(activePath).ok).toBe(true);
+      expect(readProbe(activePath)).toBe('original-data');
+      expect(await readFile(join(workingDirectory, '.retailos-restore.json')).catch(() => null)).toBeNull();
+    } finally {
+      await source.close();
+      await active.close();
+    }
+  });
+
+  it('preserves a valid original if rollback marker creation fails before replacement', async () => {
+    workingDirectory = await mkdtemp(join(tmpdir(), 'retailos-restore-marker-create-failure-'));
+    const source = await makeMigratedDatabase(join(workingDirectory, 'source.sqlite'), 'candidate-data');
+    const activePath = join(workingDirectory, 'active.sqlite');
+    const active = await makeMigratedDatabase(activePath, 'original-data');
+    try {
+      const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
+      backupPath = backup.path;
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      active.beginMaintenanceMode();
+      await expect(installPreparedSqliteRestore(active.getRawDatabase(), () => active.closeForRestore(), activePath, workingDirectory, prepared, {
+        writeMarker: () => { throw new Error('simulated restore marker creation failure'); },
+      })).rejects.toThrow('simulated restore marker creation failure');
+      expect(checkSqliteFileQuick(activePath).ok).toBe(true);
+      expect(readProbe(activePath)).toBe('original-data');
+    } finally {
+      await source.close();
+      await active.close();
+    }
+  });
+
+  it('retains recovery marker and valid database when marker cleanup fails, then cleans it at recovery', async () => {
+    workingDirectory = await mkdtemp(join(tmpdir(), 'retailos-restore-marker-cleanup-failure-'));
+    const source = await makeMigratedDatabase(join(workingDirectory, 'source.sqlite'), 'candidate-data');
+    const activePath = join(workingDirectory, 'active.sqlite');
+    const active = await makeMigratedDatabase(activePath, 'original-data');
+    let failInstall = false;
+    let failCleanup = false;
+    const markerPath = join(workingDirectory, '.retailos-restore.json');
+    try {
+      const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
+      backupPath = backup.path;
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      active.beginMaintenanceMode();
+      await expect(installPreparedSqliteRestore(active.getRawDatabase(), () => active.closeForRestore(), activePath, workingDirectory, prepared, {
+        renameFile: async (from, to) => {
+          if (!failInstall && from === prepared.candidatePath && to === activePath) {
+            failInstall = true;
+            throw new Error('simulated candidate install failure');
+          }
+          return rename(from, to);
+        },
+        removeFile: async (path, options) => {
+          if (!failCleanup && path === markerPath) {
+            failCleanup = true;
+            throw new Error('simulated marker cleanup failure');
+          }
+          return rm(path, options);
+        },
+      })).rejects.toThrow(/rollback was incomplete/);
+      expect(readProbe(activePath)).toBe('original-data');
+      expect(await stat(markerPath).then(() => true, () => false)).toBe(true);
+      await expect(recoverPendingSqliteRestore(workingDirectory, activePath, restoreTenant.code)).resolves.toBe(false);
+      expect(readProbe(activePath)).toBe('original-data');
+      expect(await stat(markerPath).then(() => true, () => false)).toBe(false);
     } finally {
       await source.close();
       await active.close();

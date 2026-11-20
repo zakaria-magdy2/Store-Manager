@@ -5,6 +5,7 @@ import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +13,9 @@ import { ScopedExecutionContext } from '@retailos/application';
 import { Tenant } from '@retailos/core';
 import {
   DatabaseMigrator,
+  createEncryptedSqliteBackup,
+  decryptBackupArchive,
+  removeBackupArtifact,
   EMBEDDED_LICENSE_PUBLIC_KEY_PEM,
   SqliteAuditLogRepository,
   SqliteDatabaseManager,
@@ -40,6 +44,9 @@ import {
   waitForServerReady,
   writeExternalClockWatermark,
 } from '../dist/index.js';
+
+const infrastructureRequire = createRequire(new URL('../../../packages/infrastructure/package.json', import.meta.url));
+const BetterSqlite3 = infrastructureRequire('better-sqlite3');
 
 test('createDesktopWindowSecurityPolicy enforces loopback origin, sandbox flags, and IPC channel whitelist', () => {
   const policy = createDesktopWindowSecurityPolicy('http://127.0.0.1:4310');
@@ -664,6 +671,152 @@ test('updateDesktopDailyBackupSecret preserves historical keys in DPAPI keyring 
     assert.equal(capturedKey, emittedSecret);
   } finally {
     await rm(tempUserData, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('daily backup keyring corruption or DPAPI decrypt failure blocks rotations without overwriting stored keys', async () => {
+  const tempUserData = await mkdtemp(join(tmpdir(), 'retailos-daily-keyring-corrupt-'));
+  const keyringPath = join(tempUserData, 'daily-backup-keyring.bin');
+  const currentPath = join(tempUserData, 'daily-backup.bin');
+  const fakeDpapi = {
+    isEncryptionAvailable: () => true,
+    encryptString: (plain) => Buffer.from(`dpapi:${plain}`, 'utf8'),
+    decryptString: (blob) => {
+      const text = blob.toString('utf8');
+      if (!text.startsWith('dpapi:')) throw new Error('DPAPI decrypt failed');
+      return text.slice('dpapi:'.length);
+    },
+  };
+  try {
+    await resolveOrCreateDesktopDailyBackupSecret({ userDataDir: tempUserData, safeStorage: fakeDpapi, requireDpapi: true });
+    await updateDesktopDailyBackupSecret({
+      userDataDir: tempUserData,
+      dailyBackupSecret: 'KeyringRotationOne-2026!',
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+    });
+    await updateDesktopDailyBackupSecret({
+      userDataDir: tempUserData,
+      dailyBackupSecret: 'KeyringRotationTwo-2026!',
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+    });
+
+    const brokenKeyring = Buffer.from('tampered-dpapi-blob');
+    await writeFile(keyringPath, brokenKeyring);
+    const currentBefore = await readFile(currentPath);
+    await assert.rejects(
+      () => readDesktopDailyBackupHistory({ userDataDir: tempUserData, safeStorage: fakeDpapi, requireDpapi: true }),
+      /تعذر قراءة سجل مفاتيح النسخ الاحتياطي/,
+    );
+    await assert.rejects(
+      () => updateDesktopDailyBackupSecret({
+        userDataDir: tempUserData,
+        dailyBackupSecret: 'KeyringRotationThree-2026!',
+        safeStorage: fakeDpapi,
+        requireDpapi: true,
+      }),
+      /تعذر قراءة سجل مفاتيح النسخ الاحتياطي/,
+    );
+    assert.deepEqual(await readFile(keyringPath), brokenKeyring, 'Unreadable history must remain untouched');
+    assert.deepEqual(await readFile(currentPath), currentBefore, 'Current key must not rotate when key history cannot be read');
+
+    const failingDpapi = {
+      ...fakeDpapi,
+      decryptString: () => { throw new Error('opaque DPAPI failure'); },
+    };
+    await assert.rejects(
+      () => readDesktopDailyBackupHistory({ userDataDir: tempUserData, safeStorage: failingDpapi, requireDpapi: true }),
+      /تعذر قراءة سجل مفاتيح النسخ الاحتياطي/,
+    );
+  } finally {
+    await rm(tempUserData, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('daily backup rotations preserve keys that decrypt old archives in an isolated exported-key environment', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'retailos-daily-keyring-export-'));
+  const exportedKeyDir = join(root, 'clean-recovery-environment');
+  const userDataDir = join(root, 'owner-user-data');
+  const fakeDpapi = {
+    isEncryptionAvailable: () => true,
+    encryptString: (plain) => Buffer.from(`dpapi:${plain}`, 'utf8'),
+    decryptString: (blob) => blob.toString('utf8').replace(/^dpapi:/, ''),
+  };
+  const database = new BetterSqlite3(':memory:');
+  try {
+    await mkdir(exportedKeyDir, { recursive: true });
+    database.exec('CREATE TABLE tenants (id TEXT PRIMARY KEY, name TEXT NOT NULL); INSERT INTO tenants VALUES (\'keyring-test\', \'Synthetic Shop\');');
+    const firstKey = await resolveOrCreateDesktopDailyBackupSecret({ userDataDir, safeStorage: fakeDpapi, requireDpapi: true });
+    const firstBackup = await createEncryptedSqliteBackup(database, root, firstKey);
+    const firstArchive = await readFile(firstBackup.path);
+
+    await updateDesktopDailyBackupSecret({ userDataDir, dailyBackupSecret: 'ExportedRotationOne-2026!', safeStorage: fakeDpapi, requireDpapi: true });
+    const secondKey = 'ExportedRotationOne-2026!';
+    const secondBackup = await createEncryptedSqliteBackup(database, root, secondKey);
+    const secondArchive = await readFile(secondBackup.path);
+    await updateDesktopDailyBackupSecret({ userDataDir, dailyBackupSecret: 'ExportedRotationTwo-2026!', safeStorage: fakeDpapi, requireDpapi: true });
+    await updateDesktopDailyBackupSecret({ userDataDir, dailyBackupSecret: 'ExportedRotationThree-2026!', safeStorage: fakeDpapi, requireDpapi: true });
+
+    const retainedKeys = await readDesktopDailyBackupHistory({ userDataDir, safeStorage: fakeDpapi, requireDpapi: true });
+    assert.ok(retainedKeys.includes(firstKey), 'the original key must remain in the local keyring');
+    assert.ok(retainedKeys.includes(secondKey), 'the previous active key must remain in the local keyring');
+    await writeFile(join(exportedKeyDir, 'recovery-keys.json'), JSON.stringify([firstKey, secondKey]), { mode: 0o600 });
+    const exportedKeys = JSON.parse(await readFile(join(exportedKeyDir, 'recovery-keys.json'), 'utf8'));
+
+    for (const [index, archive, key] of [[0, firstArchive, firstKey], [1, secondArchive, secondKey]]) {
+      assert.ok(exportedKeys.includes(key), 'the recovery-key export must contain the archive key');
+      const snapshot = decryptBackupArchive(archive, key);
+      const restoredPath = join(exportedKeyDir, `restored-${index}.sqlite`);
+      await writeFile(restoredPath, snapshot, { mode: 0o600 });
+      const restored = new BetterSqlite3(restoredPath, { readonly: true, fileMustExist: true });
+      try {
+        assert.deepEqual(restored.prepare('SELECT id, name FROM tenants').get(), { id: 'keyring-test', name: 'Synthetic Shop' });
+      } finally {
+        restored.close();
+      }
+      assert.ok(snapshot.length > 0);
+    }
+    await Promise.all([removeBackupArtifact(firstBackup.path), removeBackupArtifact(secondBackup.path)]);
+  } finally {
+    database.close();
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('failed keyring persistence leaves the previous valid keyring and current key untouched', async () => {
+  const userDataDir = await mkdtemp(join(tmpdir(), 'retailos-daily-keyring-persist-failure-'));
+  const fakeDpapi = {
+    isEncryptionAvailable: () => true,
+    encryptString: (plain) => Buffer.from(`dpapi:${plain}`, 'utf8'),
+    decryptString: (blob) => blob.toString('utf8').replace(/^dpapi:/, ''),
+  };
+  try {
+    await resolveOrCreateDesktopDailyBackupSecret({ userDataDir, safeStorage: fakeDpapi, requireDpapi: true });
+    await updateDesktopDailyBackupSecret({ userDataDir, dailyBackupSecret: 'PersistenceRotationOne-2026!', safeStorage: fakeDpapi, requireDpapi: true });
+    const keyringPath = join(userDataDir, 'daily-backup-keyring.bin');
+    const currentPath = join(userDataDir, 'daily-backup.bin');
+    const keyringBefore = await readFile(keyringPath);
+    const currentBefore = await readFile(currentPath);
+    const historyBefore = await readDesktopDailyBackupHistory({ userDataDir, safeStorage: fakeDpapi, requireDpapi: true });
+    await assert.rejects(
+      () => updateDesktopDailyBackupSecret({
+        userDataDir,
+        dailyBackupSecret: 'PersistenceRotationTwo-2026!',
+        safeStorage: fakeDpapi,
+        requireDpapi: true,
+        persistFile: async (path, data, mode) => {
+          if (path === keyringPath) throw new Error('simulated keyring persistence failure');
+          await writeFile(path, data, { mode });
+        },
+      }),
+      /simulated keyring persistence failure/,
+    );
+    assert.deepEqual(await readFile(keyringPath), keyringBefore);
+    assert.deepEqual(await readFile(currentPath), currentBefore);
+    assert.deepEqual(await readDesktopDailyBackupHistory({ userDataDir, safeStorage: fakeDpapi, requireDpapi: true }), historyBefore);
+  } finally {
+    await rm(userDataDir, { recursive: true, force: true }).catch(() => undefined);
   }
 });
 

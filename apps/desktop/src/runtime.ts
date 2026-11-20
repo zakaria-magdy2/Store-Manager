@@ -358,7 +358,9 @@ export async function readDesktopDailyBackupHistory(options: {
         : rawBytes.toString('utf8');
     return normalizeDailyBackupHistoryList(JSON.parse(jsonText));
   } catch {
-    return [];
+    // Never treat an unreadable historical keyring as empty: doing so could allow a later
+    // rotation to discard the only copies of keys needed to decrypt older backups.
+    throw new Error('تعذر قراءة سجل مفاتيح النسخ الاحتياطي. لم يتم تغيير المفاتيح؛ احتفظ بملفات النسخ واتصل بمالك النظام.');
   }
 }
 
@@ -402,6 +404,7 @@ export async function updateDesktopDailyBackupSecret(options: {
   readonly dailyBackupSecret: string;
   readonly safeStorage?: SafeStorageAdapter | undefined;
   readonly requireDpapi?: boolean | undefined;
+  readonly persistFile?: typeof atomicWriteFile | undefined;
 }): Promise<{ readonly updated: boolean; readonly historyCount: number }> {
   const nextSecret = options.dailyBackupSecret.trim();
   if (!DAILY_BACKUP_SECRET_PATTERN.test(nextSecret)) {
@@ -410,6 +413,7 @@ export async function updateDesktopDailyBackupSecret(options: {
 
   const userDataDir = resolve(options.userDataDir);
   const dpapi = options.safeStorage;
+  const persistFile = options.persistFile ?? atomicWriteFile;
   if (shouldFailClosedOnMissingDpapi(options.requireDpapi) && (!dpapi || !dpapi.isEncryptionAvailable())) {
     throw new Error(DPAPI_REQUIRED_ERROR_AR);
   }
@@ -437,13 +441,13 @@ export async function updateDesktopDailyBackupSecret(options: {
     const serialized = JSON.stringify(nextHistory);
     const encodedHistory: Buffer | string =
       dpapi && dpapi.isEncryptionAvailable() ? dpapi.encryptString(serialized) : serialized;
-    await atomicWriteFile(keyringPath, encodedHistory);
+    await persistFile(keyringPath, encodedHistory);
   }
 
   if (dpapi && dpapi.isEncryptionAvailable()) {
-    await atomicWriteFile(join(userDataDir, 'daily-backup.bin'), dpapi.encryptString(nextSecret));
+    await persistFile(join(userDataDir, 'daily-backup.bin'), dpapi.encryptString(nextSecret));
   } else {
-    await atomicWriteFile(join(userDataDir, '.retailos-daily.key'), `${nextSecret}\n`);
+    await persistFile(join(userDataDir, '.retailos-daily.key'), `${nextSecret}\n`);
   }
 
   return {

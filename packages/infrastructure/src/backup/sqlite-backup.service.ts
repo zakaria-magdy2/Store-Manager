@@ -208,6 +208,13 @@ export interface VerifySqliteFileOptions {
   readonly allowReplacementTenantId?: boolean | undefined;
 }
 
+export interface RestoreFileOperations {
+  readonly renameFile?: typeof rename;
+  readonly removeFile?: typeof rm;
+  readonly verifyFile?: typeof verifySqliteFile;
+  readonly writeMarker?: typeof writeRestoreMarker;
+}
+
 export function verifySqliteFile(
   path: string,
   expectedTenant?: RestoreTenantIdentity,
@@ -321,7 +328,12 @@ export async function installPreparedSqliteRestore(
   activePath: string,
   workingDirectory: string,
   prepared: PreparedSqliteRestore,
+  operations: RestoreFileOperations = {},
 ): Promise<void> {
+  const move = operations.renameFile ?? rename;
+  const remove = operations.removeFile ?? rm;
+  const verify = operations.verifyFile ?? verifySqliteFile;
+  const writeMarker = operations.writeMarker ?? writeRestoreMarker;
   const workspace = resolve(prepared.workspace), root = resolve(workingDirectory);
   assertChildPath(root, workspace);
   assertChildPath(workspace, prepared.candidatePath);
@@ -344,20 +356,23 @@ export async function installPreparedSqliteRestore(
     await database.backup(rollbackPath);
     // The rollback snapshot is the *host* database: verify it against the host identity, not the
     // candidate's (which may carry a replacement tenant id on cross-PC recovery).
-    verifySqliteFile(rollbackPath, previousTenant);
-    await writeRestoreMarker(markerPath, marker);
+    verify(rollbackPath, previousTenant);
+    await writeMarker(markerPath, marker);
     markerCreated = true;
     await closeDatabase();
-    await rename(activePath, previousPath);
+    if (database.open) {
+      throw new Error('SQLite database handle remained open; restore swap was aborted');
+    }
+    await move(activePath, previousPath);
     marker.stage = 'OLD_MOVED';
-    await writeRestoreMarker(markerPath, marker);
-    await rm(`${activePath}-wal`, { force: true });
-    await rm(`${activePath}-shm`, { force: true });
-    await rename(prepared.candidatePath, activePath);
+    await writeMarker(markerPath, marker);
+    await remove(`${activePath}-wal`, { force: true });
+    await remove(`${activePath}-shm`, { force: true });
+    await move(prepared.candidatePath, activePath);
     marker.stage = 'CANDIDATE_INSTALLED';
-    await writeRestoreMarker(markerPath, marker);
+    await writeMarker(markerPath, marker);
     if (await hashFile(activePath) !== marker.candidateSha256) throw new Error('Installed database does not match the verified restore candidate');
-    verifySqliteFile(activePath, prepared.tenant);
+    verify(activePath, prepared.tenant);
   } catch (error) {
     if (!markerCreated) {
       await rm(workspace, { recursive: true, force: true });
@@ -365,34 +380,38 @@ export async function installPreparedSqliteRestore(
     }
     try {
       if (await stat(previousPath).then(() => true, () => false)) {
-        await rm(activePath, { force: true });
-        await rm(`${activePath}-wal`, { force: true });
-        await rm(`${activePath}-shm`, { force: true });
-        await rename(previousPath, activePath);
+        await remove(activePath, { force: true });
+        await remove(`${activePath}-wal`, { force: true });
+        await remove(`${activePath}-shm`, { force: true });
+        await move(previousPath, activePath);
       } else {
         let activeIsOriginal = false;
         if (await stat(activePath).then(() => true, () => false)) {
-          try { verifySqliteFile(activePath, previousTenant); activeIsOriginal = await hashFile(activePath) !== prepared.candidateSha256; } catch { activeIsOriginal = false; }
+          try { verify(activePath, previousTenant); activeIsOriginal = await hashFile(activePath) !== prepared.candidateSha256; } catch { activeIsOriginal = false; }
         }
         if (!activeIsOriginal) {
-          await rm(activePath, { force: true });
-          await rm(`${activePath}-wal`, { force: true });
-          await rm(`${activePath}-shm`, { force: true });
+          await remove(activePath, { force: true });
+          await remove(`${activePath}-wal`, { force: true });
+          await remove(`${activePath}-shm`, { force: true });
           if (!await stat(rollbackPath).then(() => true, () => false)) throw new Error('Rollback snapshot is unavailable', { cause: error });
           await copyFile(rollbackPath, activePath);
         }
       }
-      verifySqliteFile(activePath, previousTenant);
-      await rm(markerPath, { force: true });
-      await rm(workspace, { recursive: true, force: true });
-    } catch {
+      verify(activePath, previousTenant);
+      await remove(markerPath, { force: true });
+      await remove(workspace, { recursive: true, force: true });
+    } catch (rollbackError) {
       // Keep the marker and rollback artifacts for startup recovery if immediate rollback cannot finish.
+      throw new AggregateError([error, rollbackError], `SQLite restore failed and immediate rollback was incomplete; recovery artifacts were preserved: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`, { cause: rollbackError });
     }
     throw error;
   }
 }
 
-export async function recoverPendingSqliteRestore(workingDirectory: string, activePath: string, expectedCompanyCode: string): Promise<boolean> {
+export async function recoverPendingSqliteRestore(workingDirectory: string, activePath: string, expectedCompanyCode: string, operations: RestoreFileOperations = {}): Promise<boolean> {
+  const remove = operations.removeFile ?? rm;
+  const move = operations.renameFile ?? rename;
+  const verify = operations.verifyFile ?? verifySqliteFile;
   const root = resolve(workingDirectory), markerPath = join(root, RESTORE_MARKER);
   let markerRaw: string;
   try {
@@ -415,31 +434,31 @@ export async function recoverPendingSqliteRestore(workingDirectory: string, acti
   ) throw new Error('Restore recovery marker is invalid; database was not opened');
   const activeIsCandidate = await stat(activePath).then(async () => await hashFile(activePath) === marker.candidateSha256, () => false);
   if (activeIsCandidate) {
-    verifySqliteFile(activePath, marker.tenant);
-    await rm(marker.workspace, { recursive: true, force: true });
-    await rm(markerPath, { force: true });
+    verify(activePath, marker.tenant);
+    await remove(marker.workspace, { recursive: true, force: true });
+    await remove(markerPath, { force: true });
     return true;
   }
   if (await stat(marker.previousPath).then(() => true, () => false)) {
-    await rm(activePath, { force: true });
-    await rm(`${activePath}-wal`, { force: true });
-    await rm(`${activePath}-shm`, { force: true });
-    await rename(marker.previousPath, activePath);
+    await remove(activePath, { force: true });
+    await remove(`${activePath}-wal`, { force: true });
+    await remove(`${activePath}-shm`, { force: true });
+    await move(marker.previousPath, activePath);
   } else {
     let activeIsValidOriginal = false;
     if (await stat(activePath).then(() => true, () => false)) {
-      try { verifySqliteFile(activePath, rollbackTenant); activeIsValidOriginal = true; } catch { activeIsValidOriginal = false; }
+      try { verify(activePath, rollbackTenant); activeIsValidOriginal = true; } catch { activeIsValidOriginal = false; }
     }
     if (!activeIsValidOriginal) {
-      await rm(activePath, { force: true });
-      await rm(`${activePath}-wal`, { force: true });
-      await rm(`${activePath}-shm`, { force: true });
+      await remove(activePath, { force: true });
+      await remove(`${activePath}-wal`, { force: true });
+      await remove(`${activePath}-shm`, { force: true });
       if (!await stat(marker.rollbackPath).then(() => true, () => false)) throw new Error('Restore recovery failed; rollback snapshot is unavailable');
       await copyFile(marker.rollbackPath, activePath);
     }
   }
-  verifySqliteFile(activePath, rollbackTenant);
-  await rm(marker.workspace, { recursive: true, force: true });
-  await rm(markerPath, { force: true });
+  verify(activePath, rollbackTenant);
+  await remove(marker.workspace, { recursive: true, force: true });
+  await remove(markerPath, { force: true });
   return false;
 }
