@@ -1251,7 +1251,7 @@ export async function cleanupPackagedTestRun({
   };
 }
 
-async function captureSpawnedMainIdentity(
+export async function captureSpawnedMainIdentity(
   pid,
   expectedExePath,
   {

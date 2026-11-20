@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   assertSafeTestEnvironment,
+  captureSpawnedMainIdentity,
   cleanupPackagedTestRun,
   collectProcessTreeIdentities,
   isSameProcessIdentity,
@@ -19,6 +20,25 @@ import {
 
 const TEST_EXE = 'C:\\Temp\\retailos-smoke\\app\\RetailOS.exe';
 const TEST_SERVER_SCRIPT = 'C:\\Temp\\retailos-smoke\\app\\resources\\web\\server.mjs';
+
+test('captures only the spawned RetailOS process with a complete matching executable identity', async () => {
+  const expected = makeIdentity({ pid: 4100, executablePath: TEST_EXE });
+  const captured = await captureSpawnedMainIdentity(4100, TEST_EXE, {
+    queryProcessTable: () => new Map([[4100, expected]]),
+    platform: 'win32',
+  });
+  assert.equal(captured, expected);
+
+  const wrongExecutable = makeIdentity({ pid: 4101, executablePath: 'C:\\Temp\\other\\RetailOS.exe' });
+  await assert.rejects(
+    () => captureSpawnedMainIdentity(4101, TEST_EXE, {
+      queryProcessTable: () => new Map([[4101, wrongExecutable]]),
+      timeoutMs: 50,
+      platform: 'win32',
+    }),
+    /executable mismatch/,
+  );
+});
 
 function makeIdentity({
   pid,
