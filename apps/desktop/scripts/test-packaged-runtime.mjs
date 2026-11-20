@@ -3,7 +3,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { cp, mkdtemp, open, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve, sep } from 'node:path';
+import { dirname, join, resolve, sep, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
@@ -34,19 +34,21 @@ export function pathsEqual(candidatePath, otherPath, platform = process.platform
     return false;
   }
   if (platform === 'win32') {
-    return resolve(a).toLowerCase() === resolve(b).toLowerCase();
+    return win32.resolve(a).toLowerCase() === win32.resolve(b).toLowerCase();
   }
   return resolve(a) === resolve(b);
 }
 
 export function isPathInsideOrEqual(candidatePath, baseDir, platform = process.platform) {
-  const resolvedCandidate = resolve(candidatePath);
-  const resolvedBase = resolve(baseDir);
   if (platform === 'win32') {
+    const resolvedCandidate = win32.resolve(candidatePath);
+    const resolvedBase = win32.resolve(baseDir);
     const c = resolvedCandidate.toLowerCase();
     const b = resolvedBase.toLowerCase();
-    return c === b || c.startsWith(`${b}${sep}`);
+    return c === b || c.startsWith(`${b}${win32.sep}`);
   }
+  const resolvedCandidate = resolve(candidatePath);
+  const resolvedBase = resolve(baseDir);
   return resolvedCandidate === resolvedBase || resolvedCandidate.startsWith(`${resolvedBase}${sep}`);
 }
 
@@ -323,7 +325,7 @@ export function validateServerProcessOwnership(
         : candidateIdentity.commandLine;
     const expectedScript =
       platform === 'win32'
-        ? resolve(expectedServerScriptPath).toLowerCase()
+        ? win32.resolve(expectedServerScriptPath).toLowerCase()
         : resolve(expectedServerScriptPath);
     cmdMatches =
       cmdText.includes('--electron-stdio-secret') && cmdText.includes(expectedScript);

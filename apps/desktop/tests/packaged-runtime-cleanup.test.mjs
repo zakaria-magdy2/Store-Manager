@@ -3,14 +3,16 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import {
   assertSafeTestEnvironment,
   captureSpawnedMainIdentity,
   cleanupPackagedTestRun,
   collectProcessTreeIdentities,
+  isPathInsideOrEqual,
   isSameProcessIdentity,
   listRunningRetailOsPids,
+  pathsEqual,
   ProcessEnumerationError,
   queryWindowsProcessTable,
   terminateVerifiedProcess,
@@ -20,6 +22,25 @@ import {
 
 const TEST_EXE = 'C:\\Temp\\retailos-smoke\\app\\RetailOS.exe';
 const TEST_SERVER_SCRIPT = 'C:\\Temp\\retailos-smoke\\app\\resources\\web\\server.mjs';
+
+test('normalizes Windows process paths with win32 semantics on every host', () => {
+  const canonicalServerPath = 'C:\\RetailOS\\resources\\web\\server.mjs';
+  const equivalentServerPath = 'c:\\RetailOS\\resources\\web\\..\\web\\server.mjs';
+  assert.equal(pathsEqual(equivalentServerPath, canonicalServerPath, 'win32'), true);
+  assert.equal(isPathInsideOrEqual(canonicalServerPath, 'c:\\retailos', 'win32'), true);
+  assert.equal(isPathInsideOrEqual('C:\\RetailOS-evil\\server.mjs', 'C:\\RetailOS', 'win32'), false);
+  assert.equal(win32.resolve(equivalentServerPath).toLowerCase(), win32.resolve(canonicalServerPath).toLowerCase());
+});
+
+test('Windows path checks work when running on a Linux host', { skip: process.platform !== 'linux' }, () => {
+  assert.equal(pathsEqual(TEST_SERVER_SCRIPT, win32.normalize(TEST_SERVER_SCRIPT.toLowerCase()), 'win32'), true);
+  assert.equal(isPathInsideOrEqual(TEST_SERVER_SCRIPT, 'C:\\Temp\\retailos-smoke', 'win32'), true);
+});
+
+test('Windows path checks work on a native Windows host', { skip: process.platform !== 'win32' }, () => {
+  assert.equal(pathsEqual(TEST_SERVER_SCRIPT, win32.normalize(TEST_SERVER_SCRIPT.toLowerCase()), 'win32'), true);
+  assert.equal(isPathInsideOrEqual(TEST_SERVER_SCRIPT, 'C:\\Temp\\retailos-smoke', process.platform), true);
+});
 
 test('captures only the spawned RetailOS process with a complete matching executable identity', async () => {
   const expected = makeIdentity({ pid: 4100, executablePath: TEST_EXE });
