@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { assessFreshReplacementHost, checkSqliteFileQuick, createEncryptedSqliteBackup, decryptBackupArchive, installPreparedSqliteRestore, prepareEncryptedSqliteRestore, preparePlainSqliteRestore, recoverPendingSqliteRestore, removeBackupArtifact, verifySqliteFile } from '../src/backup/sqlite-backup.service.js';
+import { checkSqliteFileQuick, createEncryptedSqliteBackup, decryptBackupArchive, installPreparedSqliteRestore, prepareEncryptedSqliteRestore, preparePlainSqliteRestore, recoverPendingSqliteRestore, removeBackupArtifact, verifySqliteFile } from '../src/backup/sqlite-backup.service.js';
 import { SqliteDatabaseManager } from '../src/database/sqlite.js';
 import { DatabaseMigrator } from '../src/database/migrator.js';
 
@@ -81,10 +81,10 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     try {
       const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
       backupPath = backup.path;
-      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase);
       await installPreparedSqliteRestore(active.getRawDatabase(), () => active.close(), activePath, workingDirectory, prepared);
 
-      await expect(recoverPendingSqliteRestore(workingDirectory, activePath, restoreTenant.code)).resolves.toBe(true);
+      await expect(recoverPendingSqliteRestore(workingDirectory, activePath)).resolves.toBe(true);
       expect(readProbe(activePath)).toBe('from-backup');
       expect(await readFile(join(workingDirectory, '.retailos-restore.json')).catch(() => null)).toBeNull();
     } finally {
@@ -147,7 +147,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     try {
       const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
       backupPath = backup.path;
-      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase);
       await writeFile(prepared.candidatePath, 'tampered after preparation');
 
       active.beginMaintenanceMode();
@@ -176,7 +176,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     try {
       const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
       backupPath = backup.path;
-      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase);
       active.beginMaintenanceMode();
 
       await expect(installPreparedSqliteRestore(
@@ -206,7 +206,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     try {
       const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
       backupPath = backup.path;
-      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase);
       active.beginMaintenanceMode();
 
       await expect(installPreparedSqliteRestore(
@@ -226,7 +226,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
       expect(await stat(activePath).then(() => true, () => false)).toBe(false);
 
       await rm(obstructionPath!, { recursive: true, force: true });
-      await expect(recoverPendingSqliteRestore(workingDirectory, activePath, restoreTenant.code)).resolves.toBe(false);
+      await expect(recoverPendingSqliteRestore(workingDirectory, activePath)).resolves.toBe(false);
       expect(checkSqliteFileQuick(activePath).ok).toBe(true);
       expect(readProbe(activePath)).toBe('original-data');
       expect(await readFile(join(workingDirectory, '.retailos-restore.json')).catch(() => null)).toBeNull();
@@ -245,7 +245,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     try {
       const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
       backupPath = backup.path;
-      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase);
       active.beginMaintenanceMode();
       await expect(installPreparedSqliteRestore(active.getRawDatabase(), async () => {
         await active.closeForRestore();
@@ -277,7 +277,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     try {
       const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
       backupPath = backup.path;
-      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase);
       active.beginMaintenanceMode();
       await expect(installPreparedSqliteRestore(active.getRawDatabase(), () => active.closeForRestore(), activePath, workingDirectory, prepared, {
         renameFile: async (from, to) => {
@@ -307,7 +307,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     try {
       const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
       backupPath = backup.path;
-      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase);
       active.beginMaintenanceMode();
       await expect(installPreparedSqliteRestore(active.getRawDatabase(), () => active.closeForRestore(), activePath, workingDirectory, prepared, {
         renameFile: async (from, to) => {
@@ -327,7 +327,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
       expect(await stat(marker.previousPath).then(() => true, () => false)).toBe(true);
       expect(await stat(marker.rollbackPath).then(() => true, () => false)).toBe(true);
       expect(await stat(activePath).then(() => true, () => false)).toBe(false);
-      await expect(recoverPendingSqliteRestore(workingDirectory, activePath, restoreTenant.code)).resolves.toBe(false);
+      await expect(recoverPendingSqliteRestore(workingDirectory, activePath)).resolves.toBe(false);
       expect(checkSqliteFileQuick(activePath).ok).toBe(true);
       expect(readProbe(activePath)).toBe('original-data');
     } finally {
@@ -345,15 +345,15 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     try {
       const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
       backupPath = backup.path;
-      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase);
       active.beginMaintenanceMode();
       await expect(installPreparedSqliteRestore(active.getRawDatabase(), () => active.closeForRestore(), activePath, workingDirectory, prepared, {
-        verifyFile: (path, tenant, options) => {
+        verifyFile: (path, tenant) => {
           if (!injected && path === activePath) {
             injected = true;
             throw new Error('simulated post-install validation failure');
           }
-          return verifySqliteFile(path, tenant, options);
+          return verifySqliteFile(path, tenant);
         },
       })).rejects.toThrow('simulated post-install validation failure');
       expect(checkSqliteFileQuick(activePath).ok).toBe(true);
@@ -373,7 +373,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     try {
       const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
       backupPath = backup.path;
-      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase);
       active.beginMaintenanceMode();
       await expect(installPreparedSqliteRestore(active.getRawDatabase(), () => active.closeForRestore(), activePath, workingDirectory, prepared, {
         writeMarker: () => { throw new Error('simulated restore marker creation failure'); },
@@ -397,7 +397,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     try {
       const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
       backupPath = backup.path;
-      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase);
       active.beginMaintenanceMode();
       await expect(installPreparedSqliteRestore(active.getRawDatabase(), () => active.closeForRestore(), activePath, workingDirectory, prepared, {
         renameFile: async (from, to) => {
@@ -417,7 +417,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
       })).rejects.toThrow(/rollback was incomplete/);
       expect(readProbe(activePath)).toBe('original-data');
       expect(await stat(markerPath).then(() => true, () => false)).toBe(true);
-      await expect(recoverPendingSqliteRestore(workingDirectory, activePath, restoreTenant.code)).resolves.toBe(false);
+      await expect(recoverPendingSqliteRestore(workingDirectory, activePath)).resolves.toBe(false);
       expect(readProbe(activePath)).toBe('original-data');
       expect(await stat(markerPath).then(() => true, () => false)).toBe(false);
     } finally {
@@ -426,7 +426,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     }
   });
 
-  it('rejects wrong passphrases and other-company backups without changing the active database', async () => {
+  it('rejects wrong passphrases but allows valid backups with a different company identity', async () => {
     workingDirectory = await mkdtemp(join(tmpdir(), 'retailos-restore-reject-'));
     const source = await makeMigratedDatabase(join(workingDirectory, 'snapshot.sqlite'), 'from-backup');
     const activePath = join(workingDirectory, 'active.sqlite');
@@ -434,10 +434,13 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     try {
       const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
       backupPath = backup.path;
-      await expect(prepareEncryptedSqliteRestore(backup.path, workingDirectory, 'incorrect passphrase', restoreTenant)).rejects.toThrow();
-      await expect(prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, { ...restoreTenant, id: 'another-company' })).rejects.toThrow(/different company/);
-      await expect(prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, { ...restoreTenant, code: 'OTHER_CO' }, { allowReplacementTenantId: true })).rejects.toThrow(/different company/);
-      const replacementPrepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, { ...restoreTenant, id: 'fresh-replacement-pc-id' }, { allowReplacementTenantId: true });
+      await expect(prepareEncryptedSqliteRestore(backup.path, workingDirectory, 'incorrect passphrase')).rejects.toThrow();
+      const tamperedArchivePath = join(workingDirectory, 'tampered.rfbackup');
+      const tamperedArchive = await readFile(backup.path);
+      tamperedArchive[Math.floor(tamperedArchive.length / 2)] ^= 0x01;
+      await writeFile(tamperedArchivePath, tamperedArchive);
+      await expect(prepareEncryptedSqliteRestore(tamperedArchivePath, workingDirectory, restorePassphrase)).rejects.toThrow();
+      const replacementPrepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase);
       expect(replacementPrepared.tenant.code).toBe(restoreTenant.code);
       await rm(replacementPrepared.workspace, { recursive: true, force: true });
       expect(readProbe(activePath)).toBe('keep-current-data');
@@ -455,7 +458,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     try {
       const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
       backupPath = backup.path;
-      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase);
       const previousPath = join(prepared.workspace, 'previous.sqlite');
       const rollbackPath = join(prepared.workspace, 'rollback.sqlite');
       await active.getRawDatabase().backup(rollbackPath);
@@ -468,7 +471,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
         candidateSha256, tenant: restoreTenant,
       }), { mode: 0o600 });
 
-      await expect(recoverPendingSqliteRestore(workingDirectory, activePath, restoreTenant.code)).resolves.toBe(false);
+      await expect(recoverPendingSqliteRestore(workingDirectory, activePath)).resolves.toBe(false);
       expect(readProbe(activePath)).toBe('original-data');
     } finally {
       await source.close();
@@ -484,7 +487,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     try {
       const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
       backupPath = backup.path;
-      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase);
       const rollbackPath = join(prepared.workspace, 'rollback.sqlite');
       await active.getRawDatabase().backup(rollbackPath);
       await active.close();
@@ -497,7 +500,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
         candidateSha256, tenant: restoreTenant,
       }), { mode: 0o600 });
 
-      await expect(recoverPendingSqliteRestore(workingDirectory, activePath, restoreTenant.code)).resolves.toBe(false);
+      await expect(recoverPendingSqliteRestore(workingDirectory, activePath)).resolves.toBe(false);
       expect(readProbe(activePath)).toBe('rollback-data');
     } finally {
       await source.close();
@@ -518,9 +521,9 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
       await writeFile(corruptPath, 'not a valid sqlite file');
       expect(checkSqliteFileQuick(corruptPath).ok).toBe(false);
 
-      const prepared = await preparePlainSqliteRestore(sourcePath, workingDirectory, restoreTenant);
+      const prepared = await preparePlainSqliteRestore(sourcePath, workingDirectory);
       await installPreparedSqliteRestore(active.getRawDatabase(), () => active.close(), activePath, workingDirectory, prepared);
-      await expect(recoverPendingSqliteRestore(workingDirectory, activePath, restoreTenant.code)).resolves.toBe(true);
+      await expect(recoverPendingSqliteRestore(workingDirectory, activePath)).resolves.toBe(true);
       expect(readProbe(activePath)).toBe('daily-good');
     } finally {
       await source.close();
@@ -550,7 +553,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
       await new Promise((resolve) => setTimeout(resolve, 15));
       const backup = await createEncryptedSqliteBackup(raw, workingDirectory, restorePassphrase);
       backupPath = backup.path;
-      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase);
       keepWriting = false;
       await writerTask;
 
@@ -573,34 +576,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     }
   });
 
-  it('assessFreshReplacementHost accepts only a host with no operational data (fail-closed for unknown tables)', async () => {
-    workingDirectory = await mkdtemp(join(tmpdir(), 'retailos-fresh-host-'));
-    const fresh = await makeMigratedDatabase(join(workingDirectory, 'fresh.sqlite'), null, replacementHostTenant);
-    try {
-      const raw = fresh.getRawDatabase();
-      expect(assessFreshReplacementHost(raw, replacementHostTenant.id)).toEqual({ fresh: true, blockers: [] });
-      // Wrong tenant id for the session is never fresh.
-      expect(assessFreshReplacementHost(raw, 'someone-else').fresh).toBe(false);
-
-      // Any operational row (here: a product category) disqualifies the host.
-      raw.prepare('INSERT INTO categories (id, tenant_id, name, code) VALUES (?, ?, ?, ?)').run('cat-1', replacementHostTenant.id, 'أحذية', 'SHOES');
-      const withCategory = assessFreshReplacementHost(raw, replacementHostTenant.id);
-      expect(withCategory.fresh).toBe(false);
-      expect(withCategory.blockers).toContainEqual({ table: 'categories', rows: 1, allowed: 0 });
-      raw.prepare('DELETE FROM categories').run();
-
-      // A table introduced by a future migration is not on the allowlist: rows there also block.
-      raw.exec('CREATE TABLE future_operational_table (id TEXT PRIMARY KEY)');
-      raw.prepare('INSERT INTO future_operational_table (id) VALUES (?)').run('x');
-      const withFuture = assessFreshReplacementHost(raw, replacementHostTenant.id);
-      expect(withFuture.fresh).toBe(false);
-      expect(withFuture.blockers.map((b) => b.table)).toContain('future_operational_table');
-    } finally {
-      await fresh.close();
-    }
-  });
-
-  it('installs a cross-PC replacement restore and verifies the rollback snapshot against the host tenant', async () => {
+  it('replaces a populated host across company id, code, and currency while preserving its device license', async () => {
     workingDirectory = await mkdtemp(join(tmpdir(), 'retailos-replacement-install-'));
     const source = await makeMigratedDatabase(join(workingDirectory, 'snapshot.sqlite'), 'from-old-pc');
     const activePath = join(workingDirectory, 'active.sqlite');
@@ -608,12 +584,12 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     try {
       const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
       backupPath = backup.path;
-      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, replacementHostTenant, { allowReplacementTenantId: true });
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase);
       expect(prepared.tenant.id).toBe(restoreTenant.id);
       await installPreparedSqliteRestore(active.getRawDatabase(), () => active.close(), activePath, workingDirectory, prepared);
       const marker = JSON.parse(await readFile(join(workingDirectory, '.retailos-restore.json'), 'utf8')) as { previousTenant?: { id: string } };
       expect(marker.previousTenant?.id).toBe(replacementHostTenant.id);
-      await expect(recoverPendingSqliteRestore(workingDirectory, activePath, restoreTenant.code)).resolves.toBe(true);
+      await expect(recoverPendingSqliteRestore(workingDirectory, activePath)).resolves.toBe(true);
       expect(readProbe(activePath)).toBe('from-old-pc');
     } finally {
       await source.close();
@@ -629,7 +605,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     try {
       const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
       backupPath = backup.path;
-      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, replacementHostTenant, { allowReplacementTenantId: true });
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase);
       const rollbackPath = join(prepared.workspace, 'rollback.sqlite');
       await active.getRawDatabase().backup(rollbackPath);
       await active.close();
@@ -643,7 +619,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
         candidateSha256, tenant: prepared.tenant, previousTenant: replacementHostTenant,
       }), { mode: 0o600 });
 
-      await expect(recoverPendingSqliteRestore(workingDirectory, activePath, restoreTenant.code)).resolves.toBe(false);
+      await expect(recoverPendingSqliteRestore(workingDirectory, activePath)).resolves.toBe(false);
       expect(readProbe(activePath)).toBe('host-original');
     } finally {
       await source.close();
@@ -651,19 +627,35 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     }
   });
 
-  it('refuses to install a candidate whose company code differs from the host', async () => {
+  it('replaces a different company code and currency while preserving target license state', async () => {
     workingDirectory = await mkdtemp(join(tmpdir(), 'retailos-replacement-code-'));
     const source = await makeMigratedDatabase(join(workingDirectory, 'snapshot.sqlite'), 'from-backup');
     const activePath = join(workingDirectory, 'active.sqlite');
-    const otherCompany = { id: 'other-company-id', code: 'OTHER_CO', currency: 'EGP' };
+    const otherCompany = { id: 'other-company-id', code: 'OTHER_CO', currency: 'USD' };
     const active = await makeMigratedDatabase(activePath, 'other-company-data', otherCompany);
     try {
+      const sourceLicense = { id: 1, activation_token: 'source-machine-token', last_verified_clock_ms: 1_700_000_000_000, clock_hmac: 'a'.repeat(64), updated_at: '2026-11-20T12:00:00.000Z' };
+      const targetLicense = { id: 1, activation_token: 'target-machine-token', last_verified_clock_ms: 1_800_000_000_000, clock_hmac: 'b'.repeat(64), updated_at: '2026-11-21T12:00:00.000Z' };
+      source.getRawDatabase().prepare('INSERT INTO system_licensing (id, activation_token, last_verified_clock_ms, clock_hmac, updated_at) VALUES (?, ?, ?, ?, ?)').run(sourceLicense.id, sourceLicense.activation_token, sourceLicense.last_verified_clock_ms, sourceLicense.clock_hmac, sourceLicense.updated_at);
+      active.getRawDatabase().prepare('INSERT INTO system_licensing (id, activation_token, last_verified_clock_ms, clock_hmac, updated_at) VALUES (?, ?, ?, ?, ?)').run(targetLicense.id, targetLicense.activation_token, targetLicense.last_verified_clock_ms, targetLicense.clock_hmac, targetLicense.updated_at);
+      active.getRawDatabase().prepare('INSERT INTO categories (id, tenant_id, name, code) VALUES (?, ?, ?, ?)').run('target-category', otherCompany.id, 'Target only', 'TARGET');
       const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
       backupPath = backup.path;
-      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, restoreTenant);
-      await expect(installPreparedSqliteRestore(active.getRawDatabase(), () => active.close(), activePath, workingDirectory, prepared)).rejects.toThrow(/different company/);
-      expect(readProbe(activePath)).toBe('other-company-data');
-      expect(await readFile(join(workingDirectory, '.retailos-restore.json')).catch(() => null)).toBeNull();
+      const prepared = await prepareEncryptedSqliteRestore(backup.path, workingDirectory, restorePassphrase, { deviceLicenseState: targetLicense });
+      expect(prepared.tenant).toEqual(restoreTenant);
+      await installPreparedSqliteRestore(active.getRawDatabase(), () => active.close(), activePath, workingDirectory, prepared);
+      await expect(recoverPendingSqliteRestore(workingDirectory, activePath)).resolves.toBe(true);
+      expect(readProbe(activePath)).toBe('from-backup');
+      const restored = new Database(activePath, { readonly: true });
+      try {
+        expect(restored.prepare('SELECT id, code, currency FROM tenants').get()).toEqual(restoreTenant);
+        expect(restored.prepare('SELECT id FROM categories WHERE id = ?').get('target-category')).toBeUndefined();
+        expect(restored.prepare('SELECT * FROM system_licensing WHERE id = 1').get()).toEqual(targetLicense);
+        expect(restored.pragma('integrity_check')).toEqual([{ integrity_check: 'ok' }]);
+        expect(restored.pragma('foreign_key_check')).toEqual([]);
+      } finally {
+        restored.close();
+      }
     } finally {
       await source.close();
       await active.close();

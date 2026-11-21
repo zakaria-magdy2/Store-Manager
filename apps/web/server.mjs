@@ -46,7 +46,6 @@ import {
   preparePlainSqliteRestore,
   recoverPendingSqliteRestore,
   checkSqliteFileQuick,
-  assessFreshReplacementHost,
   EscPosReceiptPrinter,
   businessDateInTimeZone,
   resolveValidTimeZone,
@@ -391,7 +390,7 @@ await mkdir(dataDir, { recursive: true });
 await mkdir(dirname(databasePath), { recursive: true });
 await mkdir(dailyBackupDir, { recursive: true });
 await mkdir(preRestoreBackupDir, { recursive: true });
-const restoredAfterCrash = await recoverPendingSqliteRestore(dataDir, databasePath, companyConfig.code);
+const restoredAfterCrash = await recoverPendingSqliteRestore(dataDir, databasePath);
 
 function resolveDailyBackupPassphraseSync() {
   if (isValidDailyBackupPassphrase(dailyBackupSecret)) {
@@ -706,6 +705,15 @@ const licenseService = new LicenseService(db, {
   identityProvider: typeof options.licenseIdentityProvider === 'function' ? options.licenseIdentityProvider : undefined,
   nowProvider: typeof options.nowProvider === 'function' ? options.nowProvider : undefined,
 });
+
+async function readDeviceLicenseStateForRestore() {
+  const row = await db.selectFrom('system_licensing').selectAll().where('id', '=', 1).executeTakeFirst();
+  if (!row) {
+    throw Object.assign(new Error('تعذر تأمين حالة ترخيص هذا الجهاز؛ لم تبدأ الاستعادة'), { status: 503 });
+  }
+  return row;
+}
+
 const recurringExpenses = new SqliteRecurringExpenseRepository(db);
 const supplierReturnsRepo = new SqliteSupplierReturnRepository(db);
 const auditLogs = new SqliteAuditLogRepository(db);
@@ -5291,8 +5299,7 @@ async function handleApi(req, res, url) {
     const body = validate(DailyRestoreSchema, await readJson(req));
     const targetPath = join(dailyBackupDir, body.filename);
     if (!existsSync(targetPath)) throw Object.assign(new Error('ملف النسخة اليومية غير موجود'), { status: 404 });
-    const currentTenant = await db.selectFrom('tenants').select(['id', 'code', 'currency']).where('id', '=', ctx.tenantId).executeTakeFirst();
-    if (!currentTenant) throw Object.assign(new Error('Company not found'), { status: 404 });
+    const deviceLicenseState = await readDeviceLicenseStateForRestore();
 
     let preparedRestore;
     try {
@@ -5300,7 +5307,7 @@ async function handleApi(req, res, url) {
         let lastRestoreError = null;
         for (const passphrase of resolveDailyBackupCandidatePassphrases()) {
           try {
-            preparedRestore = await prepareEncryptedSqliteRestore(targetPath, dataDir, passphrase, currentTenant);
+            preparedRestore = await prepareEncryptedSqliteRestore(targetPath, dataDir, passphrase, { deviceLicenseState });
             break;
           } catch (candidateErr) {
             lastRestoreError = candidateErr;
@@ -5308,10 +5315,10 @@ async function handleApi(req, res, url) {
         }
         if (!preparedRestore) throw lastRestoreError ?? new Error('Unable to decrypt daily backup');
       } else {
-        preparedRestore = await preparePlainSqliteRestore(targetPath, dataDir, currentTenant);
+        preparedRestore = await preparePlainSqliteRestore(targetPath, dataDir, { deviceLicenseState });
       }
     } catch {
-      throw Object.assign(new Error('ملف النسخة اليومية تالف أو لا يخص هذا المتجر'), { status: 400 });
+      throw Object.assign(new Error('ملف النسخة اليومية تالف أو غير متوافق مع إصدار قاعدة البيانات'), { status: 400 });
     }
     let restartRequired = false;
     let restoreInstallStarted = false;
@@ -5400,19 +5407,11 @@ async function handleApi(req, res, url) {
         else callback(null, chunk);
       } });
       await pipeline(req, limit, createWriteStream(archivePath, { flags: 'wx', mode: 0o600 }));
-      const currentTenant = await db.selectFrom('tenants').select(['id', 'code', 'currency']).where('id', '=', ctx.tenantId).executeTakeFirst();
-      if (!currentTenant) throw Object.assign(new Error('Company not found'), { status: 404 });
-      const rawDb = database.getRawDatabase();
-      // Cross-PC replacement (different tenant id, same company code) is only permitted onto a host
-      // with no operational data at all; every non-baseline table must be empty (fail-closed).
-      const freshHostAssessment = assessFreshReplacementHost(rawDb, ctx.tenantId);
-      const isFreshReplacementHost = freshHostAssessment.fresh;
+      const deviceLicenseState = await readDeviceLicenseStateForRestore();
       try {
-        preparedRestore = await prepareEncryptedSqliteRestore(archivePath, dataDir, passphrase, currentTenant, {
-          allowReplacementTenantId: isFreshReplacementHost,
-        });
+        preparedRestore = await prepareEncryptedSqliteRestore(archivePath, dataDir, passphrase, { deviceLicenseState });
       } catch {
-        throw Object.assign(new Error('Backup file or passphrase is invalid, or the backup belongs to another company'), { status: 400 });
+        throw Object.assign(new Error('Backup file or passphrase is invalid, or the backup database is invalid'), { status: 400 });
       }
       await enterRestoreMaintenanceMode();
       database.beginMaintenanceMode();

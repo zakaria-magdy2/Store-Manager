@@ -4,6 +4,7 @@ import { copyFile, mkdtemp, open, readFile, rename, rm, stat, writeFile } from '
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import Database, { type Database as DatabaseInstance } from 'better-sqlite3';
+import type { SystemLicensingTable } from '../database/types.js';
 import {
   MINIMUM_SUPPORTED_BACKUP_MIGRATION,
   REGISTERED_MIGRATION_NAMES,
@@ -105,66 +106,6 @@ interface RestoreMarker {
   previousTenant?: RestoreTenantIdentity;
 }
 
-/**
- * Tables that a freshly set-up host is allowed to contain rows in (schema bookkeeping, seeded
- * chart of accounts / periods / categories, auth/session plumbing, setup audit trail, licensing).
- * Every other table — including any table added by a future migration — must be empty for the
- * host to qualify as a fresh replacement target (fail-closed).
- */
-const FRESH_HOST_UNBOUNDED_TABLES: ReadonlySet<string> = new Set([
-  'kysely_migration',
-  'kysely_migration_lock',
-  'sqlite_sequence',
-  'accounts',
-  'accounting_periods',
-  'expense_categories',
-  'document_sequences',
-  'sessions',
-  'auth_rate_limits',
-  'outbox_events',
-  'audit_logs',
-  'system_licensing',
-]);
-/** Tables allowed a bounded number of rows on a fresh host (the setup owner and default branch). */
-const FRESH_HOST_BOUNDED_TABLES: ReadonlyMap<string, number> = new Map([
-  ['tenants', 1],
-  ['stores', 1],
-  ['users', 1],
-]);
-
-export interface FreshReplacementHostBlocker { table: string; rows: number; allowed: number }
-export interface FreshReplacementHostAssessment { fresh: boolean; blockers: FreshReplacementHostBlocker[] }
-
-/**
- * Decides whether the live host database may be replaced by a backup that carries a different
- * tenant id (cross-PC disaster recovery onto a newly installed machine). Only a host with no
- * operational data qualifies. Any query failure is treated as "not fresh".
- */
-export function assessFreshReplacementHost(database: DatabaseInstance, tenantId: string): FreshReplacementHostAssessment {
-  const blockers: FreshReplacementHostBlocker[] = [];
-  try {
-    const tenantIds = database.prepare('SELECT id FROM tenants').pluck().all();
-    if (tenantIds.length !== 1 || tenantIds[0] !== tenantId) {
-      blockers.push({ table: 'tenants', rows: tenantIds.length, allowed: 1 });
-    }
-    const tables = database
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
-      .pluck()
-      .all() as string[];
-    for (const table of tables) {
-      if (FRESH_HOST_UNBOUNDED_TABLES.has(table) || table === 'tenants') continue;
-      const allowed = FRESH_HOST_BOUNDED_TABLES.get(table) ?? 0;
-      const quoted = `"${table.replace(/"/g, '""')}"`;
-      const rows = database.prepare(`SELECT COUNT(*) FROM ${quoted}`).pluck().get();
-      const count = typeof rows === 'number' ? rows : -1;
-      if (count < 0 || count > allowed) blockers.push({ table, rows: count, allowed });
-    }
-  } catch {
-    blockers.push({ table: '*', rows: -1, allowed: 0 });
-  }
-  return { fresh: blockers.length === 0, blockers };
-}
-
 function readSingleTenantIdentity(database: DatabaseInstance): RestoreTenantIdentity {
   const tenants = database.prepare('SELECT id, code, currency FROM tenants').all() as RestoreTenantIdentity[];
   if (tenants.length !== 1) throw new Error('Active database must contain exactly one company before restore');
@@ -204,8 +145,9 @@ export function checkSqliteFileQuick(path: string): { ok: boolean; messages: str
   }
 }
 
-export interface VerifySqliteFileOptions {
-  readonly allowReplacementTenantId?: boolean | undefined;
+export interface RestorePreparationOptions {
+  /** Keep the target installation's device-bound activation and clock watermark. */
+  readonly deviceLicenseState?: SystemLicensingTable | undefined;
 }
 
 export interface RestoreFileOperations {
@@ -218,7 +160,6 @@ export interface RestoreFileOperations {
 export function verifySqliteFile(
   path: string,
   expectedTenant?: RestoreTenantIdentity,
-  options?: VerifySqliteFileOptions,
 ): RestoreTenantIdentity {
   const verification = new Database(path, { readonly: true, fileMustExist: true });
   try {
@@ -239,14 +180,44 @@ export function verifySqliteFile(
     if (tenants.length !== 1) throw new Error('Backup must contain exactly one company');
     const tenant = tenants[0]!;
     if (expectedTenant) {
-      const idMismatch = !options?.allowReplacementTenantId && tenant.id !== expectedTenant.id;
-      if (idMismatch || tenant.code !== expectedTenant.code || tenant.currency !== expectedTenant.currency) {
+      if (tenant.id !== expectedTenant.id || tenant.code !== expectedTenant.code || tenant.currency !== expectedTenant.currency) {
         throw new Error('Backup belongs to a different company');
       }
     }
     return tenant;
   } finally {
     verification.close();
+  }
+}
+
+function preserveDeviceLicenseState(path: string, state: SystemLicensingTable | undefined): void {
+  if (!state) return;
+  if (
+    state.id !== 1
+    || (state.activation_token !== null && typeof state.activation_token !== 'string')
+    || !Number.isSafeInteger(state.last_verified_clock_ms)
+    || state.last_verified_clock_ms < 0
+    || !/^[a-f0-9]{64}$/i.test(state.clock_hmac)
+    || typeof state.updated_at !== 'string'
+    || !Number.isFinite(Date.parse(state.updated_at))
+  ) {
+    throw new Error('Local device licensing state is invalid; restore was not prepared');
+  }
+  const target = new Database(path);
+  try {
+    const update = target.prepare(`
+      UPDATE system_licensing
+      SET activation_token = ?, last_verified_clock_ms = ?, clock_hmac = ?, updated_at = ?
+      WHERE id = 1
+    `).run(state.activation_token, state.last_verified_clock_ms, state.clock_hmac, state.updated_at);
+    if (update.changes === 0) {
+      target.prepare(`
+        INSERT INTO system_licensing (id, activation_token, last_verified_clock_ms, clock_hmac, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(state.id, state.activation_token, state.last_verified_clock_ms, state.clock_hmac, state.updated_at);
+    }
+  } finally {
+    target.close();
   }
 }
 
@@ -265,8 +236,7 @@ export async function prepareEncryptedSqliteRestore(
   archivePath: string,
   workingDirectory: string,
   passphrase: string,
-  expectedTenant: RestoreTenantIdentity,
-  options?: VerifySqliteFileOptions,
+  options?: RestorePreparationOptions,
 ): Promise<PreparedSqliteRestore> {
   const archive = await open(archivePath, 'r');
   const header = Buffer.alloc(HEADER_BYTES), tag = Buffer.alloc(TAG_BYTES);
@@ -285,7 +255,8 @@ export async function prepareEncryptedSqliteRestore(
     await pipeline(archive.createReadStream({ start: HEADER_BYTES, end: archiveStats.size - TAG_BYTES - 1, autoClose: false }), decipher, createWriteStream(candidatePath, { flags: 'wx', mode: 0o600 }));
     const candidateStats = await stat(candidatePath);
     if (candidateStats.size === 0 || candidateStats.size > MAX_DATABASE_BYTES) throw new Error('Restored database size is invalid');
-    const tenant = verifySqliteFile(candidatePath, expectedTenant, options);
+    preserveDeviceLicenseState(candidatePath, options?.deviceLicenseState);
+    const tenant = verifySqliteFile(candidatePath);
     return { workspace, candidatePath, candidateSha256: await hashFile(candidatePath), tenant };
   } catch (error) {
     await rm(workspace, { recursive: true, force: true });
@@ -298,7 +269,7 @@ export async function prepareEncryptedSqliteRestore(
 export async function preparePlainSqliteRestore(
   snapshotPath: string,
   workingDirectory: string,
-  expectedTenant: RestoreTenantIdentity,
+  options?: RestorePreparationOptions,
 ): Promise<PreparedSqliteRestore> {
   const workspace = await mkdtemp(join(workingDirectory, '.retailos-restore-'));
   const candidatePath = join(workspace, 'candidate.sqlite');
@@ -308,7 +279,8 @@ export async function preparePlainSqliteRestore(
       throw new Error('Daily backup size is invalid');
     }
     await copyFile(snapshotPath, candidatePath);
-    const tenant = verifySqliteFile(candidatePath, expectedTenant);
+    preserveDeviceLicenseState(candidatePath, options?.deviceLicenseState);
+    const tenant = verifySqliteFile(candidatePath);
     return { workspace, candidatePath, candidateSha256: await hashFile(candidatePath), tenant };
   } catch (error) {
     await rm(workspace, { recursive: true, force: true });
@@ -345,10 +317,6 @@ export async function installPreparedSqliteRestore(
   } catch (error) {
     await rm(workspace, { recursive: true, force: true });
     throw error;
-  }
-  if (previousTenant.code !== prepared.tenant.code || previousTenant.currency !== prepared.tenant.currency) {
-    await rm(workspace, { recursive: true, force: true });
-    throw new Error('Backup belongs to a different company');
   }
   const marker: RestoreMarker = { version: 1, stage: 'PREPARED', workspace, activePath: resolve(activePath), candidatePath: resolve(prepared.candidatePath), previousPath, rollbackPath, candidateSha256: prepared.candidateSha256, tenant: prepared.tenant, previousTenant };
   let markerCreated = false;
@@ -408,7 +376,7 @@ export async function installPreparedSqliteRestore(
   }
 }
 
-export async function recoverPendingSqliteRestore(workingDirectory: string, activePath: string, expectedCompanyCode: string, operations: RestoreFileOperations = {}): Promise<boolean> {
+export async function recoverPendingSqliteRestore(workingDirectory: string, activePath: string, operations: RestoreFileOperations = {}): Promise<boolean> {
   const remove = operations.removeFile ?? rm;
   const move = operations.renameFile ?? rename;
   const verify = operations.verifyFile ?? verifySqliteFile;
@@ -421,7 +389,7 @@ export async function recoverPendingSqliteRestore(workingDirectory: string, acti
     throw error;
   }
   const marker = JSON.parse(markerRaw) as RestoreMarker;
-  if (marker.version !== 1 || !['PREPARED', 'OLD_MOVED', 'CANDIDATE_INSTALLED'].includes(marker.stage) || resolve(marker.activePath) !== resolve(activePath) || marker.tenant.code !== expectedCompanyCode) throw new Error('Restore recovery marker is invalid; database was not opened');
+  if (marker.version !== 1 || !['PREPARED', 'OLD_MOVED', 'CANDIDATE_INSTALLED'].includes(marker.stage) || resolve(marker.activePath) !== resolve(activePath)) throw new Error('Restore recovery marker is invalid; database was not opened');
   assertChildPath(root, marker.workspace);
   assertChildPath(marker.workspace, marker.candidatePath);
   assertChildPath(marker.workspace, marker.previousPath);
@@ -430,7 +398,6 @@ export async function recoverPendingSqliteRestore(workingDirectory: string, acti
   const rollbackTenant = marker.previousTenant ?? marker.tenant;
   if (
     typeof rollbackTenant?.id !== 'string' || typeof rollbackTenant.code !== 'string' || typeof rollbackTenant.currency !== 'string'
-    || rollbackTenant.code !== expectedCompanyCode
   ) throw new Error('Restore recovery marker is invalid; database was not opened');
   const activeIsCandidate = await stat(activePath).then(async () => await hashFile(activePath) === marker.candidateSha256, () => false);
   if (activeIsCandidate) {

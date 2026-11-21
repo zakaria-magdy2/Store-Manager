@@ -4473,8 +4473,6 @@ test('pre-pilot fixes: P1-1 fail-closed 503 startup/writes, P1-4 versioned maste
       join(mirrorDir, 'retailos-latest.rfbackup'),
       crossPcWorkspace,
       masterKey2,
-      { id: dataAfterProd.payload.tenantId, code: 'PREPILOT_FIX', currency: 'EGP' },
-      { allowReplacementTenantId: true },
     );
     assert.equal(preparedLatest.tenant.code, 'PREPILOT_FIX');
     await rm(preparedLatest.workspace, { recursive: true, force: true });
@@ -4484,8 +4482,6 @@ test('pre-pilot fixes: P1-1 fail-closed 503 startup/writes, P1-4 versioned maste
       historicalSnapshotPath,
       crossPcWorkspace,
       masterKey1,
-      { id: randomUUID(), code: 'PREPILOT_FIX', currency: 'EGP' },
-      { allowReplacementTenantId: true },
     );
     assert.equal(preparedHistorical.tenant.code, 'PREPILOT_FIX');
     await rm(preparedHistorical.workspace, { recursive: true, force: true });

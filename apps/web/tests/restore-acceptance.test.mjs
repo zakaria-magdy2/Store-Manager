@@ -20,6 +20,8 @@ const backupPassphrase = 'C3-cross-device-backup-passphrase-2026';
 const ownerUsername = 'c3_restore_owner';
 const ownerPassword = 'C3-Restore-Owner-Password-2026';
 const machineId = 'ROS-ABCD-EFGH-JKLM';
+const sourceMachineId = 'ROS-2345-6789-ABCD';
+const targetMachineId = 'ROS-EFGH-JKLM-NPQR';
 
 function signLicense(payload) {
   const encodedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
@@ -37,21 +39,27 @@ async function reservePort() {
 }
 
 async function startApp(dataDir, port, extraOptions = {}) {
+  const {
+    companyName = 'متجر استعادة C3',
+    companyCode = 'C3_RESTORE_SHOP',
+    currency = 'EGP',
+    ...serverOptions
+  } = extraOptions;
   process.env.NODE_ENV = 'test';
   process.env.PORT = String(port);
   process.env.RETAILOS_DATA_DIR = dataDir;
   delete process.env.RETAILOS_DB_PATH;
   delete process.env.RETAILOS_BACKUP_DIR;
-  process.env.RETAILOS_COMPANY_NAME = 'متجر استعادة C3';
-  process.env.RETAILOS_COMPANY_CODE = 'C3_RESTORE_SHOP';
-  process.env.RETAILOS_CURRENCY = 'EGP';
+  process.env.RETAILOS_COMPANY_NAME = companyName;
+  process.env.RETAILOS_COMPANY_CODE = companyCode;
+  process.env.RETAILOS_CURRENCY = currency;
   process.env.RETAILOS_STORE_NAME = 'فرع C3';
   const app = await createServerApp({
     watermarkSecret,
     dailyBackupSecret: randomBytes(32).toString('base64url'),
     licensePublicKey: publicKeyPem,
     licenseIdentityProvider: () => ({ machineId, isHardwareBacked: true }),
-    ...extraOptions,
+    ...serverOptions,
   });
   if (!app.server.listening) await once(app.server, 'listening');
   return { ...app, url: `http://127.0.0.1:${port}` };
@@ -252,7 +260,21 @@ test('full synthetic purchase, POS sale, encrypted cross-device restore, and mai
   const atRestoreBarrier = new Promise((resolve) => { restoreBarrierEntered = resolve; });
 
   try {
-    source = await startApp(sourceDir, sourcePort);
+    const sourceWatermarkSecret = randomBytes(32).toString('hex');
+    const targetWatermarkSecret = randomBytes(32).toString('hex');
+    const targetOptions = {
+      companyName: '50%',
+      companyCode: 'DIFFERENT_TARGET_CODE',
+      currency: 'USD',
+      watermarkSecret: targetWatermarkSecret,
+      licenseIdentityProvider: () => ({ machineId: targetMachineId, isHardwareBacked: true }),
+    };
+    source = await startApp(sourceDir, sourcePort, {
+      companyCode: 'XDEV_SYNTH',
+      currency: 'EGP',
+      watermarkSecret: sourceWatermarkSecret,
+      licenseIdentityProvider: () => ({ machineId: sourceMachineId, isHardwareBacked: true }),
+    });
     const sourceCookie = await activateAndSetup(source);
     const bootstrap = await api(source.url, `/api/data` , { cookie: sourceCookie });
     assert.equal(bootstrap.response.status, 200);
@@ -343,10 +365,14 @@ test('full synthetic purchase, POS sale, encrypted cross-device restore, and mai
     });
     assert.equal(exported.response.status, 200);
     assert.equal(exported.payload.subarray(0, 5).toString(), 'RFBK1');
+    const sourceIdentityDb = new Database(source.databasePath, { readonly: true });
+    const sourceTenant = sourceIdentityDb.prepare('SELECT id, code, currency FROM tenants').get();
+    sourceIdentityDb.close();
     await source.shutdown();
     source = null;
 
     target = await startApp(targetDir, targetPort, {
+      ...targetOptions,
       beforeApiRequest: async (url) => {
         if (holdDataRequest && url.pathname === '/api/data') {
           signalInFlightDataStarted();
@@ -367,7 +393,7 @@ test('full synthetic purchase, POS sale, encrypted cross-device restore, and mai
         restartPromise = (async () => {
           await target.shutdown();
           t.diagnostic('old test server shutdown complete');
-          target = await startApp(targetDir, targetPort);
+          target = await startApp(targetDir, targetPort, targetOptions);
           t.diagnostic('replacement test server started');
         })();
         signalRestartTriggered(restartPromise);
@@ -379,6 +405,13 @@ test('full synthetic purchase, POS sale, encrypted cross-device restore, and mai
       },
     });
     const targetCookie = await activateAndSetup(target);
+    const targetDbBefore = new Database(target.databasePath);
+    const targetTenantId = targetDbBefore.prepare('SELECT id FROM tenants').pluck().get();
+    assert.notEqual(targetTenantId, sourceTenant.id, 'source and target must have different internal tenant ids');
+    targetDbBefore.prepare('INSERT INTO categories (id, tenant_id, name, code) VALUES (?, ?, ?, ?)')
+      .run(randomUUID(), targetTenantId, 'بيانات هدف يجب استبدالها', 'TARGET_ONLY');
+    const targetLicenseTokenBefore = targetDbBefore.prepare('SELECT activation_token FROM system_licensing WHERE id = 1').pluck().get();
+    targetDbBefore.close();
     await Promise.race([
       scheduledTaskStarted,
       new Promise((_, reject) => setTimeout(() => reject(new Error('Scheduled database task did not start for drain test')), 5000)),
@@ -394,7 +427,15 @@ test('full synthetic purchase, POS sale, encrypted cross-device restore, and mai
         'X-RetailOS-Restore-Confirm': 'replace',
       },
     });
-    await maintenanceStarted;
+    const restoreGate = await Promise.race([
+      maintenanceStarted.then(() => ({ started: true })),
+      restoreRequest.then((result) => ({ earlyResult: result })),
+      new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 10_000)),
+    ]);
+    if ('earlyResult' in restoreGate) {
+      assert.fail(`Restore failed before entering maintenance: ${restoreGate.earlyResult.response.status} ${JSON.stringify(restoreGate.earlyResult.payload)}`);
+    }
+    assert.equal('started' in restoreGate, true, 'restore must enter maintenance within ten seconds');
     assert.equal(await Promise.race([atRestoreBarrier.then(() => true), new Promise((resolve) => setTimeout(() => resolve(false), 25))]), false,
       'restore must wait for the active API request and scheduled database work');
     const gatedRequest = await api(target.url, '/api/data', { cookie: targetCookie });
@@ -419,6 +460,29 @@ test('full synthetic purchase, POS sale, encrypted cross-device restore, and mai
     await restartTriggered;
     await restartPromise;
     assert.equal(restore.response.status, 202, JSON.stringify(restore.payload));
+
+    const targetDbAfter = new Database(target.databasePath, { readonly: true });
+    try {
+      assert.deepEqual(
+        targetDbAfter.prepare('SELECT id, code, currency FROM tenants').get(),
+        sourceTenant,
+        'restore must replace target identity with the complete source company identity',
+      );
+      assert.equal(
+        targetDbAfter.prepare('SELECT id FROM categories WHERE code = ?').get('TARGET_ONLY'),
+        undefined,
+        'target operational data must be replaced rather than merged',
+      );
+      assert.equal(
+        targetDbAfter.prepare('SELECT activation_token FROM system_licensing WHERE id = 1').pluck().get(),
+        targetLicenseTokenBefore,
+        'the target installation keeps its machine-bound license/watermark row',
+      );
+    } finally {
+      targetDbAfter.close();
+    }
+    const licenseAfterRestore = await api(target.url, '/api/license/status');
+    assert.equal(licenseAfterRestore.payload.status, 'ACTIVE', JSON.stringify(licenseAfterRestore.payload));
 
     const restoredLogin = await api(target.url, '/api/login', {
       method: 'POST', body: { username: ownerUsername, password: ownerPassword },

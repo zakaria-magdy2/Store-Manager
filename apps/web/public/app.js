@@ -7687,7 +7687,7 @@ function backupView() {
 
     <div class="analytics-two-col">
       <section class="panel compact-panel"><div class="panel-heading"><div><h3>تصدير نسخة احتياطية مشفرة (.rfbackup)</h3><p>نسخة خارجية مشفرة بكلمة مرور لحفظها على فلاشة أو سحابة خارجية.</p></div></div><div class="empty-row">احفظ كلمة المرور في مكان آمن؛ لا يمكن فك تشفير النسخة بدونها.</div><form id="backup-export-form" class="form-stack"><label>كلمة مرور للتشفير<input name="passphrase" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label><label>أكد كلمة المرور<input name="confirmPassphrase" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label><button class="button button-primary" type="submit">تنزيل نسخة احتياطية</button></form></section>
-      <section class="panel compact-panel"><div class="panel-heading"><div><h3>استعادة نسخة مشفرة</h3><p>سيتم استبدال بيانات المحل الحالية وإعادة تشغيل النظام. لاستعادة نسخة يومية من جهاز آخر، أدخل مفتاح النسخ اليومي المستخرج في خانة كلمة المرور.</p></div></div><form id="backup-restore-form" class="form-stack"><label>ملف النسخة<input name="archive" type="file" accept=".rfbackup,application/octet-stream" required></label><label>كلمة مرور النسخة أو مفتاح النسخ اليومي<input name="passphrase" type="password" minlength="12" maxlength="256" autocomplete="current-password" required></label><label><input name="confirmReplace" type="checkbox" required> أفهم أن الاستعادة ستستبدل البيانات.</label><button class="button button-danger" type="submit">استعادة النسخة</button></form></section>
+      <section class="panel compact-panel"><div class="panel-heading"><div><h3>استعادة نسخة مشفرة</h3><p>ستُستبدل قاعدة بيانات المتجر الحالية بالكامل ببيانات النسخة، بما فيها هوية الشركة والمستخدمون والحسابات والمخزون والإعدادات. لن يتم دمج البيانات. سيحتفظ هذا التثبيت بترخيصه المحلي. لاستعادة نسخة يومية من جهاز آخر، أدخل مفتاح النسخ اليومي المستخرج في خانة كلمة المرور.</p></div></div><form id="backup-restore-form" class="form-stack"><label>ملف النسخة<input name="archive" type="file" accept=".rfbackup,application/octet-stream" required></label><label>كلمة مرور النسخة أو مفتاح النسخ اليومي<input name="passphrase" type="password" minlength="12" maxlength="256" autocomplete="current-password" required></label><label><input name="confirmReplace" type="checkbox" required> أؤكد استبدال كل بيانات المتجر الحالية بالنسخة المحددة.</label><button class="button button-danger" type="submit">استعادة النسخة</button></form></section>
     </div>
 
     <section class="panel compact-panel">
@@ -7946,7 +7946,7 @@ function bindBackups() {
     event.preventDefault();
     const form = event.currentTarget;
     const data = Object.fromEntries(new FormData(form));
-    const accepted = await showConfirmModal({ title: 'استعادة نسخة احتياطية', message: 'سيتم استبدال بيانات المحل الحالية وإعادة تشغيل النظام. هل تريد المتابعة؟', confirmText: 'استعادة الآن', cancelText: 'إلغاء', danger: true });
+    const accepted = await showConfirmModal({ title: 'استبدال كامل لبيانات المتجر', message: 'سيتم حذف بيانات المتجر الحالية من قاعدة التشغيل واستبدالها بالكامل بقاعدة النسخة الاحتياطية، بما في ذلك هوية الشركة والمستخدمون والمبيعات والمخزون والحسابات والإعدادات. لن يتم الدمج. ستُحفظ نقطة رجوع آمنة قبل الاستبدال. هل تؤكد المتابعة؟', confirmText: 'استبدال واستعادة', cancelText: 'إلغاء', danger: true });
     if (!accepted) return;
     const button = form.querySelector('[type=submit]'); button.disabled = true;
     try {
