@@ -415,10 +415,16 @@ async function bootDesktopApplication(): Promise<void> {
       const openerOrigin = trustedPopupWebContentsIds.has(webContents.id)
         ? serverOrigin
         : undefined;
+      const mediaTypes = 'mediaTypes' in details ? details.mediaTypes : undefined;
+      const requestedPermission = permission === 'media'
+        && mediaTypes?.includes('video')
+        && !mediaTypes.includes('audio')
+        ? 'camera'
+        : permission;
       callback(
         Boolean(
           activeSecurityPolicy?.isAllowedPermissionRequest(
-            permission,
+            requestedPermission,
             requestingUrl,
             openerOrigin,
           ),
@@ -427,12 +433,16 @@ async function bootDesktopApplication(): Promise<void> {
     },
   );
 
-  session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
+  session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
     const targetUrl = requestingOrigin || webContents?.getURL() || '';
     const openerOrigin =
       webContents && trustedPopupWebContentsIds.has(webContents.id) ? serverOrigin : undefined;
+    const requestedPermission = permission === 'media'
+      && details?.mediaType === 'video'
+      ? 'camera'
+      : permission;
     return Boolean(
-      activeSecurityPolicy?.isAllowedPermissionRequest(permission, targetUrl, openerOrigin),
+      activeSecurityPolicy?.isAllowedPermissionRequest(requestedPermission, targetUrl, openerOrigin),
     );
   });
 

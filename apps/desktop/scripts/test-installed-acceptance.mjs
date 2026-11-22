@@ -3,7 +3,7 @@
  * Isolated Windows acceptance checks for a packaged RetailOS executable.
  *
  * Safety properties:
- * - Windows CIM process enumeration must succeed; uncertainty aborts before launch.
+ * - Native Win32 process identity enumeration must succeed; uncertainty aborts before launch.
  * - The app's actual Electron userData path, database, and backups are redirected to one
  *   unique OS temp directory before Electron starts.
  * - Cleanup terminates only process identities verified as descendants of this run.

@@ -110,6 +110,16 @@ export function formatProcessIdentity(identity) {
   return `PID=${pid}, ExecutablePath="${exe}", CreationDate=${created}, ParentPID=${ppid}`;
 }
 
+export function sanitizeStartupDiagnostics(value) {
+  return String(value ?? '')
+    .replace(/(--electron-stdio-secret\s+)\S+/gi, '$1[REDACTED]')
+    .replace(
+      /(\b(?:passphrase|password|secret|token|dailyBackupSecret|watermarkSecret|recoveryKey)\b\s*["']?\s*[:=]\s*["']?)[^"'\s,}]+/gi,
+      '$1[REDACTED]',
+    )
+    .slice(-16_000);
+}
+
 async function readAsarIndex(asarPath) {
   const handle = await open(asarPath, 'r');
   try {
@@ -138,7 +148,7 @@ function collectAsarPaths(node, prefix = '', acc = []) {
   return acc;
 }
 
-function defaultRunPowerShellCim(encodedCommand) {
+function defaultRunPowerShellProcessQuery(encodedCommand) {
   return spawnSync('powershell', ['-NoProfile', '-EncodedCommand', encodedCommand], {
     encoding: 'utf8',
     windowsHide: true,
@@ -147,39 +157,169 @@ function defaultRunPowerShellCim(encodedCommand) {
   });
 }
 
-const WIN32_PROCESS_CIM_SCRIPT = [
+const WIN32_PROCESS_QUERY_SCRIPT = [
   '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
   '[Console]::OutputEncoding = $OutputEncoding',
   "$ErrorActionPreference = 'Stop'",
-  "$rows = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine, @{Name='CreationDate';Expression={ if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { $null } }})",
+  String.raw`$nativeSource = @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public sealed class RetailOsProcessRow {
+  public uint ProcessId { get; set; }
+  public uint ParentProcessId { get; set; }
+  public string Name { get; set; }
+  public string ExecutablePath { get; set; }
+  public string CommandLine { get; set; }
+  public string CreationDate { get; set; }
+}
+
+public static class RetailOsProcessSnapshot {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  private struct ProcessEntry32 {
+    public uint Size;
+    public uint Usage;
+    public uint ProcessId;
+    public IntPtr DefaultHeapId;
+    public uint ModuleId;
+    public uint Threads;
+    public uint ParentProcessId;
+    public int BasePriority;
+    public uint Flags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string ExeFile;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct FileTime {
+    public uint Low;
+    public uint High;
+    public long Value { get { return ((long)High << 32) | Low; } }
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct UnicodeString {
+    public ushort Length;
+    public ushort MaximumLength;
+    public IntPtr Buffer;
+  }
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+  [DllImport("kernel32.dll", EntryPoint = "Process32FirstW", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool Process32First(IntPtr snapshot, ref ProcessEntry32 entry);
+  [DllImport("kernel32.dll", EntryPoint = "Process32NextW", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool Process32Next(IntPtr snapshot, ref ProcessEntry32 entry);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern IntPtr OpenProcess(uint access, bool inheritHandle, uint processId);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool QueryFullProcessImageName(IntPtr process, uint flags, StringBuilder path, ref uint size);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool GetProcessTimes(IntPtr process, out FileTime creation, out FileTime exit, out FileTime kernel, out FileTime user);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool CloseHandle(IntPtr handle);
+  [DllImport("ntdll.dll")]
+  private static extern int NtQueryInformationProcess(IntPtr process, int informationClass, IntPtr information, uint informationLength, out uint returnLength);
+
+  private static string ReadCommandLine(IntPtr process) {
+    uint required = 0;
+    NtQueryInformationProcess(process, 60, IntPtr.Zero, 0, out required);
+    int headerSize = Marshal.SizeOf(typeof(UnicodeString));
+    if (required < headerSize || required > 1048576) return null;
+    IntPtr buffer = Marshal.AllocHGlobal((int)required);
+    try {
+      uint returned = 0;
+      int status = NtQueryInformationProcess(process, 60, buffer, required, out returned);
+      if (status < 0 || returned < headerSize) return null;
+      UnicodeString value = (UnicodeString)Marshal.PtrToStructure(buffer, typeof(UnicodeString));
+      long start = buffer.ToInt64();
+      long text = value.Buffer.ToInt64();
+      if (value.Length > value.MaximumLength || (value.Length & 1) != 0 || text < start || text + value.Length > start + returned) return null;
+      return Marshal.PtrToStringUni(value.Buffer, value.Length / 2);
+    } finally {
+      Marshal.FreeHGlobal(buffer);
+    }
+  }
+
+  private static void ReadIdentity(uint processId, RetailOsProcessRow row) {
+    const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    IntPtr process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, processId);
+    if (process == IntPtr.Zero) return;
+    try {
+      StringBuilder path = new StringBuilder(32768);
+      uint pathSize = (uint)path.Capacity;
+      if (QueryFullProcessImageName(process, 0, path, ref pathSize)) row.ExecutablePath = path.ToString();
+      FileTime creation, exit, kernel, user;
+      if (GetProcessTimes(process, out creation, out exit, out kernel, out user)) {
+        row.CreationDate = DateTime.FromFileTimeUtc(creation.Value).ToString("o");
+      }
+      row.CommandLine = ReadCommandLine(process);
+    } finally {
+      CloseHandle(process);
+    }
+  }
+
+  public static RetailOsProcessRow[] Read() {
+    const uint TH32CS_SNAPPROCESS = 0x00000002;
+    IntPtr snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == new IntPtr(-1)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    var rows = new List<RetailOsProcessRow>();
+    try {
+      ProcessEntry32 entry = new ProcessEntry32();
+      entry.Size = (uint)Marshal.SizeOf(typeof(ProcessEntry32));
+      if (!Process32First(snapshot, ref entry)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      do {
+        var row = new RetailOsProcessRow {
+          ProcessId = entry.ProcessId,
+          ParentProcessId = entry.ParentProcessId,
+          Name = entry.ExeFile
+        };
+        ReadIdentity(entry.ProcessId, row);
+        rows.Add(row);
+        entry.Size = (uint)Marshal.SizeOf(typeof(ProcessEntry32));
+      } while (Process32Next(snapshot, ref entry));
+      int iterationError = Marshal.GetLastWin32Error();
+      if (iterationError != 18) throw new Win32Exception(iterationError);
+      if (rows.Count == 0) throw new InvalidOperationException("Windows process snapshot returned no entries");
+      return rows.ToArray();
+    } finally {
+      CloseHandle(snapshot);
+    }
+  }
+}
+'@`,
+  'Add-Type -TypeDefinition $nativeSource -ErrorAction Stop',
+  '$rows = [RetailOsProcessSnapshot]::Read()',
   'ConvertTo-Json -InputObject $rows -Compress -Depth 3',
 ].join('; ');
 
-const WIN32_PROCESS_CIM_ENCODED = Buffer.from(WIN32_PROCESS_CIM_SCRIPT, 'utf16le').toString('base64');
+const WIN32_PROCESS_QUERY_ENCODED = Buffer.from(WIN32_PROCESS_QUERY_SCRIPT, 'utf16le').toString('base64');
 
 export function queryWindowsProcessTable({
-  runCommand = defaultRunPowerShellCim,
+  runCommand = defaultRunPowerShellProcessQuery,
   platform = process.platform,
 } = {}) {
   if (platform !== 'win32') {
     throw new ProcessEnumerationError(
-      `Windows CIM process enumeration is unavailable on platform "${platform}"`,
+      `Windows process enumeration is unavailable on platform "${platform}"`,
     );
   }
 
   let res;
   try {
-    res = runCommand(WIN32_PROCESS_CIM_ENCODED);
+    res = runCommand(WIN32_PROCESS_QUERY_ENCODED);
   } catch (err) {
     throw new ProcessEnumerationError(
-      `Failed to invoke PowerShell/CIM process query: ${err instanceof Error ? err.message : String(err)}`,
+      `Failed to invoke Windows process query: ${err instanceof Error ? err.message : String(err)}`,
       { cause: err instanceof Error ? err : undefined },
     );
   }
 
   if (!res || res.error) {
     const msg = res?.error ? res.error.message : 'missing spawnSync result';
-    throw new ProcessEnumerationError(`PowerShell/CIM execution failed: ${msg}`, {
+    throw new ProcessEnumerationError(`Windows process query execution failed: ${msg}`, {
       cause: res?.error,
     });
   }
@@ -187,13 +327,13 @@ export function queryWindowsProcessTable({
   if (res.status !== 0) {
     const stderrText = String(res.stderr ?? '').trim();
     throw new ProcessEnumerationError(
-      `PowerShell/CIM process query exited with code ${String(res.status)}${stderrText ? `: ${stderrText}` : ''}`,
+      `Windows process query exited with code ${String(res.status)}${stderrText ? `: ${stderrText}` : ''}`,
     );
   }
 
   const stdoutText = String(res.stdout ?? '').trim();
   if (!stdoutText) {
-    throw new ProcessEnumerationError('PowerShell/CIM process query returned empty output');
+    throw new ProcessEnumerationError('Windows process query returned empty output');
   }
 
   let parsed;
@@ -201,20 +341,20 @@ export function queryWindowsProcessTable({
     parsed = JSON.parse(stdoutText);
   } catch (err) {
     throw new ProcessEnumerationError(
-      `PowerShell/CIM process query returned invalid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      `Windows process query returned invalid JSON: ${err instanceof Error ? err.message : String(err)}`,
       { cause: err instanceof Error ? err : undefined },
     );
   }
 
   if (!Array.isArray(parsed)) {
     throw new ProcessEnumerationError(
-      'PowerShell/CIM process query returned non-array payload',
+      'Windows process query returned non-array payload',
     );
   }
 
   if (parsed.length === 0) {
     throw new ProcessEnumerationError(
-      'PowerShell/CIM process query returned 0 processes on a live host (treating empty process table as enumeration failure)',
+      'Windows process query returned 0 processes on a live host (treating empty process table as enumeration failure)',
     );
   }
 
@@ -250,7 +390,7 @@ export function queryWindowsProcessTable({
 
   if (table.size === 0) {
     throw new ProcessEnumerationError(
-      'PowerShell/CIM process query yielded no valid process entries',
+      'Windows process query yielded no valid process entries',
     );
   }
 
@@ -259,7 +399,7 @@ export function queryWindowsProcessTable({
 
 export function listRunningRetailOsPids({
   queryProcessTable,
-  runCommand = defaultRunPowerShellCim,
+  runCommand = defaultRunPowerShellProcessQuery,
   platform = process.platform,
 } = {}) {
   try {
@@ -1003,7 +1143,7 @@ export async function cleanupPackagedTestRun({
         creationDate: null,
         parentPid: null,
       },
-      reason: `Spawned main process PID ${unverifiedMainPid} could not be identity-verified via CIM at launch`,
+      reason: `Spawned main process PID ${unverifiedMainPid} could not be identity-verified at launch`,
     });
   }
 
@@ -1073,7 +1213,7 @@ export async function cleanupPackagedTestRun({
                 creationDate: null,
                 parentPid: spawnedMainIdentity?.pid ?? null,
               },
-              reason: `Unable to verify control-file PID ${candidatePid} via CIM: ${enumErr instanceof Error ? enumErr.message : String(enumErr)}`,
+              reason: `Unable to verify control-file PID ${candidatePid} via the Windows process query: ${enumErr instanceof Error ? enumErr.message : String(enumErr)}`,
             });
           }
         }
@@ -1305,6 +1445,7 @@ export async function runPackagedRuntimeTest({ argv = process.argv } = {}) {
 
   let preExistingPids = new Set();
   let child = null;
+  let childStderrTail = '';
   let spawnedMainIdentity = null;
   let trackedServerIdentity = null;
   let unverifiedMainPid = null;
@@ -1313,6 +1454,21 @@ export async function runPackagedRuntimeTest({ argv = process.argv } = {}) {
   let expectedServerScriptPath = join(unpackedSourceDir, 'resources', 'web', 'server.mjs');
   const ownedProcesses = new Map();
   let primaryError = null;
+  let controlData = null;
+  let earlyExitError = null;
+
+  const describeEarlyExit = async () => {
+    const logContent = existsSync(desktopLogPath) ? await readFile(desktopLogPath, 'utf8') : '';
+    const stderrContent = sanitizeStartupDiagnostics(childStderrTail);
+    const safeLogContent = sanitizeStartupDiagnostics(logContent);
+    return [
+      earlyExitError?.message ?? `RetailOS.exe exited prematurely (code=${String(child?.exitCode)}, signal=${String(child?.signalCode)})`,
+      stderrContent && `Electron stderr:\n${stderrContent}`,
+      safeLogContent,
+    ]
+      .filter(Boolean)
+      .join('\n');
+  };
 
   try {
     preExistingPids = assertSafeTestEnvironment(explicitExe, tempUserDataDir);
@@ -1385,15 +1541,16 @@ export async function runPackagedRuntimeTest({ argv = process.argv } = {}) {
     child = spawn(targetExePath, [], {
       cwd: targetAppDir,
       env,
-      stdio: 'ignore',
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    child.stderr?.on('data', (chunk) => {
+      childStderrTail = `${childStderrTail}${String(chunk)}`.slice(-16_000);
     });
     if (!(typeof child.pid === 'number' && Number.isInteger(child.pid) && child.pid > 0)) {
       throw new Error('Failed to capture spawned RetailOS.exe PID');
     }
     unverifiedMainPid = child.pid;
 
-    let earlyExitError = null;
-    let controlData = null;
     child.once('exit', (code, signal) => {
       if (!controlData) {
         earlyExitError = new Error(
@@ -1402,7 +1559,14 @@ export async function runPackagedRuntimeTest({ argv = process.argv } = {}) {
       }
     });
 
-    spawnedMainIdentity = await captureSpawnedMainIdentity(child.pid, targetExePath);
+    try {
+      spawnedMainIdentity = await captureSpawnedMainIdentity(child.pid, targetExePath);
+    } catch (identityError) {
+      if (earlyExitError || child.exitCode !== null) {
+        throw new Error(await describeEarlyExit(), { cause: identityError });
+      }
+      throw identityError;
+    }
     unverifiedMainPid = null;
     ownedProcesses.set(spawnedMainIdentity.pid, { identity: spawnedMainIdentity, depth: 0 });
 
@@ -1412,8 +1576,7 @@ export async function runPackagedRuntimeTest({ argv = process.argv } = {}) {
 
     while (Date.now() < deadline) {
       if (earlyExitError) {
-        const logContent = existsSync(desktopLogPath) ? await readFile(desktopLogPath, 'utf8') : '';
-        throw new Error(`${earlyExitError.message}\n${logContent}`);
+        throw new Error(await describeEarlyExit());
       }
       if (existsSync(controlFilePath)) {
         try {
@@ -1479,7 +1642,7 @@ export async function runPackagedRuntimeTest({ argv = process.argv } = {}) {
 
     const logText = existsSync(desktopLogPath) ? await readFile(desktopLogPath, 'utf8') : '';
     assert.ok(controlData, `Timed out waiting for packaged RetailOS server. Log:\n${logText}`);
-    assert.ok(trackedServerIdentity, 'Managed server identity was not verified via CIM');
+    assert.ok(trackedServerIdentity, 'Managed server identity was not verified via the native Windows process query');
     assert.equal(bootstrapJson?.configured, true);
     assert.equal(bootstrapJson?.setupRequired, true);
     assert.equal(licenseStatus?.status, 'UNLICENSED');

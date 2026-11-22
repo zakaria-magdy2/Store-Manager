@@ -124,6 +124,9 @@ after(async () => {
 });
 
 test('configured store, owner account, supplier ledger, products, stock receipt, and checkout persist in SQLite', async () => {
+  const home = await fetch(baseUrl);
+  assert.equal(home.headers.get('permissions-policy'), 'camera=(self), microphone=(), geolocation=(), payment=()');
+  assert.match(home.headers.get('content-security-policy') ?? '', /default-src 'self'/);
   const initial = await request('/api/bootstrap', { authenticated: false });
   assert.equal(initial.payload.configured, true);
   assert.equal(initial.payload.setupRequired, true);

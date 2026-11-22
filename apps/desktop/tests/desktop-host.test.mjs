@@ -88,6 +88,11 @@ test('createDesktopWindowSecurityPolicy enforces loopback origin, sandbox flags,
     false,
   );
   assert.equal(policy.isAllowedPermissionRequest('media', 'http://127.0.0.1:4310/pos'), false);
+  assert.equal(policy.isAllowedPermissionRequest('camera', 'http://127.0.0.1:4310/pos'), true);
+  assert.equal(policy.isAllowedPermissionRequest('camera', 'https://evil.example.com'), false);
+  assert.equal(policy.isAllowedPermissionRequest('camera', 'http://127.0.0.1:9999/'), false);
+  assert.equal(policy.isAllowedPermissionRequest('camera', 'about:blank', 'http://127.0.0.1:4310/'), false);
+  assert.equal(policy.isAllowedPermissionRequest('microphone', 'http://127.0.0.1:4310/pos'), false);
   assert.equal(
     policy.isAllowedPermissionRequest('geolocation', 'http://127.0.0.1:4310/pos'),
     false,

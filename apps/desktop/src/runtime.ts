@@ -49,6 +49,7 @@ const ALLOWED_CLIPBOARD_PERMISSIONS = new Set<string>([
   'clipboard-read',
   'clipboard-sanitized-write',
 ]);
+const ALLOWED_LOOPBACK_PERMISSIONS = new Set<string>(['camera']);
 
 export function createDesktopWindowSecurityPolicy(
   localLoopbackOrigin = 'http://127.0.0.1:4310',
@@ -88,6 +89,9 @@ export function createDesktopWindowSecurityPolicy(
       requestingOriginOrUrl: string,
       openerOriginOrUrl?: string,
     ): boolean {
+      if (ALLOWED_LOOPBACK_PERMISSIONS.has(permission)) {
+        return isAllowedLoopbackUrl(requestingOriginOrUrl);
+      }
       if (!ALLOWED_CLIPBOARD_PERMISSIONS.has(permission)) {
         return false;
       }

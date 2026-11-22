@@ -15,6 +15,7 @@ import {
   pathsEqual,
   ProcessEnumerationError,
   queryWindowsProcessTable,
+  sanitizeStartupDiagnostics,
   terminateVerifiedProcess,
   validateServerProcessOwnership,
   waitForVerifiedProcessesExit,
@@ -32,6 +33,15 @@ test('normalizes Windows process paths with win32 semantics on every host', () =
   assert.equal(win32.resolve(equivalentServerPath).toLowerCase(), win32.resolve(canonicalServerPath).toLowerCase());
 });
 
+test('startup diagnostics redact recovery secrets and keep a bounded tail', () => {
+  const diagnostics = sanitizeStartupDiagnostics(
+    'dailyBackupSecret: synthetic-secret password="synthetic-password" --electron-stdio-secret opaque-handshake',
+  );
+  assert.doesNotMatch(diagnostics, /synthetic-secret|synthetic-password|opaque-handshake/);
+  assert.equal((diagnostics.match(/\[REDACTED\]/g) ?? []).length, 3);
+  assert.equal(sanitizeStartupDiagnostics('x'.repeat(20_000)).length, 16_000);
+});
+
 test('Windows path checks work when running on a Linux host', { skip: process.platform !== 'linux' }, () => {
   assert.equal(pathsEqual(TEST_SERVER_SCRIPT, win32.normalize(TEST_SERVER_SCRIPT.toLowerCase()), 'win32'), true);
   assert.equal(isPathInsideOrEqual(TEST_SERVER_SCRIPT, 'C:\\Temp\\retailos-smoke', 'win32'), true);
@@ -40,6 +50,21 @@ test('Windows path checks work when running on a Linux host', { skip: process.pl
 test('Windows path checks work on a native Windows host', { skip: process.platform !== 'win32' }, () => {
   assert.equal(pathsEqual(TEST_SERVER_SCRIPT, win32.normalize(TEST_SERVER_SCRIPT.toLowerCase()), 'win32'), true);
   assert.equal(isPathInsideOrEqual(TEST_SERVER_SCRIPT, 'C:\\Temp\\retailos-smoke', process.platform), true);
+});
+
+test('native Win32 snapshot provides complete identity for the current process without CIM', { skip: process.platform !== 'win32' }, () => {
+  const table = queryWindowsProcessTable();
+  const current = table.get(process.pid);
+  assert.ok(current, `Current process PID ${process.pid} must be present in the Win32 Toolhelp snapshot`);
+  assert.equal(current.pid, process.pid);
+  assert.equal(current.parentPid > 0, true);
+  assert.equal(typeof current.name, 'string');
+  assert.match(current.name, /^(node|node\.exe)$/i);
+  assert.equal(typeof current.executablePath, 'string');
+  assert.equal(current.executablePath.trim().length > 0, true);
+  assert.equal(Number.isFinite(Date.parse(current.creationDate)), true);
+  assert.equal(typeof current.commandLine, 'string');
+  assert.match(current.commandLine, /packaged-runtime-cleanup\.test\.mjs/i);
 });
 
 test('captures only the spawned RetailOS process with a complete matching executable identity', async () => {
@@ -204,7 +229,7 @@ test('never terminates processes and preserves sandbox when process identity can
     assert.equal(resRecorded.status, 'VERIFICATION_FAILED');
     assert.deepEqual(killedPids, []);
 
-    // 2b: Live CIM record missing ExecutablePath/CreationDate -> cleanup throws & preserves sandbox
+    // 2b: Live process record missing ExecutablePath/CreationDate -> cleanup throws & preserves sandbox
     const expectedMain = makeIdentity({ pid: 5101 });
     const ownedProcesses = new Map([[expectedMain.pid, { identity: expectedMain, depth: 0 }]]);
     const liveIncompleteTable = new Map([
@@ -277,8 +302,8 @@ test('never terminates processes and preserves sandbox when process identity can
   }
 });
 
-test('fails closed on PowerShell/CIM failure instead of treating failure as empty process list', async () => {
-  // 3a: Non-zero exit from PowerShell/CIM
+test('fails closed on native process enumeration failure instead of treating failure as empty process list', async () => {
+  // 3a: Non-zero exit from the Windows process query
   assert.throws(
     () =>
       queryWindowsProcessTable({
@@ -311,7 +336,7 @@ test('fails closed on PowerShell/CIM failure instead of treating failure as empt
   // 3d: listRunningRetailOsPids distinguishes failure from genuine empty RetailOS count
   const failedListing = listRunningRetailOsPids({
     platform: 'win32',
-    runCommand: () => ({ status: 1, stdout: '', stderr: 'CIM service unavailable' }),
+    runCommand: () => ({ status: 1, stdout: '', stderr: 'Win32 process snapshot unavailable' }),
   });
   assert.equal(failedListing.ok, false);
   assert.ok(failedListing.error instanceof ProcessEnumerationError);
@@ -335,7 +360,7 @@ test('fails closed on PowerShell/CIM failure instead of treating failure as empt
   });
   assert.deepEqual(genuineZeroListing, { ok: true, pids: [] });
 
-  // 3e: assertSafeTestEnvironment aborts fail-closed when CIM enumeration fails
+  // 3e: assertSafeTestEnvironment aborts fail-closed when process enumeration fails
   assert.throws(
     () =>
       assertSafeTestEnvironment(null, join(tmpdir(), 'retailos-safe-check-dir'), {
@@ -345,20 +370,20 @@ test('fails closed on PowerShell/CIM failure instead of treating failure as empt
     /fail-closed.*unable to verify whether RetailOS\.exe is already running/i,
   );
 
-  // 3f: collectProcessTreeIdentities throws instead of returning empty tree on CIM failure
+  // 3f: collectProcessTreeIdentities throws instead of returning empty tree on enumeration failure
   assert.throws(
     () =>
       collectProcessTreeIdentities(makeIdentity({ pid: 6000 }), {
         queryProcessTable: () => {
-          throw new ProcessEnumerationError('CIM failure during tree collection');
+          throw new ProcessEnumerationError('Win32 process query failure during tree collection');
         },
         platform: 'win32',
       }),
     ProcessEnumerationError,
   );
 
-  // 3g: cleanupPackagedTestRun refuses blind kill and preserves sandbox when CIM fails
-  const sandbox = await mkdtemp(join(tmpdir(), 'retailos-test-cimfail-'));
+  // 3g: cleanupPackagedTestRun refuses blind kill and preserves sandbox when enumeration fails
+  const sandbox = await mkdtemp(join(tmpdir(), 'retailos-test-process-query-failure-'));
   try {
     const sentinel = join(sandbox, 'sentinel.txt');
     await writeFile(sentinel, 'preserve', 'utf8');

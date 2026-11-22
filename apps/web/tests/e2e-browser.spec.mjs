@@ -313,7 +313,47 @@ test.describe.serial('RetailOS Real-Browser E2E Suite (1366x768 RTL)', () => {
     await expect(page.locator('aside.sidebar')).toBeVisible();
   });
 
-  test('2. POS Shift, Barcode Scan & Split Payment (CASH + electronic) with Thermal Receipt Preview', async () => {
+  test('2. Product camera capture compresses and applies an image, then releases the camera', async () => {
+    const cameraState = await page.evaluate(() => {
+      globalThis.__retailosCameraTracksStopped = false;
+      Object.defineProperty(globalThis.navigator, 'mediaDevices', {
+        configurable: true,
+        value: {
+          getUserMedia: async (constraints) => {
+            if (constraints.audio !== false || !constraints.video) throw new Error('Unsafe camera constraints');
+            const track = { stop: () => { globalThis.__retailosCameraTracksStopped = true; } };
+            const stream = new globalThis.MediaStream();
+            stream.getTracks = () => [track];
+            return stream;
+          },
+        },
+      });
+      globalThis.HTMLVideoElement.prototype.play = async function () {
+        Object.defineProperty(this, 'videoWidth', { configurable: true, value: 640 });
+        Object.defineProperty(this, 'videoHeight', { configurable: true, value: 480 });
+      };
+      globalThis.CanvasRenderingContext2D.prototype.drawImage = function () {};
+      return true;
+    });
+    expect(cameraState).toBe(true);
+
+    await page.click('.nav-item[data-page="products"]');
+    await page.click('#new-product');
+    await expect(page.locator('[data-camera-image-btn]')).toBeVisible();
+    await page.click('[data-camera-image-btn]');
+    await expect(page.locator('[data-camera-capture]')).toBeEnabled();
+    await page.click('[data-camera-capture]');
+    await expect(page.locator('.camera-capture-overlay')).toHaveCount(0);
+    await expect(page.locator('#product-form input[name="imagePath"]')).toHaveValue(/^data:image\/(webp|jpeg);base64,/);
+    const capturedImage = await page.locator('#product-form input[name="imagePath"]').inputValue();
+    expect(capturedImage.length).toBeLessThanOrEqual(240_000);
+    expect(await page.evaluate(() => globalThis.__retailosCameraTracksStopped)).toBe(true);
+
+    await page.locator('#product-form [data-close-modal]').click();
+    await expect(page.locator('#product-form')).toHaveCount(0);
+  });
+
+  test('3. POS Shift, Barcode Scan & Split Payment (CASH + electronic) with Thermal Receipt Preview', async () => {
     await page.click('.nav-item[data-page="pos"]');
     await expect(page.locator('#pos-start-shift-now-btn')).toBeVisible();
 

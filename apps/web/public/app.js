@@ -366,6 +366,7 @@ function renderProductImagePicker(imagePath = '') {
       <div class="product-image-actions">
         <input type="file" accept="image/*" class="product-image-file-input" data-image-file hidden>
         <button type="button" class="button button-secondary button-sm" data-pick-image-btn>${safePath ? 'تغيير الصورة' : 'رفع صورة للمنتج'}</button>
+        <button type="button" class="button button-secondary button-sm" data-camera-image-btn>تصوير بالكاميرا</button>
         <button type="button" class="button button-secondary button-sm product-image-remove-btn" data-remove-image-btn ${safePath ? '' : 'hidden'}>حذف الصورة</button>
       </div>
     </div>
@@ -378,6 +379,7 @@ function bindProductImagePicker(container) {
   const hiddenInput = picker.querySelector('input[name="imagePath"]');
   const fileInput = picker.querySelector('[data-image-file]');
   const pickBtn = picker.querySelector('[data-pick-image-btn]');
+  const cameraBtn = picker.querySelector('[data-camera-image-btn]');
   const removeBtn = picker.querySelector('[data-remove-image-btn]');
   const preview = picker.querySelector('[data-image-preview]');
 
@@ -393,6 +395,102 @@ function bindProductImagePicker(container) {
   };
 
   pickBtn?.addEventListener('click', () => fileInput?.click());
+  cameraBtn?.addEventListener('click', async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      toast('الكاميرا غير متاحة في هذا المتصفح أو يجب فتح النظام عبر اتصال آمن', 'error');
+      return;
+    }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'camera-capture-overlay';
+    overlay.innerHTML = `<section class="camera-capture-dialog" role="dialog" aria-modal="true" aria-labelledby="camera-capture-title">
+      <div class="modal-heading"><h2 id="camera-capture-title">تصوير صورة المنتج</h2></div>
+      <video class="camera-capture-video" autoplay muted playsinline aria-label="معاينة الكاميرا"></video>
+      <p class="camera-capture-message" role="status">اسمح باستخدام الكاميرا لالتقاط الصورة.</p>
+      <div class="modal-actions">
+        <button type="button" class="button button-secondary" data-camera-cancel>إلغاء</button>
+        <button type="button" class="button button-primary" data-camera-capture disabled>التقاط واستخدام الصورة</button>
+      </div>
+    </section>`;
+    document.body.append(overlay);
+
+    const video = overlay.querySelector('video');
+    const captureBtn = overlay.querySelector('[data-camera-capture]');
+    const cancelBtn = overlay.querySelector('[data-camera-cancel]');
+    const message = overlay.querySelector('.camera-capture-message');
+    let stream = null;
+    let closed = false;
+    const stopCamera = () => {
+      stream?.getTracks().forEach((track) => track.stop());
+      stream = null;
+      if (video) video.srcObject = null;
+    };
+    const closeCamera = () => {
+      if (closed) return;
+      closed = true;
+      stopCamera();
+      overlay.remove();
+      document.removeEventListener('keydown', onEscape);
+      window.removeEventListener('pagehide', closeCamera);
+      cameraBtn.focus();
+    };
+    const onEscape = (event) => {
+      if (event.key === 'Escape') closeCamera();
+    };
+    cancelBtn.addEventListener('click', closeCamera);
+    document.addEventListener('keydown', onEscape);
+    window.addEventListener('pagehide', closeCamera, { once: true });
+    captureBtn.addEventListener('click', async () => {
+      if (closed || !stream || !video.videoWidth || !video.videoHeight) return;
+      captureBtn.disabled = true;
+      message.textContent = 'جاري تجهيز الصورة...';
+      try {
+        const canvas = document.createElement('canvas');
+        const scale = Math.min(1, 1280 / Math.max(video.videoWidth, video.videoHeight));
+        canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+        canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+        const context = canvas.getContext('2d');
+        if (!context) throw new Error('تعذر معالجة الصورة في المتصفح');
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const blob = await new Promise((resolve, reject) => canvas.toBlob(
+          (result) => result ? resolve(result) : reject(new Error('تعذر التقاط الصورة')),
+          'image/jpeg',
+          0.9,
+        ));
+        stopCamera();
+        const photo = new File([blob], 'retailos-camera.jpg', { type: blob.type || 'image/jpeg' });
+        const dataUrl = await compressProductImageFile(photo);
+        syncUi(dataUrl);
+        closeCamera();
+        toast('تم تصوير صورة المنتج وتجهيزها');
+      } catch (error) {
+        toast(error.message || 'تعذر التقاط صورة المنتج', 'error');
+        closeCamera();
+      }
+    });
+
+    cameraBtn.disabled = true;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+      if (closed) {
+        stopCamera();
+        return;
+      }
+      video.srcObject = stream;
+      await video.play();
+      captureBtn.disabled = false;
+      message.textContent = 'وجّه الكاميرا إلى المنتج ثم التقط الصورة.';
+    } catch (error) {
+      const denied = error?.name === 'NotAllowedError' || error?.name === 'PermissionDeniedError';
+      message.textContent = denied
+        ? 'لم يتم السماح بالكاميرا. يمكنك السماح بها من إعدادات النظام أو رفع صورة من الجهاز.'
+        : 'تعذر تشغيل الكاميرا أو لم يتم العثور على كاميرا. يمكنك رفع صورة من الجهاز.';
+      captureBtn.hidden = true;
+      toast(message.textContent, 'error');
+    } finally {
+      cameraBtn.disabled = false;
+    }
+  });
   removeBtn?.addEventListener('click', () => {
     if (fileInput) fileInput.value = '';
     syncUi('');
