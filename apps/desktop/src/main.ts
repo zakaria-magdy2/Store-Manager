@@ -511,8 +511,8 @@ if (singleInstanceLock) {
       writeDesktopLog(`fatal startup error: ${detail}`, true);
       await shutdownServerOnce().catch(() => undefined);
       dialog.showErrorBox(
-        'RetailOS — تعذر تشغيل النظام',
-        `حدث خطأ أثناء تشغيل خادم RetailOS المحلي:\n\n${detail}`,
+        'رف — تعذر تشغيل النظام',
+        `حدث خطأ أثناء تشغيل خادم رَفّ المحلي:\n\n${detail}`,
       );
       quitHandled = true;
       app.exit(1);

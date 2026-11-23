@@ -1686,7 +1686,7 @@ async function verifyCurrentUserPasswordOrThrow(ctx, currentPassword) {
   const validCurrent = currentUser && await passwordHasher.verify(currentUser.passwordHash, currentPassword);
   if (!validCurrent) {
     recordAuthFailure('pwd_change', rateLimitKey);
-    throw Object.assign(new Error('Current password is incorrect'), { status: 400 });
+    throw Object.assign(new Error('كلمة المرور الحالية غير صحيحة'), { status: 400 });
   }
   clearAuthFailures('pwd_change', rateLimitKey);
   return currentUser;
@@ -2388,9 +2388,9 @@ async function requireContext(req) {
 }
 
 function reportDay(value) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value ?? '')) throw Object.assign(new Error('Invalid report date'), { status: 400 });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value ?? '')) throw Object.assign(new Error('تاريخ التقرير غير صالح'), { status: 400 });
   const parsed = new Date(`${value}T00:00:00.000Z`);
-  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) throw Object.assign(new Error('Invalid report date'), { status: 400 });
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) throw Object.assign(new Error('تاريخ التقرير غير صالح'), { status: 400 });
   return parsed;
 }
 
@@ -2398,7 +2398,7 @@ async function profitLossReport(ctx, url) {
   ctx.assertPermission(Permissions.REPORTS_FINANCIAL_VIEW);
   const from = reportDay(url.searchParams.get('from'));
   const to = reportDay(url.searchParams.get('to'));
-  if (from > to) throw Object.assign(new Error('Report start date must be before end date'), { status: 400 });
+  if (from > to) throw Object.assign(new Error('تاريخ البداية يجب أن يكون قبل تاريخ النهاية'), { status: 400 });
   const requestedStore = url.searchParams.get('storeId');
   const stores = await storeRepo.listByTenant(ctx);
   const storeId = ctx.storeId ?? requestedStore ?? stores[0]?.id;
@@ -3083,11 +3083,11 @@ async function topProductsReport(ctx, url) {
   ctx.assertPermission(Permissions.REPORTS_DAILY_VIEW);
   const fromValue = url.searchParams.get('from');
   const toValue = url.searchParams.get('to');
-  if ((fromValue === null) !== (toValue === null)) throw Object.assign(new Error('Both report dates are required'), { status: 400 });
+  if ((fromValue === null) !== (toValue === null)) throw Object.assign(new Error('يرجى تحديد تاريخ البداية وتاريخ النهاية'), { status: 400 });
   let start = null, endExclusive = null;
   if (fromValue && toValue) {
     const from = reportDay(fromValue), to = reportDay(toValue);
-    if (from > to) throw Object.assign(new Error('Report start date must be before end date'), { status: 400 });
+    if (from > to) throw Object.assign(new Error('تاريخ البداية يجب أن يكون قبل تاريخ النهاية'), { status: 400 });
     const bounds = queryRangeBounds(fromValue, toValue, url);
     start = bounds.startIso;
     endExclusive = bounds.endExclusiveIso;
@@ -3254,9 +3254,9 @@ async function topProductsReport(ctx, url) {
 async function purchaseSupplierReport(ctx, url) {
   ctx.assertPermission(Permissions.REPORTS_FINANCIAL_VIEW);
   const fromValue = url.searchParams.get('from'), toValue = url.searchParams.get('to');
-  if (!fromValue || !toValue) throw Object.assign(new Error('Both report dates are required'), { status: 400 });
+  if (!fromValue || !toValue) throw Object.assign(new Error('يرجى تحديد تاريخ البداية وتاريخ النهاية'), { status: 400 });
   const from = reportDay(fromValue), to = reportDay(toValue);
-  if (from > to) throw Object.assign(new Error('Report start date must be before end date'), { status: 400 });
+  if (from > to) throw Object.assign(new Error('تاريخ البداية يجب أن يكون قبل تاريخ النهاية'), { status: 400 });
   const bounds = queryRangeBounds(fromValue, toValue, url);
   const stores = await storeRepo.listByTenant(ctx);
   const requestedStore = url.searchParams.get('storeId');
@@ -5792,12 +5792,12 @@ async function handleApi(req, res, url) {
     ctx.assertPermission(Permissions.SYSTEM_BACKUP_MANAGE);
     if (req.headers['x-retailos-restore-confirm'] !== 'replace') throw Object.assign(new Error('Restore confirmation is required'), { status: 400 });
     const encodedPassphrase = req.headers['x-backup-passphrase'];
-    if (typeof encodedPassphrase !== 'string' || encodedPassphrase.length > 1400) throw Object.assign(new Error('Backup passphrase is required'), { status: 400 });
+    if (typeof encodedPassphrase !== 'string' || encodedPassphrase.length > 1400) throw Object.assign(new Error('يرجى إدخال كلمة مرور النسخة الاحتياطية'), { status: 400 });
     const passphrase = Buffer.from(encodedPassphrase, 'base64url').toString('utf8');
-    if (Buffer.from(passphrase, 'utf8').toString('base64url') !== encodedPassphrase || passphrase.length < 12 || passphrase.length > 256) throw Object.assign(new Error('Backup passphrase is invalid'), { status: 400 });
+    if (Buffer.from(passphrase, 'utf8').toString('base64url') !== encodedPassphrase || passphrase.length < 12 || passphrase.length > 256) throw Object.assign(new Error('كلمة مرور النسخة الاحتياطية غير صالحة (يجب أن تكون 12 حرفًا على الأقل)'), { status: 400 });
     const maxUploadBytes = 2 * 1024 * 1024 * 1024 + 64;
     const declaredLength = req.headers['content-length'];
-    if (declaredLength && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > maxUploadBytes)) throw Object.assign(new Error('Backup file exceeds the upload limit'), { status: 413 });
+    if (declaredLength && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > maxUploadBytes)) throw Object.assign(new Error('حجم ملف النسخة الاحتياطية أكبر من الحد المسموح'), { status: 413 });
     const uploadWorkspace = await mkdtemp(join(dataDir, '.retailos-upload-'));
     const archivePath = join(uploadWorkspace, 'upload.rfbackup');
     let preparedRestore;
@@ -5807,7 +5807,7 @@ async function handleApi(req, res, url) {
       let uploadSize = 0;
       const limit = new Transform({ transform(chunk, _encoding, callback) {
         uploadSize += chunk.length;
-        if (uploadSize > maxUploadBytes) callback(Object.assign(new Error('Backup file exceeds the upload limit'), { status: 413 }));
+        if (uploadSize > maxUploadBytes) callback(Object.assign(new Error('حجم ملف النسخة الاحتياطية أكبر من الحد المسموح'), { status: 413 }));
         else callback(null, chunk);
       } });
       await pipeline(req, limit, createWriteStream(archivePath, { flags: 'wx', mode: 0o600 }));
@@ -5815,7 +5815,7 @@ async function handleApi(req, res, url) {
       try {
         preparedRestore = await prepareEncryptedSqliteRestore(archivePath, dataDir, passphrase, { deviceLicenseState });
       } catch {
-        throw Object.assign(new Error('Backup file or passphrase is invalid, or the backup database is invalid'), { status: 400 });
+        throw Object.assign(new Error('ملف النسخة الاحتياطية أو كلمة المرور غير صحيحة، أو أن الملف تالف'), { status: 400 });
       }
       await enterRestoreMaintenanceMode();
       database.beginMaintenanceMode();
@@ -6401,8 +6401,8 @@ async function handleApi(req, res, url) {
       await recordAudit(ctx, { storeId: created.storeId ?? null, action: 'USER_CREATED', entityType: 'USER', entityId: created.id, summary: `إضافة حساب موظف جديد (${created.username} - ${created.role})`, metadata: { role: created.role, username: created.username, shiftStartTime: created.shiftStartTime ?? null, lateGraceMinutes: created.lateGraceMinutes } });
       return json(res, 201, { id: created.id, username: created.username });
     } catch (error) {
-      if (error?.message?.startsWith('UserError:')) throw Object.assign(new Error('Username is already in use'), { status: 409 });
-      if (error?.message?.startsWith('StoreError:')) throw Object.assign(new Error('Selected store is unavailable'), { status: 400 });
+      if (error?.message?.startsWith('UserError:')) throw Object.assign(new Error('اسم المستخدم مستخدم بالفعل، اختر اسمًا آخر'), { status: 409 });
+      if (error?.message?.startsWith('StoreError:')) throw Object.assign(new Error('الفرع المختار غير متاح'), { status: 400 });
       throw error;
     }
   }
@@ -6450,20 +6450,20 @@ async function handleApi(req, res, url) {
     const body = validate(UpdateUserSchema, await readJson(req));
     const targetId = userMatch[1];
     const target = await db.selectFrom('users').selectAll().where('tenant_id', '=', ctx.tenantId).where('id', '=', targetId).executeTakeFirst();
-    if (!target || (ctx.storeId && target.store_id !== ctx.storeId)) throw Object.assign(new Error('User not found'), { status: 404 });
+    if (!target || (ctx.storeId && target.store_id !== ctx.storeId)) throw Object.assign(new Error('المستخدم غير موجود'), { status: 404 });
     const nextRole = body.role ?? target.role;
     const nextStoreId = body.storeId === undefined ? target.store_id : body.storeId;
     const nextActive = body.isActive === undefined ? Boolean(target.is_active) : body.isActive;
     const nextShiftStartTime = body.shiftStartTime === undefined ? target.shift_start_time : (body.shiftStartTime || null);
     const nextLateGraceMinutes = body.lateGraceMinutes === undefined ? Number(target.late_grace_minutes ?? 0) : body.lateGraceMinutes;
-    if (target.id === ctx.userId && (nextRole !== target.role || !nextActive)) throw Object.assign(new Error('You cannot change your own role or deactivate your own account'), { status: 400 });
+    if (target.id === ctx.userId && (nextRole !== target.role || !nextActive)) throw Object.assign(new Error('لا يمكنك تغيير صلاحية حسابك الحالي أو تعطيله'), { status: 400 });
     if (target.id === ctx.userId && body.newPassword) throw Object.assign(new Error('استخدم صفحة تغيير كلمة المرور لتحديث كلمة مرورك'), { status: 400 });
-    if (ctx.roleId !== 'OWNER' && (target.role !== 'CASHIER' || nextRole !== 'CASHIER' || nextStoreId !== ctx.storeId)) throw Object.assign(new Error('Store managers can only manage cashiers in their assigned store'), { status: 403 });
-    if (nextRole === 'CASHIER' && !nextStoreId) throw Object.assign(new Error('Cashiers must be assigned to a store'), { status: 400 });
-    if (nextStoreId && !await db.selectFrom('stores').select('id').where('tenant_id', '=', ctx.tenantId).where('id', '=', nextStoreId).executeTakeFirst()) throw Object.assign(new Error('Selected store is unavailable'), { status: 400 });
+    if (ctx.roleId !== 'OWNER' && (target.role !== 'CASHIER' || nextRole !== 'CASHIER' || nextStoreId !== ctx.storeId)) throw Object.assign(new Error('مدير الفرع يمكنه إدارة الكاشير في فرعه فقط'), { status: 403 });
+    if (nextRole === 'CASHIER' && !nextStoreId) throw Object.assign(new Error('يجب ربط حساب الكاشير بفرع محدد'), { status: 400 });
+    if (nextStoreId && !await db.selectFrom('stores').select('id').where('tenant_id', '=', ctx.tenantId).where('id', '=', nextStoreId).executeTakeFirst()) throw Object.assign(new Error('الفرع المختار غير متاح'), { status: 400 });
     if (target.role === 'OWNER' && target.is_active && (nextRole !== 'OWNER' || !nextActive)) {
       const activeOwners = await db.selectFrom('users').select(db.fn.countAll().as('count')).where('tenant_id', '=', ctx.tenantId).where('role', '=', 'OWNER').where('is_active', '=', 1).executeTakeFirst();
-      if (Number(activeOwners?.count ?? 0) <= 1) throw Object.assign(new Error('At least one active owner must remain'), { status: 409 });
+      if (Number(activeOwners?.count ?? 0) <= 1) throw Object.assign(new Error('يجب الإبقاء على حساب مدير نظام نشط واحد على الأقل'), { status: 409 });
     }
     const passwordHash = body.newPassword ? await passwordHasher.hash(body.newPassword) : null;
     const revokeSessions = nextRole !== target.role || nextStoreId !== target.store_id || Number(nextActive) !== target.is_active || Boolean(passwordHash);

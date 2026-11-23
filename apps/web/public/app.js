@@ -684,7 +684,7 @@ async function requireMutationConfirmation(operation) {
 
 function mutationLabel(path, method) {
   if (path === '/api/dev/reset-operational-data') return 'مسح بيانات التشغيل التجريبية بالكامل';
-  if (path === '/api/license/activate') return 'تفعيل أو تجديد اشتراك RetailOS على هذا الجهاز';
+  if (path === '/api/license/activate') return 'تفعيل أو تجديد اشتراك رَفّ على هذا الجهاز';
   if (path === '/api/logout') return 'تسجيل الخروج من النظام';
   if (path === '/api/categories') return 'إضافة الفئة';
   if (/^\/api\/categories\/[^/?]+$/.test(path) && method === 'PATCH') return 'تعديل اسم الفئة';
