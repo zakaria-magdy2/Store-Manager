@@ -7141,11 +7141,6 @@ async function handleApi(req, res, url) {
       lines,
       ...(newProducts.length > 0 ? { newProducts } : {}),
     });
-    if (savedId === id) {
-      const savedPurchase = await db.selectFrom('supplier_purchases').select('invoice_number').where('id', '=', savedId).where('tenant_id', '=', ctx.tenantId).executeTakeFirst();
-      const recordedInvoice = savedPurchase?.invoice_number ?? explicitInvoiceNumber ?? savedId.slice(0, 8);
-      await recordAudit(ctx, { storeId: body.storeId, action: 'PURCHASE_RECORDED', entityType: 'PURCHASE', entityId: savedId, summary: `تسجيل فاتورة شراء (${recordedInvoice})`, metadata: { invoiceNumber: recordedInvoice, totalAmount: body.totalAmount, paidAmount: body.paidAmount, targetProfitPercent: body.targetProfitPercent ?? null, expectedRetailTotal: expectedRetailTotal?.amount.toString() ?? null, newProductsCount: newProducts.length } });
-    }
     return json(res, 201, { id: savedId });
   }
 

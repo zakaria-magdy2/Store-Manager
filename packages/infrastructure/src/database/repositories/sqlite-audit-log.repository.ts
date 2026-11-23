@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Permissions } from '@retailos/core';
 import type { ExecutionContext } from '@retailos/application';
-import type { Kysely } from 'kysely';
+import type { Kysely, Transaction } from 'kysely';
 import type { RetailOSDatabase } from '../types.js';
 
 const SENSITIVE_KEY_PATTERN = /(password|passphrase|token|secret|pin)/i;
@@ -107,6 +107,94 @@ export interface ListAuditLogsOptions {
   limit?: number | undefined;
 }
 
+export async function recordAuditLogInTransaction(
+  trx: Transaction<RetailOSDatabase>,
+  ctx: ExecutionContext,
+  input: RecordAuditLogInput,
+): Promise<AuditLogEntryRecord> {
+  const id = input.id ?? randomUUID();
+  const storeId = input.storeId ?? ctx.storeId ?? null;
+  const actorUserId =
+    input.actorUserId === undefined
+      ? ctx.userId === 'system'
+        ? null
+        : ctx.userId
+      : input.actorUserId;
+  const createdAt = (input.occurredAt ?? new Date()).toISOString();
+  const sanitizedMetadata = sanitizeMetadata(input.metadata ?? {}) as Record<string, unknown>;
+  const metadataJson = JSON.stringify(sanitizedMetadata);
+
+  const latest = await trx
+    .selectFrom('audit_logs')
+    .select(['entry_hash', 'sequence_no'])
+    .where('tenant_id', '=', ctx.tenantId)
+    .orderBy('sequence_no', 'desc')
+    .limit(1)
+    .executeTakeFirst();
+
+  const previousHash = latest?.entry_hash ?? 'GENESIS';
+  const entryHash = computeAuditEntryHash({
+    id,
+    tenantId: ctx.tenantId,
+    storeId,
+    actorUserId,
+    actorUsername: input.actorUsername,
+    actorRole: input.actorRole,
+    action: input.action,
+    entityType: input.entityType,
+    entityId: input.entityId ?? null,
+    summary: input.summary,
+    metadataJson,
+    previousHash,
+    createdAt,
+  });
+
+  await trx
+    .insertInto('audit_logs')
+    .values({
+      id,
+      tenant_id: ctx.tenantId,
+      store_id: storeId,
+      actor_user_id: actorUserId,
+      actor_username: input.actorUsername,
+      actor_role: input.actorRole,
+      action: input.action,
+      entity_type: input.entityType,
+      entity_id: input.entityId ?? null,
+      summary: input.summary,
+      metadata_json: metadataJson,
+      previous_hash: previousHash,
+      entry_hash: entryHash,
+      created_at: createdAt,
+    })
+    .execute();
+
+  const inserted = await trx
+    .selectFrom('audit_logs')
+    .select('sequence_no')
+    .where('tenant_id', '=', ctx.tenantId)
+    .where('id', '=', id)
+    .executeTakeFirstOrThrow();
+
+  return {
+    sequenceNo: inserted.sequence_no,
+    id,
+    tenantId: ctx.tenantId,
+    storeId,
+    actorUserId,
+    actorUsername: input.actorUsername,
+    actorRole: input.actorRole,
+    action: input.action,
+    entityType: input.entityType,
+    entityId: input.entityId ?? null,
+    summary: input.summary,
+    metadata: sanitizedMetadata,
+    previousHash,
+    entryHash,
+    createdAt,
+  };
+}
+
 export class SqliteAuditLogRepository {
   constructor(private readonly db: Kysely<RetailOSDatabase>) {}
 
@@ -114,89 +202,7 @@ export class SqliteAuditLogRepository {
     ctx: ExecutionContext,
     input: RecordAuditLogInput,
   ): Promise<AuditLogEntryRecord> {
-    const id = input.id ?? randomUUID();
-    const storeId = input.storeId ?? ctx.storeId ?? null;
-    const actorUserId =
-      input.actorUserId === undefined
-        ? ctx.userId === 'system'
-          ? null
-          : ctx.userId
-        : input.actorUserId;
-    const createdAt = (input.occurredAt ?? new Date()).toISOString();
-    const sanitizedMetadata = sanitizeMetadata(input.metadata ?? {}) as Record<string, unknown>;
-    const metadataJson = JSON.stringify(sanitizedMetadata);
-
-    return this.db.transaction().execute(async (trx) => {
-      const latest = await trx
-        .selectFrom('audit_logs')
-        .select(['entry_hash', 'sequence_no'])
-        .where('tenant_id', '=', ctx.tenantId)
-        .orderBy('sequence_no', 'desc')
-        .limit(1)
-        .executeTakeFirst();
-
-      const previousHash = latest?.entry_hash ?? 'GENESIS';
-      const entryHash = computeAuditEntryHash({
-        id,
-        tenantId: ctx.tenantId,
-        storeId,
-        actorUserId,
-        actorUsername: input.actorUsername,
-        actorRole: input.actorRole,
-        action: input.action,
-        entityType: input.entityType,
-        entityId: input.entityId ?? null,
-        summary: input.summary,
-        metadataJson,
-        previousHash,
-        createdAt,
-      });
-
-      await trx
-        .insertInto('audit_logs')
-        .values({
-          id,
-          tenant_id: ctx.tenantId,
-          store_id: storeId,
-          actor_user_id: actorUserId,
-          actor_username: input.actorUsername,
-          actor_role: input.actorRole,
-          action: input.action,
-          entity_type: input.entityType,
-          entity_id: input.entityId ?? null,
-          summary: input.summary,
-          metadata_json: metadataJson,
-          previous_hash: previousHash,
-          entry_hash: entryHash,
-          created_at: createdAt,
-        })
-        .execute();
-
-      const inserted = await trx
-        .selectFrom('audit_logs')
-        .select('sequence_no')
-        .where('tenant_id', '=', ctx.tenantId)
-        .where('id', '=', id)
-        .executeTakeFirstOrThrow();
-
-      return {
-        sequenceNo: inserted.sequence_no,
-        id,
-        tenantId: ctx.tenantId,
-        storeId,
-        actorUserId,
-        actorUsername: input.actorUsername,
-        actorRole: input.actorRole,
-        action: input.action,
-        entityType: input.entityType,
-        entityId: input.entityId ?? null,
-        summary: input.summary,
-        metadata: sanitizedMetadata,
-        previousHash,
-        entryHash,
-        createdAt,
-      };
-    });
+    return this.db.transaction().execute((trx) => recordAuditLogInTransaction(trx, ctx, input));
   }
 
   public async list(

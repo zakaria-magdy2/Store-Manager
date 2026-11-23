@@ -5,6 +5,7 @@ import type { Money, ProductOption } from '@retailos/core';
 import { applyStockMovementInTransaction } from './stock-movement.executor.js';
 import { postJournalEntry } from './accounting-journal.executor.js';
 import { allocateDocumentNumberInTransaction } from './document-sequence.executor.js';
+import { recordAuditLogInTransaction } from './sqlite-audit-log.repository.js';
 import type { RetailOSDatabase } from '../types.js';
 
 export interface PurchaseLineInput {
@@ -561,6 +562,34 @@ export class SqlitePurchasingRepository {
           ...(input.initialPayment.amount > 0n ? [{ accountCode: cashAccount(input.paymentMethod), side: 'CREDIT' as const, amount: input.initialPayment.amount, memo: 'المدفوع عند استلام الفاتورة' }] : []),
           ...(input.totalAmount.amount > input.initialPayment.amount ? [{ accountCode: '2010', side: 'CREDIT' as const, amount: input.totalAmount.amount - input.initialPayment.amount, memo: 'رصيد مستحق للتاجر' }] : []),
         ],
+      });
+
+      const actor = ctx.userId === 'system'
+        ? undefined
+        : await trx
+            .selectFrom('users')
+            .select('username')
+            .where('tenant_id', '=', ctx.tenantId)
+            .where('id', '=', ctx.userId)
+            .executeTakeFirst();
+      const recordedInvoice = resolvedInvoiceNumber ?? input.id.slice(0, 8);
+      await recordAuditLogInTransaction(trx, ctx, {
+        storeId: input.storeId,
+        actorUserId: ctx.userId === 'system' ? null : ctx.userId,
+        actorUsername: actor?.username ?? 'system',
+        actorRole: ctx.roleId,
+        action: 'PURCHASE_RECORDED',
+        entityType: 'PURCHASE',
+        entityId: input.id,
+        summary: `تسجيل فاتورة شراء (${recordedInvoice})`,
+        metadata: {
+          invoiceNumber: recordedInvoice,
+          totalAmount: input.totalAmount.amount.toString(),
+          paidAmount: input.initialPayment.amount.toString(),
+          targetProfitPercent: input.targetProfitPercent ?? null,
+          expectedRetailTotal: input.expectedRetailTotal?.amount.toString() ?? null,
+          newProductsCount: (input.newProducts ?? []).length,
+        },
       });
       return input.id;
     });

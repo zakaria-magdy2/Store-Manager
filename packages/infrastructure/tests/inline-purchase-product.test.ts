@@ -428,5 +428,101 @@ describe('Atomic inline new-product creation inside purchase invoice', () => {
     expect(await db.selectFrom('stock_movements').select('id').where('tenant_id', '=', tenantId).execute()).toHaveLength(0);
     expect(await db.selectFrom('journal_entries').select('id').where('tenant_id', '=', tenantId).execute()).toHaveLength(0);
     expect(await db.selectFrom('journal_lines').select('id').execute()).toHaveLength(0);
+    expect(await db.selectFrom('audit_logs').select('id').where('tenant_id', '=', tenantId).where('action', '=', 'PURCHASE_RECORDED').execute()).toHaveLength(0);
+  });
+
+  it('writes PURCHASE_RECORDED audit log atomically inside the purchase transaction and rolls back everything if audit insertion fails', async () => {
+    const db = dbManager.getDb();
+    const rawDb = dbManager.getRawDatabase();
+
+    // 1. Force audit_logs insertion to fail via a temporary SQLite trigger
+    rawDb.exec(`
+      CREATE TRIGGER trg_test_fail_purchase_audit
+      BEFORE INSERT ON audit_logs
+      WHEN NEW.action = 'PURCHASE_RECORDED'
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated audit log failure');
+      END;
+    `);
+
+    const failedIdempotencyKey = randomUUID();
+    await expect(
+      purchasingRepo.recordPurchase(ctx, {
+        id: randomUUID(),
+        idempotencyKey: failedIdempotencyKey,
+        supplierId,
+        storeId,
+        autoGenerateInvoiceNumber: true,
+        totalAmount: egp(30000n),
+        initialPayment: egp(30000n),
+        paymentMethod: 'CASH',
+        purchasedAt: new Date('2026-11-23T12:00:00Z'),
+        lines: [],
+        newProducts: [
+          {
+            id: randomUUID(),
+            name: 'منتج اختبار فشل التدقيق',
+            sku: 'AUDIT-FAIL-01',
+            categoryId,
+            options: [{ key: 'option_1', name: 'اللون', values: ['أزرق'] }],
+            variants: [
+              { id: randomUUID(), sku: 'AUDIT-FAIL-01-BLU', attributes: { option_1: 'أزرق' }, quantity: 2n, unitCost: egp(15000n) },
+            ],
+          },
+        ],
+      }),
+    ).rejects.toThrow(/simulated audit log failure/);
+
+    // Everything must be 100% rolled back (no orphan purchase, product, stock, or journal)
+    expect(await db.selectFrom('supplier_purchases').select('id').where('tenant_id', '=', tenantId).execute()).toHaveLength(0);
+    expect(await db.selectFrom('products').select('id').where('tenant_id', '=', tenantId).execute()).toHaveLength(0);
+    expect(await db.selectFrom('stock_movements').select('id').where('tenant_id', '=', tenantId).execute()).toHaveLength(0);
+    expect(await db.selectFrom('journal_entries').select('id').where('tenant_id', '=', tenantId).execute()).toHaveLength(0);
+    expect(await db.selectFrom('audit_logs').select('id').where('tenant_id', '=', tenantId).where('action', '=', 'PURCHASE_RECORDED').execute()).toHaveLength(0);
+
+    // 2. Remove the failure trigger and retry with the same idempotencyKey -> succeeds with exactly 1 audit log
+    rawDb.exec('DROP TRIGGER trg_test_fail_purchase_audit;');
+
+    const purchaseId = randomUUID();
+    const retryPayload = {
+      id: purchaseId,
+      idempotencyKey: failedIdempotencyKey,
+      supplierId,
+      storeId,
+      autoGenerateInvoiceNumber: true,
+      totalAmount: egp(30000n),
+      initialPayment: egp(30000n),
+      paymentMethod: 'CASH' as const,
+      purchasedAt: new Date('2026-11-23T12:00:00Z'),
+      lines: [],
+      newProducts: [
+        {
+          id: randomUUID(),
+          name: 'منتج اختبار فشل التدقيق',
+          sku: 'AUDIT-FAIL-01',
+          categoryId,
+          options: [{ key: 'option_1', name: 'اللون', values: ['أزرق'] }],
+          variants: [
+            { id: randomUUID(), sku: 'AUDIT-FAIL-01-BLU', attributes: { option_1: 'أزرق' }, quantity: 2n, unitCost: egp(15000n) },
+          ],
+        },
+      ],
+    };
+
+    const savedId = await purchasingRepo.recordPurchase(ctx, retryPayload);
+    expect(savedId).toBe(purchaseId);
+
+    // 3. Replaying the succeeded idempotencyKey returns the same purchaseId without duplicating the audit log
+    const replayId = await purchasingRepo.recordPurchase(ctx, { ...retryPayload, id: randomUUID() });
+    expect(replayId).toBe(purchaseId);
+
+    const auditRows = await db
+      .selectFrom('audit_logs')
+      .selectAll()
+      .where('tenant_id', '=', tenantId)
+      .where('action', '=', 'PURCHASE_RECORDED')
+      .execute();
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0]?.entity_id).toBe(purchaseId);
   });
 });
