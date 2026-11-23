@@ -6,7 +6,7 @@ import { Transform } from 'node:stream';
 import { createReadStream, createWriteStream, existsSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, join, normalize, parse, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import {
   AuthService,
@@ -57,8 +57,16 @@ import {
   LicenseHardwareIdentityError,
   LicenseService,
 } from '@retailos/infrastructure';
-import { CreateProductSchema, CreateUserSchema, UpdateProductSchema } from '@retailos/shared';
+import {
+  CreateProductSchema,
+  CreateUserSchema,
+  ProductAttributesSchema,
+  ProductImagePathSchema,
+  ProductOptionSchema,
+  UpdateProductSchema,
+} from '@retailos/shared';
 import { z } from 'zod';
+import { isPreviewResetConfiguration, resetDevelopmentOperationalData } from './dev-data-reset.mjs';
 
 const serverFilePath = fileURLToPath(import.meta.url);
 
@@ -379,6 +387,76 @@ const companyConfig = {
 const port = Number.parseInt(process.env.PORT ?? '4173', 10);
 const origin = `http://127.0.0.1:${port}`;
 const databasePath = process.env.RETAILOS_DB_PATH ? resolve(process.env.RETAILOS_DB_PATH) : join(dataDir, 'retailos.sqlite');
+const previewMarkerPath = join(appDir, 'preview-reset-mode.js');
+const developmentResetEnabled = isPreviewResetConfiguration({
+  previewMarkerExists: existsSync(previewMarkerPath) || Boolean(options.betaTrialConfig?.enabled),
+  dataDir: options.betaTrialConfig?.enabled ? dataDir : process.env.RETAILOS_DATA_DIR,
+  databasePath,
+  electronRuntime: process.argv.includes('--electron-stdio-secret') || Boolean(options.betaTrialConfig?.enabled),
+});
+let betaTrialConfig = options.betaTrialConfig?.enabled ? options.betaTrialConfig : null;
+if (!betaTrialConfig && developmentResetEnabled && existsSync(previewMarkerPath)) {
+  try {
+    const mod = await import(pathToFileURL(previewMarkerPath).href);
+    if (mod?.PREVIEW_RESET_MODE === true) {
+      betaTrialConfig = {
+        enabled: true,
+        autoLogin: mod.BETA_AUTO_LOGIN === true,
+        issuedAt: typeof mod.BETA_BUILD_ISSUED_AT === 'string' ? mod.BETA_BUILD_ISSUED_AT : null,
+        expiresAt: typeof mod.BETA_BUILD_EXPIRES_AT === 'string' ? mod.BETA_BUILD_EXPIRES_AT : null,
+      };
+    }
+  } catch { /* ignore unreadable marker */ }
+}
+const betaAutoLoginEnabled = Boolean(developmentResetEnabled && betaTrialConfig?.autoLogin && betaTrialConfig?.expiresAt);
+const betaIssuedAtMs = betaTrialConfig?.issuedAt ? Date.parse(betaTrialConfig.issuedAt) : 0;
+const betaExpiresAtMs = betaTrialConfig?.expiresAt ? Date.parse(betaTrialConfig.expiresAt) : 0;
+
+function evaluateBetaTrialStatus() {
+  const nowMs = typeof options.nowProvider === 'function' ? options.nowProvider() : Date.now();
+  if (!Number.isFinite(betaExpiresAtMs) || betaExpiresAtMs <= 0) {
+    return {
+      status: 'EXPIRED',
+      daysRemaining: 0,
+      expiresAt: null,
+      planName: 'نسخة Beta تجريبية (7 أيام)',
+      customerName: 'نسخة تجريبية Beta',
+      machineId: 'BETA-TRIAL-7D',
+      message: 'صلاحية النسخة التجريبية غير صالحة.',
+    };
+  }
+  if (Number.isFinite(betaIssuedAtMs) && betaIssuedAtMs > 0 && nowMs + 5 * 60 * 1000 < betaIssuedAtMs) {
+    return {
+      status: 'CLOCK_TAMPERED',
+      daysRemaining: 0,
+      expiresAt: new Date(betaExpiresAtMs).toISOString(),
+      planName: 'نسخة Beta تجريبية (7 أيام)',
+      customerName: 'نسخة تجريبية Beta',
+      machineId: 'BETA-TRIAL-7D',
+      message: 'تم رصد رجوع ساعة الجهاز للخلف — يرجى ضبط التاريخ والوقت الصحيح.',
+    };
+  }
+  if (nowMs > betaExpiresAtMs) {
+    return {
+      status: 'EXPIRED',
+      daysRemaining: 0,
+      expiresAt: new Date(betaExpiresAtMs).toISOString(),
+      planName: 'نسخة Beta تجريبية (7 أيام)',
+      customerName: 'نسخة تجريبية Beta',
+      machineId: 'BETA-TRIAL-7D',
+      message: 'انتهت صلاحية النسخة التجريبية Beta (7 أيام). تواصل مع الدعم للحصول على النسخة الكاملة.',
+    };
+  }
+  const daysRemaining = Math.max(0, Math.ceil((betaExpiresAtMs - nowMs) / (24 * 60 * 60 * 1000)));
+  return {
+    status: 'ACTIVE',
+    daysRemaining,
+    expiresAt: new Date(betaExpiresAtMs).toISOString(),
+    planName: 'نسخة Beta تجريبية (7 أيام)',
+    customerName: 'نسخة تجريبية Beta',
+    machineId: 'BETA-TRIAL-7D',
+  };
+}
 const backupBaseDir = process.env.RETAILOS_BACKUP_DIR ? resolve(process.env.RETAILOS_BACKUP_DIR) : join(dataDir, 'backups');
 const dailyBackupDir = join(backupBaseDir, 'daily');
 const preRestoreBackupDir = join(backupBaseDir, 'pre-restore');
@@ -844,8 +922,87 @@ const SaleExchangeSchema = z.object({
   notes: z.string().max(500).trim().optional(),
 });
 const SupplierSchema = z.object({ name: z.string().min(2).max(120).trim(), phone: z.string().max(40).trim().optional(), notes: z.string().max(500).trim().optional() });
-const PurchaseSchema = z.object({ idempotencyKey: z.string().uuid(), supplierId: z.string().uuid(), storeId: z.string().uuid(), invoiceNumber: z.string().max(80).trim().optional(), totalAmount: z.string().regex(/^[1-9]\d{0,14}$/), paidAmount: z.string().regex(/^\d{1,15}$/), paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'CARD', 'MOBILE']).default('CASH'), targetProfitPercent: z.number().min(0).max(100000).nullable().optional(), referenceNumber: z.string().max(80).trim().optional(), notes: z.string().max(500).trim().optional(), items: z.array(z.object({ variantId: z.string().uuid(), quantity: z.string().regex(/^[1-9]\d{0,8}$/), unitCost: z.string().regex(/^\d{1,15}$/), retailPrice: z.string().regex(/^\d{1,15}$/).nullable().optional() })).min(1).max(100) });
+const InlinePurchaseVariantSchema = z.object({
+  sku: z.string().min(1, 'كود التركيبة مطلوب').max(64, 'كود التركيبة طويل جدًا').trim(),
+  barcode: z.string().min(1, 'الباركود غير صالح').max(64, 'الباركود طويل جدًا').trim().optional(),
+  attributes: ProductAttributesSchema.default({}),
+  quantity: z.string().regex(/^\d{1,9}$/, 'الكمية يجب أن تكون رقمًا صحيحًا بدون كسور'),
+  unitCost: z.string().regex(/^\d{1,15}$/, 'سعر الشراء غير صالح'),
+  retailPrice: z.string().regex(/^\d{1,15}$/, 'سعر البيع غير صالح').nullable().optional(),
+  reorderPoint: z.string().regex(/^\d{1,9}$/, 'حد التنبيه غير صالح').optional(),
+});
+const InlinePurchaseProductSchema = z.object({
+  name: z.string().min(2, 'اسم المنتج يجب أن يكون حرفين على الأقل').max(120, 'اسم المنتج طويل جدًا').trim(),
+  sku: z.string().min(1, 'كود المنتج مطلوب').max(64, 'كود المنتج طويل جدًا').trim(),
+  barcode: z.string().min(1, 'باركود المنتج غير صالح').max(64, 'باركود المنتج طويل جدًا').trim().optional(),
+  categoryId: z.string().uuid('الفئة المحددة غير صالحة').nullable().optional(),
+  brand: z.string().max(100, 'اسم الماركة طويل جدًا').trim().optional(),
+  description: z.string().max(2000, 'الوصف طويل جدًا').trim().optional(),
+  imagePath: ProductImagePathSchema.optional(),
+  options: z.array(ProductOptionSchema).max(8, 'الحد الأقصى للخيارات هو 8 خيارات').default([]),
+  variants: z.array(InlinePurchaseVariantSchema).min(1, 'يجب إضافة تركيبة واحدة على الأقل للمنتج').max(200, 'الحد الأقصى للتركيبات هو 200 تركيبة'),
+});
+const PurchaseSchema = z.object({
+  idempotencyKey: z.string().uuid('معرف العملية غير صالح، أعد فتح النموذج وحاول مرة أخرى'),
+  supplierId: z.string().uuid('اختر التاجر / المورد أولًا'),
+  storeId: z.string().uuid('اختر الفرع أولًا'),
+  invoiceNumber: z.string().max(80, 'رقم الفاتورة طويل جدًا').trim().optional(),
+  totalAmount: z.string().regex(/^[1-9]\d{0,14}$/, 'إجمالي الفاتورة يجب أن يكون أكبر من صفر'),
+  paidAmount: z.string().regex(/^\d{1,15}$/, 'المبلغ المدفوع غير صالح'),
+  paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'CARD', 'MOBILE']).default('CASH'),
+  targetProfitPercent: z.number().min(0, 'نسبة الربح يجب أن تكون صفرًا أو أكثر').max(100000, 'نسبة الربح كبيرة جدًا').nullable().optional(),
+  referenceNumber: z.string().max(80, 'الرقم المرجعي طويل جدًا').trim().optional(),
+  notes: z.string().max(500, 'الملاحظات طويلة جدًا').trim().optional(),
+  items: z.array(z.object({
+    variantId: z.string().uuid('الصنف المحدد غير صالح'),
+    quantity: z.string().regex(/^[1-9]\d{0,8}$/, 'الكمية يجب أن تكون رقمًا صحيحًا أكبر من صفر'),
+    unitCost: z.string().regex(/^\d{1,15}$/, 'سعر الشراء غير صالح'),
+    retailPrice: z.string().regex(/^\d{1,15}$/, 'سعر البيع غير صالح').nullable().optional(),
+  })).max(200, 'الحد الأقصى للأصناف في الفاتورة هو 200 صنف').default([]),
+  newProducts: z.array(InlinePurchaseProductSchema).max(50, 'الحد الأقصى للمنتجات الجديدة في فاتورة واحدة هو 50 منتجًا').default([]),
+}).superRefine((body, refinementCtx) => {
+  let newPurchasedLines = 0;
+  for (const np of body.newProducts) {
+    const productPurchased = np.variants.filter((variant) => BigInt(variant.quantity) > 0n).length;
+    if (productPurchased === 0) {
+      refinementCtx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `حدد كمية أكبر من صفر لتركيبة واحدة على الأقل للمنتج (${np.name})`,
+      });
+      return;
+    }
+    newPurchasedLines += productPurchased;
+  }
+  const totalLines = body.items.length + newPurchasedLines;
+  if (totalLines === 0) {
+    refinementCtx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'يجب أن تحتوي فاتورة الشراء على صنف واحد على الأقل بكمية أكبر من صفر',
+    });
+    return;
+  }
+  if (totalLines > 300) {
+    refinementCtx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'تجاوزت الفاتورة الحد الأقصى لعدد البنود (300 بند)',
+    });
+  }
+});
 const SupplierPaymentSchema = z.object({ idempotencyKey: z.string().uuid(), amount: z.string().regex(/^[1-9]\d{0,14}$/), paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'CARD', 'MOBILE']), referenceNumber: z.string().max(80).trim().optional() });
+const UpdatePurchaseMetaSchema = z.object({
+  invoiceNumber: z.string().max(80).trim().nullable().optional(),
+  notes: z.string().max(500).trim().nullable().optional(),
+  targetProfitPercent: z.number().min(0).max(100000).nullable().optional(),
+});
+const UpdateExpenseSchema = z.object({
+  idempotencyKey: z.string().uuid(),
+  categoryCode: z.enum(['RENT', 'UTILITIES', 'TRANSPORT', 'MAINTENANCE', 'SUPPLIES', 'OTHER']),
+  amount: z.string().regex(/^[1-9]\d{0,14}$/, 'قيمة المصروف يجب أن تكون أكبر من صفر'),
+  paymentMethod: z.enum(['CASH_DRAWER', 'CASH_SAFE', 'BANK_TRANSFER']),
+  expenseDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'تاريخ المصروف غير صالح'),
+  notes: z.string().max(500).trim().optional(),
+  referenceNumber: z.string().max(80).trim().optional(),
+});
 const ExpenseSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), categoryCode: z.enum(['RENT', 'UTILITIES', 'TRANSPORT', 'MAINTENANCE', 'SUPPLIES', 'OTHER']), amount: z.string().regex(/^[1-9]\d{0,14}$/), paymentMethod: z.enum(['CASH_DRAWER', 'CASH_SAFE', 'BANK_TRANSFER']), expenseDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), notes: z.string().max(500).trim().optional(), referenceNumber: z.string().max(80).trim().optional() });
 const CustomerReturnSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), paymentMethod: z.enum(['CASH', 'CARD', 'MOBILE', 'OTHER']), items: z.array(z.object({ originalSaleItemId: z.string().min(1).max(80), quantity: z.string().regex(/^[1-9]\d{0,8}$/) })).min(1).max(100) });
 const RecurringObligationSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), categoryCode: z.enum(['RENT', 'UTILITIES', 'TRANSPORT', 'MAINTENANCE', 'SUPPLIES', 'OTHER']), name: z.string().min(2).max(120).trim(), dueDay: z.number().int().min(1).max(31), initialAmount: z.string().regex(/^[1-9]\d{0,14}$/).optional() });
@@ -1299,7 +1456,7 @@ function supplierPurchaseAggregates(filter) {
       COUNT(*) AS purchaseCount,
       COALESCE(SUM(p.total_amount), 0) AS totalAmount,
       COALESCE(SUM(${unrepresentedInitialPaidSql('p')}), 0) AS initialPaid,
-      COALESCE(SUM((SELECT COALESCE(SUM(sp.amount), 0) FROM supplier_payments sp WHERE sp.tenant_id = p.tenant_id AND sp.purchase_id = p.id)), 0) AS laterPaid,
+      COALESCE(SUM((SELECT COALESCE(SUM(sp.amount), 0) FROM supplier_payments sp WHERE sp.tenant_id = p.tenant_id AND sp.purchase_id = p.id AND sp.deleted_at IS NULL)), 0) AS laterPaid,
       COALESCE(SUM((SELECT COALESCE(SUM(sr.credit_amount), 0) FROM supplier_returns sr WHERE sr.tenant_id = p.tenant_id AND sr.purchase_id = p.id)), 0) AS returnedCredit
     FROM supplier_purchases p
     WHERE ${where}
@@ -1349,6 +1506,7 @@ function serializeSupplierSummary(supplier, totals, currency, purchases, supplie
     name: supplier.name,
     phone: supplier.phone,
     notes: supplier.notes,
+    isActive: supplier.is_active === 1,
     purchases,
     supplierRefunds,
     purchaseCount: t.purchaseCount,
@@ -1391,8 +1549,9 @@ async function loadPurchaseEntries(tenantId, purchaseRows, userMap) {
   const returnsByPurchase = group(vendorReturns, 'purchase_id');
   return purchaseRows.map((purchase) => {
     const purchasePayments = paymentsByPurchase.get(purchase.id) ?? [];
+    const activePurchasePayments = purchasePayments.filter((payment) => !payment.deleted_at);
     const purchaseReturns = returnsByPurchase.get(purchase.id) ?? [];
-    const paid = effectiveLegacyInitialPaid(purchase, purchasePayments) + purchasePayments.reduce((sum, payment) => sum + BigInt(payment.amount), 0n);
+    const paid = effectiveLegacyInitialPaid(purchase, purchasePayments) + activePurchasePayments.reduce((sum, payment) => sum + BigInt(payment.amount), 0n);
     const returnCredit = purchaseReturns.reduce((sum, item) => sum + BigInt(item.credit_amount), 0n);
     return {
       id: purchase.id,
@@ -1420,7 +1579,7 @@ async function loadPurchaseEntries(tenantId, purchaseRows, userMap) {
           retailPrice: line.retail_price !== null && line.retail_price !== undefined ? moneyJson(Money.fromMinor(BigInt(line.retail_price), line.currency)) : null,
         };
       }),
-      payments: purchasePayments.map((payment) => ({ id: payment.id, amount: moneyJson(Money.fromMinor(BigInt(payment.amount), payment.currency)), paymentMethod: payment.payment_method, referenceNumber: payment.reference_number, paidAt: payment.paid_at, createdByUserId: payment.created_by_user_id, createdByName: userMap.get(payment.created_by_user_id) || 'المسؤول' })),
+      payments: activePurchasePayments.map((payment) => ({ id: payment.id, amount: moneyJson(Money.fromMinor(BigInt(payment.amount), payment.currency)), paymentMethod: payment.payment_method, referenceNumber: payment.reference_number, paidAt: payment.paid_at, createdByUserId: payment.created_by_user_id, createdByName: userMap.get(payment.created_by_user_id) || 'المسؤول' })),
       returns: purchaseReturns.map((item) => ({ id: item.id, returnNumber: item.return_number, creditAmount: moneyJson(Money.fromMinor(BigInt(item.credit_amount), item.currency)), createdAt: item.created_at })),
     };
   });
@@ -1607,14 +1766,84 @@ async function readJson(req, maxBytes = MAX_JSON_BODY_BYTES) {
   try {
     return raw ? JSON.parse(raw) : {};
   } catch {
-    throw Object.assign(new Error('Invalid JSON body'), { status: 400 });
+    throw Object.assign(new Error('البيانات المرسلة غير صالحة، يرجى المحاولة مرة أخرى'), { status: 400 });
   }
+}
+
+const VALIDATION_FIELD_LABELS = {
+  name: 'الاسم',
+  sku: 'الكود',
+  barcode: 'الباركود',
+  categoryId: 'الفئة',
+  supplierId: 'التاجر / المورد',
+  storeId: 'الفرع',
+  items: 'أصناف الفاتورة',
+  newProducts: 'المنتجات الجديدة',
+  variants: 'التركيبات (الألوان والمقاسات)',
+  options: 'خيارات المنتج',
+  values: 'قيم الخيار',
+  quantity: 'الكمية',
+  unitCost: 'سعر الشراء',
+  retailPrice: 'سعر البيع',
+  totalAmount: 'إجمالي الفاتورة',
+  paidAmount: 'المبلغ المدفوع',
+  amount: 'المبلغ',
+  paymentMethod: 'طريقة الدفع',
+  invoiceNumber: 'رقم الفاتورة',
+  notes: 'الملاحظات',
+  phone: 'رقم الهاتف',
+  username: 'اسم المستخدم',
+  password: 'كلمة المرور',
+  passphrase: 'كلمة سر النسخة الاحتياطية',
+  fullName: 'الاسم الكامل',
+  ownerName: 'اسم المدير',
+  ownerUsername: 'اسم مستخدم المدير',
+  reorderPoint: 'حد التنبيه لنقص المخزون',
+  expenseDate: 'تاريخ المصروف',
+  reason: 'السبب',
+};
+
+function formatValidationIssue(issue) {
+  const rawMsg = String(issue.message ?? '').trim();
+  const hasArabic = /[\u0600-\u06FF]/.test(rawMsg);
+  if (hasArabic) return rawMsg;
+
+  const pathKeys = Array.isArray(issue.path) ? issue.path.filter((p) => typeof p === 'string') : [];
+  const lastField = pathKeys[pathKeys.length - 1];
+  const label = (lastField && VALIDATION_FIELD_LABELS[lastField]) || 'البيانات المدخلة';
+
+  if (issue.code === 'too_small') {
+    if (issue.origin === 'array') return `يجب إدخال عنصر واحد على الأقل في ${label}`;
+    if (issue.origin === 'string') return `${label} قصير جدًا، يرجى استكماله`;
+    return `قيمة ${label} أقل من الحد المسموح`;
+  }
+  if (issue.code === 'too_big') {
+    if (issue.origin === 'array') return `عدد عناصر ${label} يتجاوز الحد المسموح`;
+    if (issue.origin === 'string') return `${label} أطول من الحد المسموح`;
+    return `قيمة ${label} أكبر من الحد المسموح`;
+  }
+  if (issue.code === 'invalid_format' || issue.code === 'invalid_string') {
+    if (lastField === 'totalAmount') return 'إجمالي الفاتورة يجب أن يكون أكبر من صفر';
+    if (lastField === 'quantity') return 'الكمية يجب أن تكون رقمًا صحيحًا أكبر من صفر';
+    if (lastField === 'unitCost' || lastField === 'retailPrice' || lastField === 'paidAmount' || lastField === 'amount') {
+      return `يرجى إدخال رقم صحيح في ${label}`;
+    }
+    return `صيغة ${label} غير صحيحة`;
+  }
+  if (issue.code === 'invalid_type') {
+    return `يرجى استكمال حقل ${label} بشكل صحيح`;
+  }
+  if (issue.code === 'invalid_value' || issue.code === 'invalid_enum_value') {
+    return `القيمة المختارة في ${label} غير صالحة`;
+  }
+  return `يرجى مراجعة حقل ${label} والتأكد من إدخاله بشكل صحيح`;
 }
 
 function validate(schema, value) {
   const result = schema.safeParse(value);
   if (!result.success) {
-    throw Object.assign(new Error(result.error.issues.map((issue) => issue.message).join('، ')), { status: 400 });
+    const messages = [...new Set(result.error.issues.map(formatValidationIssue))];
+    throw Object.assign(new Error(messages.join('، ')), { status: 400 });
   }
   return result.data;
 }
@@ -2093,12 +2322,67 @@ function loadStocktakeSessionDetail(ctx, sessionId, { includeBlindReview = false
   };
 }
 
+let betaOwnerBootstrapPromise = null;
+async function ensureBetaOwnerContext(requestId = undefined) {
+  if (!betaOwnerBootstrapPromise) {
+    betaOwnerBootstrapPromise = (async () => {
+      const tenants = await tenantRepo.listAll();
+      if (tenants.length !== 1) throw new Error('Beta preview requires a single configured company');
+      const tenant = tenants[0];
+      let owner = await db
+        .selectFrom('users')
+        .select(['id', 'tenant_id', 'store_id', 'role'])
+        .where('tenant_id', '=', tenant.id)
+        .where('role', '=', 'OWNER')
+        .where('is_active', '=', 1)
+        .executeTakeFirst();
+      if (!owner) {
+        const ownerId = randomUUID();
+        const passwordHash = await passwordHasher.hash(randomBytes(24).toString('base64url'));
+        await db.insertInto('users').values({
+          id: ownerId,
+          tenant_id: tenant.id,
+          store_id: null,
+          username: 'beta_owner',
+          password_hash: passwordHash,
+          full_name: 'مدير النسخة التجريبية',
+          phone: null,
+          employment_start_date: null,
+          role: 'OWNER',
+          is_active: 1,
+        }).execute();
+        owner = { id: ownerId, tenant_id: tenant.id, store_id: null, role: 'OWNER' };
+      }
+      return owner;
+    })().catch((err) => {
+      betaOwnerBootstrapPromise = null;
+      throw err;
+    });
+  }
+  const owner = await betaOwnerBootstrapPromise;
+  return new ScopedExecutionContext({
+    tenantId: owner.tenant_id,
+    userId: owner.id,
+    roleId: 'OWNER',
+    permissions: new Set(Object.values(Permissions)),
+    correlationId: requestId ? String(requestId) : randomUUID(),
+  });
+}
+
 async function requireContext(req) {
   const token = readCookie(req, 'retailos_session');
-  if (!token) throw Object.assign(new Error('يلزم تسجيل الدخول'), { status: 401 });
+  if (!token) {
+    if (betaAutoLoginEnabled && evaluateBetaTrialStatus().status === 'ACTIVE') {
+      return ensureBetaOwnerContext(req.headers['x-request-id']);
+    }
+    throw Object.assign(new Error('يلزم تسجيل الدخول'), { status: 401 });
+  }
   try {
     return await auth.validateSession(token, req.headers['x-request-id']);
   } catch {
+    if (betaAutoLoginEnabled && evaluateBetaTrialStatus().status === 'ACTIVE') {
+      return ensureBetaOwnerContext(req.headers['x-request-id']);
+    }
     throw Object.assign(new Error('انتهت الجلسة. سجّل الدخول مرة أخرى.'), { status: 401 });
   }
 }
@@ -2241,7 +2525,7 @@ async function profitLossReport(ctx, url) {
     FROM supplier_payments sp
     INNER JOIN supplier_purchases p ON p.id = sp.purchase_id AND p.tenant_id = sp.tenant_id
     INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
-    WHERE sp.tenant_id = ? AND p.store_id = ?
+    WHERE sp.tenant_id = ? AND p.store_id = ? AND sp.deleted_at IS NULL
       AND replace(COALESCE(sp.paid_at, sp.created_at), ' ', 'T') >= ?
       AND replace(COALESCE(sp.paid_at, sp.created_at), ' ', 'T') < ?
     ORDER BY COALESCE(sp.paid_at, sp.created_at) DESC
@@ -2982,7 +3266,7 @@ async function purchaseSupplierReport(ctx, url) {
   if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
   const rows = database.getRawDatabase().prepare(`
     SELECT s.id AS supplierId, s.name AS supplierName, COUNT(p.id) AS invoiceCount, SUM(p.total_amount) AS totalAmount,
-      SUM(${unrepresentedInitialPaidSql('p')} + COALESCE((SELECT SUM(pay.amount) FROM supplier_payments pay WHERE pay.tenant_id = p.tenant_id AND pay.purchase_id = p.id), 0)) AS paidAmount,
+      SUM(${unrepresentedInitialPaidSql('p')} + COALESCE((SELECT SUM(pay.amount) FROM supplier_payments pay WHERE pay.tenant_id = p.tenant_id AND pay.purchase_id = p.id AND pay.deleted_at IS NULL), 0)) AS paidAmount,
       SUM(COALESCE((SELECT SUM(sr.credit_amount) FROM supplier_returns sr WHERE sr.tenant_id = p.tenant_id AND sr.purchase_id = p.id), 0)) AS returnedCredit,
       SUM(COALESCE((SELECT SUM(spi.quantity) FROM supplier_purchase_items spi WHERE spi.tenant_id = p.tenant_id AND spi.purchase_id = p.id), 0)) AS unitsOrdered
     FROM supplier_purchases p
@@ -3109,7 +3393,7 @@ async function financialMapReport(ctx, url) {
     FROM supplier_payments sp
     INNER JOIN supplier_purchases p ON p.id = sp.purchase_id AND p.tenant_id = sp.tenant_id
     INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
-    WHERE sp.tenant_id = ? AND p.store_id = ?
+    WHERE sp.tenant_id = ? AND p.store_id = ? AND sp.deleted_at IS NULL
   `;
   const supPayParams = [ctx.tenantId, storeId];
   if (bounds) { supPaySql += ` AND replace(COALESCE(sp.paid_at, sp.created_at), ' ', 'T') >= ? AND replace(COALESCE(sp.paid_at, sp.created_at), ' ', 'T') < ?`; supPayParams.push(bounds.startIso, bounds.endExclusiveIso); }
@@ -4041,6 +4325,9 @@ async function setupState() {
   const tenants = await tenantRepo.listAll();
   if (tenants.length === 0) return { configured: false };
   if (tenants.length !== 1) throw new Error('هذه القاعدة تحتوي على أكثر من شركة. يلزم فحص ملف البيانات قبل المتابعة.');
+  if (betaAutoLoginEnabled && evaluateBetaTrialStatus().status === 'ACTIVE') {
+    await ensureBetaOwnerContext();
+  }
   const owner = await db.selectFrom('users').select('id').where('tenant_id', '=', tenants[0].id).where('role', '=', 'OWNER').executeTakeFirst();
   return { configured: true, setupRequired: !owner, companyName: tenants[0].name, currency: tenants[0].currency, companyCode: tenants[0].code };
 }
@@ -4143,7 +4430,13 @@ async function currentData(ctx, url) {
   }
   const expenseRows = expenseQuery ? await expenseQuery.orderBy('operating_expense_records.expense_date', 'desc').limit(BOOTSTRAP_PURCHASE_WINDOW).execute() : [];
   const canManageCatalog = ctx.hasPermission(Permissions.CATALOG_MANAGE);
-  const suppliers = canManageCatalog ? await db.selectFrom('suppliers').selectAll().where('tenant_id', '=', ctx.tenantId).where('is_active', '=', 1).orderBy('name').execute() : [];
+  const includeArchivedSuppliers = url.searchParams.get('includeArchivedSuppliers') === '1';
+  const suppliersQuery = canManageCatalog
+    ? db.selectFrom('suppliers').selectAll().where('tenant_id', '=', ctx.tenantId)
+    : null;
+  const suppliers = suppliersQuery
+    ? await (includeArchivedSuppliers ? suppliersQuery : suppliersQuery.where('is_active', '=', 1)).orderBy('name').execute()
+    : [];
   // Recent window only; full history is served by GET /api/purchases. Supplier totals below cover all history.
   const purchases = canManageCatalog ? await db.selectFrom('supplier_purchases').selectAll().where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).orderBy('purchased_at', 'desc').limit(BOOTSTRAP_PURCHASE_WINDOW).execute() : [];
   const purchaseEntries = canManageCatalog ? await loadPurchaseEntries(ctx.tenantId, purchases, userMap) : [];
@@ -4289,6 +4582,9 @@ async function currentData(ctx, url) {
     tenantId: ctx.tenantId,
     company: { name: tenant.name, currency: tenant.currency, timezone: resolveValidTimeZone(tenant.timezone) },
     user: { id: ctx.userId, fullName: signedInUser?.fullName ?? '', role: ctx.roleId, storeId: ctx.storeId ?? null, shiftStartTime: signedInUser?.shiftStartTime ?? null, lateGraceMinutes: signedInUser?.lateGraceMinutes ?? 0 },
+    betaPreviewMode: developmentResetEnabled,
+    betaAutoLogin: betaAutoLoginEnabled,
+    developmentResetAvailable: developmentResetEnabled && ctx.roleId === 'OWNER',
     activeShift: activeShiftRow ? {
       id: activeShiftRow.id,
       shiftNumber: activeShiftRow.shiftNumber,
@@ -4380,6 +4676,12 @@ const LicenseActivateSchema = z.object({
   token: z.string().trim().min(20, 'كود التفعيل غير صالح').max(4096, 'كود التفعيل أطول من المسموح'),
 });
 
+const VendorPasswordResetSchema = z.object({
+  resetToken: z.string().trim().min(20, 'كود الطوارئ غير صالح').max(4096, 'كود الطوارئ أطول من المسموح'),
+  username: z.string().trim().max(30).optional(),
+  newPassword: z.string().min(8, 'كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل').max(128, 'كلمة المرور أطول من المسموح'),
+});
+
 function isLicenseExemptMutationPath(path) {
   if (path.startsWith('/api/license/')) return true;
   if (path.startsWith('/api/backups/')) return true;
@@ -4387,6 +4689,7 @@ function isLicenseExemptMutationPath(path) {
     path === '/api/login' ||
     path === '/api/logout' ||
     path === '/api/setup' ||
+    path === '/api/auth/vendor-password-reset' ||
     path === '/api/account/password' ||
     path === '/api/internal/shutdown'
   );
@@ -4401,6 +4704,7 @@ async function handleApi(req, res, url) {
   if (method === 'GET' && path === '/api/bootstrap') return json(res, 200, await setupState());
 
   if (method === 'GET' && path === '/api/license/status') {
+    if (betaAutoLoginEnabled) return json(res, 200, evaluateBetaTrialStatus());
     return json(res, 200, await licenseService.getStatus());
   }
 
@@ -4920,6 +5224,99 @@ async function handleApi(req, res, url) {
     }
   }
 
+  if (method === 'POST' && path === '/api/auth/vendor-password-reset') {
+    const body = validate(VendorPasswordResetSchema, await readJson(req));
+    const state = await setupState();
+    if (!state.configured) throw Object.assign(new Error('أكمل إعداد النظام أولًا'), { status: 409 });
+
+    pruneFailedLogins();
+    const rateKey = 'vendor-owner-reset';
+    const failures = getAuthFailures('vendor_reset', rateKey);
+    const cooldownMs = computeLoginBackoffMs(failures.count);
+    const elapsedMs = Date.now() - failures.startedAt;
+    if (cooldownMs > 0 && elapsedMs < cooldownMs) {
+      const waitSeconds = Math.max(1, Math.ceil((cooldownMs - elapsedMs) / 1000));
+      throw Object.assign(new Error(`محاولات كثيرة. انتظر ${waitSeconds} ثانية ثم حاول مرة أخرى.`), { status: 429 });
+    }
+
+    const verification = licenseService.verifyPasswordResetToken(body.resetToken);
+    if (!verification.valid || !verification.payload) {
+      recordAuthFailure('vendor_reset', rateKey);
+      throw Object.assign(new Error(verification.reason ?? 'كود الطوارئ غير صالح'), { status: 400 });
+    }
+
+    const tenants = await tenantRepo.listAll();
+    const tenant = tenants[0];
+    if (!tenant) throw Object.assign(new Error('لم يتم العثور على بيانات الشركة'), { status: 404 });
+
+    const requestedUsername = (body.username ?? '').trim().toLowerCase();
+    const rawDb = database.getRawDatabase();
+    let ownerRow;
+    if (requestedUsername) {
+      ownerRow = rawDb
+        .prepare("SELECT id, username, full_name, role, is_active FROM users WHERE tenant_id = ? AND lower(username) = ? AND role = 'OWNER' AND is_active = 1 LIMIT 1")
+        .get(tenant.id, requestedUsername);
+      if (!ownerRow) {
+        recordAuthFailure('vendor_reset', rateKey);
+        throw Object.assign(new Error('لم يتم العثور على حساب مدير نشط بهذا الاسم'), { status: 404 });
+      }
+    } else {
+      ownerRow = rawDb
+        .prepare("SELECT id, username, full_name, role, is_active FROM users WHERE tenant_id = ? AND role = 'OWNER' AND is_active = 1 ORDER BY created_at ASC LIMIT 1")
+        .get(tenant.id);
+      if (!ownerRow) {
+        throw Object.assign(new Error('لم يتم العثور على حساب مدير نشط في النظام'), { status: 404 });
+      }
+    }
+
+    const newPasswordHash = await passwordHasher.hash(body.newPassword);
+    const usedAt = new Date().toISOString();
+    const resetPayload = verification.payload;
+
+    try {
+      rawDb.transaction(() => {
+        rawDb
+          .prepare('INSERT INTO used_password_reset_tokens (reset_id, machine_id, user_id, used_at) VALUES (?, ?, ?, ?)')
+          .run(resetPayload.resetId, resetPayload.machineId, ownerRow.id, usedAt);
+        rawDb
+          .prepare('UPDATE users SET password_hash = ? WHERE tenant_id = ? AND id = ?')
+          .run(newPasswordHash, tenant.id, ownerRow.id);
+        rawDb
+          .prepare('DELETE FROM sessions WHERE tenant_id = ? AND user_id = ?')
+          .run(tenant.id, ownerRow.id);
+      })();
+    } catch (err) {
+      if (String(err?.message ?? '').includes('UNIQUE constraint failed')) {
+        recordAuthFailure('vendor_reset', rateKey);
+        throw Object.assign(new Error('تم استخدام كود الطوارئ هذا من قبل — اطلب كودًا جديدًا من الدعم الفني'), { status: 409 });
+      }
+      throw err;
+    }
+
+    clearAuthFailures('vendor_reset', rateKey);
+    clearAuthFailures('login', String(ownerRow.username).trim().toLowerCase());
+
+    const sysCtx = new ScopedExecutionContext({
+      tenantId: tenant.id,
+      userId: ownerRow.id,
+      roleId: 'OWNER',
+      permissions: new Set(['*']),
+      correlationId: randomUUID(),
+    });
+    await recordAudit(sysCtx, {
+      actorUserId: ownerRow.id,
+      actorUsername: ownerRow.username,
+      actorRole: 'OWNER',
+      action: 'OWNER_PASSWORD_RESET_BY_VENDOR_TOKEN',
+      entityType: 'USER',
+      entityId: ownerRow.id,
+      summary: `إعادة تعيين كلمة مرور المدير (${ownerRow.username}) باستخدام كود طوارئ مؤقت`,
+      metadata: { resetId: resetPayload.resetId, machineId: resetPayload.machineId },
+    });
+
+    return json(res, 200, { ok: true, username: ownerRow.username, fullName: ownerRow.full_name });
+  }
+
   if (method === 'POST' && path === '/api/logout') {
     const token = readCookie(req, 'retailos_session');
     if (token) {
@@ -4934,7 +5331,14 @@ async function handleApi(req, res, url) {
 
   const ctx = await requireContext(req);
   if (mutating && !isLicenseExemptMutationPath(path)) {
-    await licenseService.assertOperationalAccess();
+    if (betaAutoLoginEnabled) {
+      const betaStatus = evaluateBetaTrialStatus();
+      if (betaStatus.status !== 'ACTIVE') {
+        throw Object.assign(new Error(betaStatus.message || 'انتهت صلاحية النسخة التجريبية Beta'), { status: 402 });
+      }
+    } else {
+      await licenseService.assertOperationalAccess();
+    }
   }
 
   if (method === 'GET' && path === '/api/reports/profit-loss') return json(res, 200, await profitLossReport(ctx, url));
@@ -6093,6 +6497,18 @@ async function handleApi(req, res, url) {
     return json(res, 201, { id: created.id, name: created.name });
   }
 
+  const categoryPatchMatch = method === 'PATCH' ? path.match(/^\/api\/categories\/([0-9a-f-]+)$/i) : null;
+  if (categoryPatchMatch) {
+    ctx.assertPermission(Permissions.CATALOG_MANAGE);
+    const categoryId = categoryPatchMatch[1];
+    const body = validate(z.object({ name: z.string().min(2, 'اسم الفئة يجب أن يكون حرفين على الأقل').max(100).trim() }), await readJson(req));
+    const existing = await db.selectFrom('categories').select(['id', 'name']).where('tenant_id', '=', ctx.tenantId).where('id', '=', categoryId).executeTakeFirst();
+    if (!existing) throw Object.assign(new Error('الفئة غير موجودة'), { status: 404 });
+    await db.updateTable('categories').set({ name: body.name }).where('tenant_id', '=', ctx.tenantId).where('id', '=', categoryId).execute();
+    await recordAudit(ctx, { action: 'CATEGORY_UPDATED', entityType: 'CATEGORY', entityId: categoryId, summary: `تعديل اسم الفئة (${existing.name} → ${body.name})`, metadata: { oldName: existing.name, newName: body.name } });
+    return json(res, 200, { id: categoryId, name: body.name });
+  }
+
   if (method === 'POST' && path === '/api/products') {
     ctx.assertPermission(Permissions.CATALOG_MANAGE);
     const body = validate(CreateProductSchema, await readJson(req));
@@ -6206,6 +6622,64 @@ async function handleApi(req, res, url) {
     return json(res, 201, { id });
   }
 
+  if (method === 'POST' && path === '/api/dev/reset-operational-data') {
+    if (!developmentResetEnabled) throw Object.assign(new Error('المسح متاح فقط لخادم تطوير معزول ومفعّل صراحةً'), { status: 404 });
+    ctx.assertPermission(Permissions.SYSTEM_BACKUP_MANAGE);
+    if (ctx.roleId !== 'OWNER') throw Object.assign(new Error('المسح متاح لمدير النظام فقط'), { status: 403 });
+    const body = validate(z.object({
+      confirmation: z.enum(['مسح بيانات التطوير', 'مسح جميع البيانات']),
+      currentPassword: betaAutoLoginEnabled ? z.string().max(128).optional() : z.string().min(1).max(128),
+    }), await readJson(req));
+    if (!betaAutoLoginEnabled) {
+      const owner = await userRepo.findById(ctx, ctx.userId);
+      if (!owner || !(await passwordHasher.verify(owner.passwordHash, body.currentPassword ?? ''))) {
+        throw Object.assign(new Error('كلمة المرور الحالية غير صحيحة'), { status: 403 });
+      }
+    }
+
+    const resetResult = resetDevelopmentOperationalData(database.getRawDatabase());
+    await recordAudit(ctx, {
+      action: 'DEV_OPERATIONAL_DATA_RESET',
+      entityType: 'DEVELOPMENT_DATA',
+      summary: 'مسح بيانات التشغيل من بيئة التطوير مع الإبقاء على الهوية والترخيص وسجل التدقيق والنسخ الاحتياطية',
+      metadata: resetResult,
+    });
+    return json(res, 200, resetResult);
+  }
+
+  const supplierPatchMatch = method === 'PATCH' ? path.match(/^\/api\/suppliers\/([0-9a-f-]+)$/i) : null;
+  if (supplierPatchMatch) {
+    ctx.assertPermission(Permissions.CATALOG_MANAGE);
+    const supplierId = supplierPatchMatch[1];
+    const body = validate(SupplierSchema, await readJson(req));
+    const existing = await db.selectFrom('suppliers').select(['id', 'name', 'phone', 'notes']).where('tenant_id', '=', ctx.tenantId).where('id', '=', supplierId).executeTakeFirst();
+    if (!existing) throw Object.assign(new Error('التاجر غير موجود'), { status: 404 });
+    await db.updateTable('suppliers').set({ name: body.name, phone: body.phone || null, notes: body.notes || null }).where('tenant_id', '=', ctx.tenantId).where('id', '=', supplierId).execute();
+    await recordAudit(ctx, { action: 'SUPPLIER_UPDATED', entityType: 'SUPPLIER', entityId: supplierId, summary: `تعديل بيانات التاجر (${existing.name} → ${body.name})`, metadata: { oldName: existing.name, newName: body.name, phone: body.phone ?? null } });
+    return json(res, 200, { id: supplierId, name: body.name });
+  }
+
+  const supplierArchiveMatch = method === 'PATCH' ? path.match(/^\/api\/suppliers\/([0-9a-f-]+)\/archive$/i) : null;
+  if (supplierArchiveMatch) {
+    ctx.assertPermission(Permissions.CATALOG_MANAGE);
+    const body = validate(z.object({ archived: z.boolean() }), await readJson(req));
+    const supplierId = supplierArchiveMatch[1];
+    const supplier = await db.selectFrom('suppliers').select(['id', 'name', 'is_active']).where('tenant_id', '=', ctx.tenantId).where('id', '=', supplierId).executeTakeFirst();
+    if (!supplier) throw Object.assign(new Error('التاجر غير موجود'), { status: 404 });
+    const active = body.archived ? 0 : 1;
+    if (supplier.is_active !== active) {
+      await db.updateTable('suppliers').set({ is_active: active }).where('tenant_id', '=', ctx.tenantId).where('id', '=', supplierId).execute();
+      await recordAudit(ctx, {
+        action: body.archived ? 'SUPPLIER_ARCHIVED' : 'SUPPLIER_REACTIVATED',
+        entityType: 'SUPPLIER',
+        entityId: supplierId,
+        summary: `${body.archived ? 'أرشفة' : 'إعادة تفعيل'} التاجر (${supplier.name}) مع الاحتفاظ بسجل معاملاته`,
+        metadata: { archived: body.archived },
+      });
+    }
+    return json(res, 200, { id: supplierId, archived: body.archived });
+  }
+
   if (method === 'POST' && path === '/api/expenses') {
     ctx.assertPermission(Permissions.EXPENSES_DIRECT_CREATE);
     const body = validate(ExpenseSchema, await readJson(req));
@@ -6214,6 +6688,41 @@ async function handleApi(req, res, url) {
     const id = randomUUID();
     const savedId = await expenses.record(ctx, { ...body, id, amount: BigInt(body.amount), currency: tenant.currency });
     return json(res, 201, { id: savedId });
+  }
+
+  const updateExpenseMatch = method === 'PATCH' ? path.match(/^\/api\/expenses\/([0-9a-f-]+)$/i) : null;
+  if (updateExpenseMatch) {
+    ctx.assertPermission(Permissions.EXPENSES_DIRECT_CREATE);
+    if (!['OWNER', 'STORE_MANAGER'].includes(ctx.roleId)) {
+      throw Object.assign(new Error('غير مصرح بتعديل المصروفات'), { status: 403 });
+    }
+    const body = validate(UpdateExpenseSchema, await readJson(req));
+    const updated = await expenses.update(ctx, {
+      idempotencyKey: body.idempotencyKey,
+      expenseId: updateExpenseMatch[1],
+      categoryCode: body.categoryCode,
+      amount: BigInt(body.amount),
+      paymentMethod: body.paymentMethod,
+      expenseDate: body.expenseDate,
+      notes: body.notes,
+      referenceNumber: body.referenceNumber,
+      updatedAt: new Date(),
+    });
+    await recordAudit(ctx, {
+      storeId: updated.storeId,
+      action: 'EXPENSE_UPDATED',
+      entityType: 'EXPENSE',
+      entityId: updated.id,
+      summary: `تعديل مصروف (${updated.categoryName}) من ${updated.oldAmount.toString()} إلى ${updated.newAmount.toString()}`,
+      metadata: {
+        oldAmount: updated.oldAmount.toString(),
+        newAmount: updated.newAmount.toString(),
+        oldMethod: updated.oldMethod,
+        newMethod: updated.newMethod,
+        expenseDate: body.expenseDate,
+      },
+    });
+    return json(res, 200, { id: updated.id, updated: true });
   }
 
   const deleteExpenseMatch = method === 'DELETE' ? path.match(/^\/api\/expenses\/([0-9a-f-]+)$/i) : null;
@@ -6566,6 +7075,9 @@ async function handleApi(req, res, url) {
   if (method === 'POST' && path === '/api/purchases') {
     ctx.assertPermission(Permissions.CATALOG_MANAGE);
     const body = validate(PurchaseSchema, await readJson(req));
+    for (const np of body.newProducts) {
+      assertVariantOptions(np.options, np.variants);
+    }
     const tenant = await tenantRepo.findById(ctx.tenantId);
     if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
     const id = randomUUID();
@@ -6586,6 +7098,35 @@ async function handleApi(req, res, url) {
         ...(hasRetail ? { retailPrice: Money.fromMinor(BigInt(line.retailPrice), tenant.currency) } : {}),
       };
     });
+    const newProducts = body.newProducts.map((np) => ({
+      id: randomUUID(),
+      name: np.name,
+      sku: np.sku,
+      ...(np.barcode ? { barcode: np.barcode } : {}),
+      ...(np.categoryId ? { categoryId: np.categoryId } : {}),
+      ...(np.brand ? { brand: np.brand } : {}),
+      ...(np.description ? { description: np.description } : {}),
+      ...(np.imagePath ? { imagePath: np.imagePath } : {}),
+      options: np.options,
+      variants: np.variants.map((variant) => {
+        const qty = BigInt(variant.quantity);
+        const hasRetail = variant.retailPrice !== undefined && variant.retailPrice !== null;
+        if (hasRetail && qty > 0n) {
+          hasAnyRetailPrice = true;
+          computedRetailTotalMinor += BigInt(variant.retailPrice) * qty;
+        }
+        return {
+          id: randomUUID(),
+          sku: variant.sku,
+          ...(variant.barcode ? { barcode: variant.barcode } : {}),
+          attributes: variant.attributes ?? {},
+          quantity: qty,
+          unitCost: Money.fromMinor(BigInt(variant.unitCost), tenant.currency),
+          ...(hasRetail ? { retailPrice: Money.fromMinor(BigInt(variant.retailPrice), tenant.currency) } : {}),
+          reorderPoint: BigInt(variant.reorderPoint ?? '0'),
+        };
+      }),
+    }));
     const expectedRetailTotal = hasAnyRetailPrice ? Money.fromMinor(computedRetailTotalMinor, tenant.currency) : undefined;
     const savedId = await purchasing.recordPurchase(ctx, {
       id, idempotencyKey: body.idempotencyKey, storeId: body.storeId, supplierId: body.supplierId,
@@ -6598,11 +7139,12 @@ async function handleApi(req, res, url) {
       referenceNumber: body.referenceNumber,
       notes: body.notes, purchasedAt: new Date(),
       lines,
+      ...(newProducts.length > 0 ? { newProducts } : {}),
     });
     if (savedId === id) {
       const savedPurchase = await db.selectFrom('supplier_purchases').select('invoice_number').where('id', '=', savedId).where('tenant_id', '=', ctx.tenantId).executeTakeFirst();
       const recordedInvoice = savedPurchase?.invoice_number ?? explicitInvoiceNumber ?? savedId.slice(0, 8);
-      await recordAudit(ctx, { storeId: body.storeId, action: 'PURCHASE_RECORDED', entityType: 'PURCHASE', entityId: savedId, summary: `تسجيل فاتورة شراء (${recordedInvoice})`, metadata: { invoiceNumber: recordedInvoice, totalAmount: body.totalAmount, paidAmount: body.paidAmount, targetProfitPercent: body.targetProfitPercent ?? null, expectedRetailTotal: expectedRetailTotal?.amount.toString() ?? null } });
+      await recordAudit(ctx, { storeId: body.storeId, action: 'PURCHASE_RECORDED', entityType: 'PURCHASE', entityId: savedId, summary: `تسجيل فاتورة شراء (${recordedInvoice})`, metadata: { invoiceNumber: recordedInvoice, totalAmount: body.totalAmount, paidAmount: body.paidAmount, targetProfitPercent: body.targetProfitPercent ?? null, expectedRetailTotal: expectedRetailTotal?.amount.toString() ?? null, newProductsCount: newProducts.length } });
     }
     return json(res, 201, { id: savedId });
   }
@@ -6616,6 +7158,78 @@ async function handleApi(req, res, url) {
       lines: body.items.map((item) => ({ purchaseItemId: item.purchaseItemId, quantity: BigInt(item.quantity) })) });
     await recordAudit(ctx, { storeId: body.storeId, action: 'SUPPLIER_RETURN_RECORDED', entityType: 'SUPPLIER_RETURN', entityId: result.id, summary: `تسجيل مرتجع للمورد بقيمة ائتمانية (${result.creditAmount.toString()})`, metadata: { purchaseId: supplierReturnMatch[1], creditAmount: result.creditAmount.toString() } });
     return json(res, 201, { id: result.id, creditAmount: result.creditAmount.toString() });
+  }
+
+  const purchasePatchMatch = method === 'PATCH' ? path.match(/^\/api\/purchases\/([0-9a-f-]+)$/i) : null;
+  if (purchasePatchMatch) {
+    ctx.assertPermission(Permissions.CATALOG_MANAGE);
+    const purchaseId = purchasePatchMatch[1];
+    const body = validate(UpdatePurchaseMetaSchema, await readJson(req));
+    const existing = await db.selectFrom('supplier_purchases').select(['id', 'store_id', 'invoice_number', 'notes', 'target_profit_percent']).where('tenant_id', '=', ctx.tenantId).where('id', '=', purchaseId).executeTakeFirst();
+    if (!existing || (ctx.storeId && ctx.storeId !== existing.store_id)) {
+      throw Object.assign(new Error('فاتورة الشراء غير متاحة'), { status: 404 });
+    }
+    const nextInvoice = body.invoiceNumber === undefined ? existing.invoice_number : (body.invoiceNumber || null);
+    const nextNotes = body.notes === undefined ? existing.notes : (body.notes || null);
+    const nextTarget = body.targetProfitPercent === undefined ? existing.target_profit_percent : body.targetProfitPercent;
+    await db.updateTable('supplier_purchases').set({ invoice_number: nextInvoice, notes: nextNotes, target_profit_percent: nextTarget }).where('tenant_id', '=', ctx.tenantId).where('id', '=', purchaseId).execute();
+    await recordAudit(ctx, { storeId: existing.store_id, action: 'PURCHASE_UPDATED', entityType: 'PURCHASE', entityId: purchaseId, summary: `تعديل بيانات فاتورة الشراء (${nextInvoice ?? purchaseId.slice(0, 8)})`, metadata: { oldInvoiceNumber: existing.invoice_number, newInvoiceNumber: nextInvoice, notes: nextNotes, targetProfitPercent: nextTarget } });
+    return json(res, 200, { id: purchaseId, updated: true });
+  }
+
+  const paymentMutationMatch = (method === 'PATCH' || method === 'DELETE') ? path.match(/^\/api\/purchases\/([0-9a-f-]+)\/payments\/([^/]+)$/i) : null;
+  if (paymentMutationMatch) {
+    ctx.assertPermission(Permissions.CATALOG_MANAGE);
+    if (!['OWNER', 'STORE_MANAGER'].includes(ctx.roleId)) {
+      throw Object.assign(new Error('غير مصرح بتعديل أو إلغاء دفعات التجار'), { status: 403 });
+    }
+    const purchaseId = paymentMutationMatch[1];
+    const paymentId = decodeURIComponent(paymentMutationMatch[2]);
+    if (method === 'PATCH') {
+      const body = validate(SupplierPaymentSchema, await readJson(req));
+      const tenant = await tenantRepo.findById(ctx.tenantId);
+      if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
+      const updated = await purchasing.updateSupplierPayment(ctx, {
+        idempotencyKey: body.idempotencyKey,
+        purchaseId,
+        paymentId,
+        amount: Money.fromMinor(BigInt(body.amount), tenant.currency),
+        paymentMethod: body.paymentMethod,
+        referenceNumber: body.referenceNumber,
+        updatedAt: new Date(),
+      });
+      await recordAudit(ctx, {
+        storeId: updated.storeId,
+        action: 'SUPPLIER_PAYMENT_UPDATED',
+        entityType: 'SUPPLIER_PAYMENT',
+        entityId: updated.id,
+        summary: `تعديل دفعة سداد لتاجر من ${updated.oldAmount.toString()} إلى ${updated.newAmount.toString()}`,
+        metadata: {
+          purchaseId,
+          oldAmount: updated.oldAmount.toString(),
+          newAmount: updated.newAmount.toString(),
+          oldMethod: updated.oldMethod,
+          newMethod: updated.newMethod,
+        },
+      });
+      return json(res, 200, { id: updated.id, updated: true });
+    }
+    const body = validate(z.object({ idempotencyKey: z.string().uuid().optional() }), await readJson(req));
+    const deleted = await purchasing.deleteSupplierPayment(ctx, {
+      idempotencyKey: body.idempotencyKey ?? randomUUID(),
+      purchaseId,
+      paymentId,
+      deletedAt: new Date(),
+    });
+    await recordAudit(ctx, {
+      storeId: deleted.storeId,
+      action: 'SUPPLIER_PAYMENT_DELETED',
+      entityType: 'SUPPLIER_PAYMENT',
+      entityId: deleted.id,
+      summary: `إلغاء وعكس دفعة سداد لتاجر بقيمة ${deleted.deletedAmount.toString()}`,
+      metadata: { purchaseId, deletedAmount: deleted.deletedAmount.toString(), paymentMethod: deleted.paymentMethod },
+    });
+    return json(res, 200, { id: deleted.id, deleted: true });
   }
 
   const paymentMatch = method === 'POST' ? path.match(/^\/api\/purchases\/([0-9a-f-]+)\/payments$/i) : null;
@@ -6669,9 +7283,9 @@ async function handleApi(req, res, url) {
       let totalPaid = 0n;
       let totalReturned = 0n;
       if (purchaseIds.length > 0) {
-        const payRows = await trx.selectFrom('supplier_payments').select(['id', 'purchase_id', 'idempotency_key', 'amount']).where('tenant_id', '=', ctx.tenantId).where('purchase_id', 'in', purchaseIds).execute();
+        const payRows = await trx.selectFrom('supplier_payments').select(['id', 'purchase_id', 'idempotency_key', 'amount', 'deleted_at']).where('tenant_id', '=', ctx.tenantId).where('purchase_id', 'in', purchaseIds).execute();
         for (const row of payRows) {
-          totalPaid += BigInt(row.amount);
+          if (!row.deleted_at) totalPaid += BigInt(row.amount);
           const bucket = paymentsByPurchase.get(row.purchase_id) ?? [];
           bucket.push(row);
           paymentsByPurchase.set(row.purchase_id, bucket);
@@ -7113,7 +7727,9 @@ async function handleApi(req, res, url) {
 
   if (method === 'POST' && path === '/api/checkout') {
     ctx.assertPermission(Permissions.POS_CHECKOUT);
-    await licenseService.touchWatermarkOnCheckout();
+    if (!betaAutoLoginEnabled) {
+      await licenseService.touchWatermarkOnCheckout();
+    }
     const body = validate(CheckoutSchema, await readJson(req));
     const openShift = database.getRawDatabase().prepare(
       "SELECT id, store_id FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' LIMIT 1"

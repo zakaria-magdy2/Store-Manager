@@ -1,0 +1,57 @@
+{
+  "$schema": "https://www.schemastore.org/electron-builder.json",
+  "appId": "com.retailos.desktop.beta",
+  "productName": "Raff Beta",
+  "asar": true,
+  "npmRebuild": false,
+  "buildDependenciesFromSource": false,
+  "directories": {
+    "output": "release-beta"
+  },
+  "afterPack": "scripts/after-pack.cjs",
+  "files": [
+    "dist/main.js",
+    "dist/runtime.js",
+    "dist/license-public-key.generated.js",
+    "dist/preload.cjs",
+    "build/icon.png",
+    "build/icon.ico",
+    "package.json",
+    "!node_modules/**/*",
+    "!**/*.map",
+    "!**/*.d.ts"
+  ],
+  "extraResources": [
+    {
+      "from": "stage/web",
+      "to": "web",
+      "filter": ["**/*"]
+    }
+  ],
+  "win": {
+    "icon": "build/icon.ico",
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      },
+      {
+        "target": "dir",
+        "arch": ["x64"]
+      }
+    ],
+    "artifactName": "Raff-Beta-Setup-${version}-${arch}.${ext}",
+    "signExecutable": false
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "installerIcon": "build/icon.ico",
+    "uninstallerIcon": "build/icon.ico",
+    "installerHeaderIcon": "build/icon.ico",
+    "shortcutName": "رف Beta"
+  }
+}

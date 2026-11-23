@@ -22,6 +22,7 @@ import {
   readDesktopDailyBackupHistory,
   readExternalClockWatermark,
   resolveAvailableLoopbackPort,
+  resolveDesktopApplicationName,
   resolveDesktopDataPaths,
   resolveOrCreateDesktopDailyBackupSecret,
   resolveOrCreateDesktopWatermarkSecret,
@@ -40,11 +41,13 @@ const CHANNELS = Object.freeze({
   PRINT_RECEIPT: 'retailos:desktop:print-receipt',
 } as const);
 
-const WINDOW_TITLE = 'RetailOS — إدارة المتجر';
+const WINDOW_TITLE = 'رف — إدارة المتجر';
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const overrideUserDataDir = process.env.RETAILOS_DESKTOP_USER_DATA_DIR?.trim();
-app.setName('RetailOS');
+const previewResetMarkerExists = app.isPackaged
+  && existsSync(join(process.resourcesPath, 'web', 'preview-reset-mode.js'));
+app.setName(resolveDesktopApplicationName(previewResetMarkerExists));
 if (overrideUserDataDir) {
   app.setPath('userData', resolve(overrideUserDataDir));
 }
@@ -182,10 +185,20 @@ function registerIpcHandlers(): void {
   );
 }
 
+function resolveWindowIconPath(): string | undefined {
+  const candidates = [
+    join(currentDir, '..', 'build', 'icon.ico'),
+    join(currentDir, '..', 'build', 'icon.png'),
+  ];
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
 function createMainWindow(origin: string, securityPolicy: DesktopWindowSecurityPolicy): BrowserWindow {
   const preloadPath = join(currentDir, 'preload.cjs');
+  const iconPath = resolveWindowIconPath();
   const win = new BrowserWindow({
     title: WINDOW_TITLE,
+    ...(iconPath ? { icon: iconPath } : {}),
     width: 1400,
     height: 860,
     minWidth: 1024,
@@ -227,7 +240,7 @@ function createMainWindow(origin: string, securityPolicy: DesktopWindowSecurityP
       return {
         action: 'allow',
         overrideBrowserWindowOptions: {
-          title: 'RetailOS — طباعة',
+          title: 'رف — طباعة',
           autoHideMenuBar: true,
           webPreferences: {
             contextIsolation: securityPolicy.contextIsolation,

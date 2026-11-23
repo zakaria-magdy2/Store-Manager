@@ -317,6 +317,7 @@ export interface SupplierPaymentsTable {
   id: string; tenant_id: string; supplier_id: string; purchase_id: string; amount: bigint;
   currency: string; payment_method: string; reference_number: string | null; paid_at: string;
   idempotency_key: string;
+  deleted_at: Generated<string | null>;
   created_by_user_id: string; created_at: Generated<string>;
 }
 
@@ -524,4 +525,12 @@ export interface RetailOSDatabase {
   document_sequences: DocumentSequencesTable;
   supplier_refunds: SupplierRefundsTable;
   system_licensing: SystemLicensingTable;
+  used_password_reset_tokens: UsedPasswordResetTokensTable;
+}
+
+export interface UsedPasswordResetTokensTable {
+  reset_id: string;
+  machine_id: string;
+  user_id: string;
+  used_at: string;
 }

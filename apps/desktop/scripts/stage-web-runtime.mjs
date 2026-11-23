@@ -133,6 +133,25 @@ for (const entry of rootEntries) {
   }
 }
 
+if (process.argv.includes('--preview-data-reset')) {
+  const issuedAt = new Date();
+  const expiresAt = new Date(issuedAt.getTime() + 7 * 24 * 60 * 60 * 1000);
+  await writeFile(
+    join(stageWebDir, 'preview-reset-mode.js'),
+    [
+      'export const PREVIEW_RESET_MODE = true;',
+      'export const BETA_AUTO_LOGIN = true;',
+      `export const BETA_BUILD_ISSUED_AT = ${JSON.stringify(issuedAt.toISOString())};`,
+      `export const BETA_BUILD_EXPIRES_AT = ${JSON.stringify(expiresAt.toISOString())};`,
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  console.warn(
+    `[stage-web-runtime] Building explicit 7-day zero-login Beta preview (expires ${expiresAt.toISOString()}) with operational-data reset enabled.`,
+  );
+}
+
 const requiredPaths = [
   join(stageWebDir, 'server.mjs'),
   join(stageWebDir, 'public', 'index.html'),

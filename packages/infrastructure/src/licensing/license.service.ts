@@ -84,6 +84,20 @@ export interface LicenseServiceOptions {
   readonly nowProvider?: (() => number) | undefined;
 }
 
+export interface PasswordResetTokenPayload {
+  readonly resetId: string;
+  readonly machineId: string;
+  readonly issuedAt: string;
+  readonly expiresAt: string;
+}
+
+export interface PasswordResetVerificationResult {
+  readonly valid: boolean;
+  readonly payload: PasswordResetTokenPayload | null;
+  readonly reason: string | null;
+  readonly machineId: string;
+}
+
 export class LicenseService {
   private readonly publicKeyPem: string;
   private readonly publicKey: KeyObject;
@@ -572,6 +586,104 @@ export class LicenseService {
       daysRemaining,
       licenseId: payload.licenseId,
       reason,
+    };
+  }
+
+  public verifyPasswordResetToken(rawToken: string): PasswordResetVerificationResult {
+    const machineId = this.getMachineId();
+    const cleaned = String(rawToken ?? '').trim().replace(/\s+/g, '');
+    const parts = cleaned.split('.');
+    if (parts.length !== 3 || parts[0] !== 'ROSRST1') {
+      return {
+        valid: false,
+        payload: null,
+        reason: 'صيغة كود الطوارئ غير صحيحة — تأكد من نسخ الكود كاملًا (يبدأ بـ ROSRST1.)',
+        machineId,
+      };
+    }
+
+    const [, payloadB64u, signatureB64u] = parts;
+    if (!payloadB64u || !signatureB64u) {
+      return { valid: false, payload: null, reason: 'كود الطوارئ غير مكتمل', machineId };
+    }
+
+    const signingInput = `ROSRST1.${payloadB64u}`;
+    let signatureBytes: Buffer;
+    try {
+      signatureBytes = Buffer.from(signatureB64u, 'base64url');
+    } catch {
+      return { valid: false, payload: null, reason: 'توقيع كود الطوارئ غير صالح', machineId };
+    }
+
+    if (signatureBytes.length !== 64) {
+      return { valid: false, payload: null, reason: 'توقيع كود الطوارئ غير صالح', machineId };
+    }
+
+    const verified = verify(null, Buffer.from(signingInput, 'utf8'), this.publicKey, signatureBytes);
+    if (!verified) {
+      return {
+        valid: false,
+        payload: null,
+        reason: 'كود الطوارئ غير صحيح أو تم التلاعب به',
+        machineId,
+      };
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(Buffer.from(payloadB64u, 'base64url').toString('utf8'));
+    } catch {
+      return { valid: false, payload: null, reason: 'بيانات كود الطوارئ تالفة', machineId };
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+      return { valid: false, payload: null, reason: 'بيانات كود الطوارئ غير صالحة', machineId };
+    }
+
+    const candidate = parsed as Record<string, unknown>;
+    const resetId = typeof candidate.resetId === 'string' ? candidate.resetId.trim() : '';
+    const tokenMachineId = typeof candidate.machineId === 'string' ? candidate.machineId.trim().toUpperCase() : '';
+    const issuedAt = typeof candidate.issuedAt === 'string' ? candidate.issuedAt.trim() : '';
+    const expiresAt = typeof candidate.expiresAt === 'string' ? candidate.expiresAt.trim() : '';
+    const issuedMs = Date.parse(issuedAt);
+    const expiresMs = Date.parse(expiresAt);
+
+    if (!resetId || resetId.length < 8 || !tokenMachineId || !globalThis.Number.isFinite(issuedMs) || !globalThis.Number.isFinite(expiresMs) || expiresMs <= issuedMs) {
+      return { valid: false, payload: null, reason: 'بيانات كود الطوارئ غير مكتملة أو غير صالحة', machineId };
+    }
+
+    if (tokenMachineId !== machineId) {
+      return {
+        valid: false,
+        payload: null,
+        reason: 'كود الطوارئ مخصص لجهاز آخر ولا يعمل على هذا الجهاز',
+        machineId,
+      };
+    }
+
+    const nowMs = this.nowProvider();
+    if (nowMs > expiresMs) {
+      return {
+        valid: false,
+        payload: null,
+        reason: 'انتهت صلاحية كود الطوارئ — اطلب كودًا جديدًا من الدعم الفني',
+        machineId,
+      };
+    }
+    if (nowMs + CLOCK_SKEW_TOLERANCE_MS < issuedMs) {
+      return {
+        valid: false,
+        payload: null,
+        reason: 'ساعة الجهاز متأخرة عن وقت إصدار الكود — اضبط تاريخ ووقت الجهاز وحاول مجددًا',
+        machineId,
+      };
+    }
+
+    return {
+      valid: true,
+      payload: { resetId, machineId: tokenMachineId, issuedAt, expiresAt },
+      reason: null,
+      machineId,
     };
   }
 }

@@ -6669,3 +6669,4 @@ bdi[dir="ltr"] {
 }
 
 
+.button-danger{background:var(--rose);color:#fff;box-shadow:0 4px 10px #be123c29}.button-danger:hover{background:#9f1239;transform:translateY(-1px)}

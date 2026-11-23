@@ -17,8 +17,10 @@
     "test:installed-acceptance": "node scripts/test-installed-acceptance.mjs",
     "desktop:dev": "pnpm run desktop:build && electron .",
     "desktop:build": "pnpm --filter @retailos/web... build && pnpm run build && node scripts/stage-web-runtime.mjs",
+    "desktop:build:beta": "pnpm --filter @retailos/web... build && pnpm run build && node scripts/stage-web-runtime.mjs --preview-data-reset",
     "desktop:pack:win": "node -e \"import('node:child_process').then(({spawnSync})=>{const w=process.platform==='win32';const cmd='pnpm run desktop:build && electron-builder --win --dir --config electron-builder.json';const r=spawnSync(w?'cmd.exe':'sh',w?['/d','/s','/c',cmd]:['-c',cmd],{stdio:'inherit',env:{...process.env,RETAILOS_REQUIRE_SIGNED_MANIFEST:'1'}});process.exit(r.status??1);})\"",
-    "desktop:dist:win": "node -e \"import('node:child_process').then(({spawnSync})=>{const w=process.platform==='win32';const cmd='pnpm run desktop:build && electron-builder --win --config electron-builder.json';const r=spawnSync(w?'cmd.exe':'sh',w?['/d','/s','/c',cmd]:['-c',cmd],{stdio:'inherit',env:{...process.env,RETAILOS_REQUIRE_SIGNED_MANIFEST:'1'}});process.exit(r.status??1);})\""
+    "desktop:dist:win": "node -e \"import('node:child_process').then(({spawnSync})=>{const w=process.platform==='win32';const cmd='pnpm run desktop:build && electron-builder --win --config electron-builder.json';const r=spawnSync(w?'cmd.exe':'sh',w?['/d','/s','/c',cmd]:['-c',cmd],{stdio:'inherit',env:{...process.env,RETAILOS_REQUIRE_SIGNED_MANIFEST:'1'}});process.exit(r.status??1);})\"",
+    "desktop:dist:win:beta": "node -e \"import('node:child_process').then(({spawnSync})=>{const w=process.platform==='win32';const cmd='pnpm run desktop:build:beta && electron-builder --win --config electron-builder.beta.json';const r=spawnSync(w?'cmd.exe':'sh',w?['/d','/s','/c',cmd]:['-c',cmd],{stdio:'inherit',env:{...process.env,RETAILOS_REQUIRE_SIGNED_MANIFEST:'1',RETAILOS_PREVIEW_DATA_RESET:'0'}});process.exit(r.status??1);})\""
   },
   "dependencies": {
     "@retailos/application": "workspace:*",

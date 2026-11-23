@@ -34,6 +34,7 @@ import {
   readDesktopDailyBackupHistory,
   readExternalClockWatermark,
   resolveAvailableLoopbackPort,
+  resolveDesktopApplicationName,
   resolveDesktopDataPaths,
   resolveOrCreateDesktopDailyBackupSecret,
   resolveOrCreateDesktopWatermarkSecret,
@@ -236,6 +237,21 @@ test('resolveDesktopDataPaths and buildServerProcessEnv isolate AppData SQLite a
   assert.equal(env.RETAILOS_BACKUP_DIR, paths.backupDir);
   assert.equal(env.ELECTRON_RUN_AS_NODE, '1');
   assert.equal(env.RETAILOS_DESKTOP_VERSION, '0.1.0');
+});
+
+test('Beta preview uses a separate application identity from the production installation', () => {
+  assert.equal(resolveDesktopApplicationName(true), 'RetailOS Beta');
+  assert.equal(resolveDesktopApplicationName(false), 'RetailOS');
+});
+
+test('Beta installer output and app identity cannot overwrite or share the production install', async () => {
+  const betaConfig = JSON.parse(await readFile(new URL('../electron-builder.beta.json', import.meta.url), 'utf8'));
+  const releaseConfig = JSON.parse(await readFile(new URL('../electron-builder.json', import.meta.url), 'utf8'));
+  assert.equal(betaConfig.directories.output, 'release-beta');
+  assert.notEqual(betaConfig.appId, releaseConfig.appId);
+  assert.equal(betaConfig.productName, 'Raff Beta');
+  assert.equal(releaseConfig.productName, 'Raff');
+  assert.equal(releaseConfig.directories.output, 'release');
 });
 
 test('resolveAvailableLoopbackPort falls back dynamically when preferred port is occupied', async () => {

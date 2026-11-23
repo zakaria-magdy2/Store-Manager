@@ -130,6 +130,7 @@ test.describe.serial('RetailOS Real-Browser E2E Suite (1366x768 RTL)', () => {
     // Invalid license token must be rejected cleanly without leaving activation screen
     await page.fill('#license-token-input', 'ROS1.invalid_payload.invalid_signature');
     await page.click('#activate-license-btn');
+    await acceptConfirmModal(page);
     await expect(page.locator('#license-activation-screen')).toBeVisible();
     await expect(page.locator('#toast-region')).toContainText(/غير صالح|توقيع|تنسيق/);
 
@@ -145,6 +146,7 @@ test.describe.serial('RetailOS Real-Browser E2E Suite (1366x768 RTL)', () => {
     });
     await page.fill('#license-token-input', validToken);
     await page.click('#activate-license-btn');
+    await acceptConfirmModal(page);
 
     // Initial owner setup
     await expect(page.locator('#setup-form')).toBeVisible();
@@ -337,20 +339,50 @@ test.describe.serial('RetailOS Real-Browser E2E Suite (1366x768 RTL)', () => {
     });
     expect(cameraState).toBe(true);
 
-    await page.click('.nav-item[data-page="products"]');
-    await page.click('#new-product');
+    await page.click('.nav-item[data-page="inventory"]');
+    await page.locator('.inventory-product-details').first().click();
+    await page.click('#inventory-edit-model-btn');
+    await expect(page.locator('#product-edit-form')).toBeVisible();
     await expect(page.locator('[data-camera-image-btn]')).toBeVisible();
     await page.click('[data-camera-image-btn]');
     await expect(page.locator('[data-camera-capture]')).toBeEnabled();
     await page.click('[data-camera-capture]');
     await expect(page.locator('.camera-capture-overlay')).toHaveCount(0);
-    await expect(page.locator('#product-form input[name="imagePath"]')).toHaveValue(/^data:image\/(webp|jpeg);base64,/);
-    const capturedImage = await page.locator('#product-form input[name="imagePath"]').inputValue();
+    await expect(page.locator('#product-edit-form input[name="imagePath"]')).toHaveValue(/^data:image\/(webp|jpeg);base64,/);
+    const capturedImage = await page.locator('#product-edit-form input[name="imagePath"]').inputValue();
     expect(capturedImage.length).toBeLessThanOrEqual(240_000);
     expect(await page.evaluate(() => globalThis.__retailosCameraTracksStopped)).toBe(true);
 
-    await page.locator('#product-form [data-close-modal]').click();
-    await expect(page.locator('#product-form')).toHaveCount(0);
+    await page.locator('#product-edit-form [data-close-modal]').click();
+    await expect(page.locator('#product-edit-form')).toHaveCount(0);
+
+    // Verify suppliers page: #new-product removed, #new-category present, and inline new product purchase works end-to-end
+    await page.click('.nav-item[data-page="suppliers"]');
+    await expect(page.locator('#new-product')).toHaveCount(0);
+    await expect(page.locator('#new-category')).toBeVisible();
+
+    await page.click('#new-category');
+    await expect(page.locator('#category-form')).toBeVisible();
+    await page.fill('#category-form input[name="name"]', 'أحذية E2E');
+    await page.click('#category-form button[type="submit"]');
+    await acceptConfirmModal(page);
+    await expect(page.locator('#category-form')).toHaveCount(0);
+
+    await page.click('#new-purchase');
+    await expect(page.locator('#purchase-form')).toBeVisible();
+    await page.locator('#purchase-form [data-purchase-group="0"] [data-group-mode="NEW"]').click();
+    await page.fill('#purchase-form input[name="newProductName_0"]', 'سنيكرز شراء مدمج E2E');
+    await page.fill('#purchase-form input[name="newProductSku_0"]', 'E2E-INLINE-77');
+    await page.fill('#purchase-form input[name="newPurchaseCost_0"]', '150');
+    await page.fill('#purchase-form input[name="newPurchaseRetailPrice_0"]', '260');
+    await page.locator('#purchase-form [data-purchase-group="0"] [data-opt-preset="single"]').click();
+    await page.fill('#purchase-form [data-purchase-group="0"] [data-new-qty-key="__SINGLE__"]', '3');
+    await page.click('#purchase-form button[type="submit"]');
+    await acceptConfirmModal(page);
+    await expect(page.locator('#purchase-form')).toHaveCount(0);
+
+    await page.click('.nav-item[data-page="inventory"]');
+    await expect(page.locator('main')).toContainText('سنيكرز شراء مدمج E2E');
   });
 
   test('3. POS Shift, Barcode Scan & Split Payment (CASH + electronic) with Thermal Receipt Preview', async () => {
@@ -603,6 +635,7 @@ test.describe('RetailOS Pre-Pilot Browser Resilience: 503 Retry & Lockout Backup
       });
       await p.fill('#license-token-input', shortToken);
       await p.click('#activate-license-btn');
+      await acceptConfirmModal(p);
 
       await expect(p.locator('#setup-form')).toBeVisible();
       await p.fill('#setup-form input[name="ownerName"]', 'مالك الطوارئ');

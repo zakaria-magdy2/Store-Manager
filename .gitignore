@@ -1,8 +1,11 @@
 node_modules/
 dist/
 build/
+!apps/desktop/build/
 out/
 release/
+release-beta/
+release-beta-*/
 .turbo/
 *.log
 *.tsbuildinfo

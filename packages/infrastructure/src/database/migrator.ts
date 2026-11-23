@@ -32,6 +32,8 @@ import * as accountingCashBasisAndSupplierInvoiceIndex from './migrations/026_ac
 import * as supplierRefunds from './migrations/027_supplier_refunds.js';
 import * as systemLicensing from './migrations/028_system_licensing.js';
 import * as systemLicensingGuard from './migrations/029_system_licensing_guard.js';
+import * as editablePurchasesPaymentsExpenses from './migrations/030_editable_purchases_payments_expenses.js';
+import * as passwordResetTokens from './migrations/031_password_reset_tokens.js';
 
 const MIGRATION_REGISTRY: Record<string, Migration> = {
   '001_initial_foundation': {
@@ -149,6 +151,14 @@ const MIGRATION_REGISTRY: Record<string, Migration> = {
   '029_system_licensing_guard': {
     up: systemLicensingGuard.up,
     down: systemLicensingGuard.down,
+  },
+  '030_editable_purchases_payments_expenses': {
+    up: editablePurchasesPaymentsExpenses.up,
+    down: editablePurchasesPaymentsExpenses.down,
+  },
+  '031_password_reset_tokens': {
+    up: passwordResetTokens.up,
+    down: passwordResetTokens.down,
   },
 };
 

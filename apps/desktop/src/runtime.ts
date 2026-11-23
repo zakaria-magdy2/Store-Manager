@@ -16,6 +16,10 @@ import { EMBEDDED_LICENSE_PUBLIC_KEY_PEM } from './license-public-key.generated.
 
 export const DEFAULT_DESKTOP_PORT = 3210;
 
+export function resolveDesktopApplicationName(previewResetMarkerExists: boolean): 'RetailOS' | 'RetailOS Beta' {
+  return previewResetMarkerExists ? 'RetailOS Beta' : 'RetailOS';
+}
+
 export const DESKTOP_IPC_CHANNELS = Object.freeze({
   HOST_STATUS: 'retailos:host:status',
   SYNC_RUN_BATCH: 'retailos:sync:run-batch',
