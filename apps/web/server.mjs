@@ -2506,30 +2506,32 @@ async function profitLossReport(ctx, url) {
   const userRowsPl = rawDb.prepare('SELECT id, full_name, username FROM users WHERE tenant_id = ?').all(ctx.tenantId);
   const userMapPl = new Map(userRowsPl.map((u) => [u.id, u.full_name || u.username]));
 
-  const supInitRows = rawDb.prepare(`
-    SELECT p.id, p.invoice_number, COALESCE(p.purchased_at, p.created_at) AS paid_at,
-      p.initial_paid_amount AS amount, p.notes, p.created_by_user_id,
-      s.id AS supplier_id, s.name AS supplier_name
-    FROM supplier_purchases p
-    INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
-    WHERE p.tenant_id = ? AND p.store_id = ? AND ${unrepresentedInitialPaidSql('p')} > 0
-      AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') >= ?
-      AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') < ?
-    ORDER BY COALESCE(p.purchased_at, p.created_at) DESC
-  `).all(ctx.tenantId, storeId, start, endExclusive);
-
-  const supPayRows = rawDb.prepare(`
-    SELECT sp.id, sp.purchase_id, sp.idempotency_key, p.invoice_number, COALESCE(sp.paid_at, sp.created_at) AS paid_at,
-      sp.amount, sp.payment_method, sp.reference_number, sp.created_by_user_id,
-      s.id AS supplier_id, s.name AS supplier_name
-    FROM supplier_payments sp
-    INNER JOIN supplier_purchases p ON p.id = sp.purchase_id AND p.tenant_id = sp.tenant_id
-    INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
-    WHERE sp.tenant_id = ? AND p.store_id = ? AND sp.deleted_at IS NULL
-      AND replace(COALESCE(sp.paid_at, sp.created_at), ' ', 'T') >= ?
-      AND replace(COALESCE(sp.paid_at, sp.created_at), ' ', 'T') < ?
-    ORDER BY COALESCE(sp.paid_at, sp.created_at) DESC
-  `).all(ctx.tenantId, storeId, start, endExclusive);
+  const supPayJournalRows = rawDb.prepare(`
+    SELECT je.id AS journal_id, je.source_type, je.source_id, je.entry_date, je.created_at, je.created_by_user_id,
+      a.account_code,
+      SUM(CASE WHEN jl.entry_type = 'CREDIT' THEN jl.amount ELSE 0 END) AS cash_out,
+      SUM(CASE WHEN jl.entry_type = 'DEBIT' THEN jl.amount ELSE 0 END) AS cash_in,
+      MAX(jl.memo) AS memo,
+      COALESCE(sp.purchase_id, p_direct.id) AS purchase_id,
+      COALESCE(p_via_pay.invoice_number, p_direct.invoice_number) AS invoice_number,
+      sp.reference_number AS reference_number,
+      COALESCE(s_via_pay.id, s_direct.id) AS supplier_id,
+      COALESCE(s_via_pay.name, s_direct.name, 'تاجر') AS supplier_name
+    FROM journal_entries je
+    INNER JOIN journal_lines jl ON jl.journal_entry_id = je.id
+    INNER JOIN accounts a ON a.id = jl.account_id
+    LEFT JOIN supplier_payments sp ON je.source_type = 'PURCHASE_PAYMENT' AND sp.id = je.source_id AND sp.tenant_id = je.tenant_id
+    LEFT JOIN supplier_purchases p_via_pay ON p_via_pay.id = sp.purchase_id AND p_via_pay.tenant_id = je.tenant_id
+    LEFT JOIN suppliers s_via_pay ON s_via_pay.id = p_via_pay.supplier_id AND s_via_pay.tenant_id = je.tenant_id
+    LEFT JOIN supplier_purchases p_direct ON je.source_type = 'PURCHASE' AND p_direct.id = je.source_id AND p_direct.tenant_id = je.tenant_id
+    LEFT JOIN suppliers s_direct ON s_direct.id = p_direct.supplier_id AND s_direct.tenant_id = je.tenant_id
+    WHERE je.tenant_id = ? AND je.store_id = ?
+      AND je.source_type IN ('PURCHASE', 'PURCHASE_PAYMENT')
+      AND a.account_code IN ('1010', '1015', '1020')
+      AND je.entry_date >= ? AND je.entry_date <= ?
+    GROUP BY je.id, a.account_code
+    ORDER BY je.created_at DESC
+  `).all(ctx.tenantId, storeId, fromStr, toStr);
 
   const supRetCreditRow = rawDb.prepare(`
     SELECT COALESCE(SUM(credit_amount), 0) AS total_credit
@@ -2574,40 +2576,27 @@ async function profitLossReport(ctx, url) {
   let supplierInstallmentPaid = 0n;
   const supplierPaymentItems = [];
 
-  for (const row of supInitRows) {
-    const amt = BigInt(row.amount ?? 0);
-    supplierInitialPaid += amt;
+  for (const row of supPayJournalRows) {
+    const cashOut = BigInt(row.cash_out ?? 0);
+    const cashIn = BigInt(row.cash_in ?? 0);
+    const netOut = cashOut - cashIn;
+    if (netOut === 0n) continue;
+    const isInitial = row.source_type === 'PURCHASE';
+    if (isInitial) supplierInitialPaid += netOut;
+    else supplierInstallmentPaid += netOut;
+    const methodFromAccount = row.account_code === '1020' ? 'ELECTRONIC' : row.account_code === '1015' ? 'CASH_SAFE' : 'CASH';
     supplierPaymentItems.push({
-      id: `${row.id}-init`,
-      purchaseId: row.id,
-      supplierId: row.supplier_id,
-      supplierName: row.supplier_name,
-      invoiceNumber: row.invoice_number || row.id.slice(0, 8),
-      type: 'INITIAL',
-      paymentMethod: 'CASH',
-      referenceNumber: null,
-      paidAt: row.paid_at,
-      actorName: userMapPl.get(row.created_by_user_id) || 'المسؤول',
-      amount: money(amt),
-    });
-  }
-  for (const row of supPayRows) {
-    const amt = BigInt(row.amount ?? 0);
-    const isInitial = String(row.idempotency_key || '').endsWith(':initial') || String(row.id || '').endsWith(':payment:initial');
-    if (isInitial) supplierInitialPaid += amt;
-    else supplierInstallmentPaid += amt;
-    supplierPaymentItems.push({
-      id: row.id,
-      purchaseId: row.purchase_id,
-      supplierId: row.supplier_id,
-      supplierName: row.supplier_name,
-      invoiceNumber: row.invoice_number || row.purchase_id.slice(0, 8),
-      type: isInitial ? 'INITIAL' : 'INSTALLMENT',
-      paymentMethod: row.payment_method || 'CASH',
+      id: `${row.journal_id}:${row.account_code}`,
+      purchaseId: row.purchase_id || row.source_id,
+      supplierId: row.supplier_id || null,
+      supplierName: row.supplier_name || 'تاجر',
+      invoiceNumber: row.invoice_number || String(row.purchase_id || row.source_id).slice(0, 8),
+      type: netOut < 0n ? 'REVERSAL' : (isInitial ? 'INITIAL' : 'INSTALLMENT'),
+      paymentMethod: methodFromAccount,
       referenceNumber: row.reference_number || null,
-      paidAt: row.paid_at,
+      paidAt: row.created_at,
       actorName: userMapPl.get(row.created_by_user_id) || 'المسؤول',
-      amount: money(amt),
+      amount: money(netOut),
     });
   }
   supplierPaymentItems.sort((a, b) => String(b.paidAt).localeCompare(String(a.paidAt)));
@@ -3376,29 +3365,35 @@ async function financialMapReport(ctx, url) {
   supBillsSql += ` ORDER BY COALESCE(p.purchased_at, p.created_at) ASC`;
   const supBillsRows = rawDb.prepare(supBillsSql).all(...supBillsParams);
 
-  // 3. Supplier purchases legacy initial_paid_amount > 0 + supplier_payments table
-  let supInitSql = `
-    SELECT p.id, p.invoice_number, COALESCE(p.purchased_at, p.created_at) as created_at, p.initial_paid_amount as amount, p.notes, p.created_by_user_id, s.name as supplier_name
-    FROM supplier_purchases p
-    INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
-    WHERE p.tenant_id = ? AND p.store_id = ? AND ${unrepresentedInitialPaidSql('p')} > 0
+  // 3. Supplier cash/electronic payments & edit/void adjustments from ledger (journal_entries)
+  let supPayJournalSql = `
+    SELECT je.id AS journal_id, je.source_type, je.source_id, je.entry_date, je.created_at, je.created_by_user_id,
+      a.account_code,
+      SUM(CASE WHEN jl.entry_type = 'CREDIT' THEN jl.amount ELSE 0 END) AS cash_out,
+      SUM(CASE WHEN jl.entry_type = 'DEBIT' THEN jl.amount ELSE 0 END) AS cash_in,
+      MAX(jl.memo) AS memo,
+      COALESCE(p_via_pay.invoice_number, p_direct.invoice_number) AS invoice_number,
+      sp.reference_number AS reference_number,
+      COALESCE(s_via_pay.name, s_direct.name, 'تاجر') AS supplier_name
+    FROM journal_entries je
+    INNER JOIN journal_lines jl ON jl.journal_entry_id = je.id
+    INNER JOIN accounts a ON a.id = jl.account_id
+    LEFT JOIN supplier_payments sp ON je.source_type = 'PURCHASE_PAYMENT' AND sp.id = je.source_id AND sp.tenant_id = je.tenant_id
+    LEFT JOIN supplier_purchases p_via_pay ON p_via_pay.id = sp.purchase_id AND p_via_pay.tenant_id = je.tenant_id
+    LEFT JOIN suppliers s_via_pay ON s_via_pay.id = p_via_pay.supplier_id AND s_via_pay.tenant_id = je.tenant_id
+    LEFT JOIN supplier_purchases p_direct ON je.source_type = 'PURCHASE' AND p_direct.id = je.source_id AND p_direct.tenant_id = je.tenant_id
+    LEFT JOIN suppliers s_direct ON s_direct.id = p_direct.supplier_id AND s_direct.tenant_id = je.tenant_id
+    WHERE je.tenant_id = ? AND je.store_id = ?
+      AND je.source_type IN ('PURCHASE', 'PURCHASE_PAYMENT')
+      AND a.account_code IN ('1010', '1015', '1020')
   `;
-  const supInitParams = [ctx.tenantId, storeId];
-  if (bounds) { supInitSql += ` AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') >= ? AND replace(COALESCE(p.purchased_at, p.created_at), ' ', 'T') < ?`; supInitParams.push(bounds.startIso, bounds.endExclusiveIso); }
-  supInitSql += ` ORDER BY COALESCE(p.purchased_at, p.created_at) ASC`;
-  const supInitRows = rawDb.prepare(supInitSql).all(...supInitParams);
-
-  let supPaySql = `
-    SELECT sp.id, sp.idempotency_key, p.invoice_number, COALESCE(sp.paid_at, sp.created_at) as created_at, sp.amount, sp.payment_method, sp.reference_number, sp.created_by_user_id, s.name as supplier_name
-    FROM supplier_payments sp
-    INNER JOIN supplier_purchases p ON p.id = sp.purchase_id AND p.tenant_id = sp.tenant_id
-    INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
-    WHERE sp.tenant_id = ? AND p.store_id = ? AND sp.deleted_at IS NULL
-  `;
-  const supPayParams = [ctx.tenantId, storeId];
-  if (bounds) { supPaySql += ` AND replace(COALESCE(sp.paid_at, sp.created_at), ' ', 'T') >= ? AND replace(COALESCE(sp.paid_at, sp.created_at), ' ', 'T') < ?`; supPayParams.push(bounds.startIso, bounds.endExclusiveIso); }
-  supPaySql += ` ORDER BY COALESCE(sp.paid_at, sp.created_at) ASC`;
-  const supPayRows = rawDb.prepare(supPaySql).all(...supPayParams);
+  const supPayJournalParams = [ctx.tenantId, storeId];
+  if (from && to) {
+    supPayJournalSql += ` AND je.entry_date >= ? AND je.entry_date <= ?`;
+    supPayJournalParams.push(from, to);
+  }
+  supPayJournalSql += ` GROUP BY je.id, a.account_code ORDER BY je.created_at ASC`;
+  const supPayJournalRows = rawDb.prepare(supPayJournalSql).all(...supPayJournalParams);
 
   // 4. Operating Expenses (stored with local calendar expense_date)
   let expSql = `
@@ -3571,47 +3566,36 @@ async function financialMapReport(ctx, url) {
     });
   }
 
-  for (const p of supInitRows) {
-    const amt = BigInt(p.amount ?? 0);
-    const formattedAmt = `${Money.fromMinor(amt, currency).toDecimalString()} ${currency}`;
-    const invRef = p.invoice_number || p.id.slice(0, 8);
+  for (const p of supPayJournalRows) {
+    const cashOut = BigInt(p.cash_out ?? 0);
+    const cashIn = BigInt(p.cash_in ?? 0);
+    const netOut = cashOut - cashIn;
+    if (netOut === 0n) continue;
+    const isReversal = netOut < 0n;
+    const absAmt = isReversal ? -netOut : netOut;
+    const formattedAmt = `${Money.fromMinor(absAmt, currency).toDecimalString()} ${currency}`;
+    const methodCode = p.account_code === '1020' ? 'ELECTRONIC' : p.account_code === '1015' ? 'CASH_SAFE' : 'CASH';
+    const methodLabel = paymentMethodArabicLabel(methodCode);
+    const invRef = p.invoice_number || String(p.source_id || p.journal_id).slice(0, 8);
+    const isInitial = p.source_type === 'PURCHASE';
     timeline.push({
-      id: `${p.id}-init`,
+      id: `${p.journal_id}:${p.account_code}`,
       timestamp: toIsoTimestamp(p.created_at),
       sortOrder: 3,
       type: 'SUPPLIER_PAYMENT',
-      category: 'سداد تاجر',
-      title: `سددت ${formattedAmt} للتاجر ${p.supplier_name}`,
+      category: isReversal ? 'تسوية/عكس سداد تاجر' : 'سداد تاجر',
+      title: isReversal
+        ? `رد/عكس سداد ${formattedAmt} من التاجر ${p.supplier_name}`
+        : `سددت ${formattedAmt} للتاجر ${p.supplier_name}`,
       reference: p.invoice_number,
       party: `التاجر: ${p.supplier_name}`,
       actor: userMap.get(p.created_by_user_id) || 'المسؤول',
-      amountIn: '0',
-      amountOut: amt.toString(),
+      amountIn: isReversal ? absAmt.toString() : '0',
+      amountOut: isReversal ? '0' : absAmt.toString(),
       profitImpact: '0',
-      details: `سددت ${formattedAmt} للتاجر ${p.supplier_name} — دفعة مقدمة عند استلام فاتورة #${invRef}${p.notes ? ` · ${p.notes}` : ''}`,
-    });
-  }
-
-  for (const p of supPayRows) {
-    const amt = BigInt(p.amount ?? 0);
-    const formattedAmt = `${Money.fromMinor(amt, currency).toDecimalString()} ${currency}`;
-    const methodLabel = paymentMethodArabicLabel(p.payment_method || 'CASH');
-    const invRef = p.invoice_number || p.id.slice(0, 8);
-    const isInitial = String(p.idempotency_key || '').endsWith(':initial') || String(p.id || '').endsWith(':payment:initial');
-    timeline.push({
-      id: p.id,
-      timestamp: toIsoTimestamp(p.created_at),
-      sortOrder: 3,
-      type: 'SUPPLIER_PAYMENT',
-      category: 'سداد تاجر',
-      title: `سددت ${formattedAmt} للتاجر ${p.supplier_name}`,
-      reference: p.invoice_number,
-      party: `التاجر: ${p.supplier_name}`,
-      actor: userMap.get(p.created_by_user_id) || 'المسؤول',
-      amountIn: '0',
-      amountOut: amt.toString(),
-      profitImpact: '0',
-      details: `سددت ${formattedAmt} للتاجر ${p.supplier_name} — ${isInitial ? 'دفعة مقدمة عند استلام' : 'سداد دفعة من حساب'} فاتورة #${invRef} (${methodLabel})${p.reference_number ? ` · مرجع: ${p.reference_number}` : ''}`,
+      details: isReversal
+        ? `رد/عكس سداد ${formattedAmt} لحساب ${methodLabel} — فاتورة #${invRef}${p.memo ? ` · ${p.memo}` : ''}`
+        : `سددت ${formattedAmt} للتاجر ${p.supplier_name} — ${isInitial ? 'دفعة مقدمة عند استلام' : 'سداد دفعة من حساب'} فاتورة #${invRef} (${methodLabel})${p.reference_number ? ` · مرجع: ${p.reference_number}` : ''}`,
     });
   }
 
@@ -5837,7 +5821,46 @@ async function handleApi(req, res, url) {
 
   if (method === 'GET' && path === '/api/data') return json(res, 200, await currentData(ctx, url));
 
-  if (method === 'GET' && path === '/api/shifts/current') {
+function computeShiftDrawerMovements(rawDb, tenantId, storeId, userId, startIso, endIso = null) {
+  const rows = rawDb.prepare(`
+    SELECT je.source_type AS sourceType,
+      COALESCE(SUM(CASE WHEN jl.entry_type = 'DEBIT' THEN jl.amount ELSE -jl.amount END), 0) AS netDelta
+    FROM journal_entries je
+    INNER JOIN journal_lines jl ON jl.journal_entry_id = je.id
+    INNER JOIN accounts a ON a.id = jl.account_id
+    WHERE je.tenant_id = ? AND je.store_id = ? AND je.created_by_user_id = ? AND a.account_code = '1010'
+      AND je.source_type NOT IN ('SALE', 'RETURN', 'SESSION_CLOSING')
+      AND replace(je.created_at, ' ', 'T') >= replace(?, ' ', 'T')
+      ${endIso ? "AND replace(je.created_at, ' ', 'T') <= replace(?, ' ', 'T')" : ''}
+    GROUP BY je.source_type
+  `).all(...(endIso ? [tenantId, storeId, userId, startIso, endIso] : [tenantId, storeId, userId, startIso]));
+
+  let netOtherDrawerDelta = 0n;
+  let cashExpensesOut = 0n;
+  let cashSupplierPaymentsOut = 0n;
+  let cashSupplierRefundsIn = 0n;
+  let cashTransfersNet = 0n;
+  let cashOtherNet = 0n;
+  for (const row of rows) {
+    const delta = BigInt(row.netDelta ?? 0);
+    netOtherDrawerDelta += delta;
+    if (row.sourceType === 'EXPENSE') cashExpensesOut += -delta;
+    else if (row.sourceType === 'PURCHASE' || row.sourceType === 'PURCHASE_PAYMENT') cashSupplierPaymentsOut += -delta;
+    else if (row.sourceType === 'SUPPLIER_REFUND') cashSupplierRefundsIn += delta;
+    else if (row.sourceType === 'TRANSFER') cashTransfersNet += delta;
+    else cashOtherNet += delta;
+  }
+  return {
+    netOtherDrawerDelta,
+    cashExpensesOut,
+    cashSupplierPaymentsOut,
+    cashSupplierRefundsIn,
+    cashTransfersNet,
+    cashOtherNet,
+  };
+}
+
+if (method === 'GET' && path === '/api/shifts/current') {
     const rawDb = database.getRawDatabase();
     const openShift = rawDb.prepare(
       "SELECT * FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' ORDER BY started_at DESC LIMIT 1"
@@ -5887,7 +5910,8 @@ async function handleApi(req, res, url) {
     }
 
     const openingCashMinor = BigInt(openShift.opening_cash ?? 0);
-    const expectedCashMinor = openingCashMinor + cashSalesMinor - cashReturnsMinor;
+    const drawerMov = computeShiftDrawerMovements(rawDb, ctx.tenantId, storeId, ctx.userId, openShift.started_at);
+    const expectedCashMinor = openingCashMinor + cashSalesMinor - cashReturnsMinor + drawerMov.netOtherDrawerDelta;
 
     return json(res, 200, {
       currentShift: {
@@ -5899,6 +5923,11 @@ async function handleApi(req, res, url) {
         cashSales: cashSalesMinor.toString(),
         electronicSales: electronicSalesMinor.toString(),
         cashReturns: cashReturnsMinor.toString(),
+        cashExpenses: drawerMov.cashExpensesOut.toString(),
+        cashSupplierPayments: drawerMov.cashSupplierPaymentsOut.toString(),
+        cashSupplierRefunds: drawerMov.cashSupplierRefundsIn.toString(),
+        cashTransfersNet: drawerMov.cashTransfersNet.toString(),
+        otherDrawerDelta: drawerMov.netOtherDrawerDelta.toString(),
         returnsTotal: returnsLinkedMinor.toString(),
         grossSales: grossSalesMinor.toString(),
         salesCount: salesDuringShift.length,
@@ -6098,7 +6127,8 @@ async function handleApi(req, res, url) {
       }
 
       const openingCashMinor = BigInt(shift.opening_cash ?? 0);
-      const expectedCashMinor = openingCashMinor + cashSalesMinor - cashReturnsMinor;
+      const drawerMov = computeShiftDrawerMovements(rawDb, ctx.tenantId, shift.store_id, shift.user_id, shift.started_at, nowIso);
+      const expectedCashMinor = openingCashMinor + cashSalesMinor - cashReturnsMinor + drawerMov.netOtherDrawerDelta;
       const varianceMinor = actualCash - expectedCashMinor;
 
       const updateRes = await trx
@@ -6270,7 +6300,8 @@ async function handleApi(req, res, url) {
             ))
         `).get(ctx.tenantId, row.store_id, row.started_at, endTime, row.user_id, ctx.tenantId, row.store_id, row.user_id, row.started_at, endTime);
         const cashReturnsMinor = BigInt(cashReturnsDuringOpenRow?.total ?? 0);
-        expectedCashMinor = BigInt(row.opening_cash ?? 0) + cashSalesMinor - cashReturnsMinor;
+        const drawerMov = computeShiftDrawerMovements(rawDb, ctx.tenantId, row.store_id, row.user_id, row.started_at, endTime);
+        expectedCashMinor = BigInt(row.opening_cash ?? 0) + cashSalesMinor - cashReturnsMinor + drawerMov.netOtherDrawerDelta;
       }
 
       grandSalesMinor += salesRev;

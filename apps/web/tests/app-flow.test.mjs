@@ -2527,24 +2527,24 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
     assert.equal(partialRet.payload.refundAmount, '45000', 'Pro-rata refund must equal 450.00 EGP (not 500.00)');
 
     // -------------------------------------------------------------------------
-    // Close Shift #1 concurrently 5 times -> only 1 closes with expectedCash = 10000 + 90000 - 45000 = 55000
+    // Close Shift #1 concurrently 5 times -> only 1 closes with expectedCash = 10000 - 40000 (supplier CASH) + 90000 - 45000 = 15000
     // -------------------------------------------------------------------------
     const closeKey = randomUUID();
     const closeBurst = await Promise.all(
       Array.from({ length: 5 }, () => sReq('/api/shifts/end', {
         method: 'POST',
         cookieStr: ownerCookie,
-        body: { idempotencyKey: closeKey, shiftId: shift1Id, actualCash: '55000', handoverCash: '55000' },
+        body: { idempotencyKey: closeKey, shiftId: shift1Id, actualCash: '15000', handoverCash: '15000' },
       })),
     );
     assert.ok(closeBurst.every((r) => r.response.status === 200));
-    assert.equal(closeBurst[0].payload.shift.expectedCash, '55000');
+    assert.equal(closeBurst[0].payload.shift.expectedCash, '15000');
 
     // Snapshot Shift #1 before cross-shift exchange
     const shiftsBeforeSwap = await sReq(`/api/shifts?storeId=${storeId}`, { cookieStr: ownerCookie });
     const sh1Before = shiftsBeforeSwap.payload.shifts.find((s) => s.id === shift1Id);
     assert.equal(sh1Before.status, 'CLOSED');
-    assert.equal(sh1Before.expectedCash, '55000');
+    assert.equal(sh1Before.expectedCash, '15000');
     assert.equal(sh1Before.salesRevenue, '45000');
     assert.equal(sh1Before.returnedTotal, '45000');
 

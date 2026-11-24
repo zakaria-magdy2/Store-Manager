@@ -72,7 +72,7 @@ export class SqliteExpenseRepository {
       const accountCode = input.paymentMethod === 'CASH_DRAWER' ? '1010' : input.paymentMethod === 'CASH_SAFE' ? '1015' : '1020';
       const journalIdempotencyKey = `expense:${input.idempotencyKey}`;
       await postJournalEntry(trx, ctx, {
-        storeId: input.storeId, currency: input.currency, date: new Date(`${input.expenseDate}T12:00:00.000Z`),
+        storeId: input.storeId, currency: input.currency, date: new Date(),
         entryDate: input.expenseDate,
         sourceType: 'EXPENSE', sourceId: input.id, idempotencyKey: journalIdempotencyKey,
         description: `مصروف ${category[1]}`,
@@ -260,7 +260,9 @@ export class SqliteExpenseRepository {
           oldAmount !== input.amount ||
           row.paymentMethod !== input.paymentMethod ||
           row.expenseDate !== input.expenseDate ||
-          row.categoryId !== newCategoryId
+          row.categoryId !== newCategoryId ||
+          (row.notes ?? null) !== newNotes ||
+          (row.referenceNumber ?? null) !== newRef
         ) {
           throw Object.assign(new Error('مفتاح التعديل مستخدم لتعديل مصروف مختلف'), { status: 409 });
         }
