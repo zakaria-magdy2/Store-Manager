@@ -4414,14 +4414,14 @@ test('pre-pilot fixes: P1-1 fail-closed 503 startup/writes, P1-4 versioned maste
     const historicalSnapshotPath = join(archiveDir, 'pre-rotation-retailos-daily-2026-11-18.rfbackup');
     await writeFile(historicalSnapshotPath, backup1Bytes);
 
-    // 4. Test P2 Stocktake BigInt snapshots + large integer minor amounts
+    // 4. Test P2 Stocktake BigInt snapshots + large integer minor amounts (> 32-bit unsigned int)
     const prodRes = await reqJson(url1, '/api/products', {
       method: 'POST',
       cookieStr: cookie1,
       body: {
         name: 'منتج جرد BigInt',
         sku: 'STK-BIGINT-01',
-        variants: [{ sku: 'STK-BIGINT-01-V', barcode: '6229998887771', retailPrice: '1234567890123', reorderPoint: '1' }],
+        variants: [{ sku: 'STK-BIGINT-01-V', barcode: '6229998887771', retailPrice: '9876543210', reorderPoint: '1' }],
       },
     });
     assert.equal(prodRes.response.status, 201);
@@ -4442,10 +4442,10 @@ test('pre-pilot fixes: P1-1 fail-closed 503 startup/writes, P1-4 versioned maste
         storeId,
         supplierId: supRes.payload.id,
         idempotencyKey: randomUUID(),
-        totalAmount: '1000000000000',
-        paidAmount: '1000000000000',
+        totalAmount: '8000000000',
+        paidAmount: '8000000000',
         paymentMethod: 'BANK_TRANSFER',
-        items: [{ variantId, quantity: '2', unitCost: '500000000000' }],
+        items: [{ variantId, quantity: '2', unitCost: '4000000000' }],
       },
     });
     assert.equal(purRes.response.status, 201);
@@ -4456,8 +4456,8 @@ test('pre-pilot fixes: P1-1 fail-closed 503 startup/writes, P1-4 versioned maste
       body: { storeId, title: 'جرد BigInt دقة كاملة', scope: 'FULL' },
     });
     assert.equal(stkStart.response.status, 201);
-    assert.equal(stkStart.payload.lines[0].unitWac.amount, '500000000000');
-    assert.equal(stkStart.payload.lines[0].retailPrice.amount, '1234567890123');
+    assert.equal(stkStart.payload.lines[0].unitWac.amount, '4000000000');
+    assert.equal(stkStart.payload.lines[0].retailPrice.amount, '9876543210');
 
     const stkScan = await reqJson(url1, `/api/stocktakes/${stkStart.payload.session.id}/lines`, {
       method: 'PATCH',
@@ -4465,7 +4465,7 @@ test('pre-pilot fixes: P1-1 fail-closed 503 startup/writes, P1-4 versioned maste
       body: { scanCode: '6229998887771', delta: 3 },
     });
     assert.equal(stkScan.response.status, 200);
-    assert.equal(stkScan.payload.lines[0].varianceRetail.amount, '1234567890123');
+    assert.equal(stkScan.payload.lines[0].varianceRetail.amount, '9876543210');
 
     // 5. Rotate master backup passphrase -> masterKey2 (P1-4 historical preservation + cross-PC recovery)
     const badPwdRotate = await reqJson(url1, '/api/backups/daily/master-key', {

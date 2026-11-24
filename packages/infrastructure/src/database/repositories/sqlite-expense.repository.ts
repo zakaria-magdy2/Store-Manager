@@ -13,6 +13,24 @@ const categories = [
   ['OTHER', 'مصروفات أخرى'],
 ] as const;
 
+const MAX_EXPENSE_MINOR = 100_000_000_00n;
+const MIN_EXPENSE_YEAR = 2020;
+
+function assertValidExpenseDate(expenseDate: string): void {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(expenseDate)) {
+    throw Object.assign(new Error('تاريخ المصروف غير صالح'), { status: 400 });
+  }
+  const parsed = new Date(`${expenseDate}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.valueOf()) || parsed.toISOString().slice(0, 10) !== expenseDate) {
+    throw Object.assign(new Error('تاريخ المصروف غير صالح'), { status: 400 });
+  }
+  const year = parsed.getUTCFullYear();
+  const maxYear = Math.max(2027, new Date().getUTCFullYear() + 1);
+  if (year < MIN_EXPENSE_YEAR || year > maxYear) {
+    throw Object.assign(new Error('تاريخ المصروف خارج النطاق المسموح به'), { status: 400 });
+  }
+}
+
 export interface RecordExpenseInput {
   id: string;
   idempotencyKey: string;
@@ -43,10 +61,8 @@ export class SqliteExpenseRepository {
 
   public async record(ctx: ExecutionContext, input: RecordExpenseInput): Promise<string> {
     if (ctx.storeId && ctx.storeId !== input.storeId) throw Object.assign(new Error('Store scope mismatch'), { status: 403 });
-    if (input.amount <= 0n || input.amount > 999_999_999_999_999n) throw Object.assign(new Error('قيمة المصروف غير صالحة'), { status: 400 });
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(input.expenseDate) || new Date(`${input.expenseDate}T00:00:00.000Z`).toISOString().slice(0, 10) !== input.expenseDate) {
-      throw Object.assign(new Error('تاريخ المصروف غير صالح'), { status: 400 });
-    }
+    if (input.amount <= 0n || input.amount > MAX_EXPENSE_MINOR) throw Object.assign(new Error('قيمة المصروف غير صالحة أو تتجاوز الحد المسموح'), { status: 400 });
+    assertValidExpenseDate(input.expenseDate);
 
     return this.db.transaction().execute(async (trx) => {
       const replay = await trx.selectFrom('operating_expense_records').selectAll()
@@ -222,12 +238,10 @@ export class SqliteExpenseRepository {
     newMethod: string;
     categoryName: string;
   }> {
-    if (input.amount <= 0n || input.amount > 999_999_999_999_999n) {
-      throw Object.assign(new Error('قيمة المصروف غير صالحة'), { status: 400 });
+    if (input.amount <= 0n || input.amount > MAX_EXPENSE_MINOR) {
+      throw Object.assign(new Error('قيمة المصروف غير صالحة أو تتجاوز الحد المسموح'), { status: 400 });
     }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(input.expenseDate) || new Date(`${input.expenseDate}T00:00:00.000Z`).toISOString().slice(0, 10) !== input.expenseDate) {
-      throw Object.assign(new Error('تاريخ المصروف غير صالح'), { status: 400 });
-    }
+    assertValidExpenseDate(input.expenseDate);
     const category = categories.find(([code]) => code === input.categoryCode);
     if (!category) throw Object.assign(new Error('تصنيف المصروف غير متاح'), { status: 400 });
 

@@ -130,7 +130,7 @@ test('P1/P2 financial audit fixes: cross-actor shift drawer movements, single-sh
       body: JSON.stringify({ username: 'cashier_fin', password: 'CashierPassword123!' }),
     });
     assert.equal(cashierLogin.status, 200);
-    const cashierCookie = cashierLogin.cookie;
+    let cashierCookie = cashierLogin.cookie;
 
     // Setup category & supplier as OWNER
     const cat = await apiJson('/api/categories', { method: 'POST', cookie: ownerCookie, body: JSON.stringify({ name: 'أحذية' }) });
@@ -563,6 +563,253 @@ test('P1/P2 financial audit fixes: cross-actor shift drawer movements, single-sh
     assert.equal(auditAfterRetry.status, 200);
     assert.equal(auditAfterRetry.body.chainVerification.valid, true);
     assert.ok(auditAfterRetry.body.entries.some((e) => e.entityId === retriedPayRes.body.id && e.action === 'SUPPLIER_PAYMENT_RECORDED'));
+
+    // =========================================================================
+    // TEST 6 (P1): Unverified auto-closed shifts in GET /api/shifts
+    // =========================================================================
+    const rawShiftDb = new Database(app.databasePath);
+    try {
+      const tenantIdDb = rawShiftDb.prepare('SELECT id FROM tenants LIMIT 1').pluck().get();
+      rawShiftDb.prepare(`
+        INSERT INTO cashier_shifts (
+          id, shift_number, tenant_id, store_id, user_id, started_at, ended_at,
+          opening_cash, expected_cash, actual_cash, variance, handover_cash,
+          status, reconciliation_status, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CLOSED', 'UNVERIFIED_AUTO_CLOSED', ?)
+      `).run(
+        randomUUID(),
+        'SH-AUTO-99',
+        tenantIdDb,
+        storeId,
+        cashierCreate.body.id,
+        '2026-11-20T08:00:00.000Z',
+        '2026-11-20T16:00:00.000Z',
+        50000,
+        80000,
+        0,
+        -99900, // Even if a nonzero variance were in DB, unverified shift MUST NOT enter summary.totalVariance!
+        0,
+        'إغلاق آلي عند الترقية (032) — غير متحقق نقديًا',
+      );
+    } finally {
+      rawShiftDb.close();
+    }
+
+    const shiftsListRes = await apiJson(`/api/shifts?storeId=${storeId}`, { cookie: dayOwnerCookie });
+    assert.equal(shiftsListRes.status, 200);
+    const autoShiftEntry = shiftsListRes.body.shifts.find((s) => s.shiftNumber === 'SH-AUTO-99');
+    assert.ok(autoShiftEntry);
+    assert.equal(autoShiftEntry.reconciliationStatus, 'UNVERIFIED_AUTO_CLOSED');
+    assert.equal(autoShiftEntry.isCashCountVerified, false);
+    assert.equal(autoShiftEntry.expectedCash, '80000');
+    assert.equal(autoShiftEntry.actualCash, null);
+    assert.equal(autoShiftEntry.variance, null);
+    assert.equal(autoShiftEntry.handoverCash, null);
+    assert.equal(shiftsListRes.body.summary.unverifiedShiftsCount, 1);
+    assert.equal(shiftsListRes.body.summary.verifiedShiftsCount, 1);
+    assert.equal(shiftsListRes.body.summary.totalVariance, '0');
+
+    // =========================================================================
+    // TEST 7 (Exchange + Atomic Audit): Owner runs POST /api/sales/:id/exchange during Cashier's shift
+    // =========================================================================
+    // Advance mocked clock 1 minute past TEST 2/TEST 5 day2 ledger entries and refresh cashier session cookie
+    t.mock.timers.tick(60_000);
+    const dayCashierLogin = await apiJson('/api/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'cashier_fin', password: 'CashierPassword123!' }),
+    });
+    assert.equal(dayCashierLogin.status, 200);
+    cashierCookie = dayCashierLogin.cookie;
+
+    const exchangeShiftStart = await apiJson('/api/shifts/start', {
+      method: 'POST',
+      cookie: cashierCookie,
+      body: JSON.stringify({ storeId, openingCash: '20000' }),
+    });
+    assert.equal(exchangeShiftStart.status, 201);
+
+    const exchangeCatalogRes = await apiJson(`/api/purchases`, {
+      method: 'POST',
+      cookie: dayOwnerCookie,
+      body: JSON.stringify({
+        supplierId: sup.body.id,
+        storeId,
+        idempotencyKey: randomUUID(),
+        invoiceNumber: 'INV-EXCH-001',
+        totalAmount: '60000',
+        paidAmount: '0',
+        paymentMethod: 'CASH',
+        items: [],
+        newProducts: [{
+          name: 'قميص استبدال',
+          sku: 'EXCH-SHIRT-1',
+          categoryId: cat.body.id,
+          options: [{ key: 'option_1', name: 'المقاس', values: ['M', 'L'] }],
+          variants: [
+            { sku: 'EXCH-SHIRT-M', attributes: { option_1: 'M' }, quantity: '2', unitCost: '15000', retailPrice: '30000', reorderPoint: '1' },
+            { sku: 'EXCH-SHIRT-L', attributes: { option_1: 'L' }, quantity: '2', unitCost: '15000', retailPrice: '45000', reorderPoint: '1' },
+          ],
+        }],
+      }),
+    });
+    assert.equal(exchangeCatalogRes.status, 201);
+
+    const postCatalogData = await apiJson('/api/data', { cookie: dayOwnerCookie });
+    const shirtProduct = postCatalogData.body.products.find((p) => p.sku === 'EXCH-SHIRT-1');
+    const shirtM = shirtProduct.variants.find((v) => v.sku === 'EXCH-SHIRT-M');
+    const shirtL = shirtProduct.variants.find((v) => v.sku === 'EXCH-SHIRT-L');
+
+    // Cashier sells Size M (300.00 EGP cash)
+    const origSaleRes = await apiJson('/api/checkout', {
+      method: 'POST',
+      cookie: cashierCookie,
+      body: JSON.stringify({
+        storeId,
+        idempotencyKey: randomUUID(),
+        items: [{ variantId: shirtM.id, quantity: '1' }],
+        paymentMethod: 'CASH',
+        amountPaidMinor: '30000',
+      }),
+    });
+    assert.equal(origSaleRes.status, 201);
+
+    // Owner (different user!) exchanges Size M -> Size L (+150.00 EGP customer pays CASH) during Cashier's open shift
+    const exchangeRes = await apiJson(`/api/sales/${origSaleRes.body.id}/exchange`, {
+      method: 'POST',
+      cookie: dayOwnerCookie,
+      body: JSON.stringify({
+        idempotencyKey: randomUUID(),
+        storeId,
+        paymentMethod: 'CASH',
+        returnedItems: [{ originalSaleItemId: origSaleRes.body.items[0].id, quantity: '1' }],
+        replacementItems: [{ variantId: shirtL.id, quantity: '1' }],
+        notes: 'تبديل لمقاس أكبر',
+      }),
+    });
+    assert.equal(exchangeRes.status, 201);
+    assert.equal(exchangeRes.body.netDifference, '15000');
+
+    // Verify shift expected cash reflects 20000 + 30000 + 15000 = 65000 and SALE_EXCHANGED audit logged
+    const curShiftAfterEx = await apiJson('/api/shifts/current', { cookie: cashierCookie });
+    assert.equal(curShiftAfterEx.body.currentShift.expectedCash, '65000');
+    const auditExchange = await apiJson('/api/audit-logs?action=SALE_EXCHANGED&limit=5', { cookie: dayOwnerCookie });
+    assert.ok(auditExchange.body.entries.some((e) => e.entityId === exchangeRes.body.saleId && e.action === 'SALE_EXCHANGED'));
+
+    const closeExShift = await apiJson('/api/shifts/end', {
+      method: 'POST',
+      cookie: cashierCookie,
+      body: JSON.stringify({ shiftId: exchangeShiftStart.body.shift.id, actualCash: '65000', handoverCash: '65000' }),
+    });
+    assert.equal(closeExShift.status, 200);
+
+    // =========================================================================
+    // TEST 8: User-friendly Arabic error messages (no SQLite / English / UUID leaks)
+    // =========================================================================
+    // 8a. Duplicate supplier invoice number for same supplier -> clean Arabic 409
+    const dupInvRes = await apiJson('/api/purchases', {
+      method: 'POST',
+      cookie: dayOwnerCookie,
+      body: JSON.stringify({
+        supplierId: sup.body.id,
+        storeId,
+        idempotencyKey: randomUUID(),
+        invoiceNumber: 'INV-EXCH-001',
+        totalAmount: '15000',
+        paidAmount: '0',
+        paymentMethod: 'CASH',
+        items: [{ variantId: shirtM.id, quantity: '1', unitCost: '15000' }],
+      }),
+    });
+    assert.equal(dupInvRes.status, 409);
+    assert.equal(dupInvRes.body.error, 'رقم الفاتورة مسجل بالفعل لهذا التاجر');
+    assert.equal(/SQLITE|UNIQUE/i.test(dupInvRes.body.error), false);
+
+    // 8b. Store/Permission UnauthorizedError -> clean Arabic 403 with NO userId UUID leak
+    const secondBranch = await apiJson('/api/stores', {
+      method: 'POST',
+      cookie: dayOwnerCookie,
+      body: JSON.stringify({ code: 'BRSEC', name: 'فرع حماية ثانٍ' }),
+    });
+    assert.equal(secondBranch.status, 201);
+    const crossStoreDenied = await apiJson('/api/inventory/transfer', {
+      method: 'POST',
+      cookie: cashierCookie, // Cashier does not have INVENTORY_TRANSFER or other store access
+      body: JSON.stringify({
+        fromStoreId: storeId,
+        toStoreId: secondBranch.body.id,
+        variantId: shirtM.id,
+        quantity: '1',
+      }),
+    });
+    assert.equal(crossStoreDenied.status, 403);
+    assert.equal(/UnauthorizedError/i.test(crossStoreDenied.body.error), false);
+    assert.equal(crossStoreDenied.body.error.includes(cashierCreate.body.id), false);
+
+    // 8c. Insufficient payment on checkout -> Arabic 400
+    const openForUnderpay = await apiJson('/api/shifts/start', {
+      method: 'POST',
+      cookie: cashierCookie,
+      body: JSON.stringify({ storeId, openingCash: '0' }),
+    });
+    assert.equal(openForUnderpay.status, 201);
+    const underpayRes = await apiJson('/api/checkout', {
+      method: 'POST',
+      cookie: cashierCookie,
+      body: JSON.stringify({
+        storeId,
+        idempotencyKey: randomUUID(),
+        items: [{ variantId: shirtM.id, quantity: '1' }], // 30000 price
+        paymentMethod: 'CASH',
+        amountPaidMinor: '10000', // 10000 < 30000
+      }),
+    });
+    assert.equal(underpayRes.status, 400);
+    assert.equal(underpayRes.body.error, 'المبلغ المدفوع أقل من إجمالي الفاتورة');
+
+    // =========================================================================
+    // TEST 9: Sanity bounds on money & dates + 415 Content-Type guard on /api/login
+    // =========================================================================
+    const hugeExpense = await apiJson('/api/expenses', {
+      method: 'POST',
+      cookie: dayOwnerCookie,
+      body: JSON.stringify({
+        storeId,
+        idempotencyKey: randomUUID(),
+        categoryCode: 'UTILITIES',
+        amount: '9999999999999', // 99,999,999,999.99 EGP
+        paymentMethod: 'CASH_DRAWER',
+        expenseDate: day2,
+      }),
+    });
+    assert.equal(hugeExpense.status, 400);
+
+    for (const badDate of ['1999-01-01', '2099-01-01']) {
+      const badDateExp = await apiJson('/api/expenses', {
+        method: 'POST',
+        cookie: dayOwnerCookie,
+        body: JSON.stringify({
+          storeId,
+          idempotencyKey: randomUUID(),
+          categoryCode: 'UTILITIES',
+          amount: '10000',
+          paymentMethod: 'CASH_DRAWER',
+          expenseDate: badDate,
+        }),
+      });
+      assert.equal(badDateExp.status, 400);
+    }
+
+    const badReportDates = await apiJson(`/api/reports/profit-loss?storeId=${storeId}&from=1999-01-01&to=2099-12-31`, {
+      cookie: dayOwnerCookie,
+    });
+    assert.equal(badReportDates.status, 400);
+
+    const textPlainLoginRes = await fetch(`${baseUrl}/api/login`, {
+      method: 'POST',
+      headers: { Origin: baseUrl, 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ username: 'owner_fin', password: 'OwnerPassword123!' }),
+    });
+    assert.equal(textPlainLoginRes.status, 415);
   } finally {
     t.mock.timers.reset();
     await app.shutdown();

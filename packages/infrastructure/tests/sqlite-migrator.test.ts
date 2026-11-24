@@ -11,6 +11,7 @@ import { sql } from 'kysely';
 import { up as employeeProfileMigration } from '../src/database/migrations/015_employee_profiles.js';
 import { up as attendanceScheduleMigration } from '../src/database/migrations/020_attendance_schedule.js';
 import { up as singleOpenShiftPerStoreMigration } from '../src/database/migrations/032_single_open_shift_per_store.js';
+import { up as shiftReconciliationStatusMigration } from '../src/database/migrations/033_shift_reconciliation_status.js';
 
 describe('SQLite Database & Migration Engine', () => {
   let dbManager: SqliteDatabaseManager;
@@ -712,7 +713,7 @@ describe('SQLite Database & Migration Engine', () => {
     expect(netMap.get('1010')).toBe(-13300n);
   });
 
-  it('Migration 032: reconciles and closes older duplicate OPEN shifts per store with exact expected/actual cash and enforces unique open shift per store', async () => {
+  it('Migration 032: marks older duplicate OPEN shifts per store as UNVERIFIED_AUTO_CLOSED with exact expected_cash and enforces unique open shift per store', async () => {
     const migrator = new DatabaseMigrator(dbManager.getDb());
     await migrator.migrateToLatest();
     const db = dbManager.getDb();
@@ -764,6 +765,7 @@ describe('SQLite Database & Migration Engine', () => {
         variance: 0n,
         handover_cash: 0n,
         status: 'OPEN',
+        reconciliation_status: 'OPEN',
         notes: 'وردية صباحية',
       },
       {
@@ -780,6 +782,7 @@ describe('SQLite Database & Migration Engine', () => {
         variance: 0n,
         handover_cash: 0n,
         status: 'OPEN',
+        reconciliation_status: 'OPEN',
         notes: 'وردية مسائية',
       },
     ]).execute();
@@ -875,13 +878,15 @@ describe('SQLite Database & Migration Engine', () => {
 
     expect(oldShift.status).toBe('CLOSED');
     expect(oldShift.ended_at).toBe('2026-11-20T16:00:00.000Z');
+    expect(oldShift.reconciliation_status).toBe('UNVERIFIED_AUTO_CLOSED');
     expect(BigInt(oldShift.expected_cash ?? -1)).toBe(130000n);
-    expect(BigInt(oldShift.actual_cash ?? -1)).toBe(130000n);
+    expect(BigInt(oldShift.actual_cash ?? -1)).toBe(0n);
     expect(BigInt(oldShift.variance ?? -1)).toBe(0n);
-    expect(BigInt(oldShift.handover_cash ?? -1)).toBe(130000n);
-    expect(oldShift.notes).toContain('تسوية وإغلاق تلقائي عند الترقية (032)');
+    expect(BigInt(oldShift.handover_cash ?? -1)).toBe(0n);
+    expect(oldShift.notes).toContain('غير متحقق نقديًا');
 
     expect(newShift.status).toBe('OPEN');
+    expect(newShift.reconciliation_status).toBe('OPEN');
     expect(newShift.ended_at).toBeNull();
 
     // Unique index now rejects any second OPEN shift in the same store
@@ -897,5 +902,172 @@ describe('SQLite Database & Migration Engine', () => {
         status: 'OPEN',
       }).execute(),
     ).rejects.toThrow();
+  });
+
+  it('Migration 033: retroactively flags auto-closed shifts from both b787b5a and e9ce924 as UNVERIFIED_AUTO_CLOSED while preserving verified shifts', async () => {
+    const migrator = new DatabaseMigrator(dbManager.getDb());
+    await migrator.migrateToLatest('032_single_open_shift_per_store');
+    const db = dbManager.getDb();
+
+    const tenantId = 'ten-m33';
+    const storeId = 'st-m33';
+    const cashierId = 'usr-m33-c1';
+    const ownerId = 'usr-m33-own';
+
+    await db.insertInto('tenants').values({ id: tenantId, name: 'Legacy 032 Co', code: 'SH33', currency: 'EGP' }).execute();
+    await db.insertInto('stores').values({ id: storeId, tenant_id: tenantId, name: 'Main Branch', code: 'BR33' }).execute();
+    await db.insertInto('users').values([
+      { id: cashierId, tenant_id: tenantId, store_id: storeId, username: 'c1_m33', password_hash: 'h', full_name: 'Cashier', role: 'CASHIER', is_active: 1 },
+      { id: ownerId, tenant_id: tenantId, store_id: null, username: 'own_m33', password_hash: 'h', full_name: 'Owner', role: 'OWNER', is_active: 1 },
+    ]).execute();
+
+    // Seed:
+    // 1. e9ce924-style auto-closed shift (has note 'تسوية وإغلاق تلقائي عند الترقية' and fabricated actual_cash = 130000)
+    // 2. b787b5a-style auto-closed shift (expected_cash = 0, actual_cash = 0, handover_cash = 0, no note, no SHIFT_CLOSED audit log) + a cash sale of 50000 during its window
+    // 3. Verified manually closed shift (with SHIFT_CLOSED audit log)
+    // 4. Current active OPEN shift
+    await db.insertInto('cashier_shifts').values([
+      {
+        id: 'shift-e9ce',
+        shift_number: 'SH-101',
+        tenant_id: tenantId,
+        store_id: storeId,
+        user_id: cashierId,
+        started_at: '2026-11-18T08:00:00.000Z',
+        ended_at: '2026-11-18T16:00:00.000Z',
+        opening_cash: 100000n,
+        expected_cash: 130000n,
+        actual_cash: 130000n,
+        variance: 0n,
+        handover_cash: 130000n,
+        status: 'CLOSED',
+        notes: 'وردية صباحية — تسوية وإغلاق تلقائي عند الترقية (032) لمنع تعدد الشيفتات المفتوحة بالفرع',
+      },
+      {
+        id: 'shift-b787',
+        shift_number: 'SH-102',
+        tenant_id: tenantId,
+        store_id: storeId,
+        user_id: cashierId,
+        started_at: '2026-11-19T08:00:00.000Z',
+        ended_at: '2026-11-19T16:00:00.000Z',
+        opening_cash: 100000n,
+        expected_cash: 0n,
+        actual_cash: 0n,
+        variance: 0n,
+        handover_cash: 0n,
+        status: 'CLOSED',
+        notes: 'وردية قديمة بفرع',
+      },
+      {
+        id: 'shift-verified',
+        shift_number: 'SH-103',
+        tenant_id: tenantId,
+        store_id: storeId,
+        user_id: cashierId,
+        started_at: '2026-11-20T08:00:00.000Z',
+        ended_at: '2026-11-20T16:00:00.000Z',
+        opening_cash: 100000n,
+        expected_cash: 120000n,
+        actual_cash: 120000n,
+        variance: 0n,
+        handover_cash: 120000n,
+        status: 'CLOSED',
+        notes: 'تقفيل يدوي',
+      },
+      {
+        id: 'shift-open-m33',
+        shift_number: 'SH-104',
+        tenant_id: tenantId,
+        store_id: storeId,
+        user_id: ownerId,
+        started_at: '2026-11-21T08:00:00.000Z',
+        ended_at: null,
+        opening_cash: 50000n,
+        expected_cash: 0n,
+        actual_cash: 0n,
+        variance: 0n,
+        handover_cash: 0n,
+        status: 'OPEN',
+        notes: 'وردية حالية',
+      },
+    ]).execute();
+
+    // Cash sale during shift-b787 window (+50000 -> expected = 100000 + 50000 = 150000)
+    await db.insertInto('sales').values({
+      id: 'sale-m33-b787',
+      tenant_id: tenantId,
+      store_id: storeId,
+      sale_number: 'INV-33-1',
+      idempotency_key: 'idem-sale-m33-1',
+      customer_name: null,
+      currency: 'EGP',
+      subtotal: 50000n,
+      discount_total: 0n,
+      total: 50000n,
+      paid_total: 50000n,
+      change_given: 0n,
+      cashier_user_id: cashierId,
+      status: 'COMPLETED',
+      created_at: '2026-11-19T12:00:00.000Z',
+    }).execute();
+    await db.insertInto('sale_payments').values({
+      id: 'sp-m33-1',
+      sale_id: 'sale-m33-b787',
+      tenant_id: tenantId,
+      tender_index: 0,
+      method: 'CASH',
+      amount: 50000n,
+      created_at: '2026-11-19T12:00:00.000Z',
+    }).execute();
+
+    // SHIFT_CLOSED audit log for shift-verified
+    const auditRepo = new SqliteAuditLogRepository(db);
+    await auditRepo.record(
+      new ScopedExecutionContext({
+        tenantId,
+        storeId,
+        userId: cashierId,
+        roleId: 'CASHIER',
+        permissions: new Set([Permissions.POS_CHECKOUT]),
+        correlationId: 'corr-m33',
+      }),
+      {
+        storeId,
+        actorUserId: cashierId,
+        actorUsername: 'c1_m33',
+        actorRole: 'CASHIER',
+        action: 'SHIFT_CLOSED',
+        entityType: 'SHIFT',
+        entityId: 'shift-verified',
+        summary: 'تقفيل يدوي',
+      },
+    );
+
+    // Run Migration 033
+    await shiftReconciliationStatusMigration(db);
+
+    const e9ce = await db.selectFrom('cashier_shifts').selectAll().where('id', '=', 'shift-e9ce').executeTakeFirstOrThrow();
+    const b787 = await db.selectFrom('cashier_shifts').selectAll().where('id', '=', 'shift-b787').executeTakeFirstOrThrow();
+    const verified = await db.selectFrom('cashier_shifts').selectAll().where('id', '=', 'shift-verified').executeTakeFirstOrThrow();
+    const openRow = await db.selectFrom('cashier_shifts').selectAll().where('id', '=', 'shift-open-m33').executeTakeFirstOrThrow();
+
+    expect(e9ce.reconciliation_status).toBe('UNVERIFIED_AUTO_CLOSED');
+    expect(BigInt(e9ce.expected_cash)).toBe(130000n);
+    expect(BigInt(e9ce.actual_cash)).toBe(0n);
+    expect(BigInt(e9ce.variance)).toBe(0n);
+    expect(BigInt(e9ce.handover_cash)).toBe(0n);
+
+    expect(b787.reconciliation_status).toBe('UNVERIFIED_AUTO_CLOSED');
+    expect(BigInt(b787.expected_cash)).toBe(150000n);
+    expect(BigInt(b787.actual_cash)).toBe(0n);
+    expect(BigInt(b787.variance)).toBe(0n);
+    expect(BigInt(b787.handover_cash)).toBe(0n);
+    expect(b787.notes).toContain('غير متحقق نقديًا');
+
+    expect(verified.reconciliation_status).toBe('VERIFIED');
+    expect(BigInt(verified.actual_cash)).toBe(120000n);
+
+    expect(openRow.reconciliation_status).toBe('OPEN');
   });
 });

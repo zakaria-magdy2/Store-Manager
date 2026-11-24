@@ -848,6 +848,41 @@ if ((await tenantRepo.listAll()).length === 0) {
   }
 }
 
+const MAX_MONEY_MINOR = 100_000_000_00n;
+const MIN_BUSINESS_YEAR = 2020;
+
+function maxBusinessYear() {
+  return Math.max(2027, new Date().getUTCFullYear() + 1);
+}
+
+const PositiveMoneyMinorSchema = z
+  .string()
+  .regex(/^[1-9]\d{0,10}$/, 'القيمة المالية غير صالحة')
+  .refine((v) => !/^\d+$/.test(v) || BigInt(v) <= MAX_MONEY_MINOR, 'القيمة المالية تتجاوز الحد الأقصى المسموح به');
+
+const NonNegativeMoneyMinorSchema = z
+  .string()
+  .regex(/^\d{1,11}$/, 'القيمة المالية غير صالحة')
+  .refine((v) => !/^\d+$/.test(v) || BigInt(v) <= MAX_MONEY_MINOR, 'القيمة المالية تتجاوز الحد الأقصى المسموح به');
+
+const SignedMoneyMinorSchema = z
+  .string()
+  .regex(/^-?\d{1,11}$/, 'القيمة المالية غير صالحة')
+  .refine(
+    (v) => !/^-?\d+$/.test(v) || (BigInt(v) >= -MAX_MONEY_MINOR && BigInt(v) <= MAX_MONEY_MINOR),
+    'القيمة المالية تتجاوز الحد الأقصى المسموح به',
+  );
+
+const BusinessDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'التاريخ غير صالح')
+  .refine((value) => {
+    const d = new Date(`${value}T00:00:00.000Z`);
+    if (Number.isNaN(d.valueOf()) || d.toISOString().slice(0, 10) !== value) return false;
+    const year = d.getUTCFullYear();
+    return year >= MIN_BUSINESS_YEAR && year <= maxBusinessYear();
+  }, 'التاريخ خارج النطاق المسموح به');
+
 const OwnerSchema = z.object({
   ownerUsername: z.string().min(3).max(30).regex(/^[a-z0-9_]+$/).trim(),
   ownerName: z.string().min(2).max(100).trim(),
@@ -872,10 +907,11 @@ const CheckoutPaymentMethodSchema = z
 
 const CheckoutMinorAmountSchema = z
   .union([
-    z.string().regex(/^\d{1,15}$/),
-    z.number().int().min(0).max(999999999999999),
+    z.string().regex(/^\d{1,11}$/, 'القيمة المالية غير صالحة'),
+    z.number().int().min(0).max(Number(MAX_MONEY_MINOR)),
   ])
-  .transform((v) => String(v));
+  .transform((v) => String(v))
+  .refine((v) => !/^\d+$/.test(v) || BigInt(v) <= MAX_MONEY_MINOR, 'القيمة المالية تتجاوز الحد الأقصى المسموح به');
 
 const CheckoutTenderSchema = z
   .object({
@@ -892,11 +928,11 @@ const CheckoutSchema = z
     storeId: z.string().uuid(),
     idempotencyKey: z.string().uuid(),
     customerName: z.string().max(120).trim().optional(),
-    cartDiscount: z.string().regex(/^\d{1,15}$/).optional(),
+    cartDiscount: NonNegativeMoneyMinorSchema.optional(),
     items: z.array(z.object({
       variantId: z.string().uuid(),
       quantity: z.string().regex(/^[1-9]\d{0,8}$/),
-      lineDiscount: z.string().regex(/^\d{1,15}$/).optional(),
+      lineDiscount: NonNegativeMoneyMinorSchema.optional(),
     })).min(1).max(100),
     payment: CheckoutTenderSchema.optional(),
     payments: z.array(CheckoutTenderSchema).min(1).max(10).optional(),
@@ -945,8 +981,8 @@ const InlinePurchaseVariantSchema = z.object({
   barcode: z.string().min(1, 'الباركود غير صالح').max(64, 'الباركود طويل جدًا').trim().optional(),
   attributes: ProductAttributesSchema.default({}),
   quantity: z.string().regex(/^\d{1,9}$/, 'الكمية يجب أن تكون رقمًا صحيحًا بدون كسور'),
-  unitCost: z.string().regex(/^\d{1,15}$/, 'سعر الشراء غير صالح'),
-  retailPrice: z.string().regex(/^\d{1,15}$/, 'سعر البيع غير صالح').nullable().optional(),
+  unitCost: NonNegativeMoneyMinorSchema,
+  retailPrice: NonNegativeMoneyMinorSchema.nullable().optional(),
   reorderPoint: z.string().regex(/^\d{1,9}$/, 'حد التنبيه غير صالح').optional(),
 });
 const InlinePurchaseProductSchema = z.object({
@@ -965,8 +1001,8 @@ const PurchaseSchema = z.object({
   supplierId: z.string().uuid('اختر التاجر / المورد أولًا'),
   storeId: z.string().uuid('اختر الفرع أولًا'),
   invoiceNumber: z.string().max(80, 'رقم الفاتورة طويل جدًا').trim().optional(),
-  totalAmount: z.string().regex(/^[1-9]\d{0,14}$/, 'إجمالي الفاتورة يجب أن يكون أكبر من صفر'),
-  paidAmount: z.string().regex(/^\d{1,15}$/, 'المبلغ المدفوع غير صالح'),
+  totalAmount: PositiveMoneyMinorSchema,
+  paidAmount: NonNegativeMoneyMinorSchema,
   paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'CARD', 'MOBILE']).default('CASH'),
   targetProfitPercent: z.number().min(0, 'نسبة الربح يجب أن تكون صفرًا أو أكثر').max(100000, 'نسبة الربح كبيرة جدًا').nullable().optional(),
   referenceNumber: z.string().max(80, 'الرقم المرجعي طويل جدًا').trim().optional(),
@@ -974,8 +1010,8 @@ const PurchaseSchema = z.object({
   items: z.array(z.object({
     variantId: z.string().uuid('الصنف المحدد غير صالح'),
     quantity: z.string().regex(/^[1-9]\d{0,8}$/, 'الكمية يجب أن تكون رقمًا صحيحًا أكبر من صفر'),
-    unitCost: z.string().regex(/^\d{1,15}$/, 'سعر الشراء غير صالح'),
-    retailPrice: z.string().regex(/^\d{1,15}$/, 'سعر البيع غير صالح').nullable().optional(),
+    unitCost: NonNegativeMoneyMinorSchema,
+    retailPrice: NonNegativeMoneyMinorSchema.nullable().optional(),
   })).max(200, 'الحد الأقصى للأصناف في الفاتورة هو 200 صنف').default([]),
   newProducts: z.array(InlinePurchaseProductSchema).max(50, 'الحد الأقصى للمنتجات الجديدة في فاتورة واحدة هو 50 منتجًا').default([]),
 }).superRefine((body, refinementCtx) => {
@@ -1006,7 +1042,7 @@ const PurchaseSchema = z.object({
     });
   }
 });
-const SupplierPaymentSchema = z.object({ idempotencyKey: z.string().uuid(), amount: z.string().regex(/^[1-9]\d{0,14}$/), paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'CARD', 'MOBILE']), referenceNumber: z.string().max(80).trim().optional() });
+const SupplierPaymentSchema = z.object({ idempotencyKey: z.string().uuid(), amount: PositiveMoneyMinorSchema, paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'CARD', 'MOBILE']), referenceNumber: z.string().max(80).trim().optional() });
 const UpdatePurchaseMetaSchema = z.object({
   invoiceNumber: z.string().max(80).trim().nullable().optional(),
   notes: z.string().max(500).trim().nullable().optional(),
@@ -1015,17 +1051,21 @@ const UpdatePurchaseMetaSchema = z.object({
 const UpdateExpenseSchema = z.object({
   idempotencyKey: z.string().uuid(),
   categoryCode: z.enum(['RENT', 'UTILITIES', 'TRANSPORT', 'MAINTENANCE', 'SUPPLIES', 'OTHER']),
-  amount: z.string().regex(/^[1-9]\d{0,14}$/, 'قيمة المصروف يجب أن تكون أكبر من صفر'),
+  amount: PositiveMoneyMinorSchema,
   paymentMethod: z.enum(['CASH_DRAWER', 'CASH_SAFE', 'BANK_TRANSFER']),
-  expenseDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'تاريخ المصروف غير صالح'),
+  expenseDate: BusinessDateSchema,
   notes: z.string().max(500).trim().optional(),
   referenceNumber: z.string().max(80).trim().optional(),
 });
-const ExpenseSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), categoryCode: z.enum(['RENT', 'UTILITIES', 'TRANSPORT', 'MAINTENANCE', 'SUPPLIES', 'OTHER']), amount: z.string().regex(/^[1-9]\d{0,14}$/), paymentMethod: z.enum(['CASH_DRAWER', 'CASH_SAFE', 'BANK_TRANSFER']), expenseDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), notes: z.string().max(500).trim().optional(), referenceNumber: z.string().max(80).trim().optional() });
+const ExpenseSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), categoryCode: z.enum(['RENT', 'UTILITIES', 'TRANSPORT', 'MAINTENANCE', 'SUPPLIES', 'OTHER']), amount: PositiveMoneyMinorSchema, paymentMethod: z.enum(['CASH_DRAWER', 'CASH_SAFE', 'BANK_TRANSFER']), expenseDate: BusinessDateSchema, notes: z.string().max(500).trim().optional(), referenceNumber: z.string().max(80).trim().optional() });
 const CustomerReturnSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), paymentMethod: z.enum(['CASH', 'CARD', 'MOBILE', 'OTHER']), items: z.array(z.object({ originalSaleItemId: z.string().min(1).max(80), quantity: z.string().regex(/^[1-9]\d{0,8}$/) })).min(1).max(100) });
-const RecurringObligationSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), categoryCode: z.enum(['RENT', 'UTILITIES', 'TRANSPORT', 'MAINTENANCE', 'SUPPLIES', 'OTHER']), name: z.string().min(2).max(120).trim(), dueDay: z.number().int().min(1).max(31), initialAmount: z.string().regex(/^[1-9]\d{0,14}$/).optional() });
-const MonthlyActualSchema = z.object({ year: z.number().int().min(2000).max(9999), month: z.number().int().min(1).max(12), amount: z.string().regex(/^[1-9]\d{0,14}$/) });
-const MonthlyPaymentSchema = z.object({ idempotencyKey: z.string().uuid(), amount: z.string().regex(/^[1-9]\d{0,14}$/), paymentMethod: z.enum(['CASH_DRAWER', 'CASH_SAFE', 'BANK_TRANSFER']), referenceNumber: z.string().max(80).trim().optional(), tzOffset: z.number().int().min(-840).max(840).optional() });
+const RecurringObligationSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), categoryCode: z.enum(['RENT', 'UTILITIES', 'TRANSPORT', 'MAINTENANCE', 'SUPPLIES', 'OTHER']), name: z.string().min(2).max(120).trim(), dueDay: z.number().int().min(1).max(31), initialAmount: PositiveMoneyMinorSchema.optional() });
+const MonthlyActualSchema = z.object({
+  year: z.number().int().min(MIN_BUSINESS_YEAR, 'السنة خارج النطاق المسموح به').refine((y) => y <= maxBusinessYear(), 'السنة خارج النطاق المسموح به'),
+  month: z.number().int().min(1).max(12),
+  amount: PositiveMoneyMinorSchema,
+});
+const MonthlyPaymentSchema = z.object({ idempotencyKey: z.string().uuid(), amount: PositiveMoneyMinorSchema, paymentMethod: z.enum(['CASH_DRAWER', 'CASH_SAFE', 'BANK_TRANSFER']), referenceNumber: z.string().max(80).trim().optional(), tzOffset: z.number().int().min(-840).max(840).optional() });
 const SupplierReturnSchema = z.object({ idempotencyKey: z.string().uuid(), storeId: z.string().uuid(), items: z.array(z.object({ purchaseItemId: z.string().min(1).max(80), quantity: z.string().regex(/^[1-9]\d{0,8}$/) })).min(1).max(100) });
 const BackupSchema = z.object({ passphrase: z.string().min(12).max(256) });
 const CreateStocktakeSchema = z.object({
@@ -1080,7 +1120,9 @@ const DailyMasterKeySchema = z.object({
 const PasswordChangeSchema = z.object({ currentPassword: z.string().min(1).max(128), newPassword: z.string().min(12).max(128) });
 const EmployeeDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
   const date = new Date(`${value}T00:00:00.000Z`);
-  return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value;
+  if (Number.isNaN(date.valueOf()) || date.toISOString().slice(0, 10) !== value) return false;
+  const year = date.getUTCFullYear();
+  return year >= 1970 && year <= maxBusinessYear();
 });
 const EmployeePhoneSchema = z.string().trim().max(32).regex(/^[+0-9().\-\s]*$/);
 const ShiftStartTimeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'صيغة موعد بدء الشيفت يجب أن تكون HH:MM');
@@ -1092,20 +1134,25 @@ const BulkShiftScheduleSchema = z.object({
 });
 const CreateStoreSchema = z.object({ name: z.string().min(2).max(100).trim(), code: z.string().min(2).max(20).regex(/^[A-Za-z0-9_-]+$/).trim(), address: z.string().max(240).trim().optional(), phone: z.string().max(40).trim().optional() });
 const InventoryTransferSchema = z.object({ fromStoreId: z.string().uuid(), toStoreId: z.string().uuid(), variantId: z.string().uuid(), quantity: z.string().regex(/^[1-9]\d{0,8}$/) });
-const ShiftCloseSchema = z.object({ storeId: z.string().uuid(), idempotencyKey: z.string().uuid(), actualCashAmount: z.string().regex(/^-?\d{1,15}$/), notes: z.string().max(300).trim().optional() });
+const ShiftCloseSchema = z.object({
+  storeId: z.string().uuid(),
+  idempotencyKey: z.string().uuid(),
+  actualCashAmount: SignedMoneyMinorSchema,
+  notes: z.string().max(300).trim().optional(),
+});
 const CloseAccountingPeriodSchema = z.object({ periodId: z.string().min(1).max(120).trim() });
 const TreasuryTransferSchema = z.object({
   storeId: z.string().uuid(),
   idempotencyKey: z.string().uuid(),
   fromAccount: z.enum(['1010', '1015', '1020']),
   toAccount: z.enum(['1010', '1015', '1020']),
-  amount: z.string().regex(/^[1-9]\d{0,14}$/),
+  amount: PositiveMoneyMinorSchema,
   notes: z.string().max(300).trim().optional(),
 });
 const SupplierRefundSchema = z.object({
   storeId: z.string().uuid(),
   idempotencyKey: z.string().uuid(),
-  amount: z.string().regex(/^[1-9]\d{0,14}$/),
+  amount: PositiveMoneyMinorSchema,
   paymentMethod: z.enum(['CASH', 'CASH_SAFE', 'BANK_TRANSFER']),
   referenceNumber: z.string().max(80).trim().optional(),
   notes: z.string().max(300).trim().optional(),
@@ -1113,12 +1160,12 @@ const SupplierRefundSchema = z.object({
 const OpeningBalancesSchema = z.object({
   storeId: z.string().uuid(),
   idempotencyKey: z.string().uuid(),
-  entryDate: EmployeeDateSchema,
-  cashDrawer: z.string().regex(/^\d{1,15}$/).default('0'),
-  cashSafe: z.string().regex(/^\d{1,15}$/).default('0'),
-  bank: z.string().regex(/^\d{1,15}$/).default('0'),
-  inventory: z.string().regex(/^\d{1,15}$/).default('0'),
-  supplierPayables: z.string().regex(/^\d{1,15}$/).default('0'),
+  entryDate: BusinessDateSchema,
+  cashDrawer: NonNegativeMoneyMinorSchema.default('0'),
+  cashSafe: NonNegativeMoneyMinorSchema.default('0'),
+  bank: NonNegativeMoneyMinorSchema.default('0'),
+  inventory: NonNegativeMoneyMinorSchema.default('0'),
+  supplierPayables: NonNegativeMoneyMinorSchema.default('0'),
   notes: z.string().max(300).trim().optional(),
 });
 const InventoryDamageSchema = z.object({
@@ -1226,7 +1273,11 @@ function parseNonNegativeMinorInput(value, label = 'القيمة النقدية'
   if (!/^\d{1,15}$/.test(str)) {
     throw Object.assign(new Error(`${label} غير صالحة`), { status: 400 });
   }
-  return BigInt(str);
+  const parsed = BigInt(str);
+  if (parsed > MAX_MONEY_MINOR) {
+    throw Object.assign(new Error(`${label} تتجاوز الحد الأقصى المسموح به`), { status: 400 });
+  }
+  return parsed;
 }
 
 function toNonNegativeBigInt(value) {
@@ -1824,6 +1875,10 @@ async function readJson(req, maxBytes = MAX_JSON_BODY_BYTES) {
   }
   if (exceeded) {
     throw Object.assign(new Error('حجم البيانات المرسلة كبير جدًا، يرجى تقليل حجم الصورة والمحاولة مرة أخرى'), { status: 413 });
+  }
+  const rawContentType = String(req.headers['content-type'] ?? '').trim().toLowerCase();
+  if (rawContentType && !rawContentType.startsWith('application/json')) {
+    throw Object.assign(new Error('نوع البيانات غير مدعوم، يجب إرسال application/json'), { status: 415 });
   }
   const raw = chunks.length ? Buffer.concat(chunks).toString('utf8') : '';
   try {
@@ -2454,6 +2509,10 @@ function reportDay(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value ?? '')) throw Object.assign(new Error('تاريخ التقرير غير صالح'), { status: 400 });
   const parsed = new Date(`${value}T00:00:00.000Z`);
   if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) throw Object.assign(new Error('تاريخ التقرير غير صالح'), { status: 400 });
+  const year = parsed.getUTCFullYear();
+  if (year < MIN_BUSINESS_YEAR || year > maxBusinessYear()) {
+    throw Object.assign(new Error('تاريخ التقرير خارج النطاق المسموح به'), { status: 400 });
+  }
   return parsed;
 }
 
@@ -4379,6 +4438,19 @@ async function setupState() {
   return { configured: true, setupRequired: !owner, companyName: tenants[0].name, currency: tenants[0].currency, companyCode: tenants[0].code };
 }
 
+function findOpenShiftForStore(rawDb, tenantId, storeId, userId = null, preferUser = false) {
+  if (userId) {
+    const preferCol = preferUser ? 'user_id' : 'store_id';
+    const preferVal = preferUser ? userId : storeId;
+    return rawDb.prepare(
+      `SELECT * FROM cashier_shifts WHERE tenant_id = ? AND (store_id = ? OR user_id = ?) AND status = 'OPEN' ORDER BY CASE WHEN ${preferCol} = ? THEN 0 ELSE 1 END, started_at DESC LIMIT 1`
+    ).get(tenantId, storeId, userId, preferVal);
+  }
+  return rawDb.prepare(
+    "SELECT * FROM cashier_shifts WHERE tenant_id = ? AND store_id = ? AND status = 'OPEN' ORDER BY started_at DESC LIMIT 1"
+  ).get(tenantId, storeId);
+}
+
 async function currentData(ctx, url) {
   ctx.assertPermission(Permissions.INVENTORY_VIEW);
   const tenant = await tenantRepo.findById(ctx.tenantId);
@@ -4569,9 +4641,15 @@ async function currentData(ctx, url) {
     : [];
 
   const rawDatabase = database.getRawDatabase();
-  const activeShiftRow = rawDatabase.prepare(
-    "SELECT id, shift_number as shiftNumber, user_id as userId, started_at as startedAt, opening_cash as openingCash, notes FROM cashier_shifts WHERE tenant_id = ? AND (store_id = ? OR user_id = ?) AND status = 'OPEN' ORDER BY CASE WHEN user_id = ? THEN 0 ELSE 1 END, started_at DESC LIMIT 1"
-  ).get(ctx.tenantId, storeId, ctx.userId, ctx.userId);
+  const rawActiveShift = findOpenShiftForStore(rawDatabase, ctx.tenantId, storeId, ctx.userId, true);
+  const activeShiftRow = rawActiveShift ? {
+    id: rawActiveShift.id,
+    shiftNumber: rawActiveShift.shift_number,
+    userId: rawActiveShift.user_id,
+    startedAt: rawActiveShift.started_at,
+    openingCash: rawActiveShift.opening_cash,
+    notes: rawActiveShift.notes,
+  } : null;
   const rawTodayAttendanceRows = rawDatabase.prepare(
     "SELECT actor_user_id AS userId, actor_username AS username, actor_role AS actorRole, created_at AS createdAt, summary FROM audit_logs WHERE tenant_id = ? AND action = 'ATTENDANCE_CHECK_IN' AND created_at >= ? AND created_at < ? ORDER BY sequence_no ASC"
   ).all(ctx.tenantId, todayBounds.startIso, todayBounds.endIso);
@@ -5226,6 +5304,10 @@ async function handleApi(req, res, url) {
   }
 
   if (method === 'POST' && path === '/api/login') {
+    const loginContentType = String(req.headers['content-type'] ?? '').trim().toLowerCase();
+    if (!loginContentType.startsWith('application/json')) {
+      throw Object.assign(new Error('نوع البيانات غير مدعوم، يجب إرسال application/json'), { status: 415 });
+    }
     const body = await readJson(req);
     if (typeof body.username !== 'string' || typeof body.password !== 'string' || body.username.length > 30 || body.password.length > 128) {
       throw Object.assign(new Error('اسم المستخدم أو كلمة المرور غير صحيحة'), { status: 400 });
@@ -5935,9 +6017,7 @@ if (method === 'GET' && path === '/api/shifts/current') {
     const stores = await storeRepo.listByTenant(ctx);
     const requestedStore = url.searchParams.get('storeId');
     const targetStoreId = ctx.storeId ?? requestedStore ?? stores[0]?.id ?? '';
-    const openShift = rawDb.prepare(
-      "SELECT * FROM cashier_shifts WHERE tenant_id = ? AND (user_id = ? OR store_id = ?) AND status = 'OPEN' ORDER BY CASE WHEN user_id = ? THEN 0 ELSE 1 END, started_at DESC LIMIT 1"
-    ).get(ctx.tenantId, ctx.userId, targetStoreId, ctx.userId);
+    const openShift = findOpenShiftForStore(rawDb, ctx.tenantId, targetStoreId, ctx.userId, true);
 
     if (!openShift) return json(res, 200, { currentShift: null });
 
@@ -6089,6 +6169,7 @@ if (method === 'GET' && path === '/api/shifts/current') {
             started_at: nowIso,
             opening_cash: openingCash,
             status: 'OPEN',
+            reconciliation_status: 'OPEN',
             notes,
             start_idempotency_key: startIdempotencyKey,
             created_at: nowIso,
@@ -6234,6 +6315,7 @@ if (method === 'GET' && path === '/api/shifts/current') {
           variance: varianceMinor,
           handover_cash: handoverCash,
           status: 'CLOSED',
+          reconciliation_status: 'VERIFIED',
           notes,
           close_idempotency_key: closeIdempotencyKey,
           updated_at: nowIso,
@@ -6340,6 +6422,8 @@ if (method === 'GET' && path === '/api/shifts/current') {
     let grandProfitMinor = 0n;
     let grandReturnsMinor = 0n;
     let grandVarianceMinor = 0n;
+    let verifiedShiftsCount = 0;
+    let unverifiedShiftsCount = 0;
 
     for (const row of shiftRows) {
       const endTime = row.ended_at || new Date().toISOString();
@@ -6396,10 +6480,19 @@ if (method === 'GET' && path === '/api/shifts/current') {
         expectedCashMinor = BigInt(row.opening_cash ?? 0) + cashSalesMinor - cashReturnsMinor + drawerMov.netOtherDrawerDelta;
       }
 
+      const reconciliationStatus = row.reconciliation_status || (row.status === 'OPEN' ? 'OPEN' : 'VERIFIED');
+      const isUnverifiedAutoClosed = row.status === 'CLOSED' && reconciliationStatus === 'UNVERIFIED_AUTO_CLOSED';
+      const isVerifiedClosed = row.status === 'CLOSED' && !isUnverifiedAutoClosed;
+
       grandSalesMinor += salesRev;
       grandReturnsMinor += returnedAmt;
       if (!isCashier) grandProfitMinor += salesProfit;
-      grandVarianceMinor += BigInt(row.variance ?? 0);
+      if (isVerifiedClosed) {
+        grandVarianceMinor += BigInt(row.variance ?? 0);
+        verifiedShiftsCount += 1;
+      } else if (isUnverifiedAutoClosed) {
+        unverifiedShiftsCount += 1;
+      }
 
       const startMs = new Date(row.started_at).getTime();
       const endMs = row.ended_at ? new Date(row.ended_at).getTime() : Date.now();
@@ -6419,11 +6512,13 @@ if (method === 'GET' && path === '/api/shifts/current') {
         endedAt: row.ended_at,
         duration: durationStr,
         status: row.status,
+        reconciliationStatus,
+        isCashCountVerified: isVerifiedClosed,
         openingCash: String(row.opening_cash ?? 0),
         expectedCash: expectedCashMinor.toString(),
-        actualCash: String(row.actual_cash ?? 0),
-        variance: String(row.variance ?? 0),
-        handoverCash: String(row.handover_cash ?? 0),
+        actualCash: isUnverifiedAutoClosed || row.status === 'OPEN' ? null : String(row.actual_cash ?? 0),
+        variance: isUnverifiedAutoClosed || row.status === 'OPEN' ? null : String(row.variance ?? 0),
+        handoverCash: isUnverifiedAutoClosed || row.status === 'OPEN' ? null : String(row.handover_cash ?? 0),
         salesCount,
         grossSales: grossRev.toString(),
         returnedTotal: returnedAmt.toString(),
@@ -6438,6 +6533,8 @@ if (method === 'GET' && path === '/api/shifts/current') {
       shifts,
       summary: {
         totalShifts: shifts.length,
+        verifiedShiftsCount,
+        unverifiedShiftsCount,
         totalSales: grandSalesMinor.toString(),
         totalReturns: grandReturnsMinor.toString(),
         totalProfit: isCashier ? null : grandProfitMinor.toString(),
@@ -6903,9 +7000,7 @@ if (method === 'GET' && path === '/api/shifts/current') {
       throw Object.assign(new Error('الفرع غير متاح لهذا المستخدم'), { status: 403 });
     }
     const rawDb = database.getRawDatabase();
-    const openShift = rawDb.prepare(
-      "SELECT id, store_id FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' LIMIT 1"
-    ).get(ctx.tenantId, ctx.userId);
+    const openShift = findOpenShiftForStore(rawDb, ctx.tenantId, body.storeId, ctx.userId, false);
     if (!openShift) {
       throw Object.assign(new Error('يجب بدء الشيفت أولاً قبل إجراء الاستبدال'), { status: 403 });
     }
@@ -7126,6 +7221,25 @@ if (method === 'GET' && path === '/api/shifts/current') {
         allowNegativeStock: tenant.allowNegativeStock,
       });
 
+      await recordAuditInTrx(trx, ctx, {
+        storeId: body.storeId,
+        action: 'SALE_EXCHANGED',
+        entityType: 'SALE',
+        entityId: replacementSale.id,
+        summary: `استبدال من فاتورة (${originalSale.sale_number}) إلى (${replacementSale.saleNumber}) بفارق ${netDifferenceMinor.toString()}`,
+        metadata: {
+          originalSaleId,
+          returnId: returnRes.id,
+          returnNumber,
+          replacementSaleNumber: replacementSale.saleNumber,
+          returnedAmount: returnRes.refundAmount.toString(),
+          replacementTotal: replacementSale.total.amount.toString(),
+          netDifference: netDifferenceMinor.toString(),
+          paymentMethod: body.paymentMethod,
+          notes: body.notes ?? '',
+        },
+      });
+
       return {
         replay: false,
         originalSaleNumber: originalSale.sale_number,
@@ -7139,27 +7253,6 @@ if (method === 'GET' && path === '/api/shifts/current') {
         direction: netDifferenceMinor > 0n ? 'CUSTOMER_PAYS' : netDifferenceMinor < 0n ? 'STORE_REFUNDS' : 'EVEN',
       };
     });
-
-    if (!exchangeResult.replay) {
-      await recordAudit(ctx, {
-        storeId: body.storeId,
-        action: 'SALE_EXCHANGED',
-        entityType: 'SALE',
-        entityId: exchangeResult.saleId,
-        summary: `استبدال من فاتورة (${exchangeResult.originalSaleNumber}) إلى (${exchangeResult.saleNumber}) بفارق ${exchangeResult.netDifference}`,
-        metadata: {
-          originalSaleId,
-          returnId: exchangeResult.returnId,
-          returnNumber: exchangeResult.returnNumber,
-          replacementSaleNumber: exchangeResult.saleNumber,
-          returnedAmount: exchangeResult.returnedAmount,
-          replacementTotal: exchangeResult.replacementTotal,
-          netDifference: exchangeResult.netDifference,
-          paymentMethod: body.paymentMethod,
-          notes: body.notes ?? '',
-        },
-      });
-    }
 
     return json(res, exchangeResult.replay ? 200 : 201, {
       returnId: exchangeResult.returnId,
@@ -7816,9 +7909,7 @@ if (method === 'GET' && path === '/api/shifts/current') {
       await licenseService.touchWatermarkOnCheckout();
     }
     const body = validate(CheckoutSchema, await readJson(req));
-    const openShift = database.getRawDatabase().prepare(
-      "SELECT id, store_id, user_id FROM cashier_shifts WHERE tenant_id = ? AND (store_id = ? OR user_id = ?) AND status = 'OPEN' ORDER BY CASE WHEN store_id = ? THEN 0 ELSE 1 END LIMIT 1"
-    ).get(ctx.tenantId, body.storeId, ctx.userId, body.storeId);
+    const openShift = findOpenShiftForStore(database.getRawDatabase(), ctx.tenantId, body.storeId, ctx.userId, false);
     if (!openShift) {
       throw Object.assign(new Error('يجب بدء الشيفت أولاً قبل إجراء أي عملية بيع'), { status: 403 });
     }
@@ -8793,6 +8884,81 @@ function mimeType(path) {
   return ({ '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' })[extname(path)] ?? 'application/octet-stream';
 }
 
+function formatClientErrorMessage(error, status, databaseConflict) {
+  if (error instanceof LicenseHardwareIdentityError) {
+    return error.message;
+  }
+  if (Boolean(error?.exposeMessage) && typeof error?.message === 'string' && error.message) {
+    return error.message;
+  }
+  if (status >= 500) {
+    return 'حصل خطأ داخلي. لم يتم تنفيذ العملية.';
+  }
+  const rawMessage = typeof error?.message === 'string' ? error.message : '';
+  if (rawMessage.startsWith('UnauthorizedError')) {
+    if (/another store|operate on store|other stores/i.test(rawMessage)) {
+      return 'غير مصرح لك بالعمل على هذا الفرع';
+    }
+    return 'غير مصرح لك بتنفيذ هذا الإجراء';
+  }
+  if (databaseConflict) {
+    if (/supplier_purchases.*invoice_number/i.test(rawMessage)) {
+      return 'رقم الفاتورة مسجل بالفعل لهذا التاجر';
+    }
+    if (/cashier_shifts/i.test(rawMessage)) {
+      return 'يوجد شيفت مفتوح حاليًا في هذا الفرع';
+    }
+    if (/barcode/i.test(rawMessage)) {
+      return 'الباركود مستخدم بالفعل لمنتج آخر';
+    }
+    if (/\.sku/i.test(rawMessage)) {
+      return 'الكود (SKU) مستخدم بالفعل';
+    }
+    if (/users.*username/i.test(rawMessage)) {
+      return 'اسم المستخدم مسجل بالفعل';
+    }
+    if (/UNIQUE constraint/i.test(rawMessage)) {
+      return 'هذه البيانات مسجلة بالفعل ولا يمكن تكرارها';
+    }
+    return 'تعذر إتمام العملية لتعارض البيانات في قاعدة البيانات';
+  }
+  if (error instanceof DomainError) {
+    if (error.code === 'INSUFFICIENT_STOCK') {
+      return 'الكمية المطلوبة غير متوفرة في المخزون (تم بيعها أو نفد الرصيد)';
+    }
+    if (error.code === 'INVALID_PAYMENT') {
+      if (/Insufficient payment/i.test(rawMessage)) {
+        return 'المبلغ المدفوع أقل من إجمالي الفاتورة';
+      }
+      if (/Change can only be given from cash/i.test(rawMessage)) {
+        return 'لا يمكن صرف باقي نقدي إلا عند الدفع النقدي';
+      }
+      if (/currency/i.test(rawMessage)) {
+        return 'عملة الدفع لا تطابق عملة الفاتورة';
+      }
+      if (/zero|positive/i.test(rawMessage)) {
+        return 'يجب أن يكون مبلغ الدفع أكبر من صفر';
+      }
+      return 'بيانات الدفع غير صالحة';
+    }
+    if (error.code === 'INVALID_SALE') {
+      if (/Idempotency key/i.test(rawMessage)) {
+        return 'مفتاح العملية مستخدم لفاتورة بيع مختلفة';
+      }
+      if (/at least one payment/i.test(rawMessage)) {
+        return 'يجب تحديد وسيلة دفع واحدة على الأقل';
+      }
+      if (!/[\u0600-\u06FF]/.test(rawMessage)) {
+        return 'بيانات فاتورة البيع غير صالحة';
+      }
+    }
+    if (!/[\u0600-\u06FF]/.test(rawMessage)) {
+      return 'تعذر تنفيذ العملية بسبب بيانات غير صالحة';
+    }
+  }
+  return rawMessage || 'حدث خطأ غير متوقع';
+}
+
 const server = createServer(async (req, res) => {
   try {
     const host = req.headers.host;
@@ -8834,7 +9000,6 @@ const server = createServer(async (req, res) => {
   } catch (error) {
     if (res.headersSent) return res.destroy();
     const databaseConflict = typeof error?.code === 'string' && error.code.startsWith('SQLITE_CONSTRAINT');
-    const isInsufficientStock = error instanceof DomainError && error.code === 'INSUFFICIENT_STOCK';
     const isDomainClientError = error instanceof DomainError;
     const status = Number.isInteger(error?.status) ? error.status : error?.message?.startsWith('UnauthorizedError') ? 403 : databaseConflict ? 409 : isDomainClientError ? 400 : 500;
     if (status >= 500) {
@@ -8845,15 +9010,7 @@ const server = createServer(async (req, res) => {
     }
     const isTransientHardware = error instanceof LicenseHardwareIdentityError;
     const isExposedError = Boolean(error?.exposeMessage);
-    const message = isTransientHardware
-      ? error.message
-      : isExposedError && typeof error?.message === 'string' && error.message
-        ? error.message
-        : status >= 500
-          ? 'حصل خطأ داخلي. لم يتم تنفيذ العملية.'
-          : isInsufficientStock
-            ? 'الكمية المطلوبة غير متوفرة في المخزون (تم بيعها أو نفد الرصيد)'
-            : (error?.message ?? 'حدث خطأ غير متوقع');
+    const message = formatClientErrorMessage(error, status, databaseConflict);
     const errorBody = error instanceof LicenseEnforcementError
       ? { error: message, code: error.code, licenseStatus: error.licenseStatus }
       : isTransientHardware
@@ -8999,8 +9156,22 @@ function isInvokedAsMainModule() {
 }
 
 if (isInvokedAsMainModule()) {
+  let runningApp = null;
+  process.on('unhandledRejection', (reason) => {
+    console.error('[RetailOS] Unhandled promise rejection:', reason instanceof Error ? reason.message : String(reason));
+  });
+  process.on('uncaughtException', (error) => {
+    console.error('[RetailOS] Uncaught exception:', error instanceof Error ? error.message : String(error));
+    if (runningApp) {
+      const timer = setTimeout(() => process.exit(1), 3000);
+      timer.unref();
+      void runningApp.shutdown().finally(() => process.exit(1));
+    } else {
+      process.exit(1);
+    }
+  });
   try {
-    await createServerApp();
+    runningApp = await createServerApp();
   } catch (startupError) {
     console.error(startupError instanceof Error ? startupError.message : String(startupError));
     process.exit(1);

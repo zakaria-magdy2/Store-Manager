@@ -19,12 +19,15 @@ interface LegacyOpenShiftRow {
  * started shift OPEN, and for each older duplicate OPEN shift we compute its exact
  * expected drawer cash over its effective window `[started_at, next_shift_started_at)`:
  *   expected_cash = opening_cash + cash_sales - cash_returns + net_other_drawer_1010_movements
- * Because OPEN shifts hold schema defaults (`0`) rather than physical closing counts,
- * we settle and close each older shift at book balance (`actual_cash = expected_cash`,
- * `variance = 0`, `handover_cash = expected_cash`) with an explicit audit note in `notes`,
- * preserving full shift reconciliation history before creating the unique index.
+ * Because no physical cash count occurred for auto-closed shifts, we record the computed
+ * `expected_cash`, keep `actual_cash = 0`, `variance = 0`, `handover_cash = 0`, mark
+ * `reconciliation_status = 'UNVERIFIED_AUTO_CLOSED'` (when present), and record an explicit
+ * unverified auto-close note in `notes` before creating the unique index.
  */
 export async function up(db: Kysely<unknown>): Promise<void> {
+  const tableInfo = await sql<{ name: string }>`PRAGMA table_info(cashier_shifts)`.execute(db);
+  const hasReconciliationStatus = tableInfo.rows.some((r) => r.name === 'reconciliation_status');
+
   const openShiftsResult = await sql<LegacyOpenShiftRow>`
     SELECT id, tenant_id, store_id, user_id, started_at, ended_at, opening_cash, notes
     FROM cashier_shifts
@@ -90,26 +93,40 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       const cashReturns = BigInt(returnsResult.rows[0]?.cash_returns ?? 0);
       const otherDrawerDelta = BigInt(drawerResult.rows[0]?.net_delta ?? 0);
       const expectedCash = openingCash + cashSales - cashReturns + otherDrawerDelta;
-      const actualCash = expectedCash;
-      const variance = 0n;
-      const handoverCash = expectedCash;
-      const reconciliationNote = 'تسوية وإغلاق تلقائي عند الترقية (032) لمنع تعدد الشيفتات المفتوحة بالفرع';
+      const reconciliationNote = 'إغلاق آلي عند الترقية (032) — غير متحقق نقديًا (لم يتم جرد الدرج فعليًا)';
       const existingNotes = (olderShift.notes ?? '').trim();
       const mergedNotes = existingNotes ? `${existingNotes} — ${reconciliationNote}` : reconciliationNote;
 
-      await sql`
-        UPDATE cashier_shifts
-        SET status = 'CLOSED',
-            ended_at = ${endIso},
-            expected_cash = ${expectedCash.toString()},
-            actual_cash = ${actualCash.toString()},
-            variance = ${variance.toString()},
-            handover_cash = ${handoverCash.toString()},
-            notes = ${mergedNotes},
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ${olderShift.id}
-          AND tenant_id = ${olderShift.tenant_id}
-      `.execute(db);
+      if (hasReconciliationStatus) {
+        await sql`
+          UPDATE cashier_shifts
+          SET status = 'CLOSED',
+              ended_at = ${endIso},
+              expected_cash = ${expectedCash.toString()},
+              actual_cash = 0,
+              variance = 0,
+              handover_cash = 0,
+              reconciliation_status = 'UNVERIFIED_AUTO_CLOSED',
+              notes = ${mergedNotes},
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = ${olderShift.id}
+            AND tenant_id = ${olderShift.tenant_id}
+        `.execute(db);
+      } else {
+        await sql`
+          UPDATE cashier_shifts
+          SET status = 'CLOSED',
+              ended_at = ${endIso},
+              expected_cash = ${expectedCash.toString()},
+              actual_cash = 0,
+              variance = 0,
+              handover_cash = 0,
+              notes = ${mergedNotes},
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = ${olderShift.id}
+            AND tenant_id = ${olderShift.tenant_id}
+        `.execute(db);
+      }
     }
   }
 

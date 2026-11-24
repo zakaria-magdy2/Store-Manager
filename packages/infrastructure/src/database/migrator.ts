@@ -35,6 +35,7 @@ import * as systemLicensingGuard from './migrations/029_system_licensing_guard.j
 import * as editablePurchasesPaymentsExpenses from './migrations/030_editable_purchases_payments_expenses.js';
 import * as passwordResetTokens from './migrations/031_password_reset_tokens.js';
 import * as singleOpenShiftPerStore from './migrations/032_single_open_shift_per_store.js';
+import * as shiftReconciliationStatus from './migrations/033_shift_reconciliation_status.js';
 
 const MIGRATION_REGISTRY: Record<string, Migration> = {
   '001_initial_foundation': {
@@ -164,6 +165,10 @@ const MIGRATION_REGISTRY: Record<string, Migration> = {
   '032_single_open_shift_per_store': {
     up: singleOpenShiftPerStore.up,
     down: singleOpenShiftPerStore.down,
+  },
+  '033_shift_reconciliation_status': {
+    up: shiftReconciliationStatus.up,
+    down: shiftReconciliationStatus.down,
   },
 };
 

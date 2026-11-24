@@ -2890,7 +2890,7 @@ function shiftsView() {
         <strong class="${BigInt(summary.totalVariance ?? '0') === 0n ? 'text-green' : BigInt(summary.totalVariance ?? '0') > 0n ? 'text-blue table-total' : 'text-rose table-total'}">
           ${BigInt(summary.totalVariance ?? '0') === 0n ? 'متطابق (0.00)' : format(summary.totalVariance ?? '0')}
         </strong>
-        <small>فروقات الجرد الفعلي</small>
+        <small>${Number(summary.unverifiedShiftsCount ?? 0) > 0 ? `فروقات الجرد الفعلي (باستثناء ${Number(summary.unverifiedShiftsCount)} شيفت مغلق آليًا غير متحقق)` : 'فروقات الجرد الفعلي'}</small>
       </div>
     </div>
 
@@ -2923,7 +2923,8 @@ function shiftsView() {
             </thead>
             <tbody>
               ${shifts.map((s) => {
-                const varianceNum = BigInt(s.variance || '0');
+                const isUnverified = s.reconciliationStatus === 'UNVERIFIED_AUTO_CLOSED' || (s.status === 'CLOSED' && s.isCashCountVerified === false);
+                const varianceNum = s.variance !== null && s.variance !== undefined ? BigInt(s.variance || '0') : 0n;
                 const varianceBadge = varianceNum === 0n
                   ? '<span class="status-pill status-complete">متطابق ✓</span>'
                   : varianceNum > 0n
@@ -2945,9 +2946,9 @@ function shiftsView() {
                     </td>
                     ${!isCashier ? `<td><strong class="table-total text-purple">${format(s.grossProfit ?? '0')}</strong></td>` : ''}
                     <td class="table-total">${format(s.expectedCash)}</td>
-                    <td><strong class="${s.status === 'OPEN' ? '' : 'table-total'}">${s.status === 'OPEN' ? '—' : format(s.actualCash)}</strong></td>
-                    <td class="cell-center">${s.status === 'OPEN' ? '<span class="status-pill">قيد العمل</span>' : varianceBadge}</td>
-                    <td><strong class="table-total">${format(s.handoverCash)}</strong></td>
+                    <td>${s.status === 'OPEN' ? '<strong>—</strong>' : isUnverified ? '<span class="text-muted">غير معدود</span>' : `<strong class="table-total">${format(s.actualCash)}</strong>`}</td>
+                    <td class="cell-center">${s.status === 'OPEN' ? '<span class="status-pill">قيد العمل</span>' : isUnverified ? '<span class="status-pill status-low" title="أُغلق آليًا عند الترقية بدون جرد فعلي ولا يدخل في إجمالي الفروقات">إغلاق آلي — غير متحقق نقديًا</span>' : varianceBadge}</td>
+                    <td>${s.status === 'OPEN' || isUnverified ? '<span class="text-muted">—</span>' : `<strong class="table-total">${format(s.handoverCash)}</strong>`}</td>
                     <td class="cell-center">
                       <button type="button" class="button button-sm button-secondary view-shift-sales-btn" data-shift-id="${s.id}" data-shift-number="${escapeHtml(s.shiftNumber)}">
                         عرض الفواتير (${s.salesCount})

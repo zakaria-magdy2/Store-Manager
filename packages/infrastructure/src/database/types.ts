@@ -442,6 +442,7 @@ export interface CashierShiftsTable {
   variance: Generated<bigint>;
   handover_cash: Generated<bigint>;
   status: Generated<'OPEN' | 'CLOSED'>;
+  reconciliation_status: Generated<'OPEN' | 'VERIFIED' | 'UNVERIFIED_AUTO_CLOSED'>;
   notes: string | null;
   start_idempotency_key: Generated<string | null>;
   close_idempotency_key: Generated<string | null>;
