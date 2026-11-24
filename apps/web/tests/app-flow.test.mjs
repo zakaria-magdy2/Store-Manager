@@ -900,6 +900,18 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   cookie = cashierLogin2.response.headers.get('set-cookie').split(';')[0];
 
   const tzOffset = -120;
+  // Close any open owner shift before cashier starts shifts (only 1 open shift allowed per store)
+  cookie = ownerCookieAfter;
+  const ownerOpenBeforeCashier = await request(`/api/data?storeId=${storeId}&tzOffset=${tzOffset}`);
+  if (ownerOpenBeforeCashier.payload.activeShift?.id) {
+    const closeOwnerFirst = await request('/api/shifts/end', {
+      method: 'POST',
+      body: { shiftId: ownerOpenBeforeCashier.payload.activeShift.id, actualCash: '0', handoverCash: '0' },
+    });
+    assert.equal(closeOwnerFirst.response.status, 200);
+  }
+  cookie = cashierLogin2.response.headers.get('set-cookie').split(';')[0];
+
   const checkInRes = await request('/api/attendance/check-in', { method: 'POST', body: { tzOffset } });
   assert.ok(checkInRes.response.status === 200 || checkInRes.response.status === 201);
   const repeatCheckInRes = await request('/api/attendance/check-in', { method: 'POST', body: { tzOffset } });
@@ -913,6 +925,8 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.equal(endShift1.response.status, 200);
   const shift2 = await request('/api/shifts/start', { method: 'POST', body: { storeId, openingCash: '0', tzOffset } });
   assert.equal(shift2.response.status, 201, JSON.stringify(shift2.payload));
+  const endShift2 = await request('/api/shifts/end', { method: 'POST', body: { shiftId: shift2.payload.shift.id, actualCash: '0', handoverCash: '0' } });
+  assert.equal(endShift2.response.status, 200);
 
   cookie = ownerCookieAfter;
   // Owner starts (or restarts) a shift too; owner shift starts must never inflate employee presentCount.
@@ -2448,7 +2462,7 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
     const shift1Id = createdShifts[0].payload.shift.id;
     assert.ok(startBurst.every((r) => r.payload.shift.id === shift1Id));
 
-    // Also verify cashier starts shift concurrently with different keys (distinct shift, 1 per user max)
+    // Only ONE open shift is allowed per store at a time: cashier cannot open a second shift while owner's shift is OPEN
     const cashierStartBurst = await Promise.all(
       Array.from({ length: 5 }, () => sReq('/api/shifts/start', {
         method: 'POST',
@@ -2456,8 +2470,7 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
         body: { storeId, openingCash: '0' },
       })),
     );
-    assert.equal(cashierStartBurst.filter((r) => r.response.status === 201).length, 1);
-    assert.equal(cashierStartBurst.filter((r) => r.response.status === 409).length, 4);
+    assert.equal(cashierStartBurst.filter((r) => r.response.status === 409).length, 5, 'Second open shift in the same store must be blocked with 409');
 
     // 5 parallel identical supplier payments with SAME idempotencyKey -> 1 payment applied
     const payKey = randomUUID();
@@ -2609,7 +2622,7 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
     assert.equal(checkShoe44Inv.quantity, '1', 'Failed exchange must roll back Shoe44 & return completely');
 
     // -------------------------------------------------------------------------
-    // SCENARIO 5: Concurrent Last-Item Sale between 2 separate tabs/sessions (Owner & Cashier)
+    // SCENARIO 5: Concurrent Last-Item Sale between 2 separate tabs on the active shift
     // -------------------------------------------------------------------------
     const [tab1, tab2] = await Promise.all([
       sReq('/api/checkout', {
@@ -2619,7 +2632,7 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
       }),
       sReq('/api/checkout', {
         method: 'POST',
-        cookieStr: cashierCookie,
+        cookieStr: ownerCookie,
         body: { storeId, idempotencyKey: randomUUID(), items: [{ variantId: varLast, quantity: '1' }], payment: { method: 'CASH', amount: '20000' } },
       }),
     ]);
@@ -2751,6 +2764,20 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
       })).response.status,
       403,
     );
+
+    // Close owner's shift #2 and open cashier's shift before cashier executes a sale & return
+    const closeSh2 = await sReq('/api/shifts/end', {
+      method: 'POST',
+      cookieStr: ownerCookie,
+      body: { shiftId: shift2Id, actualCash: '0', handoverCash: '0' },
+    });
+    assert.equal(closeSh2.response.status, 200);
+    const openCashierSh = await sReq('/api/shifts/start', {
+      method: 'POST',
+      cookieStr: cashierCookie,
+      body: { storeId, openingCash: '0' },
+    });
+    assert.equal(openCashierSh.response.status, 201);
 
     // Cashier executes a normal customer return via explicit POS_REFUND permission
     const cashierSaleRes = await sReq('/api/checkout', {

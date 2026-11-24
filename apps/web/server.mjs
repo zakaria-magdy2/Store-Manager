@@ -5821,19 +5821,19 @@ async function handleApi(req, res, url) {
 
   if (method === 'GET' && path === '/api/data') return json(res, 200, await currentData(ctx, url));
 
-function computeShiftDrawerMovements(rawDb, tenantId, storeId, userId, startIso, endIso = null) {
+function computeShiftDrawerMovements(rawDb, tenantId, storeId, startIso, endIso = null) {
   const rows = rawDb.prepare(`
     SELECT je.source_type AS sourceType,
       COALESCE(SUM(CASE WHEN jl.entry_type = 'DEBIT' THEN jl.amount ELSE -jl.amount END), 0) AS netDelta
     FROM journal_entries je
     INNER JOIN journal_lines jl ON jl.journal_entry_id = je.id
     INNER JOIN accounts a ON a.id = jl.account_id
-    WHERE je.tenant_id = ? AND je.store_id = ? AND je.created_by_user_id = ? AND a.account_code = '1010'
+    WHERE je.tenant_id = ? AND je.store_id = ? AND a.account_code = '1010'
       AND je.source_type NOT IN ('SALE', 'RETURN', 'SESSION_CLOSING')
       AND replace(je.created_at, ' ', 'T') >= replace(?, ' ', 'T')
       ${endIso ? "AND replace(je.created_at, ' ', 'T') <= replace(?, ' ', 'T')" : ''}
     GROUP BY je.source_type
-  `).all(...(endIso ? [tenantId, storeId, userId, startIso, endIso] : [tenantId, storeId, userId, startIso]));
+  `).all(...(endIso ? [tenantId, storeId, startIso, endIso] : [tenantId, storeId, startIso]));
 
   let netOtherDrawerDelta = 0n;
   let cashExpensesOut = 0n;
@@ -5910,7 +5910,7 @@ if (method === 'GET' && path === '/api/shifts/current') {
     }
 
     const openingCashMinor = BigInt(openShift.opening_cash ?? 0);
-    const drawerMov = computeShiftDrawerMovements(rawDb, ctx.tenantId, storeId, ctx.userId, openShift.started_at);
+    const drawerMov = computeShiftDrawerMovements(rawDb, ctx.tenantId, storeId, openShift.started_at);
     const expectedCashMinor = openingCashMinor + cashSalesMinor - cashReturnsMinor + drawerMov.netOtherDrawerDelta;
 
     return json(res, 200, {
@@ -5976,36 +5976,62 @@ if (method === 'GET' && path === '/api/shifts/current') {
         }
       }
 
-      const existing = await trx
+      const existingStoreShift = await trx
+        .selectFrom('cashier_shifts as cs')
+        .leftJoin('users as u', (join) => join.onRef('u.id', '=', 'cs.user_id').onRef('u.tenant_id', '=', 'cs.tenant_id'))
+        .select(['cs.id', 'cs.user_id', 'cs.shift_number', 'u.full_name', 'u.username'])
+        .where('cs.tenant_id', '=', ctx.tenantId)
+        .where('cs.store_id', '=', storeId)
+        .where('cs.status', '=', 'OPEN')
+        .executeTakeFirst();
+      if (existingStoreShift) {
+        if (existingStoreShift.user_id === ctx.userId) {
+          throw Object.assign(new Error('يوجد شيفت مفتوح بالفعل لك. يجب إنهاؤه أولاً.'), { status: 409 });
+        }
+        const openerName = existingStoreShift.full_name || existingStoreShift.username || 'مستخدم آخر';
+        throw Object.assign(
+          new Error(`يوجد شيفت مفتوح حاليًا في هذا الفرع (${existingStoreShift.shift_number} — بواسطة ${openerName}). يجب إغلاقه أولًا قبل فتح شيفت جديد.`),
+          { status: 409 },
+        );
+      }
+
+      const existingUserShift = await trx
         .selectFrom('cashier_shifts')
         .select('id')
         .where('tenant_id', '=', ctx.tenantId)
         .where('user_id', '=', ctx.userId)
         .where('status', '=', 'OPEN')
         .executeTakeFirst();
-      if (existing) {
+      if (existingUserShift) {
         throw Object.assign(new Error('يوجد شيفت مفتوح بالفعل لك. يجب إنهاؤه أولاً.'), { status: 409 });
       }
 
       const shiftId = randomUUID();
       const shiftNumber = await generateNextShiftNumber(ctx.tenantId, trx);
-      await trx
-        .insertInto('cashier_shifts')
-        .values({
-          id: shiftId,
-          shift_number: shiftNumber,
-          tenant_id: ctx.tenantId,
-          store_id: storeId,
-          user_id: ctx.userId,
-          started_at: nowIso,
-          opening_cash: openingCash,
-          status: 'OPEN',
-          notes,
-          start_idempotency_key: startIdempotencyKey,
-          created_at: nowIso,
-          updated_at: nowIso,
-        })
-        .execute();
+      try {
+        await trx
+          .insertInto('cashier_shifts')
+          .values({
+            id: shiftId,
+            shift_number: shiftNumber,
+            tenant_id: ctx.tenantId,
+            store_id: storeId,
+            user_id: ctx.userId,
+            started_at: nowIso,
+            opening_cash: openingCash,
+            status: 'OPEN',
+            notes,
+            start_idempotency_key: startIdempotencyKey,
+            created_at: nowIso,
+            updated_at: nowIso,
+          })
+          .execute();
+      } catch (err) {
+        if (String(err?.message ?? '').includes('UNIQUE constraint failed')) {
+          throw Object.assign(new Error('يوجد شيفت مفتوح حاليًا في هذا الفرع. يجب إغلاقه أولًا قبل فتح شيفت جديد.'), { status: 409 });
+        }
+        throw err;
+      }
 
       return {
         replay: false,
@@ -6127,7 +6153,7 @@ if (method === 'GET' && path === '/api/shifts/current') {
       }
 
       const openingCashMinor = BigInt(shift.opening_cash ?? 0);
-      const drawerMov = computeShiftDrawerMovements(rawDb, ctx.tenantId, shift.store_id, shift.user_id, shift.started_at, nowIso);
+      const drawerMov = computeShiftDrawerMovements(rawDb, ctx.tenantId, shift.store_id, shift.started_at, nowIso);
       const expectedCashMinor = openingCashMinor + cashSalesMinor - cashReturnsMinor + drawerMov.netOtherDrawerDelta;
       const varianceMinor = actualCash - expectedCashMinor;
 
@@ -6300,7 +6326,7 @@ if (method === 'GET' && path === '/api/shifts/current') {
             ))
         `).get(ctx.tenantId, row.store_id, row.started_at, endTime, row.user_id, ctx.tenantId, row.store_id, row.user_id, row.started_at, endTime);
         const cashReturnsMinor = BigInt(cashReturnsDuringOpenRow?.total ?? 0);
-        const drawerMov = computeShiftDrawerMovements(rawDb, ctx.tenantId, row.store_id, row.user_id, row.started_at, endTime);
+        const drawerMov = computeShiftDrawerMovements(rawDb, ctx.tenantId, row.store_id, row.started_at, endTime);
         expectedCashMinor = BigInt(row.opening_cash ?? 0) + cashSalesMinor - cashReturnsMinor + drawerMov.netOtherDrawerDelta;
       }
 
