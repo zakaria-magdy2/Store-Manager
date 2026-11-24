@@ -10,6 +10,7 @@ import { User } from '@retailos/core';
 import { sql } from 'kysely';
 import { up as employeeProfileMigration } from '../src/database/migrations/015_employee_profiles.js';
 import { up as attendanceScheduleMigration } from '../src/database/migrations/020_attendance_schedule.js';
+import { up as singleOpenShiftPerStoreMigration } from '../src/database/migrations/032_single_open_shift_per_store.js';
 
 describe('SQLite Database & Migration Engine', () => {
   let dbManager: SqliteDatabaseManager;
@@ -709,5 +710,192 @@ describe('SQLite Database & Migration Engine', () => {
     expect(netMap.get('6090')).toBe(13300n);
     expect(netMap.get('2020')).toBe(0n);
     expect(netMap.get('1010')).toBe(-13300n);
+  });
+
+  it('Migration 032: reconciles and closes older duplicate OPEN shifts per store with exact expected/actual cash and enforces unique open shift per store', async () => {
+    const migrator = new DatabaseMigrator(dbManager.getDb());
+    await migrator.migrateToLatest();
+    const db = dbManager.getDb();
+
+    // Simulate pre-032 state by dropping the unique index and inserting 2 overlapping OPEN shifts in the same store
+    await sql`DROP INDEX IF EXISTS idx_cashier_shifts_one_open_per_store;`.execute(db);
+
+    const tenantId = 'ten-m32';
+    const storeId = 'st-m32';
+    const cashier1Id = 'usr-m32-c1';
+    const cashier2Id = 'usr-m32-c2';
+
+    await db.insertInto('tenants').values({ id: tenantId, name: 'Shift Upgrade Co', code: 'SH32', currency: 'EGP' }).execute();
+    await db.insertInto('stores').values({ id: storeId, tenant_id: tenantId, name: 'Main Branch', code: 'BR32' }).execute();
+    await db.insertInto('users').values([
+      { id: cashier1Id, tenant_id: tenantId, store_id: storeId, username: 'c1_m32', password_hash: 'h', full_name: 'Cashier 1', role: 'CASHIER', is_active: 1 },
+      { id: cashier2Id, tenant_id: tenantId, store_id: storeId, username: 'c2_m32', password_hash: 'h', full_name: 'Cashier 2', role: 'CASHIER', is_active: 1 },
+    ]).execute();
+    await db.insertInto('accounts').values([
+      { id: 'acc-32-1010', tenant_id: tenantId, account_code: '1010', account_name: 'Cash Drawer', account_type: 'ASSET', normal_balance: 'DEBIT' },
+      { id: 'acc-32-6090', tenant_id: tenantId, account_code: '6090', account_name: 'Operating Expense', account_type: 'EXPENSE', normal_balance: 'DEBIT' },
+    ]).execute();
+    await db.insertInto('accounting_periods').values({
+      id: 'ten-m32:period:2026-11',
+      tenant_id: tenantId,
+      name: '2026-11',
+      start_date: '2026-11-01',
+      end_date: '2026-11-30',
+      status: 'OPEN',
+      closed_at: null,
+      closed_by_user_id: null,
+    }).execute();
+
+    // Older shift: started at 08:00 with 1000.00 EGP (100000 piasters)
+    // Newer shift: started at 16:00 with 1300.00 EGP (130000 piasters)
+    // Schema defaults set expected_cash/actual_cash/variance/handover_cash to 0 while OPEN.
+    await db.insertInto('cashier_shifts').values([
+      {
+        id: 'shift-old',
+        shift_number: 'SH-001',
+        tenant_id: tenantId,
+        store_id: storeId,
+        user_id: cashier1Id,
+        started_at: '2026-11-20T08:00:00.000Z',
+        ended_at: null,
+        opening_cash: 100000n,
+        expected_cash: 0n,
+        actual_cash: 0n,
+        variance: 0n,
+        handover_cash: 0n,
+        status: 'OPEN',
+        notes: 'وردية صباحية',
+      },
+      {
+        id: 'shift-new',
+        shift_number: 'SH-002',
+        tenant_id: tenantId,
+        store_id: storeId,
+        user_id: cashier2Id,
+        started_at: '2026-11-20T16:00:00.000Z',
+        ended_at: null,
+        opening_cash: 130000n,
+        expected_cash: 0n,
+        actual_cash: 0n,
+        variance: 0n,
+        handover_cash: 0n,
+        status: 'OPEN',
+        notes: 'وردية مسائية',
+      },
+    ]).execute();
+
+    // Activity during older shift [08:00, 16:00):
+    // +500.00 EGP net cash sale (60000 paid - 10000 change = 50000)
+    // -100.00 EGP cash customer return (10000)
+    // -100.00 EGP cash drawer expense on account 1010 (10000)
+    // Expected cash at 16:00 = 100000 + 50000 - 10000 - 10000 = 130000 piasters
+    await db.insertInto('sales').values({
+      id: 'sale-32-1',
+      tenant_id: tenantId,
+      store_id: storeId,
+      sale_number: 'INV-32-1',
+      idempotency_key: 'idem-sale-32-1',
+      customer_name: null,
+      currency: 'EGP',
+      subtotal: 50000n,
+      discount_total: 0n,
+      total: 50000n,
+      paid_total: 60000n,
+      change_given: 10000n,
+      cashier_user_id: cashier1Id,
+      status: 'COMPLETED',
+      created_at: '2026-11-20T10:00:00.000Z',
+    }).execute();
+    await db.insertInto('sale_payments').values({
+      id: 'sp-32-1',
+      sale_id: 'sale-32-1',
+      tenant_id: tenantId,
+      tender_index: 0,
+      method: 'CASH',
+      amount: 60000n,
+      created_at: '2026-11-20T10:00:00.000Z',
+    }).execute();
+
+    await db.insertInto('journal_entries').values([
+      {
+        id: 'je-32-ret',
+        tenant_id: tenantId,
+        store_id: storeId,
+        period_id: 'ten-m32:period:2026-11',
+        entry_number: 'J-32-1',
+        entry_date: '2026-11-20',
+        source_type: 'RETURN',
+        source_id: 'ret-32-1',
+        idempotency_key: 'idem-je-32-ret',
+        status: 'POSTED',
+        reversed_by_entry_id: null,
+        created_at: '2026-11-20T11:00:00.000Z',
+        created_by_user_id: cashier1Id,
+      },
+      {
+        id: 'je-32-exp',
+        tenant_id: tenantId,
+        store_id: storeId,
+        period_id: 'ten-m32:period:2026-11',
+        entry_number: 'J-32-2',
+        entry_date: '2026-11-20',
+        source_type: 'EXPENSE',
+        source_id: 'exp-32-1',
+        idempotency_key: 'idem-je-32-exp',
+        status: 'POSTED',
+        reversed_by_entry_id: null,
+        created_at: '2026-11-20T12:00:00.000Z',
+        created_by_user_id: cashier1Id,
+      },
+    ]).execute();
+    await db.insertInto('journal_lines').values([
+      { id: 'jl-32-1', journal_entry_id: 'je-32-exp', account_id: 'acc-32-6090', entry_type: 'DEBIT', amount: 10000n, currency: 'EGP', memo: 'Exp' },
+      { id: 'jl-32-2', journal_entry_id: 'je-32-exp', account_id: 'acc-32-1010', entry_type: 'CREDIT', amount: 10000n, currency: 'EGP', memo: 'Drawer out' },
+    ]).execute();
+    await db.insertInto('customer_returns').values({
+      id: 'ret-32-1',
+      tenant_id: tenantId,
+      store_id: storeId,
+      original_sale_id: 'sale-32-1',
+      return_number: 'RET-32-1',
+      idempotency_key: 'idem-ret-32-1',
+      refund_amount: 10000n,
+      currency: 'EGP',
+      payment_method: 'CASH',
+      journal_entry_id: 'je-32-ret',
+      created_by_user_id: cashier1Id,
+      created_at: '2026-11-20T11:00:00.000Z',
+    }).execute();
+
+    // Run Migration 032
+    await singleOpenShiftPerStoreMigration(db);
+
+    const oldShift = await db.selectFrom('cashier_shifts').selectAll().where('id', '=', 'shift-old').executeTakeFirstOrThrow();
+    const newShift = await db.selectFrom('cashier_shifts').selectAll().where('id', '=', 'shift-new').executeTakeFirstOrThrow();
+
+    expect(oldShift.status).toBe('CLOSED');
+    expect(oldShift.ended_at).toBe('2026-11-20T16:00:00.000Z');
+    expect(BigInt(oldShift.expected_cash ?? -1)).toBe(130000n);
+    expect(BigInt(oldShift.actual_cash ?? -1)).toBe(130000n);
+    expect(BigInt(oldShift.variance ?? -1)).toBe(0n);
+    expect(BigInt(oldShift.handover_cash ?? -1)).toBe(130000n);
+    expect(oldShift.notes).toContain('تسوية وإغلاق تلقائي عند الترقية (032)');
+
+    expect(newShift.status).toBe('OPEN');
+    expect(newShift.ended_at).toBeNull();
+
+    // Unique index now rejects any second OPEN shift in the same store
+    await expect(
+      db.insertInto('cashier_shifts').values({
+        id: 'shift-dup',
+        shift_number: 'SH-003',
+        tenant_id: tenantId,
+        store_id: storeId,
+        user_id: cashier1Id,
+        started_at: '2026-11-20T18:00:00.000Z',
+        opening_cash: 50000n,
+        status: 'OPEN',
+      }).execute(),
+    ).rejects.toThrow();
   });
 });

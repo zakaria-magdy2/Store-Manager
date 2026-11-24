@@ -53,6 +53,7 @@ import {
   postJournalEntry,
   applyStockMovementInTransaction,
   allocateDocumentNumberInTransaction,
+  recordAuditLogInTransaction,
   LicenseEnforcementError,
   LicenseHardwareIdentityError,
   LicenseService,
@@ -813,6 +814,23 @@ async function recordAudit(ctx, details) {
   });
 }
 
+async function recordAuditInTrx(trx, ctx, details) {
+  const actor = details.actorUsername
+    ? { username: details.actorUsername }
+    : await trx.selectFrom('users').select('username').where('tenant_id', '=', ctx.tenantId).where('id', '=', ctx.userId).executeTakeFirst();
+  await recordAuditLogInTransaction(trx, ctx, {
+    storeId: details.storeId ?? ctx.storeId ?? null,
+    actorUserId: details.actorUserId === undefined ? (ctx.userId === 'system' ? null : ctx.userId) : details.actorUserId,
+    actorUsername: actor?.username ?? 'system',
+    actorRole: details.actorRole ?? ctx.roleId,
+    action: details.action,
+    entityType: details.entityType,
+    entityId: details.entityId ?? null,
+    summary: details.summary,
+    metadata: details.metadata ?? {},
+  });
+}
+
 if ((await tenantRepo.listAll()).length === 0) {
   const tenantId = randomUUID();
   await db.transaction().execute(async (trx) => {
@@ -1043,7 +1061,10 @@ const CommitStocktakeSchema = z.object({
   notes: z.string().max(500).trim().optional().nullable(),
 });
 const BackupSettingsSchema = z.object({ mirrorPath: z.string().max(500).trim().default(''), autoMirror: z.boolean().default(true) });
-const DailyRestoreSchema = z.object({ filename: z.string().regex(/^retailos-daily-\d{4}-\d{2}-\d{2}\.(rfbackup|sqlite)$/) });
+const DailyRestoreSchema = z.object({
+  filename: z.string().regex(/^retailos-daily-\d{4}-\d{2}-\d{2}\.(rfbackup|sqlite)$/),
+  passphrase: z.string().min(12).max(256).optional(),
+});
 const DailyKeyExportSchema = z.object({ currentPassword: z.string().min(1).max(128) });
 const DailyMasterKeySchema = z.object({
   currentPassword: z.string().min(1).max(128),
@@ -1568,8 +1589,33 @@ async function loadPurchaseEntries(tenantId, purchaseRows, userMap) {
     const purchasePayments = paymentsByPurchase.get(purchase.id) ?? [];
     const activePurchasePayments = purchasePayments.filter((payment) => !payment.deleted_at);
     const purchaseReturns = returnsByPurchase.get(purchase.id) ?? [];
-    const paid = effectiveLegacyInitialPaid(purchase, purchasePayments) + activePurchasePayments.reduce((sum, payment) => sum + BigInt(payment.amount), 0n);
+    const legacyInitialMinor = effectiveLegacyInitialPaid(purchase, purchasePayments);
+    const paid = legacyInitialMinor + activePurchasePayments.reduce((sum, payment) => sum + BigInt(payment.amount), 0n);
     const returnCredit = purchaseReturns.reduce((sum, item) => sum + BigInt(item.credit_amount), 0n);
+    const serializedPayments = [
+      ...(legacyInitialMinor > 0n
+        ? [{
+            id: `${purchase.id}:payment:initial`,
+            amount: moneyJson(Money.fromMinor(legacyInitialMinor, purchase.currency)),
+            paymentMethod: 'CASH',
+            referenceNumber: null,
+            paidAt: purchase.purchased_at,
+            updatedAt: null,
+            createdByUserId: purchase.created_by_user_id,
+            createdByName: userMap.get(purchase.created_by_user_id) || 'المسؤول',
+          }]
+        : []),
+      ...activePurchasePayments.map((payment) => ({
+        id: payment.id,
+        amount: moneyJson(Money.fromMinor(BigInt(payment.amount), payment.currency)),
+        paymentMethod: payment.payment_method,
+        referenceNumber: payment.reference_number,
+        paidAt: payment.paid_at,
+        updatedAt: latestEditByPaymentId.get(payment.id) ?? null,
+        createdByUserId: payment.created_by_user_id,
+        createdByName: userMap.get(payment.created_by_user_id) || 'المسؤول',
+      })),
+    ];
     return {
       id: purchase.id,
       supplierId: purchase.supplier_id,
@@ -1596,16 +1642,7 @@ async function loadPurchaseEntries(tenantId, purchaseRows, userMap) {
           retailPrice: line.retail_price !== null && line.retail_price !== undefined ? moneyJson(Money.fromMinor(BigInt(line.retail_price), line.currency)) : null,
         };
       }),
-      payments: activePurchasePayments.map((payment) => ({
-        id: payment.id,
-        amount: moneyJson(Money.fromMinor(BigInt(payment.amount), payment.currency)),
-        paymentMethod: payment.payment_method,
-        referenceNumber: payment.reference_number,
-        paidAt: payment.paid_at,
-        updatedAt: latestEditByPaymentId.get(payment.id) ?? null,
-        createdByUserId: payment.created_by_user_id,
-        createdByName: userMap.get(payment.created_by_user_id) || 'المسؤول',
-      })),
+      payments: serializedPayments,
       returns: purchaseReturns.map((item) => ({ id: item.id, returnNumber: item.return_number, creditAmount: moneyJson(Money.fromMinor(BigInt(item.credit_amount), item.currency)), createdAt: item.created_at })),
     };
   });
@@ -4533,8 +4570,8 @@ async function currentData(ctx, url) {
 
   const rawDatabase = database.getRawDatabase();
   const activeShiftRow = rawDatabase.prepare(
-    "SELECT id, shift_number as shiftNumber, started_at as startedAt, opening_cash as openingCash, notes FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' ORDER BY started_at DESC LIMIT 1"
-  ).get(ctx.tenantId, ctx.userId);
+    "SELECT id, shift_number as shiftNumber, user_id as userId, started_at as startedAt, opening_cash as openingCash, notes FROM cashier_shifts WHERE tenant_id = ? AND (store_id = ? OR user_id = ?) AND status = 'OPEN' ORDER BY CASE WHEN user_id = ? THEN 0 ELSE 1 END, started_at DESC LIMIT 1"
+  ).get(ctx.tenantId, storeId, ctx.userId, ctx.userId);
   const rawTodayAttendanceRows = rawDatabase.prepare(
     "SELECT actor_user_id AS userId, actor_username AS username, actor_role AS actorRole, created_at AS createdAt, summary FROM audit_logs WHERE tenant_id = ? AND action = 'ATTENDANCE_CHECK_IN' AND created_at >= ? AND created_at < ? ORDER BY sequence_no ASC"
   ).all(ctx.tenantId, todayBounds.startIso, todayBounds.endIso);
@@ -4575,8 +4612,9 @@ async function currentData(ctx, url) {
     });
   }
   const todayAttendance = [...todayAttendanceMap.values()];
-  const userCheckedInToday = Boolean(userCheckedInRecord || activeShiftRow);
-  const userCheckInTime = userCheckedInRecord?.createdAt ?? activeShiftRow?.startedAt ?? null;
+  const userOwnOpenShift = activeShiftRow && activeShiftRow.userId === ctx.userId ? activeShiftRow : null;
+  const userCheckedInToday = Boolean(userCheckedInRecord || userOwnOpenShift);
+  const userCheckInTime = userCheckedInRecord?.createdAt ?? userOwnOpenShift?.startedAt ?? null;
   const existingOpeningEntry = canViewAccounting
     ? await db.selectFrom('journal_entries')
         .select(['id', 'entry_number as entryNumber', 'entry_date as entryDate'])
@@ -5719,7 +5757,10 @@ async function handleApi(req, res, url) {
     try {
       if (body.filename.endsWith('.rfbackup')) {
         let lastRestoreError = null;
-        for (const passphrase of resolveDailyBackupCandidatePassphrases()) {
+        const candidatePassphrases = body.passphrase
+          ? [body.passphrase, ...resolveDailyBackupCandidatePassphrases()]
+          : resolveDailyBackupCandidatePassphrases();
+        for (const passphrase of candidatePassphrases) {
           try {
             preparedRestore = await prepareEncryptedSqliteRestore(targetPath, dataDir, passphrase, { deviceLicenseState });
             break;
@@ -5732,7 +5773,10 @@ async function handleApi(req, res, url) {
         preparedRestore = await preparePlainSqliteRestore(targetPath, dataDir, { deviceLicenseState });
       }
     } catch {
-      throw Object.assign(new Error('ملف النسخة اليومية تالف أو غير متوافق مع إصدار قاعدة البيانات'), { status: 400 });
+      throw Object.assign(
+        new Error('تعذر فك تشفير النسخة اليومية (قد تكون منشأة بمفتاح جهاز آخر — استخدم استعادة ملف مشفر وأدخل مفتاح الاستعادة الرئيسي، أو الملف تالف)'),
+        { status: 400 },
+      );
     }
     let restartRequired = false;
     let restoreInstallStarted = false;
@@ -5888,9 +5932,12 @@ function computeShiftDrawerMovements(rawDb, tenantId, storeId, startIso, endIso 
 
 if (method === 'GET' && path === '/api/shifts/current') {
     const rawDb = database.getRawDatabase();
+    const stores = await storeRepo.listByTenant(ctx);
+    const requestedStore = url.searchParams.get('storeId');
+    const targetStoreId = ctx.storeId ?? requestedStore ?? stores[0]?.id ?? '';
     const openShift = rawDb.prepare(
-      "SELECT * FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' ORDER BY started_at DESC LIMIT 1"
-    ).get(ctx.tenantId, ctx.userId);
+      "SELECT * FROM cashier_shifts WHERE tenant_id = ? AND (user_id = ? OR store_id = ?) AND status = 'OPEN' ORDER BY CASE WHEN user_id = ? THEN 0 ELSE 1 END, started_at DESC LIMIT 1"
+    ).get(ctx.tenantId, ctx.userId, targetStoreId, ctx.userId);
 
     if (!openShift) return json(res, 200, { currentShift: null });
 
@@ -5905,18 +5952,14 @@ if (method === 'GET' && path === '/api/shifts/current') {
         s.change_given,
         COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id AND sp.method != 'CASH'), 0) AS electronic_paid
       FROM sales s
-      WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED' AND s.created_at >= ?
-    `).all(ctx.tenantId, storeId, ctx.userId, openShift.started_at);
+      WHERE s.tenant_id = ? AND s.store_id = ? AND s.status = 'COMPLETED' AND s.created_at >= ?
+    `).all(ctx.tenantId, storeId, openShift.started_at);
 
     const returnsDuringShift = rawDb.prepare(`
       SELECT cr.id, cr.refund_amount, cr.payment_method, cr.idempotency_key
       FROM customer_returns cr
       WHERE cr.tenant_id = ? AND cr.store_id = ? AND cr.created_at >= ?
-        AND (cr.created_by_user_id = ? OR cr.original_sale_id IN (
-          SELECT s.id FROM sales s
-          WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED' AND s.created_at >= ?
-        ))
-    `).all(ctx.tenantId, storeId, openShift.started_at, ctx.userId, ctx.tenantId, storeId, ctx.userId, openShift.started_at);
+    `).all(ctx.tenantId, storeId, openShift.started_at);
 
     let grossSalesMinor = 0n;
     let cashSalesMinor = 0n;
@@ -6059,31 +6102,35 @@ if (method === 'GET' && path === '/api/shifts/current') {
         throw err;
       }
 
+      const tzOffsetMinutes = normalizeTzOffsetMinutes(body?.tzOffset);
+      const todayBounds = localDayUtcBounds(Date.now(), tzOffsetMinutes);
+      const alreadyCheckedInToday = ctx.roleId === 'OWNER'
+        ? true
+        : Boolean(
+            await trx
+              .selectFrom('audit_logs')
+              .select('id')
+              .where('tenant_id', '=', ctx.tenantId)
+              .where('actor_user_id', '=', ctx.userId)
+              .where('action', '=', 'ATTENDANCE_CHECK_IN')
+              .where('created_at', '>=', todayBounds.startIso)
+              .where('created_at', '<', todayBounds.endIso)
+              .executeTakeFirst(),
+          );
+      await recordAuditInTrx(trx, ctx, {
+        storeId,
+        action: alreadyCheckedInToday ? 'SHIFT_STARTED' : 'ATTENDANCE_CHECK_IN',
+        entityType: 'SHIFT',
+        entityId: shiftId,
+        summary: `بدء الشيفت (${shiftNumber}) برصيد افتتاحي ${openingCash.toString()}`,
+        metadata: { shiftNumber, openingCash: openingCash.toString(), occurredAt: nowIso },
+      });
+
       return {
         replay: false,
         shift: { id: shiftId, shiftNumber, startedAt: nowIso, openingCash: openingCash.toString(), status: 'OPEN' },
       };
     });
-
-    if (!txResult.replay) {
-      const tzOffsetMinutes = normalizeTzOffsetMinutes(body?.tzOffset);
-      const todayBounds = localDayUtcBounds(Date.now(), tzOffsetMinutes);
-      const rawDb = database.getRawDatabase();
-      const alreadyCheckedInToday = ctx.roleId === 'OWNER'
-        ? true
-        : Boolean(rawDb.prepare(
-            "SELECT id FROM audit_logs WHERE tenant_id = ? AND actor_user_id = ? AND action = 'ATTENDANCE_CHECK_IN' AND created_at >= ? AND created_at < ? LIMIT 1"
-          ).get(ctx.tenantId, ctx.userId, todayBounds.startIso, todayBounds.endIso));
-
-      await recordAudit(ctx, {
-        storeId,
-        action: alreadyCheckedInToday ? 'SHIFT_STARTED' : 'ATTENDANCE_CHECK_IN',
-        entityType: 'SHIFT',
-        entityId: txResult.shift.id,
-        summary: `بدء الشيفت (${txResult.shift.shiftNumber}) برصيد افتتاحي ${openingCash.toString()}`,
-        metadata: { shiftNumber: txResult.shift.shiftNumber, openingCash: openingCash.toString(), occurredAt: nowIso },
-      });
-    }
 
     return json(res, txResult.replay ? 200 : 201, { shift: txResult.shift });
   }
@@ -6153,21 +6200,16 @@ if (method === 'GET' && path === '/api/shifts/current') {
           COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id AND sp.method = 'CASH'), 0) AS cash_paid,
           s.change_given
         FROM sales s
-        WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
+        WHERE s.tenant_id = ? AND s.store_id = ? AND s.status = 'COMPLETED'
           AND s.created_at >= ? AND s.created_at <= ?
-      `).all(ctx.tenantId, shift.store_id, shift.user_id, shift.started_at, nowIso);
+      `).all(ctx.tenantId, shift.store_id, shift.started_at, nowIso);
 
       const returnsDuringShift = rawDb.prepare(`
         SELECT cr.id, cr.refund_amount, cr.payment_method
         FROM customer_returns cr
         WHERE cr.tenant_id = ? AND cr.store_id = ?
           AND cr.created_at >= ? AND cr.created_at <= ?
-          AND (cr.created_by_user_id = ? OR cr.original_sale_id IN (
-            SELECT s.id FROM sales s
-            WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
-              AND s.created_at >= ? AND s.created_at <= ?
-          ))
-      `).all(ctx.tenantId, shift.store_id, shift.started_at, nowIso, shift.user_id, ctx.tenantId, shift.store_id, shift.user_id, shift.started_at, nowIso);
+      `).all(ctx.tenantId, shift.store_id, shift.started_at, nowIso);
 
       let cashSalesMinor = 0n;
       for (const s of salesDuringShift) {
@@ -6205,6 +6247,21 @@ if (method === 'GET' && path === '/api/shifts/current') {
         throw Object.assign(new Error('هذا الشفت مغلق بالفعل'), { status: 409 });
       }
 
+      await recordAuditInTrx(trx, ctx, {
+        storeId: shift.store_id,
+        action: 'SHIFT_CLOSED',
+        entityType: 'SHIFT',
+        entityId: shift.id,
+        summary: `إنهاء الشيفت (${shift.shift_number}): متوقع ${expectedCashMinor.toString()}، فعلي ${actualCash.toString()}، الفارق ${varianceMinor.toString()}`,
+        metadata: {
+          shiftNumber: shift.shift_number,
+          expectedCash: expectedCashMinor.toString(),
+          actualCash: actualCash.toString(),
+          variance: varianceMinor.toString(),
+          handoverCash: handoverCash.toString(),
+        },
+      });
+
       return {
         replay: false,
         storeId: shift.store_id,
@@ -6225,14 +6282,6 @@ if (method === 'GET' && path === '/api/shifts/current') {
     });
 
     if (!txResult.replay) {
-      await recordAudit(ctx, {
-        storeId: txResult.storeId,
-        action: 'SHIFT_CLOSED',
-        entityType: 'SHIFT',
-        entityId: txResult.shift.id,
-        summary: `إنهاء الشيفت (${txResult.shift.shiftNumber}): متوقع ${txResult.shift.expectedCash}، فعلي ${txResult.shift.actualCash}، الفارق ${txResult.shift.variance}`,
-        metadata: { shiftNumber: txResult.shift.shiftNumber, expectedCash: txResult.shift.expectedCash, actualCash: txResult.shift.actualCash, variance: txResult.shift.variance, handoverCash: txResult.shift.handoverCash },
-      });
       void ensureDailyBackup({ force: false, minAgeMs: 60_000, syncMirror: true }).catch(() => undefined);
     }
 
@@ -6301,9 +6350,9 @@ if (method === 'GET' && path === '/api/shifts/current') {
           COALESCE(SUM((SELECT SUM(sp.amount) FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id AND sp.method = 'CASH')), 0) AS cashPaid,
           COALESCE(SUM(s.change_given), 0) AS changeGiven
         FROM sales s
-        WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
+        WHERE s.tenant_id = ? AND s.store_id = ? AND s.status = 'COMPLETED'
           AND s.created_at >= ? AND s.created_at <= ?
-      `).get(ctx.tenantId, row.store_id, row.user_id, row.started_at, endTime);
+      `).get(ctx.tenantId, row.store_id, row.started_at, endTime);
 
       const shiftReturnsQuery = rawDb.prepare(`
         SELECT COALESCE(SUM(cr.refund_amount), 0) AS returnedAmount,
@@ -6312,21 +6361,17 @@ if (method === 'GET' && path === '/api/shifts/current') {
         FROM customer_returns cr
         WHERE cr.tenant_id = ? AND cr.store_id = ?
           AND (
-            (cr.created_at >= ? AND cr.created_at <= ? AND (cr.created_by_user_id = ? OR cr.original_sale_id IN (
-              SELECT s.id FROM sales s
-              WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
-                AND s.created_at >= ? AND s.created_at <= ?
-            )))
+            (cr.created_at >= ? AND cr.created_at <= ?)
             OR (COALESCE(cr.is_exchange, 0) = 0 AND cr.created_at > ? AND cr.original_sale_id IN (
               SELECT s.id FROM sales s
-              WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
+              WHERE s.tenant_id = ? AND s.store_id = ? AND s.status = 'COMPLETED'
                 AND s.created_at >= ? AND s.created_at <= ?
             ))
           )
       `).get(
         ctx.tenantId, row.store_id,
-        row.started_at, endTime, row.user_id, ctx.tenantId, row.store_id, row.user_id, row.started_at, endTime,
-        endTime, ctx.tenantId, row.store_id, row.user_id, row.started_at, endTime,
+        row.started_at, endTime,
+        endTime, ctx.tenantId, row.store_id, row.started_at, endTime,
       );
 
       const grossRev = BigInt(salesQuery?.totalRevenue ?? 0);
@@ -6338,19 +6383,14 @@ if (method === 'GET' && path === '/api/shifts/current') {
       const salesCount = Number(salesQuery?.salesCount ?? 0);
 
       let expectedCashMinor = BigInt(row.expected_cash ?? 0);
-      if (row.status === 'OPEN') {
+      if (row.status === 'OPEN' || row.expected_cash === null || row.expected_cash === undefined) {
         const cashSalesMinor = BigInt(salesQuery?.cashPaid ?? 0) - BigInt(salesQuery?.changeGiven ?? 0);
         const cashReturnsDuringOpenRow = rawDb.prepare(`
           SELECT COALESCE(SUM(cr.refund_amount), 0) AS total
           FROM customer_returns cr
           WHERE cr.tenant_id = ? AND cr.store_id = ? AND cr.payment_method = 'CASH'
             AND cr.created_at >= ? AND cr.created_at <= ?
-            AND (cr.created_by_user_id = ? OR cr.original_sale_id IN (
-              SELECT s.id FROM sales s
-              WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
-                AND s.created_at >= ? AND s.created_at <= ?
-            ))
-        `).get(ctx.tenantId, row.store_id, row.started_at, endTime, row.user_id, ctx.tenantId, row.store_id, row.user_id, row.started_at, endTime);
+        `).get(ctx.tenantId, row.store_id, row.started_at, endTime);
         const cashReturnsMinor = BigInt(cashReturnsDuringOpenRow?.total ?? 0);
         const drawerMov = computeShiftDrawerMovements(rawDb, ctx.tenantId, row.store_id, row.started_at, endTime);
         expectedCashMinor = BigInt(row.opening_cash ?? 0) + cashSalesMinor - cashReturnsMinor + drawerMov.netOtherDrawerDelta;
@@ -6432,10 +6472,10 @@ if (method === 'GET' && path === '/api/shifts/current') {
         COALESCE((SELECT SUM(cri.cost_amount) FROM customer_return_items cri INNER JOIN customer_returns cr ON cr.id = cri.return_id AND cr.tenant_id = cri.tenant_id WHERE cr.tenant_id = s.tenant_id AND cr.store_id = s.store_id AND cr.original_sale_id = s.id AND cr.created_at >= ? AND (cr.created_at <= ? OR COALESCE(cr.is_exchange, 0) = 0)), 0) AS returned_cost,
         COALESCE((SELECT SUM(cri.quantity) FROM customer_return_items cri INNER JOIN customer_returns cr ON cr.id = cri.return_id AND cr.tenant_id = cri.tenant_id WHERE cr.tenant_id = s.tenant_id AND cr.store_id = s.store_id AND cr.original_sale_id = s.id AND cr.created_at >= ? AND (cr.created_at <= ? OR COALESCE(cr.is_exchange, 0) = 0)), 0) AS returned_qty
       FROM sales s
-      WHERE s.tenant_id = ? AND s.store_id = ? AND s.cashier_user_id = ? AND s.status = 'COMPLETED'
+      WHERE s.tenant_id = ? AND s.store_id = ? AND s.status = 'COMPLETED'
         AND s.created_at >= ? AND s.created_at <= ?
       ORDER BY s.created_at DESC
-    `).all(shift.started_at, endTime, shift.started_at, endTime, shift.started_at, endTime, ctx.tenantId, shift.store_id, shift.user_id, shift.started_at, endTime);
+    `).all(shift.started_at, endTime, shift.started_at, endTime, shift.started_at, endTime, ctx.tenantId, shift.store_id, shift.started_at, endTime);
 
     return json(res, 200, {
       currency,
@@ -6791,20 +6831,6 @@ if (method === 'GET' && path === '/api/shifts/current') {
       referenceNumber: body.referenceNumber,
       updatedAt: new Date(),
     });
-    await recordAudit(ctx, {
-      storeId: updated.storeId,
-      action: 'EXPENSE_UPDATED',
-      entityType: 'EXPENSE',
-      entityId: updated.id,
-      summary: `تعديل مصروف (${updated.categoryName}) من ${updated.oldAmount.toString()} إلى ${updated.newAmount.toString()}`,
-      metadata: {
-        oldAmount: updated.oldAmount.toString(),
-        newAmount: updated.newAmount.toString(),
-        oldMethod: updated.oldMethod,
-        newMethod: updated.newMethod,
-        expenseDate: body.expenseDate,
-      },
-    });
     return json(res, 200, { id: updated.id, updated: true });
   }
 
@@ -6814,14 +6840,6 @@ if (method === 'GET' && path === '/api/shifts/current') {
       throw Object.assign(new Error('غير مصرح بحذف المصروفات'), { status: 403 });
     }
     const deleted = await expenses.softDelete(ctx, { expenseId: deleteExpenseMatch[1], deletedAt: new Date() });
-    await recordAudit(ctx, {
-      storeId: deleted.storeId,
-      action: 'EXPENSE_DELETED',
-      entityType: 'EXPENSE',
-      entityId: deleted.id,
-      summary: `حذف وعكس مصروف (${deleted.categoryName}) بقيمة ${deleted.amount.toString()}`,
-      metadata: { expenseDate: deleted.expenseDate, amount: deleted.amount.toString(), paymentMethod: deleted.paymentMethod },
-    });
     return json(res, 200, { id: deleted.id, deleted: true });
   }
 
@@ -7250,8 +7268,10 @@ if (method === 'GET' && path === '/api/shifts/current') {
     const nextInvoice = body.invoiceNumber === undefined ? existing.invoice_number : (body.invoiceNumber || null);
     const nextNotes = body.notes === undefined ? existing.notes : (body.notes || null);
     const nextTarget = body.targetProfitPercent === undefined ? existing.target_profit_percent : body.targetProfitPercent;
-    await db.updateTable('supplier_purchases').set({ invoice_number: nextInvoice, notes: nextNotes, target_profit_percent: nextTarget }).where('tenant_id', '=', ctx.tenantId).where('id', '=', purchaseId).execute();
-    await recordAudit(ctx, { storeId: existing.store_id, action: 'PURCHASE_UPDATED', entityType: 'PURCHASE', entityId: purchaseId, summary: `تعديل بيانات فاتورة الشراء (${nextInvoice ?? purchaseId.slice(0, 8)})`, metadata: { oldInvoiceNumber: existing.invoice_number, newInvoiceNumber: nextInvoice, notes: nextNotes, targetProfitPercent: nextTarget } });
+    await db.transaction().execute(async (trx) => {
+      await trx.updateTable('supplier_purchases').set({ invoice_number: nextInvoice, notes: nextNotes, target_profit_percent: nextTarget }).where('tenant_id', '=', ctx.tenantId).where('id', '=', purchaseId).execute();
+      await recordAuditInTrx(trx, ctx, { storeId: existing.store_id, action: 'PURCHASE_UPDATED', entityType: 'PURCHASE', entityId: purchaseId, summary: `تعديل بيانات فاتورة الشراء (${nextInvoice ?? purchaseId.slice(0, 8)})`, metadata: { oldInvoiceNumber: existing.invoice_number, newInvoiceNumber: nextInvoice, notes: nextNotes, targetProfitPercent: nextTarget } });
+    });
     return json(res, 200, { id: purchaseId, updated: true });
   }
 
@@ -7276,20 +7296,6 @@ if (method === 'GET' && path === '/api/shifts/current') {
         referenceNumber: body.referenceNumber,
         updatedAt: new Date(),
       });
-      await recordAudit(ctx, {
-        storeId: updated.storeId,
-        action: 'SUPPLIER_PAYMENT_UPDATED',
-        entityType: 'SUPPLIER_PAYMENT',
-        entityId: updated.id,
-        summary: `تعديل دفعة سداد لتاجر من ${updated.oldAmount.toString()} إلى ${updated.newAmount.toString()}`,
-        metadata: {
-          purchaseId,
-          oldAmount: updated.oldAmount.toString(),
-          newAmount: updated.newAmount.toString(),
-          oldMethod: updated.oldMethod,
-          newMethod: updated.newMethod,
-        },
-      });
       return json(res, 200, { id: updated.id, updated: true });
     }
     const body = validate(z.object({ idempotencyKey: z.string().uuid().optional() }), await readJson(req));
@@ -7298,14 +7304,6 @@ if (method === 'GET' && path === '/api/shifts/current') {
       purchaseId,
       paymentId,
       deletedAt: new Date(),
-    });
-    await recordAudit(ctx, {
-      storeId: deleted.storeId,
-      action: 'SUPPLIER_PAYMENT_DELETED',
-      entityType: 'SUPPLIER_PAYMENT',
-      entityId: deleted.id,
-      summary: `إلغاء وعكس دفعة سداد لتاجر بقيمة ${deleted.deletedAmount.toString()}`,
-      metadata: { purchaseId, deletedAmount: deleted.deletedAmount.toString(), paymentMethod: deleted.paymentMethod },
     });
     return json(res, 200, { id: deleted.id, deleted: true });
   }
@@ -7322,9 +7320,6 @@ if (method === 'GET' && path === '/api/shifts/current') {
       amount: Money.fromMinor(BigInt(body.amount), tenant.currency),
       paymentMethod: body.paymentMethod, referenceNumber: body.referenceNumber, paidAt: new Date(),
     });
-    if (savedId === id) {
-      await recordAudit(ctx, { action: 'SUPPLIER_PAYMENT_RECORDED', entityType: 'SUPPLIER_PAYMENT', entityId: savedId, summary: `تسجيل دفعة لمورد (${body.amount})`, metadata: { purchaseId: paymentMatch[1], amount: body.amount, paymentMethod: body.paymentMethod } });
-    }
     return json(res, 201, { id: savedId });
   }
 
@@ -7419,19 +7414,18 @@ if (method === 'GET' && path === '/api/shifts/current') {
         created_by_user_id: ctx.userId,
       }).execute();
 
-      return { id: refundId, amount: refundAmount, isReplay: false, remainingCredit: creditAvailable - refundAmount };
-    });
-
-    if (!result.isReplay) {
-      await recordAudit(ctx, {
+      await recordAuditInTrx(trx, ctx, {
         storeId: body.storeId,
         action: 'SUPPLIER_REFUND_RECEIVED',
         entityType: 'SUPPLIER_REFUND',
-        entityId: result.id,
+        entityId: refundId,
         summary: `استلام مبلغ مسترد من تاجر (${body.amount})`,
         metadata: { supplierId, amount: body.amount, paymentMethod: body.paymentMethod },
       });
-    }
+
+      return { id: refundId, amount: refundAmount, isReplay: false, remainingCredit: creditAvailable - refundAmount };
+    });
+
     return json(res, 201, { id: result.id, amount: result.amount.toString(), remainingCredit: (result.remainingCredit ?? 0n).toString() });
   }
 
@@ -7611,8 +7605,15 @@ if (method === 'GET' && path === '/api/shifts/current') {
           { accountCode: body.fromAccount, side: 'CREDIT', amount: amountMinor, memo: `صرف تحويل إلى ${accountLabels[body.toAccount]}` },
         ],
       });
+      await recordAuditInTrx(trx, ctx, {
+        storeId: body.storeId,
+        action: 'TREASURY_TRANSFERRED',
+        entityType: 'TREASURY',
+        entityId: body.idempotencyKey,
+        summary: `تحويل مالي من ${accountLabels[body.fromAccount]} إلى ${accountLabels[body.toAccount]} بقيمة (${body.amount})`,
+        metadata: { fromAccount: body.fromAccount, toAccount: body.toAccount, amount: body.amount, notes: body.notes ?? '' },
+      });
     });
-    await recordAudit(ctx, { storeId: body.storeId, action: 'TREASURY_TRANSFERRED', entityType: 'TREASURY', entityId: body.idempotencyKey, summary: `تحويل مالي من ${accountLabels[body.fromAccount]} إلى ${accountLabels[body.toAccount]} بقيمة (${body.amount})`, metadata: { fromAccount: body.fromAccount, toAccount: body.toAccount, amount: body.amount, notes: body.notes ?? '' } });
     return json(res, 201, {
       transferred: true,
       fromAccount: body.fromAccount,
@@ -7750,19 +7751,25 @@ if (method === 'GET' && path === '/api/shifts/current') {
       });
       const created = await trx.selectFrom('journal_entries').select(['id', 'entry_number'])
         .where('tenant_id', '=', ctx.tenantId).where('idempotency_key', '=', journalKey).executeTakeFirstOrThrow();
-      return { id: created.id, entryNumber: created.entry_number, isReplay: false };
-    });
-
-    if (!entryRes.isReplay) {
-      await recordAudit(ctx, {
+      await recordAuditInTrx(trx, ctx, {
         storeId: body.storeId,
         action: 'OPENING_BALANCE_POSTED',
         entityType: 'JOURNAL_ENTRY',
-        entityId: entryRes.id,
+        entityId: created.id,
         summary: `تسجيل أرصدة افتتاحية بتاريخ ${body.entryDate}`,
-        metadata: { entryNumber: entryRes.entryNumber, cashDrawer: body.cashDrawer, cashSafe: body.cashSafe, bank: body.bank, inventory: body.inventory, supplierPayables: body.supplierPayables, netEquity: netEquity.toString() },
+        metadata: {
+          entryNumber: created.entry_number,
+          cashDrawer: body.cashDrawer,
+          cashSafe: body.cashSafe,
+          bank: body.bank,
+          inventory: body.inventory,
+          supplierPayables: body.supplierPayables,
+          netEquity: netEquity.toString(),
+        },
       });
-    }
+      return { id: created.id, entryNumber: created.entry_number, isReplay: false };
+    });
+
     return json(res, 201, {
       id: entryRes.id,
       entryNumber: entryRes.entryNumber,
@@ -7810,8 +7817,8 @@ if (method === 'GET' && path === '/api/shifts/current') {
     }
     const body = validate(CheckoutSchema, await readJson(req));
     const openShift = database.getRawDatabase().prepare(
-      "SELECT id, store_id FROM cashier_shifts WHERE tenant_id = ? AND user_id = ? AND status = 'OPEN' LIMIT 1"
-    ).get(ctx.tenantId, ctx.userId);
+      "SELECT id, store_id, user_id FROM cashier_shifts WHERE tenant_id = ? AND (store_id = ? OR user_id = ?) AND status = 'OPEN' ORDER BY CASE WHEN store_id = ? THEN 0 ELSE 1 END LIMIT 1"
+    ).get(ctx.tenantId, body.storeId, ctx.userId, body.storeId);
     if (!openShift) {
       throw Object.assign(new Error('يجب بدء الشيفت أولاً قبل إجراء أي عملية بيع'), { status: 403 });
     }

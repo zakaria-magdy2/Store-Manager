@@ -2,6 +2,7 @@ import type { ExecutionContext } from '@retailos/application';
 import type { Kysely } from 'kysely';
 import type { RetailOSDatabase } from '../types.js';
 import { postJournalEntry } from './accounting-journal.executor.js';
+import { recordAuditLogInTransaction } from './sqlite-audit-log.repository.js';
 
 const categories = [
   ['RENT', 'إيجار المحل'],
@@ -174,6 +175,30 @@ export class SqliteExpenseRepository {
         throw Object.assign(new Error('تعذر حذف المصروف لتزامن طلب آخر'), { status: 409 });
       }
 
+      const actor = ctx.userId === 'system'
+        ? undefined
+        : await trx
+            .selectFrom('users')
+            .select('username')
+            .where('tenant_id', '=', ctx.tenantId)
+            .where('id', '=', ctx.userId)
+            .executeTakeFirst();
+      await recordAuditLogInTransaction(trx, ctx, {
+        storeId: row.storeId,
+        actorUserId: ctx.userId === 'system' ? null : ctx.userId,
+        actorUsername: actor?.username ?? 'system',
+        actorRole: ctx.roleId,
+        action: 'EXPENSE_DELETED',
+        entityType: 'EXPENSE',
+        entityId: row.id,
+        summary: `حذف وعكس مصروف (${categoryLabel}) بقيمة ${amountMinor.toString()}`,
+        metadata: {
+          expenseDate: row.expenseDate,
+          amount: amountMinor.toString(),
+          paymentMethod: row.paymentMethod,
+        },
+      });
+
       return {
         id: row.id,
         storeId: row.storeId,
@@ -317,7 +342,7 @@ export class SqliteExpenseRepository {
         await postJournalEntry(trx, ctx, {
           storeId: row.storeId,
           currency: row.currency,
-          date: new Date(`${input.expenseDate}T12:00:00.000Z`),
+          date: input.updatedAt,
           entryDate: input.expenseDate,
           sourceType: 'EXPENSE',
           sourceId: row.id,
@@ -354,6 +379,32 @@ export class SqliteExpenseRepository {
         .where('id', '=', row.id)
         .where('deleted_at', 'is', null)
         .execute();
+
+      const actor = ctx.userId === 'system'
+        ? undefined
+        : await trx
+            .selectFrom('users')
+            .select('username')
+            .where('tenant_id', '=', ctx.tenantId)
+            .where('id', '=', ctx.userId)
+            .executeTakeFirst();
+      await recordAuditLogInTransaction(trx, ctx, {
+        storeId: row.storeId,
+        actorUserId: ctx.userId === 'system' ? null : ctx.userId,
+        actorUsername: actor?.username ?? 'system',
+        actorRole: ctx.roleId,
+        action: 'EXPENSE_UPDATED',
+        entityType: 'EXPENSE',
+        entityId: row.id,
+        summary: `تعديل مصروف (${category[1]}) من ${oldAmount.toString()} إلى ${input.amount.toString()}`,
+        metadata: {
+          oldAmount: oldAmount.toString(),
+          newAmount: input.amount.toString(),
+          oldMethod: row.paymentMethod,
+          newMethod: input.paymentMethod,
+          expenseDate: input.expenseDate,
+        },
+      });
 
       return {
         id: row.id,

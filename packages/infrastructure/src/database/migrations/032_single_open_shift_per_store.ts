@@ -1,24 +1,117 @@
 import { sql, type Kysely } from 'kysely';
 
+interface LegacyOpenShiftRow {
+  id: string;
+  tenant_id: string;
+  store_id: string;
+  user_id: string;
+  started_at: string;
+  ended_at: string | null;
+  opening_cash: string | number | bigint | null;
+  notes: string | null;
+}
+
+/**
+ * Migration 032: Enforce at most one OPEN shift per (tenant_id, store_id).
+ *
+ * Accounting-safe legacy upgrade policy:
+ * If a legacy database has >1 OPEN shift in the same store, we keep the most recently
+ * started shift OPEN, and for each older duplicate OPEN shift we compute its exact
+ * expected drawer cash over its effective window `[started_at, next_shift_started_at)`:
+ *   expected_cash = opening_cash + cash_sales - cash_returns + net_other_drawer_1010_movements
+ * Because OPEN shifts hold schema defaults (`0`) rather than physical closing counts,
+ * we settle and close each older shift at book balance (`actual_cash = expected_cash`,
+ * `variance = 0`, `handover_cash = expected_cash`) with an explicit audit note in `notes`,
+ * preserving full shift reconciliation history before creating the unique index.
+ */
 export async function up(db: Kysely<unknown>): Promise<void> {
-  // Safety for upgrading legacy databases that might have >1 OPEN shift in the same store:
-  // keep the most recently started OPEN shift per (tenant_id, store_id) and close any older duplicates.
-  await sql`
-    UPDATE cashier_shifts
-    SET status = 'CLOSED',
-        ended_at = COALESCE(ended_at, CURRENT_TIMESTAMP),
-        updated_at = CURRENT_TIMESTAMP
+  const openShiftsResult = await sql<LegacyOpenShiftRow>`
+    SELECT id, tenant_id, store_id, user_id, started_at, ended_at, opening_cash, notes
+    FROM cashier_shifts
     WHERE status = 'OPEN'
-      AND id NOT IN (
-        SELECT id FROM (
-          SELECT id,
-                 ROW_NUMBER() OVER (PARTITION BY tenant_id, store_id ORDER BY started_at DESC, id DESC) AS rn
-          FROM cashier_shifts
-          WHERE status = 'OPEN'
-        )
-        WHERE rn = 1
-      );
+    ORDER BY tenant_id ASC, store_id ASC, started_at DESC, id DESC
   `.execute(db);
+
+  const groupedByStore = new Map<string, LegacyOpenShiftRow[]>();
+  for (const row of openShiftsResult.rows) {
+    const key = `${row.tenant_id}::${row.store_id}`;
+    const list = groupedByStore.get(key) ?? [];
+    list.push(row);
+    groupedByStore.set(key, list);
+  }
+
+  for (const shifts of groupedByStore.values()) {
+    if (shifts.length <= 1) continue;
+    // shifts[0] is the most recently started shift (kept OPEN).
+    // shifts[i] (i >= 1) are older duplicate OPEN shifts that must be reconciled and closed.
+    for (let i = 1; i < shifts.length; i += 1) {
+      const olderShift = shifts[i]!;
+      const newerShift = shifts[i - 1]!;
+      const endIso = olderShift.ended_at ?? newerShift.started_at;
+
+      const salesResult = await sql<{ net_cash_sales: string | number | bigint }>`
+        SELECT COALESCE(SUM(
+          COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp WHERE sp.tenant_id = s.tenant_id AND sp.sale_id = s.id AND sp.method = 'CASH'), 0)
+          - COALESCE(s.change_given, 0)
+        ), 0) AS net_cash_sales
+        FROM sales s
+        WHERE s.tenant_id = ${olderShift.tenant_id}
+          AND s.store_id = ${olderShift.store_id}
+          AND s.status = 'COMPLETED'
+          AND replace(s.created_at, ' ', 'T') >= replace(${olderShift.started_at}, ' ', 'T')
+          AND replace(s.created_at, ' ', 'T') < replace(${endIso}, ' ', 'T')
+      `.execute(db);
+
+      const returnsResult = await sql<{ cash_returns: string | number | bigint }>`
+        SELECT COALESCE(SUM(cr.refund_amount), 0) AS cash_returns
+        FROM customer_returns cr
+        WHERE cr.tenant_id = ${olderShift.tenant_id}
+          AND cr.store_id = ${olderShift.store_id}
+          AND cr.payment_method = 'CASH'
+          AND replace(cr.created_at, ' ', 'T') >= replace(${olderShift.started_at}, ' ', 'T')
+          AND replace(cr.created_at, ' ', 'T') < replace(${endIso}, ' ', 'T')
+      `.execute(db);
+
+      const drawerResult = await sql<{ net_delta: string | number | bigint }>`
+        SELECT COALESCE(SUM(CASE WHEN jl.entry_type = 'DEBIT' THEN jl.amount ELSE -jl.amount END), 0) AS net_delta
+        FROM journal_entries je
+        INNER JOIN journal_lines jl ON jl.journal_entry_id = je.id
+        INNER JOIN accounts a ON a.id = jl.account_id
+        WHERE je.tenant_id = ${olderShift.tenant_id}
+          AND je.store_id = ${olderShift.store_id}
+          AND a.account_code = '1010'
+          AND je.source_type NOT IN ('SALE', 'RETURN', 'SESSION_CLOSING')
+          AND replace(je.created_at, ' ', 'T') >= replace(${olderShift.started_at}, ' ', 'T')
+          AND replace(je.created_at, ' ', 'T') < replace(${endIso}, ' ', 'T')
+      `.execute(db);
+
+      const openingCash = BigInt(olderShift.opening_cash ?? 0);
+      const cashSales = BigInt(salesResult.rows[0]?.net_cash_sales ?? 0);
+      const cashReturns = BigInt(returnsResult.rows[0]?.cash_returns ?? 0);
+      const otherDrawerDelta = BigInt(drawerResult.rows[0]?.net_delta ?? 0);
+      const expectedCash = openingCash + cashSales - cashReturns + otherDrawerDelta;
+      const actualCash = expectedCash;
+      const variance = 0n;
+      const handoverCash = expectedCash;
+      const reconciliationNote = 'تسوية وإغلاق تلقائي عند الترقية (032) لمنع تعدد الشيفتات المفتوحة بالفرع';
+      const existingNotes = (olderShift.notes ?? '').trim();
+      const mergedNotes = existingNotes ? `${existingNotes} — ${reconciliationNote}` : reconciliationNote;
+
+      await sql`
+        UPDATE cashier_shifts
+        SET status = 'CLOSED',
+            ended_at = ${endIso},
+            expected_cash = ${expectedCash.toString()},
+            actual_cash = ${actualCash.toString()},
+            variance = ${variance.toString()},
+            handover_cash = ${handoverCash.toString()},
+            notes = ${mergedNotes},
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ${olderShift.id}
+          AND tenant_id = ${olderShift.tenant_id}
+      `.execute(db);
+    }
+  }
 
   await sql`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_cashier_shifts_one_open_per_store

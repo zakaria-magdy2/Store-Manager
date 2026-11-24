@@ -8,6 +8,3 @@ allowBuilds:
   electron-winstaller: false
   esbuild: true
 
-auditConfig:
-  ignoreGhsas:
-    - GHSA-mrhx-c7xc-m3w5

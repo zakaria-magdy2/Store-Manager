@@ -661,6 +661,31 @@ export class SqlitePurchasingRepository {
           { accountCode: cashAccount(input.paymentMethod), side: 'CREDIT', amount: input.amount.amount, memo: 'صرف دفعة للتاجر' },
         ],
       });
+
+      const actor = ctx.userId === 'system'
+        ? undefined
+        : await trx
+            .selectFrom('users')
+            .select('username')
+            .where('tenant_id', '=', ctx.tenantId)
+            .where('id', '=', ctx.userId)
+            .executeTakeFirst();
+      await recordAuditLogInTransaction(trx, ctx, {
+        storeId: purchase.store_id,
+        actorUserId: ctx.userId === 'system' ? null : ctx.userId,
+        actorUsername: actor?.username ?? 'system',
+        actorRole: ctx.roleId,
+        action: 'SUPPLIER_PAYMENT_RECORDED',
+        entityType: 'SUPPLIER_PAYMENT',
+        entityId: input.id,
+        summary: `تسجيل دفعة لمورد (${input.amount.amount.toString()})`,
+        metadata: {
+          purchaseId: purchase.id,
+          amount: input.amount.amount.toString(),
+          paymentMethod: input.paymentMethod,
+          referenceNumber: input.referenceNumber ?? null,
+        },
+      });
       return input.id;
     });
   }
@@ -679,15 +704,6 @@ export class SqlitePurchasingRepository {
   }> {
     if (input.amount.amount <= 0n) throw badRequest('مبلغ السداد لازم يكون أكبر من صفر');
     return this.db.transaction().execute(async (trx) => {
-      const payment = await trx
-        .selectFrom('supplier_payments')
-        .selectAll()
-        .where('tenant_id', '=', ctx.tenantId)
-        .where('purchase_id', '=', input.purchaseId)
-        .where('id', '=', input.paymentId)
-        .executeTakeFirst();
-      if (!payment) throw Object.assign(new Error('دفعة السداد غير موجودة'), { status: 404 });
-
       const purchase = await trx
         .selectFrom('supplier_purchases')
         .selectAll()
@@ -700,6 +716,18 @@ export class SqlitePurchasingRepository {
       if (input.amount.currency.code !== purchase.currency) {
         throw badRequest('عملة السداد لا تطابق عملة الفاتورة');
       }
+
+      let payment = await trx
+        .selectFrom('supplier_payments')
+        .selectAll()
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('purchase_id', '=', input.purchaseId)
+        .where('id', '=', input.paymentId)
+        .executeTakeFirst();
+      if (!payment && input.paymentId === `${purchase.id}:payment:initial` && BigInt(purchase.initial_paid_amount ?? 0) > 0n) {
+        payment = await materializeLegacyInitialPaymentInTransaction(trx, ctx.tenantId, purchase);
+      }
+      if (!payment) throw Object.assign(new Error('دفعة السداد غير موجودة'), { status: 404 });
 
       const oldAmount = BigInt(payment.amount);
       if (payment.deleted_at) {
@@ -806,6 +834,44 @@ export class SqlitePurchasingRepository {
         .where('id', '=', payment.id)
         .execute();
 
+      if (
+        payment.id === `${purchase.id}:payment:initial` ||
+        payment.idempotency_key === `${purchase.idempotency_key}:initial`
+      ) {
+        await trx
+          .updateTable('supplier_purchases')
+          .set({ initial_paid_amount: 0n })
+          .where('tenant_id', '=', ctx.tenantId)
+          .where('id', '=', purchase.id)
+          .execute();
+      }
+
+      const actor = ctx.userId === 'system'
+        ? undefined
+        : await trx
+            .selectFrom('users')
+            .select('username')
+            .where('tenant_id', '=', ctx.tenantId)
+            .where('id', '=', ctx.userId)
+            .executeTakeFirst();
+      await recordAuditLogInTransaction(trx, ctx, {
+        storeId: purchase.store_id,
+        actorUserId: ctx.userId === 'system' ? null : ctx.userId,
+        actorUsername: actor?.username ?? 'system',
+        actorRole: ctx.roleId,
+        action: 'SUPPLIER_PAYMENT_UPDATED',
+        entityType: 'SUPPLIER_PAYMENT',
+        entityId: payment.id,
+        summary: `تعديل دفعة سداد لتاجر من ${oldAmount.toString()} إلى ${newAmount.toString()}`,
+        metadata: {
+          purchaseId: purchase.id,
+          oldAmount: oldAmount.toString(),
+          newAmount: newAmount.toString(),
+          oldMethod,
+          newMethod,
+        },
+      });
+
       return {
         id: payment.id,
         purchaseId: purchase.id,
@@ -829,15 +895,6 @@ export class SqlitePurchasingRepository {
     paymentMethod: string;
   }> {
     return this.db.transaction().execute(async (trx) => {
-      const payment = await trx
-        .selectFrom('supplier_payments')
-        .selectAll()
-        .where('tenant_id', '=', ctx.tenantId)
-        .where('purchase_id', '=', input.purchaseId)
-        .where('id', '=', input.paymentId)
-        .executeTakeFirst();
-      if (!payment) throw Object.assign(new Error('دفعة السداد غير موجودة'), { status: 404 });
-
       const purchase = await trx
         .selectFrom('supplier_purchases')
         .selectAll()
@@ -847,6 +904,18 @@ export class SqlitePurchasingRepository {
       if (!purchase || (ctx.storeId && ctx.storeId !== purchase.store_id)) {
         throw Object.assign(new Error('فاتورة التاجر غير متاحة'), { status: 404 });
       }
+
+      let payment = await trx
+        .selectFrom('supplier_payments')
+        .selectAll()
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('purchase_id', '=', input.purchaseId)
+        .where('id', '=', input.paymentId)
+        .executeTakeFirst();
+      if (!payment && input.paymentId === `${purchase.id}:payment:initial` && BigInt(purchase.initial_paid_amount ?? 0) > 0n) {
+        payment = await materializeLegacyInitialPaymentInTransaction(trx, ctx.tenantId, purchase);
+      }
+      if (!payment) throw Object.assign(new Error('دفعة السداد غير موجودة'), { status: 404 });
 
       const oldAmount = BigInt(payment.amount);
       if (payment.deleted_at) {
@@ -890,6 +959,30 @@ export class SqlitePurchasingRepository {
           .execute();
       }
 
+      const actor = ctx.userId === 'system'
+        ? undefined
+        : await trx
+            .selectFrom('users')
+            .select('username')
+            .where('tenant_id', '=', ctx.tenantId)
+            .where('id', '=', ctx.userId)
+            .executeTakeFirst();
+      await recordAuditLogInTransaction(trx, ctx, {
+        storeId: purchase.store_id,
+        actorUserId: ctx.userId === 'system' ? null : ctx.userId,
+        actorUsername: actor?.username ?? 'system',
+        actorRole: ctx.roleId,
+        action: 'SUPPLIER_PAYMENT_DELETED',
+        entityType: 'SUPPLIER_PAYMENT',
+        entityId: payment.id,
+        summary: `إلغاء وعكس دفعة سداد لتاجر بقيمة ${oldAmount.toString()}`,
+        metadata: {
+          purchaseId: purchase.id,
+          deletedAmount: oldAmount.toString(),
+          paymentMethod: oldMethod,
+        },
+      });
+
       return {
         id: payment.id,
         purchaseId: purchase.id,
@@ -899,6 +992,66 @@ export class SqlitePurchasingRepository {
       };
     });
   }
+}
+
+async function materializeLegacyInitialPaymentInTransaction(
+  trx: Kysely<RetailOSDatabase>,
+  tenantId: string,
+  purchase: {
+    id: string;
+    supplier_id: string;
+    initial_paid_amount: bigint;
+    currency: string;
+    idempotency_key: string;
+    purchased_at: string;
+    created_by_user_id: string;
+  },
+) {
+  const initialPaymentId = `${purchase.id}:payment:initial`;
+  const creditLine = await trx
+    .selectFrom('journal_entries as je')
+    .innerJoin('journal_lines as jl', 'jl.journal_entry_id', 'je.id')
+    .innerJoin('accounts as a', 'a.id', 'jl.account_id')
+    .select('a.account_code as accountCode')
+    .where('je.tenant_id', '=', tenantId)
+    .where('je.source_type', '=', 'PURCHASE')
+    .where('je.source_id', '=', purchase.id)
+    .where('jl.entry_type', '=', 'CREDIT')
+    .where('a.account_code', 'in', ['1010', '1020'])
+    .executeTakeFirst();
+  const inferredMethod = creditLine?.accountCode === '1020' ? 'BANK_TRANSFER' : 'CASH';
+
+  await trx
+    .insertInto('supplier_payments')
+    .values({
+      id: initialPaymentId,
+      tenant_id: tenantId,
+      supplier_id: purchase.supplier_id,
+      purchase_id: purchase.id,
+      amount: BigInt(purchase.initial_paid_amount),
+      currency: purchase.currency,
+      payment_method: inferredMethod,
+      idempotency_key: `${purchase.idempotency_key}:initial`,
+      reference_number: null,
+      paid_at: purchase.purchased_at,
+      created_by_user_id: purchase.created_by_user_id,
+    })
+    .execute();
+
+  await trx
+    .updateTable('supplier_purchases')
+    .set({ initial_paid_amount: 0n })
+    .where('tenant_id', '=', tenantId)
+    .where('id', '=', purchase.id)
+    .execute();
+
+  return trx
+    .selectFrom('supplier_payments')
+    .selectAll()
+    .where('tenant_id', '=', tenantId)
+    .where('purchase_id', '=', purchase.id)
+    .where('id', '=', initialPaymentId)
+    .executeTakeFirst();
 }
 
 function cashAccount(method: string): string {

@@ -13,7 +13,7 @@
 - **Universal Product Catalog**: Products, nested categories, and sellable variants with validated JSON attributes — apparel, grocery, electronics, and pharmacy share one schema.
 - **WAC Inventory with Immutable Ledger**: Weighted Average Cost valuation with exact integer arithmetic, immutable cost snapshots on every issue, atomic inter-store transfers, damage/shrinkage write-offs (`DAMAGE_OUT`), physical stock count adjustments (`ADJUSTMENT_IN`/`ADJUSTMENT_OUT`), and a database-enforced append-only `stock_movements` ledger.
 - **Supplier & Financial Sub-Ledger**: Multi-line supplier invoices, supplier payments, supplier returns (with `5090` WAC variance accounting), linked customer returns, direct daily expenses, recurring monthly obligations, 3-tier cash treasury management (`1010` Drawer, `1015` Safe, `1020` Bank), cash drawer Z-Report shift closing, monthly (`YYYY-MM`) accounting period locking, and SQLite trigger-enforced immutable `journal_entries` & `journal_lines` — all posting balanced double-entry journal entries atomically.
-- **Encrypted Disaster Recovery & Tamper-Evident Audit Chain**: AES-256-GCM backups (both manual passphrase-protected `.rfbackup` exports and automatic daily/mirror `.rfbackup` snapshots using an installation-local key), 4-stage atomic swap & rollback recovery, SHA-256 hash-chained append-only `audit_logs`, UTF-8 BOM CSV report exports with formula-injection protection, and foundational Phase 8 components (`OutboxSyncWorker` and `@retailos/desktop` security policy supervisor, not yet wired into live runtime).
+- **Encrypted Disaster Recovery & Tamper-Evident Audit Chain**: AES-256-GCM backups (both manual passphrase-protected `.rfbackup` exports and automatic daily/mirror `.rfbackup` snapshots using an installation-local DPAPI/master key), 4-stage atomic cross-device swap & rollback recovery (preserving the target device's machine-bound license state while replacing company identity and ledger atomically), SHA-256 hash-chained append-only `audit_logs`, UTF-8 BOM CSV report exports with formula-injection protection, and a hardened Windows Electron desktop shell (`@retailos/desktop` packaged as **`Raff-Setup-0.1.0-x64.exe`**) with Ed25519 runtime integrity verification (`integrity-manifest.json`), offline device-bound licensing (`ROS1.`), and signed emergency admin password recovery (`ROSRST1.`).
 
 ---
 
@@ -29,9 +29,11 @@ This project is organized as a strict, high-performance monorepo powered by **pn
 │   ├── infrastructure/  # Kysely SQLite, database migrations, Argon2id hasher, repositories
 │   └── tsconfig/        # Strict shared TypeScript configurations
 ├── apps/
-│   ├── desktop/         # Desktop security supervisor & Electron packaging stub [Phase 8 — planned]
+│   ├── desktop/         # Hardened Electron Windows application, runtime integrity verifier & NSIS installer (Raff-Setup)
 │   └── web/             # Arabic RTL local web UI, SQLite API, and integration flow
-├── docs/                # Architecture blueprints and Architecture Decision Records (ADRs)
+├── tools/
+│   └── vendor-keygen/   # Offline Ed25519 license & emergency password-reset token generator (CLI + Arabic GUI Studio)
+├── docs/                # Architecture blueprints, deployment SOPs, and Architecture Decision Records (ADRs)
 └── PROJECT_CONTEXT.md   # Master project context and implementation status
 ```
 
@@ -105,7 +107,7 @@ transaction. Direct operating expenses post to the journal atomically with
 cash drawer, safe, or bank movements. Linked partial customer returns update
 inventory at the original sale cost, refund the original discounted value,
 and post a balancing journal entry. Recurring expense actuals are confirmed once
-per month, then settled as liability payments without double-counting. The system also includes multi-store creation and atomic inter-store stock transfers, 80mm/58mm thermal receipt preview and ESC/POS byte generation, cash drawer Z-Report shift closing, accounting period locking, SHA-256 hash-chained audit logs, automated encrypted daily/mirror backups (`.rfbackup`), and manual passphrase-protected AES-256-GCM exports. (The Outbox CDC `OutboxSyncWorker` and `@retailos/desktop` Electron shell remain foundational Phase 8 modules not yet wired into active store runtime.)
+per month, then recognized on a strict cash basis when settled (`6090 DR / Cash CR`) so P&L, Financial Map, and Trial Balance reconcile 100% without accrual mismatch. The system also includes multi-store creation and atomic inter-store stock transfers, 80mm/58mm thermal receipt preview and ESC/POS byte generation, store-wide single-open-shift Z-Report cash drawer reconciliation, accounting period locking, atomic SHA-256 hash-chained audit logs inside financial transactions, automated encrypted daily/mirror backups (`.rfbackup`), manual passphrase-protected AES-256-GCM exports with cross-device restore support, and a production Windows installer (`apps/desktop/release/Raff-Setup-0.1.0-x64.exe`).
 
 ### Build & Verification Commands
 

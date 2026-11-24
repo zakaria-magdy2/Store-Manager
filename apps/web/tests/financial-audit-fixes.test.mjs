@@ -1,10 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import { generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { createServer as createNetServer } from 'node:net';
 import { join } from 'node:path';
 import { createServerApp } from '../server.mjs';
 import { cleanupTempDir, createTestTempDir } from './e2e-server-harness.mjs';
+
+const require = createRequire(new URL('../../../packages/infrastructure/package.json', import.meta.url));
+const Database = require('better-sqlite3');
 
 async function getFreePort() {
   return new Promise((resolvePort, rejectPort) => {
@@ -224,23 +228,59 @@ test('P1/P2 financial audit fixes: cross-actor shift drawer movements, single-sh
     assert.equal(curShiftAfterTransfer.body.currentShift.expectedCash, '55000');
     assert.equal(curShiftAfterTransfer.body.currentShift.cashTransfersNet, '-15000');
 
-    // Verify /api/shifts shows 55000 while open
+    // 1d. OWNER (different user!) rings up a CASH POS sale (350 EGP) and processes a CASH customer return
+    // wait: let's also verify Owner can checkout while Cashier's shift is open in the store!
+    const dataForSale = await apiJson('/api/data', { cookie: ownerCookie });
+    const shoeVariantId = dataForSale.body.products[0].variants[0].id;
+    const ownerSaleInCashierShift = await apiJson('/api/checkout', {
+      method: 'POST',
+      cookie: ownerCookie,
+      body: JSON.stringify({
+        storeId,
+        idempotencyKey: randomUUID(),
+        items: [{ variantId: shoeVariantId, quantity: '2' }], // 2 * 350 = 700.00 EGP (70000)
+        paymentMethod: 'CASH',
+        amountPaidMinor: '70000',
+      }),
+    });
+    assert.equal(ownerSaleInCashierShift.status, 201);
+
+    // And OWNER processes a 1-unit CASH customer return (350.00 EGP = 35000) during Cashier's open shift
+    const ownerReturnInCashierShift = await apiJson(`/api/sales/${ownerSaleInCashierShift.body.id}/returns`, {
+      method: 'POST',
+      cookie: ownerCookie,
+      body: JSON.stringify({
+        storeId,
+        idempotencyKey: randomUUID(),
+        paymentMethod: 'CASH',
+        items: [{ originalSaleItemId: ownerSaleInCashierShift.body.items[0].id, quantity: '1' }],
+      }),
+    });
+    assert.equal(ownerReturnInCashierShift.status, 201);
+
+    // Expected drawer cash = 55000 + 70000 (cash sale) - 35000 (cash return) = 90000
+    const curShiftAfterOwnerSaleReturn = await apiJson('/api/shifts/current', { cookie: cashierCookie });
+    assert.equal(curShiftAfterOwnerSaleReturn.body.currentShift.cashSales, '70000');
+    assert.equal(curShiftAfterOwnerSaleReturn.body.currentShift.cashReturns, '35000');
+    assert.equal(curShiftAfterOwnerSaleReturn.body.currentShift.expectedCash, '90000');
+
+    // Verify /api/shifts shows 90000 while open
     const historyOpen = await apiJson(`/api/shifts?storeId=${storeId}`, { cookie: ownerCookie });
     assert.equal(historyOpen.status, 200);
-    assert.equal(historyOpen.body.shifts[0].expectedCash, '55000');
+    assert.equal(historyOpen.body.shifts[0].expectedCash, '90000');
 
-    // 1d. CASHIER closes shift with actualCash = 55000 -> variance MUST be 0!
+    // 1e. CASHIER closes shift with actualCash = 90000 -> variance MUST be 0!
     const closeRes = await apiJson('/api/shifts/end', {
       method: 'POST',
       cookie: cashierCookie,
       body: JSON.stringify({
         shiftId: shiftStart.body.shift.id,
-        actualCash: '55000',
-        handoverCash: '55000',
+        actualCash: '90000',
+        handoverCash: '90000',
       }),
     });
     assert.equal(closeRes.status, 200);
-    assert.equal(closeRes.body.shift.expectedCash, '55000');
+    assert.equal(closeRes.body.shift.expectedCash, '90000');
     assert.equal(closeRes.body.shift.variance, '0');
 
     // =========================================================================
@@ -463,6 +503,66 @@ test('P1/P2 financial audit fixes: cross-actor shift drawer movements, single-sh
 
     const plAfterVoid = await apiJson(`/api/reports/profit-loss?storeId=${storeId}&from=${day1}&to=${day2}`);
     assert.equal(plAfterVoid.body.supplierPayments.totalPaid.amount, '0');
+
+    // =========================================================================
+    // TEST 5 (P1): Supplier payment & audit log are atomic inside one DB transaction
+    // Inject a fault into audit_logs for SUPPLIER_PAYMENT_RECORDED -> payment & journal roll back completely!
+    // Removing the fault and retrying with the exact same idempotencyKey succeeds and writes the audit log.
+    // =========================================================================
+    const faultDb = new Database(app.databasePath);
+    const atomicPayIdemKey = randomUUID();
+    try {
+      const paymentsCountBefore = faultDb.prepare('SELECT COUNT(*) AS cnt FROM supplier_payments WHERE purchase_id = ?').get(p2Res.body.id).cnt;
+      const journalsCountBefore = faultDb.prepare('SELECT COUNT(*) AS cnt FROM journal_entries').get().cnt;
+
+      faultDb.exec(`
+        CREATE TRIGGER trg_test_fail_supplier_payment_audit
+        BEFORE INSERT ON audit_logs
+        WHEN NEW.action = 'SUPPLIER_PAYMENT_RECORDED'
+        BEGIN
+          SELECT RAISE(ABORT, 'injected audit_logs failure for supplier payment');
+        END;
+      `);
+
+      const failedPayRes = await apiJson(`/api/purchases/${p2Res.body.id}/payments`, {
+        method: 'POST',
+        cookie: dayOwnerCookie,
+        body: JSON.stringify({
+          idempotencyKey: atomicPayIdemKey,
+          amount: '25000',
+          paymentMethod: 'CASH',
+        }),
+      });
+      // SQLite RAISE(ABORT) produces SQLITE_CONSTRAINT_TRIGGER, mapped to 409 Conflict by server.mjs.
+      assert.equal(failedPayRes.status, 409);
+
+      // Verify 100% atomic rollback: zero new rows in supplier_payments and zero new rows in journal_entries
+      const paymentsCountAfterFail = faultDb.prepare('SELECT COUNT(*) AS cnt FROM supplier_payments WHERE purchase_id = ?').get(p2Res.body.id).cnt;
+      const journalsCountAfterFail = faultDb.prepare('SELECT COUNT(*) AS cnt FROM journal_entries').get().cnt;
+      assert.equal(paymentsCountAfterFail, paymentsCountBefore);
+      assert.equal(journalsCountAfterFail, journalsCountBefore);
+
+      // Remove fault trigger and retry with the EXACT SAME idempotencyKey
+      faultDb.exec('DROP TRIGGER trg_test_fail_supplier_payment_audit;');
+    } finally {
+      faultDb.close();
+    }
+
+    const retriedPayRes = await apiJson(`/api/purchases/${p2Res.body.id}/payments`, {
+      method: 'POST',
+      cookie: dayOwnerCookie,
+      body: JSON.stringify({
+        idempotencyKey: atomicPayIdemKey,
+        amount: '25000',
+        paymentMethod: 'CASH',
+      }),
+    });
+    assert.equal(retriedPayRes.status, 201);
+
+    const auditAfterRetry = await apiJson('/api/audit-logs?action=SUPPLIER_PAYMENT_RECORDED&limit=10', { cookie: dayOwnerCookie });
+    assert.equal(auditAfterRetry.status, 200);
+    assert.equal(auditAfterRetry.body.chainVerification.valid, true);
+    assert.ok(auditAfterRetry.body.entries.some((e) => e.entityId === retriedPayRes.body.id && e.action === 'SUPPLIER_PAYMENT_RECORDED'));
   } finally {
     t.mock.timers.reset();
     await app.shutdown();
