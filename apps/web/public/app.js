@@ -3798,7 +3798,7 @@ function suppliersView() {
               <div class="disclosure-content">
                 ${purchase.payments.map((p) => `
                   <div class="invoice-history-row">
-                    <span>سداد ${methodLabel(p.paymentMethod)} بواسطة <strong>${escapeHtml(p.createdByName || 'المسؤول')}</strong> · ${new Date(p.paidAt).toLocaleDateString('ar-EG')}</span>
+                    <span>سداد ${methodLabel(p.paymentMethod)} بواسطة <strong>${escapeHtml(p.createdByName || 'المسؤول')}</strong> · ${new Date(p.paidAt).toLocaleDateString('ar-EG')}${p.updatedAt ? ` <small style="color:var(--muted);">(عُدّلت في ${new Date(p.updatedAt).toLocaleDateString('ar-EG')})</small>` : ''}</span>
                     <div style="display:flex;align-items:center;gap:10px;">
                       <strong class="table-total text-green">${money(p.amount)}</strong>
                       ${['OWNER', 'STORE_MANAGER'].includes(state.data.user?.role) ? `

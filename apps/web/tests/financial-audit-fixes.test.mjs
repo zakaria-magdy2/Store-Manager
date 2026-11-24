@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { createServer as createNetServer } from 'node:net';
 import { join } from 'node:path';
 import { createServerApp } from '../server.mjs';
@@ -18,10 +18,21 @@ async function getFreePort() {
   });
 }
 
-test('P1/P2 financial audit fixes: shift drawer movements, cross-day supplier payment edit/method/void reconciliation, and expense edit notes/ref conflict', async (t) => {
+function signLicenseToken(privateKeyPem, payload) {
+  const payloadB64u = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const signingInput = `ROS1.${payloadB64u}`;
+  const sigB64u = sign(null, Buffer.from(signingInput, 'utf8'), privateKeyPem).toString('base64url');
+  return `${signingInput}.${sigB64u}`;
+}
+
+test('P1/P2 financial audit fixes: cross-actor shift drawer movements, single-shift store guard, cross-day supplier payment edit/method/void across ledger & invoice details, and expense edit notes/ref conflict', async (t) => {
   const dataDir = await createTestTempDir('retailos-fin-audit-fixes-');
   const freePort = await getFreePort();
-  const currentNowMs = Date.UTC(2026, 10, 22, 10, 0, 0); // 2026-11-22 10:00 UTC
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519', {
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+  const machineId = 'ROS-ABCD-2345-WXYZ';
 
   process.env.NODE_ENV = 'test';
   process.env.PORT = String(freePort);
@@ -38,46 +49,116 @@ test('P1/P2 financial audit fixes: shift drawer movements, cross-day supplier pa
     dataDir,
     watermarkSecret: randomBytes(32).toString('hex'),
     dailyBackupSecret: randomBytes(32).toString('base64url'),
-    nowProvider: () => currentNowMs,
-    betaTrialConfig: {
-      enabled: true,
-      autoLogin: true,
-      issuedAt: new Date(Date.UTC(2026, 10, 20, 0, 0, 0)).toISOString(),
-      expiresAt: new Date(Date.UTC(2026, 10, 30, 0, 0, 0)).toISOString(),
-    },
+    licensePublicKey: publicKey,
+    licenseIdentityProvider: () => ({ machineId, isHardwareBacked: true }),
   });
 
   const baseUrl = app.origin;
-  const headers = { Origin: baseUrl, 'Content-Type': 'application/json' };
+  let activeCookie = '';
   const apiJson = async (path, options = {}) => {
-    const res = await fetch(`${baseUrl}${path}`, { ...options, headers: { ...headers, ...(options.headers ?? {}) } });
+    const cookieToUse = options.cookie ?? activeCookie;
+    const headers = {
+      Origin: baseUrl,
+      'Content-Type': 'application/json',
+      ...(cookieToUse ? { Cookie: cookieToUse } : {}),
+      ...(options.headers ?? {}),
+    };
+    const res = await fetch(`${baseUrl}${path}`, { ...options, headers });
+    const setCookie = res.headers.get('set-cookie')?.split(';')[0] ?? '';
     const text = await res.text();
-    return { status: res.status, body: text ? JSON.parse(text) : null };
+    return { status: res.status, body: text ? JSON.parse(text) : null, cookie: setCookie };
   };
 
   try {
-    const bootData = await apiJson('/api/data');
+    // Activate license & setup OWNER account + separate CASHIER account
+    const licToken = signLicenseToken(privateKey, {
+      licenseId: randomUUID(),
+      customerName: 'شركة اختبار المراجعة المالية',
+      machineId,
+      issuedAt: new Date(Date.now() - 86400_000).toISOString(),
+      expiresAt: new Date(Date.now() + 365 * 86400_000).toISOString(),
+      planName: 'الباقة السنوية',
+    });
+    const actRes = await apiJson('/api/license/activate', {
+      method: 'POST',
+      body: JSON.stringify({ token: licToken }),
+    });
+    assert.equal(actRes.status, 200);
+
+    const setupRes = await apiJson('/api/setup', {
+      method: 'POST',
+      body: JSON.stringify({
+        ownerName: 'مدير المتجر',
+        ownerUsername: 'owner_fin',
+        password: 'OwnerPassword123!',
+      }),
+    });
+    assert.equal(setupRes.status, 201);
+
+    const ownerLogin = await apiJson('/api/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'owner_fin', password: 'OwnerPassword123!' }),
+    });
+    assert.equal(ownerLogin.status, 200);
+    const ownerCookie = ownerLogin.cookie;
+    activeCookie = ownerCookie;
+
+    const bootData = await apiJson('/api/data', { cookie: ownerCookie });
     assert.equal(bootData.status, 200);
     const storeId = bootData.body.selectedStoreId;
 
-    // Setup category & supplier
-    const cat = await apiJson('/api/categories', { method: 'POST', body: JSON.stringify({ name: 'أحذية' }) });
+    // Create a distinct CASHIER user assigned to the store
+    const cashierCreate = await apiJson('/api/users', {
+      method: 'POST',
+      cookie: ownerCookie,
+      body: JSON.stringify({
+        username: 'cashier_fin',
+        fullName: 'كاشير الوردية',
+        password: 'CashierPassword123!',
+        role: 'CASHIER',
+        storeId,
+      }),
+    });
+    assert.equal(cashierCreate.status, 201);
+
+    const cashierLogin = await apiJson('/api/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'cashier_fin', password: 'CashierPassword123!' }),
+    });
+    assert.equal(cashierLogin.status, 200);
+    const cashierCookie = cashierLogin.cookie;
+
+    // Setup category & supplier as OWNER
+    const cat = await apiJson('/api/categories', { method: 'POST', cookie: ownerCookie, body: JSON.stringify({ name: 'أحذية' }) });
     assert.equal(cat.status, 201);
-    const sup = await apiJson('/api/suppliers', { method: 'POST', body: JSON.stringify({ name: 'مورد المراجعة' }) });
+    const sup = await apiJson('/api/suppliers', { method: 'POST', cookie: ownerCookie, body: JSON.stringify({ name: 'مورد المراجعة' }) });
     assert.equal(sup.status, 201);
 
     // =========================================================================
-    // TEST 1 (P1): Shift close expected cash includes drawer expenses, supplier payments, & treasury transfers
+    // TEST 1 (P1): Cross-actor shift drawer movements & single open shift per store
+    // Cashier opens shift (1000 EGP); Owner attempts second shift (blocked 409);
+    // Owner records drawer expense (100 EGP), cash supplier payment (200 EGP),
+    // and treasury transfer (150 EGP). Cashier closes at 550 EGP -> variance = 0!
     // =========================================================================
     const shiftStart = await apiJson('/api/shifts/start', {
       method: 'POST',
-      body: JSON.stringify({ storeId, openingCash: '100000' }), // 1000.00 EGP
+      cookie: cashierCookie,
+      body: JSON.stringify({ storeId, openingCash: '100000' }), // 1000.00 EGP opened by CASHIER
     });
     assert.equal(shiftStart.status, 201);
 
-    // 1a. Record 100 EGP expense from CASH_DRAWER
+    // Owner cannot open a second shift in the same store while cashier's shift is OPEN
+    const secondShiftAttempt = await apiJson('/api/shifts/start', {
+      method: 'POST',
+      cookie: ownerCookie,
+      body: JSON.stringify({ storeId, openingCash: '50000' }),
+    });
+    assert.equal(secondShiftAttempt.status, 409);
+
+    // 1a. OWNER (different user!) records 100 EGP expense from CASH_DRAWER during cashier's shift
     const expRes = await apiJson('/api/expenses', {
       method: 'POST',
+      cookie: ownerCookie,
       body: JSON.stringify({
         storeId,
         idempotencyKey: randomUUID(),
@@ -90,15 +171,16 @@ test('P1/P2 financial audit fixes: shift drawer movements, cross-day supplier pa
     });
     assert.equal(expRes.status, 201);
 
-    // Verify open shift expectedCash = 1000 - 100 = 900 EGP (90000 piasters)
-    const curShiftAfterExp = await apiJson('/api/shifts/current');
+    // Cashier queries their open shift -> expectedCash = 1000 - 100 = 900 EGP (90000 piasters)
+    const curShiftAfterExp = await apiJson('/api/shifts/current', { cookie: cashierCookie });
     assert.equal(curShiftAfterExp.status, 200);
     assert.equal(curShiftAfterExp.body.currentShift.expectedCash, '90000');
     assert.equal(curShiftAfterExp.body.currentShift.cashExpenses, '10000');
 
-    // 1b. Record purchase (1000 EGP total, 200 EGP paid CASH from drawer) -> expected = 700 EGP
+    // 1b. OWNER records purchase (1000 EGP total, 200 EGP paid CASH from drawer) -> expected = 700 EGP
     const purchaseRes = await apiJson('/api/purchases', {
       method: 'POST',
+      cookie: ownerCookie,
       body: JSON.stringify({
         supplierId: sup.body.id,
         storeId,
@@ -119,13 +201,14 @@ test('P1/P2 financial audit fixes: shift drawer movements, cross-day supplier pa
     });
     assert.equal(purchaseRes.status, 201);
 
-    const curShiftAfterSup = await apiJson('/api/shifts/current');
+    const curShiftAfterSup = await apiJson('/api/shifts/current', { cookie: cashierCookie });
     assert.equal(curShiftAfterSup.body.currentShift.expectedCash, '70000');
     assert.equal(curShiftAfterSup.body.currentShift.cashSupplierPayments, '20000');
 
-    // 1c. Record treasury transfer from drawer (1010) to safe (1015) of 150 EGP -> expected = 550 EGP
+    // 1c. OWNER records treasury transfer from drawer (1010) to safe (1015) of 150 EGP -> expected = 550 EGP
     const transferRes = await apiJson('/api/accounting/treasury-transfer', {
       method: 'POST',
+      cookie: ownerCookie,
       body: JSON.stringify({
         storeId,
         idempotencyKey: randomUUID(),
@@ -137,18 +220,19 @@ test('P1/P2 financial audit fixes: shift drawer movements, cross-day supplier pa
     });
     assert.equal(transferRes.status, 201);
 
-    const curShiftAfterTransfer = await apiJson('/api/shifts/current');
+    const curShiftAfterTransfer = await apiJson('/api/shifts/current', { cookie: cashierCookie });
     assert.equal(curShiftAfterTransfer.body.currentShift.expectedCash, '55000');
     assert.equal(curShiftAfterTransfer.body.currentShift.cashTransfersNet, '-15000');
 
-    // Also verify /api/shifts shows 55000 while open
-    const historyOpen = await apiJson(`/api/shifts?storeId=${storeId}`);
+    // Verify /api/shifts shows 55000 while open
+    const historyOpen = await apiJson(`/api/shifts?storeId=${storeId}`, { cookie: ownerCookie });
     assert.equal(historyOpen.status, 200);
     assert.equal(historyOpen.body.shifts[0].expectedCash, '55000');
 
-    // 1d. Close shift with actualCash = 55000 -> variance MUST be 0!
+    // 1d. CASHIER closes shift with actualCash = 55000 -> variance MUST be 0!
     const closeRes = await apiJson('/api/shifts/end', {
       method: 'POST',
+      cookie: cashierCookie,
       body: JSON.stringify({
         shiftId: shiftStart.body.shift.id,
         actualCash: '55000',
@@ -165,6 +249,7 @@ test('P1/P2 financial audit fixes: shift drawer movements, cross-day supplier pa
     const expEditKey = randomUUID();
     const editExp1 = await apiJson(`/api/expenses/${expRes.body.id}`, {
       method: 'PATCH',
+      cookie: ownerCookie,
       body: JSON.stringify({
         idempotencyKey: expEditKey,
         categoryCode: 'UTILITIES',
@@ -180,6 +265,7 @@ test('P1/P2 financial audit fixes: shift drawer movements, cross-day supplier pa
     // Exact replay succeeds with 200
     const editExpReplay = await apiJson(`/api/expenses/${expRes.body.id}`, {
       method: 'PATCH',
+      cookie: ownerCookie,
       body: JSON.stringify({
         idempotencyKey: expEditKey,
         categoryCode: 'UTILITIES',
@@ -195,6 +281,7 @@ test('P1/P2 financial audit fixes: shift drawer movements, cross-day supplier pa
     // Same idempotencyKey with different notes MUST fail with 409 Conflict
     const editExpConflictNotes = await apiJson(`/api/expenses/${expRes.body.id}`, {
       method: 'PATCH',
+      cookie: ownerCookie,
       body: JSON.stringify({
         idempotencyKey: expEditKey,
         categoryCode: 'UTILITIES',
@@ -210,6 +297,7 @@ test('P1/P2 financial audit fixes: shift drawer movements, cross-day supplier pa
     // Same idempotencyKey with different referenceNumber MUST fail with 409 Conflict
     const editExpConflictRef = await apiJson(`/api/expenses/${expRes.body.id}`, {
       method: 'PATCH',
+      cookie: ownerCookie,
       body: JSON.stringify({
         idempotencyKey: expEditKey,
         categoryCode: 'UTILITIES',
@@ -223,16 +311,21 @@ test('P1/P2 financial audit fixes: shift drawer movements, cross-day supplier pa
     assert.equal(editExpConflictRef.status, 409);
 
     // =========================================================================
-    // TEST 2 (P1): Cross-day supplier payment edit / method change / void matches ledger 1010/1020 per day
+    // TEST 2 (P1): Cross-day supplier payment edit / method change / void matches
+    // ledger 1010/1020 per day AND invoice details / payment history / purchase report
     // =========================================================================
-    // Simulate Day 1 = 2026-11-25 (payment of 500 EGP) and Day 2 = 2026-11-26 (edit to 300 EGP, method switch, void)
     const day1 = '2026-11-25';
     const day2 = '2026-11-26';
     t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 10, 25, 10, 0, 0) });
+    let dayOwnerCookie = (await apiJson('/api/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'owner_fin', password: 'OwnerPassword123!' }),
+    })).cookie;
 
     // Record a 1000 EGP unpaid purchase, then pay 500 EGP on day1
     const p2Res = await apiJson('/api/purchases', {
       method: 'POST',
+      cookie: dayOwnerCookie,
       body: JSON.stringify({
         supplierId: sup.body.id,
         storeId,
@@ -242,7 +335,7 @@ test('P1/P2 financial audit fixes: shift drawer movements, cross-day supplier pa
         paidAmount: '0',
         paymentMethod: 'CASH',
         items: [{
-          variantId: (await apiJson('/api/data')).body.products[0].variants[0].id,
+          variantId: (await apiJson('/api/data', { cookie: dayOwnerCookie })).body.products[0].variants[0].id,
           quantity: '5',
           unitCost: '20000',
         }],
@@ -252,6 +345,7 @@ test('P1/P2 financial audit fixes: shift drawer movements, cross-day supplier pa
 
     const payRes = await apiJson(`/api/purchases/${p2Res.body.id}/payments`, {
       method: 'POST',
+      cookie: dayOwnerCookie,
       body: JSON.stringify({
         idempotencyKey: randomUUID(),
         amount: '50000', // 500.00 EGP
@@ -262,9 +356,15 @@ test('P1/P2 financial audit fixes: shift drawer movements, cross-day supplier pa
 
     // Advance system clock to Day 2 (2026-11-26) and edit the payment from 500 EGP to 300 EGP
     t.mock.timers.setTime(Date.UTC(2026, 10, 26, 10, 0, 0));
+    dayOwnerCookie = (await apiJson('/api/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'owner_fin', password: 'OwnerPassword123!' }),
+    })).cookie;
+    activeCookie = dayOwnerCookie;
 
     const editPayRes = await apiJson(`/api/purchases/${p2Res.body.id}/payments/${payRes.body.id}`, {
       method: 'PATCH',
+      cookie: dayOwnerCookie,
       body: JSON.stringify({
         idempotencyKey: randomUUID(),
         amount: '30000', // 300.00 EGP
@@ -272,6 +372,24 @@ test('P1/P2 financial audit fixes: shift drawer movements, cross-day supplier pa
       }),
     });
     assert.equal(editPayRes.status, 200);
+
+    // Verify invoice details & payment history view in /api/data reflects edited amount + original paidAt + updatedAt
+    const dataAfterEdit = await apiJson('/api/data');
+    const p2Entry = dataAfterEdit.body.suppliers[0].purchases.find((p) => p.id === p2Res.body.id);
+    assert.ok(p2Entry);
+    assert.equal(p2Entry.paidAmount.amount, '30000');
+    assert.equal(p2Entry.remainingAmount.amount, '70000');
+    assert.equal(p2Entry.payments.length, 1);
+    assert.equal(p2Entry.payments[0].id, payRes.body.id);
+    assert.equal(p2Entry.payments[0].amount.amount, '30000');
+    assert.ok(String(p2Entry.payments[0].paidAt).startsWith(day1));
+    assert.ok(String(p2Entry.payments[0].updatedAt).startsWith(day2));
+
+    // Verify /api/reports/purchases reflects updated paidAmount & balanceDue
+    const purReportAfterEdit = await apiJson(`/api/reports/purchases?storeId=${storeId}&from=${day1}&to=${day2}`);
+    assert.equal(purReportAfterEdit.status, 200);
+    assert.equal(purReportAfterEdit.body.suppliers[0].paidAmount.amount, '30000');
+    assert.equal(purReportAfterEdit.body.suppliers[0].balanceDue.amount, '70000');
 
     // Check Day 1 alone: Trial Balance 1010 net = -50000, P&L totalSupplierPaid = 50000, Financial Map supplier net out = 50000
     const tbDay1 = await apiJson(`/api/reports/trial-balance?storeId=${storeId}&from=${day1}&to=${day1}`);
@@ -312,7 +430,7 @@ test('P1/P2 financial audit fixes: shift drawer movements, cross-day supplier pa
     const plBoth = await apiJson(`/api/reports/profit-loss?storeId=${storeId}&from=${day1}&to=${day2}`);
     assert.equal(plBoth.body.supplierPayments.totalPaid.amount, '30000');
 
-    // Change payment method from CASH (1010) to ELECTRONIC (1020) on Day 2, then void it on Day 2
+    // Change payment method from CASH (1010) to BANK_TRANSFER (1020) on Day 2, then void it on Day 2
     const switchMethodRes = await apiJson(`/api/purchases/${p2Res.body.id}/payments/${payRes.body.id}`, {
       method: 'PATCH',
       body: JSON.stringify({
@@ -328,6 +446,13 @@ test('P1/P2 financial audit fixes: shift drawer movements, cross-day supplier pa
       body: JSON.stringify({ idempotencyKey: randomUUID() }),
     });
     assert.equal(voidRes.status, 200);
+
+    // After void: invoice details show 0 active payments, 0 paidAmount, 100000 remainingAmount
+    const dataAfterVoid = await apiJson('/api/data');
+    const p2AfterVoid = dataAfterVoid.body.suppliers[0].purchases.find((p) => p.id === p2Res.body.id);
+    assert.equal(p2AfterVoid.paidAmount.amount, '0');
+    assert.equal(p2AfterVoid.remainingAmount.amount, '100000');
+    assert.equal(p2AfterVoid.payments.length, 0);
 
     // After void: combined Day 1 + Day 2 must reconcile to 0 across Trial Balance (1010 & 1020), P&L, and Financial Map
     const tbAfterVoid = await apiJson(`/api/reports/trial-balance?storeId=${storeId}&from=${day1}&to=${day2}`);

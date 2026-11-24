@@ -15,6 +15,8 @@ release-beta-*/
 .staging/
 .env
 .env.local
+.agents/
+.claude/
 apps/web/.test-data-*/
 apps/web/.test-rbac-*/
 apps/web/.test-e2e-*/

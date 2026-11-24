@@ -1539,6 +1539,23 @@ async function loadPurchaseEntries(tenantId, purchaseRows, userMap) {
     const rows = await db.selectFrom('supplier_return_items').selectAll().where('tenant_id', '=', tenantId).where('purchase_item_id', 'in', chunk).execute();
     for (const row of rows) returnedQuantityByPurchaseItem.set(row.purchase_item_id, (returnedQuantityByPurchaseItem.get(row.purchase_item_id) ?? 0n) + BigInt(row.quantity));
   }
+  const latestEditByPaymentId = new Map();
+  const activePaymentIds = payments.filter((p) => !p.deleted_at).map((p) => p.id);
+  for (const chunk of chunkIds(activePaymentIds)) {
+    const editJournalRows = await db
+      .selectFrom('journal_entries')
+      .select(['source_id', 'created_at', 'idempotency_key'])
+      .where('tenant_id', '=', tenantId)
+      .where('source_type', '=', 'PURCHASE_PAYMENT')
+      .where('source_id', 'in', chunk)
+      .orderBy('created_at', 'asc')
+      .execute();
+    for (const jRow of editJournalRows) {
+      if (String(jRow.idempotency_key ?? '').startsWith('supplier-payment-edit:')) {
+        latestEditByPaymentId.set(jRow.source_id, jRow.created_at);
+      }
+    }
+  }
   const group = (rows, key) => {
     const map = new Map();
     for (const row of rows) { const bucket = map.get(row[key]) ?? []; bucket.push(row); map.set(row[key], bucket); }
@@ -1579,7 +1596,16 @@ async function loadPurchaseEntries(tenantId, purchaseRows, userMap) {
           retailPrice: line.retail_price !== null && line.retail_price !== undefined ? moneyJson(Money.fromMinor(BigInt(line.retail_price), line.currency)) : null,
         };
       }),
-      payments: activePurchasePayments.map((payment) => ({ id: payment.id, amount: moneyJson(Money.fromMinor(BigInt(payment.amount), payment.currency)), paymentMethod: payment.payment_method, referenceNumber: payment.reference_number, paidAt: payment.paid_at, createdByUserId: payment.created_by_user_id, createdByName: userMap.get(payment.created_by_user_id) || 'المسؤول' })),
+      payments: activePurchasePayments.map((payment) => ({
+        id: payment.id,
+        amount: moneyJson(Money.fromMinor(BigInt(payment.amount), payment.currency)),
+        paymentMethod: payment.payment_method,
+        referenceNumber: payment.reference_number,
+        paidAt: payment.paid_at,
+        updatedAt: latestEditByPaymentId.get(payment.id) ?? null,
+        createdByUserId: payment.created_by_user_id,
+        createdByName: userMap.get(payment.created_by_user_id) || 'المسؤول',
+      })),
       returns: purchaseReturns.map((item) => ({ id: item.id, returnNumber: item.return_number, creditAmount: moneyJson(Money.fromMinor(BigInt(item.credit_amount), item.currency)), createdAt: item.created_at })),
     };
   });
