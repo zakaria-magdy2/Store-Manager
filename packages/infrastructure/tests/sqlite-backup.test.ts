@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { mkdtemp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { createCipheriv, createHash, randomBytes, scryptSync } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -56,7 +56,7 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
       const backup = await createEncryptedSqliteBackup(source, workingDirectory, 'correct horse battery staple');
       backupPath = backup.path;
       const archive = await readFile(backup.path);
-      expect(archive.subarray(0, 5).toString()).toBe('RFBK1');
+      expect(archive.subarray(0, 5).toString()).toBe('RFBK2');
       expect(backup.size).toBe(archive.length);
       const snapshot = decryptBackupArchive(archive, 'correct horse battery staple');
       const restoredPath = join(workingDirectory, 'restored.sqlite');
@@ -634,10 +634,10 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
     const otherCompany = { id: 'other-company-id', code: 'OTHER_CO', currency: 'USD' };
     const active = await makeMigratedDatabase(activePath, 'other-company-data', otherCompany);
     try {
-      const sourceLicense = { id: 1, activation_token: 'source-machine-token', last_verified_clock_ms: 1_700_000_000_000, clock_hmac: 'a'.repeat(64), updated_at: '2026-11-20T12:00:00.000Z' };
-      const targetLicense = { id: 1, activation_token: 'target-machine-token', last_verified_clock_ms: 1_800_000_000_000, clock_hmac: 'b'.repeat(64), updated_at: '2026-11-21T12:00:00.000Z' };
-      source.getRawDatabase().prepare('INSERT INTO system_licensing (id, activation_token, last_verified_clock_ms, clock_hmac, updated_at) VALUES (?, ?, ?, ?, ?)').run(sourceLicense.id, sourceLicense.activation_token, sourceLicense.last_verified_clock_ms, sourceLicense.clock_hmac, sourceLicense.updated_at);
-      active.getRawDatabase().prepare('INSERT INTO system_licensing (id, activation_token, last_verified_clock_ms, clock_hmac, updated_at) VALUES (?, ?, ?, ?, ?)').run(targetLicense.id, targetLicense.activation_token, targetLicense.last_verified_clock_ms, targetLicense.clock_hmac, targetLicense.updated_at);
+      const sourceLicense = { id: 1, activation_token: 'source-machine-token', last_verified_clock_ms: 1_700_000_000_000, clock_hmac: 'a'.repeat(64), updated_at: '2026-11-20T12:00:00.000Z', ignored_sales_rowid: 2, ignored_shifts_rowid: 1, ignored_audit_rowid: 5 };
+      const targetLicense = { id: 1, activation_token: 'target-machine-token', last_verified_clock_ms: 1_800_000_000_000, clock_hmac: 'b'.repeat(64), updated_at: '2026-11-21T12:00:00.000Z', ignored_sales_rowid: 12, ignored_shifts_rowid: 4, ignored_audit_rowid: 33 };
+      source.getRawDatabase().prepare('INSERT INTO system_licensing (id, activation_token, last_verified_clock_ms, clock_hmac, updated_at, ignored_sales_rowid, ignored_shifts_rowid, ignored_audit_rowid) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(sourceLicense.id, sourceLicense.activation_token, sourceLicense.last_verified_clock_ms, sourceLicense.clock_hmac, sourceLicense.updated_at, sourceLicense.ignored_sales_rowid, sourceLicense.ignored_shifts_rowid, sourceLicense.ignored_audit_rowid);
+      active.getRawDatabase().prepare('INSERT INTO system_licensing (id, activation_token, last_verified_clock_ms, clock_hmac, updated_at, ignored_sales_rowid, ignored_shifts_rowid, ignored_audit_rowid) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(targetLicense.id, targetLicense.activation_token, targetLicense.last_verified_clock_ms, targetLicense.clock_hmac, targetLicense.updated_at, targetLicense.ignored_sales_rowid, targetLicense.ignored_shifts_rowid, targetLicense.ignored_audit_rowid);
       active.getRawDatabase().prepare('INSERT INTO categories (id, tenant_id, name, code) VALUES (?, ?, ?, ?)').run('target-category', otherCompany.id, 'Target only', 'TARGET');
       const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
       backupPath = backup.path;
@@ -656,6 +656,46 @@ describe('Encrypted SQLite backups', { timeout: 30000 }, () => {
       } finally {
         restored.close();
       }
+    } finally {
+      await source.close();
+      await active.close();
+    }
+  });
+
+  it('compresses migrated snapshots smaller than raw SQLite under RFBK2 and remains backward-compatible with legacy RFBK1 archives', async () => {
+    workingDirectory = await mkdtemp(join(tmpdir(), 'retailos-rfbk-compat-'));
+    const sourcePath = join(workingDirectory, 'source.sqlite');
+    const source = await makeMigratedDatabase(sourcePath, 'from-legacy-and-compressed');
+    const activePath = join(workingDirectory, 'active.sqlite');
+    const active = await makeMigratedDatabase(activePath, 'before-legacy');
+    try {
+      const backup = await createEncryptedSqliteBackup(source.getRawDatabase(), workingDirectory, restorePassphrase);
+      backupPath = backup.path;
+      const compressedArchive = await readFile(backup.path);
+      const rawSnapshotPath = join(workingDirectory, 'raw-check.sqlite');
+      await source.getRawDatabase().backup(rawSnapshotPath);
+      const rawBytes = await readFile(rawSnapshotPath);
+      expect(compressedArchive.subarray(0, 5).toString()).toBe('RFBK2');
+      expect(compressedArchive.length).toBeLessThan(rawBytes.length);
+
+      // Construct a legacy RFBK1 (uncompressed) encrypted backup from the exact raw SQLite bytes
+      const salt = randomBytes(16);
+      const iv = randomBytes(12);
+      const key = scryptSync(restorePassphrase, salt, 32, { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
+      const cipher = createCipheriv('aes-256-gcm', key, iv);
+      const ciphertext = Buffer.concat([cipher.update(rawBytes), cipher.final()]);
+      const tag = cipher.getAuthTag();
+      const legacyArchive = Buffer.concat([Buffer.from('RFBK1'), salt, iv, ciphertext, tag]);
+
+      const decryptedLegacy = decryptBackupArchive(legacyArchive, restorePassphrase);
+      expect(decryptedLegacy.equals(rawBytes)).toBe(true);
+
+      const legacyPath = join(workingDirectory, 'legacy.rfbackup');
+      await writeFile(legacyPath, legacyArchive);
+      const prepared = await prepareEncryptedSqliteRestore(legacyPath, workingDirectory, restorePassphrase);
+      await installPreparedSqliteRestore(active.getRawDatabase(), () => active.close(), activePath, workingDirectory, prepared);
+      await expect(recoverPendingSqliteRestore(workingDirectory, activePath)).resolves.toBe(true);
+      expect(readProbe(activePath)).toBe('from-legacy-and-compressed');
     } finally {
       await source.close();
       await active.close();

@@ -24,12 +24,14 @@ import {
 } from '@retailos/infrastructure';
 import {
   buildServerProcessEnv,
+  CLOCK_RESET_STDOUT_PREFIX,
   createDesktopWindowSecurityPolicy,
   DAILY_KEY_UPDATE_ACK_STDIN_PREFIX,
   DAILY_KEY_UPDATE_REQ_STDOUT_PREFIX,
   DAILY_KEY_UPDATE_STDOUT_PREFIX,
   DESKTOP_IPC_CHANNELS,
   DesktopHostSupervisor,
+  formatArabicDesktopError,
   isProcessAlive,
   readDesktopDailyBackupHistory,
   readExternalClockWatermark,
@@ -38,6 +40,8 @@ import {
   resolveDesktopDataPaths,
   resolveOrCreateDesktopDailyBackupSecret,
   resolveOrCreateDesktopWatermarkSecret,
+  RESTART_REQUESTED_STDOUT_PREFIX,
+  rotateLogFileIfNeeded,
   startManagedServerChild,
   stopManagedServerProcess,
   updateDesktopDailyBackupSecret,
@@ -1108,5 +1112,123 @@ test('startManagedServerChild Request/ACK protocol: child REQ → onDailyBackupS
     assert.equal(stillRotated, rotatedKey, 'Key must remain unchanged after DPAPI failure NACK');
   } finally {
     await rm(tempUserData, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('desktop runtime handles forceReset external clock, CLOCK_RESET/RESTART IPC prefixes, Arabic error sanitization, and log rotation', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'retailos-desktop-hardening-'));
+  try {
+    const fakeDpapi = {
+      isEncryptionAvailable: () => true,
+      encryptString: (text) => Buffer.from(`dpapi:${text}`, 'utf8'),
+      decryptString: (buf) => {
+        const s = buf.toString('utf8');
+        if (!s.startsWith('dpapi:')) throw new Error('DPAPI decode fail');
+        return s.slice('dpapi:'.length);
+      },
+    };
+    const secret = 'e'.repeat(64);
+    const futureMs = Date.parse('2026-12-20T10:00:00.000Z');
+    const resetTargetMs = Date.parse('2026-11-24T12:00:00.000Z');
+
+    // 1. writeExternalClockWatermark({ forceReset: true }) rewinds both future watermark and corrupted files
+    await writeExternalClockWatermark({
+      userDataDir: tempDir,
+      watermarkSecret: secret,
+      clockMs: futureMs,
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+    });
+    await writeExternalClockWatermark({
+      userDataDir: tempDir,
+      watermarkSecret: secret,
+      clockMs: resetTargetMs,
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+      forceReset: true,
+    });
+    assert.deepEqual(
+      await readExternalClockWatermark({
+        userDataDir: tempDir,
+        watermarkSecret: secret,
+        safeStorage: fakeDpapi,
+        requireDpapi: true,
+      }),
+      { clockMs: resetTargetMs, tampered: false },
+    );
+
+    await writeFile(join(tempDir, 'license-clock.dat'), Buffer.from('corrupt-clock-dat'));
+    await writeExternalClockWatermark({
+      userDataDir: tempDir,
+      watermarkSecret: secret,
+      clockMs: resetTargetMs + 60_000,
+      safeStorage: fakeDpapi,
+      requireDpapi: true,
+      forceReset: true,
+    });
+    assert.deepEqual(
+      await readExternalClockWatermark({
+        userDataDir: tempDir,
+        watermarkSecret: secret,
+        safeStorage: fakeDpapi,
+        requireDpapi: true,
+      }),
+      { clockMs: resetTargetMs + 60_000, tampered: false },
+    );
+
+    // 2. formatArabicDesktopError strips raw stack traces/technical errors and preserves Arabic guidance
+    const maskedStack = formatArabicDesktopError(
+      new Error('TypeError: Cannot read properties of undefined\n    at C:\\app\\main.js:12:3'),
+      join(tempDir, 'desktop.log'),
+    );
+    assert.ok(!maskedStack.includes('TypeError'));
+    assert.ok(!maskedStack.includes('C:\\app'));
+    assert.ok(maskedStack.includes('ملف التشخيص: desktop.log'));
+    assert.ok(/[\u0600-\u06FF]/.test(maskedStack));
+
+    const arabicMsg = formatArabicDesktopError(new Error('قاعدة البيانات محمية ولا يمكن فتحها'));
+    assert.equal(arabicMsg, 'قاعدة البيانات محمية ولا يمكن فتحها');
+
+    // 3. rotateLogFileIfNeeded rotates once size >= maxBytes and skips smaller logs
+    const logPath = join(tempDir, 'desktop.log');
+    await writeFile(logPath, 'small log\n', 'utf8');
+    await rotateLogFileIfNeeded(logPath, 64);
+    assert.equal(existsSync(`${logPath}.1`), false);
+
+    await writeFile(logPath, 'x'.repeat(128), 'utf8');
+    await rotateLogFileIfNeeded(logPath, 64);
+    assert.equal(existsSync(logPath), false);
+    assert.equal(existsSync(`${logPath}.1`), true);
+    assert.equal((await readFile(`${logPath}.1`, 'utf8')).length, 128);
+
+    // 4. startManagedServerChild emits onClockReset and onRestartRequested from stdout prefixes
+    const ipcChildScript = join(tempDir, 'ipc-signals-child.mjs');
+    await writeFile(
+      ipcChildScript,
+      [
+        `process.stdout.write(${JSON.stringify(`${CLOCK_RESET_STDOUT_PREFIX}${resetTargetMs}\n`)});`,
+        `process.stdout.write(${JSON.stringify(`${RESTART_REQUESTED_STDOUT_PREFIX}\n`)});`,
+        'setTimeout(() => process.exit(0), 30);',
+      ].join('\n'),
+      'utf8',
+    );
+    const observedClockResets = [];
+    let restartSignals = 0;
+    const managed = startManagedServerChild({
+      execPath: process.execPath,
+      serverScriptPath: ipcChildScript,
+      cwd: tempDir,
+      env: process.env,
+      watermarkSecret: secret,
+      onClockReset: (ms) => observedClockResets.push(ms),
+      onRestartRequested: () => {
+        restartSignals += 1;
+      },
+    });
+    await new Promise((resolveExit) => managed.child.once('exit', resolveExit));
+    assert.deepEqual(observedClockResets, [resetTargetMs]);
+    assert.equal(restartSignals, 1);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   }
 });

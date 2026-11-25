@@ -40,3 +40,36 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+  verify-windows:
+    name: Windows build, lint, typecheck, test
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 12.21.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm exec turbo run build --force
+
+      - name: Lint
+        run: pnpm exec turbo run lint --force
+
+      - name: Typecheck
+        run: pnpm exec turbo run typecheck --force
+
+      - name: Test
+        run: pnpm exec turbo run test --concurrency=1 --force

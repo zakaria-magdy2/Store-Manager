@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { prepareEncryptedSqliteRestore, SqliteDatabaseManager } from '@retailos/infrastructure';
+import { DatabaseMigrator, prepareEncryptedSqliteRestore, SqliteDatabaseManager } from '@retailos/infrastructure';
 import { createServerApp } from '../server.mjs';
 import {
   cleanupTempDir,
@@ -155,7 +155,7 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.equal(encryptedBackupResponse.status, 200);
   assert.match(encryptedBackupResponse.headers.get('content-disposition') ?? '', /attachment/);
   const encryptedBackup = Buffer.from(await encryptedBackupResponse.arrayBuffer());
-  assert.equal(encryptedBackup.subarray(0, 5).toString(), 'RFBK1');
+  assert.equal(encryptedBackup.subarray(0, 5).toString(), 'RFBK2');
   assert.ok(encryptedBackup.length > 1000);
   const rejectedRestore = await fetch(`${baseUrl}/api/backups/restore`, { method: 'POST', headers: { Origin: baseUrl, Cookie: cookie, 'Content-Type': 'application/octet-stream', 'X-Backup-Passphrase': Buffer.from('a-strong-test-passphrase').toString('base64url'), 'X-RetailOS-Restore-Confirm': 'replace' }, body: Buffer.from('not a backup') });
   assert.equal(rejectedRestore.status, 400);
@@ -269,10 +269,29 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.equal(reloadedEditedProduct.sku, 'SHIRT-TEST-V2');
   assert.equal(reloadedEditedProduct.brand, 'BrandUpdated');
   assert.equal(reloadedEditedProduct.description, 'Updated model description');
-  assert.equal(reloadedEditedProduct.imagePath, sampleImageDataUrl);
+  assert.match(reloadedEditedProduct.imagePath ?? '', new RegExp(`^/api/products/${sizedProduct.payload.id}/image\\?v=[a-f0-9]{12}$`));
+  assert.equal(reloadedEditedProduct.hasImage, true);
   assert.ok(reloadedEditedProduct.variants.every((v) => v.price.amount === '9200' && v.reorderPoint === '5'));
 
-  // Verify clearing a barcode to null, removing an unused option/variant, and reactivating it persist via PATCH
+  // Verify binary product image endpoint (200 + ETag + 304 + 401 without session)
+  const unauthImageRes = await fetch(`${baseUrl}${reloadedEditedProduct.imagePath}`);
+  assert.equal(unauthImageRes.status, 401);
+  const imageRes = await fetch(`${baseUrl}${reloadedEditedProduct.imagePath}`, {
+    headers: { Cookie: cookie },
+  });
+  assert.equal(imageRes.status, 200);
+  assert.equal(imageRes.headers.get('content-type'), 'image/png');
+  const imageEtag = imageRes.headers.get('etag');
+  assert.ok(imageEtag && imageEtag.length > 4);
+  const fetchedImageBytes = Buffer.from(await imageRes.arrayBuffer());
+  const expectedImageBytes = Buffer.from(sampleImageDataUrl.split(',')[1], 'base64');
+  assert.deepEqual(fetchedImageBytes, expectedImageBytes);
+  const notModifiedImageRes = await fetch(`${baseUrl}${reloadedEditedProduct.imagePath}`, {
+    headers: { Cookie: cookie, 'If-None-Match': imageEtag },
+  });
+  assert.equal(notModifiedImageRes.status, 304);
+
+  // Verify clearing a barcode to null, removing an unused option/variant, and reactivating it persist via PATCH (while URL imagePath preserves stored image bytes)
   const deactivatedVariant = reloadedEditedProduct.variants.find((v) => v.sku === 'SHIRT-TEST-NVY-L');
   assert.ok(deactivatedVariant);
   const clearAndArchiveRes = await request(`/api/products/${sizedProduct.payload.id}`, {
@@ -283,7 +302,7 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
       categoryId: null,
       brand: 'BrandUpdated',
       description: 'Updated model description',
-      imagePath: sampleImageDataUrl,
+      imagePath: reloadedEditedProduct.imagePath,
       options: [
         { key: 'size', name: 'المقاس', values: ['S', 'M'] },
         { key: 'color', name: 'اللون', values: ['Black', 'White'] },
@@ -688,7 +707,7 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
   assert.equal(downloadDaily.status, 200);
   const dailyBytes = Buffer.from(await downloadDaily.arrayBuffer());
   assert.notEqual(dailyBytes.subarray(0, 15).toString('utf8'), 'SQLite format 3');
-  assert.equal(dailyBytes.subarray(0, 5).toString('utf8'), 'RFBK1');
+  assert.equal(dailyBytes.subarray(0, 5).toString('utf8'), 'RFBK2');
 
   const malformedUriRes = await fetch(`${baseUrl}/%E0%A4%A`);
   assert.equal(malformedUriRes.status, 400);
@@ -711,7 +730,7 @@ test('configured store, owner account, supplier ledger, products, stock receipt,
     assert.equal(syncedMirror.response.status, 200, JSON.stringify(syncedMirror.payload));
     assert.equal(syncedMirror.payload.mirror.lastMirrorStatus, 'OK');
     const mirroredLatestBytes = await readFile(join(externalMirrorDir, 'retailos-latest.rfbackup'));
-    assert.equal(mirroredLatestBytes.subarray(0, 5).toString('utf8'), 'RFBK1');
+    assert.equal(mirroredLatestBytes.subarray(0, 5).toString('utf8'), 'RFBK2');
     assert.notEqual(mirroredLatestBytes.subarray(0, 15).toString('utf8'), 'SQLite format 3');
   } finally {
     await request('/api/backups/settings', { method: 'POST', body: { mirrorPath: '', autoMirror: false } });
@@ -4586,5 +4605,287 @@ test('pre-pilot fixes: P1-1 fail-closed 503 startup/writes, P1-4 versioned maste
       else process.env[k] = v;
     }
     await cleanupTempDir(tempRoot);
+  }
+});
+
+test('pre-migration snapshot before 034 upgrade, paginated financial-map, and >500 row Cairo-TZ CSV export', async () => {
+  const dirD = await createTestTempDir('retailos-hardening-csv-fm-');
+  const dbPathD = join(dirD, 'retailos.sqlite');
+  let procD = null;
+  let logD = '';
+
+  const preMigratorMgr = new SqliteDatabaseManager({ filename: dbPathD });
+  preMigratorMgr.connect();
+  try {
+    const preMigRes = await new DatabaseMigrator(preMigratorMgr.getDb()).migrateToLatest('033_shift_reconciliation_status');
+    assert.equal(preMigRes.success, true);
+  } finally {
+    await preMigratorMgr.close();
+  }
+
+  const portD = await reservePort();
+  const urlD = `http://127.0.0.1:${portD}`;
+
+  const startHarnessD = async () => {
+    logD = '';
+    const proc = spawn(process.execPath, [join(appDir, 'tests', 'e2e-server-harness.mjs')], {
+      cwd: workspace,
+      env: testLicenseEnv({
+        PORT: String(portD),
+        RETAILOS_DATA_DIR: dirD,
+        RETAILOS_DB_PATH: dbPathD,
+        RETAILOS_COMPANY_NAME: 'شركة تصدير CSV والخريطة المالية',
+        RETAILOS_COMPANY_CODE: 'HARDEN10',
+        RETAILOS_CURRENCY: 'EGP',
+        RETAILOS_STORE_NAME: 'الفرع الرئيسي',
+      }),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    procD = proc;
+    proc.stdout.on('data', (c) => { logD += c.toString(); });
+    proc.stderr.on('data', (c) => { logD += c.toString(); });
+    await waitForHarnessReady(urlD, proc, () => logD, DEFAULT_HARNESS_READY_TIMEOUT_MS);
+    return proc;
+  };
+
+  const stopHarnessD = async (proc) => {
+    if (!proc || proc.exitCode !== null) return;
+    try {
+      const ctrlRaw = await readFile(join(dirD, '.retailos-control.json'), 'utf8');
+      const ctrl = JSON.parse(ctrlRaw);
+      if (ctrl?.port && ctrl?.token) {
+        const ctrlOrigin = `http://127.0.0.1:${ctrl.port}`;
+        await fetch(`${ctrlOrigin}/api/internal/shutdown`, {
+          method: 'POST',
+          headers: { Origin: ctrlOrigin, 'x-retailos-shutdown-token': ctrl.token },
+        }).catch(() => {});
+        await Promise.race([
+          once(proc, 'exit').catch(() => undefined),
+          new Promise((r) => setTimeout(r, 3000)),
+        ]);
+      }
+    } catch {
+      // Fallback to tree kill below
+    }
+    await terminateChildProcessTree(proc);
+  };
+
+  const reqD = async (path, { method = 'GET', body, cookieStr } = {}) => {
+    const headers = { Origin: urlD };
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (cookieStr) headers.Cookie = cookieStr;
+    const response = await fetch(`${urlD}${path}`, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    const text = await response.text();
+    let payload;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      payload = text;
+    }
+    return { response, payload };
+  };
+
+  try {
+    procD = await startHarnessD();
+
+    // 1. Pre-migration backup created before applying 034_clock_reset_recovery
+    const preMigFiles = await readdir(join(dirD, 'backups', 'pre-migration'));
+    assert.ok(
+      preMigFiles.some((f) => /^retailos-pre-migration-.*\.(rfbackup|sqlite)$/.test(f)),
+      `Expected pre-migration snapshot in backups/pre-migration, found: ${JSON.stringify(preMigFiles)}`,
+    );
+
+    const checkMgr = new SqliteDatabaseManager({ filename: dbPathD, readOnly: true });
+    checkMgr.connect();
+    try {
+      const applied = await new DatabaseMigrator(checkMgr.getDb()).getAppliedMigrationNames();
+      assert.ok(applied.includes('034_clock_reset_recovery'));
+    } finally {
+      await checkMgr.close();
+    }
+
+    // 2. Activate, setup, and create 6+ financial events for pagination testing
+    await activateTestLicense(urlD);
+    const setupRes = await reqD('/api/setup', {
+      method: 'POST',
+      body: { ownerUsername: 'h10_owner', ownerName: 'مالك الاختبار', password: 'Harden10-Password-2026' },
+    });
+    assert.equal(setupRes.response.status, 201);
+    const loginRes = await reqD('/api/login', {
+      method: 'POST',
+      body: { username: 'h10_owner', password: 'Harden10-Password-2026' },
+    });
+    assert.equal(loginRes.response.status, 200);
+    const cookieD = loginRes.response.headers.get('set-cookie').split(';')[0];
+
+    const dataRes = await reqD('/api/data', { cookieStr: cookieD });
+    const storeIdD = dataRes.payload.stores[0].id;
+
+    const supRes = await reqD('/api/suppliers', {
+      method: 'POST',
+      cookieStr: cookieD,
+      body: { name: 'تاجر الترقيم' },
+    });
+    assert.equal(supRes.response.status, 201);
+
+    const prodRes = await reqD('/api/products', {
+      method: 'POST',
+      cookieStr: cookieD,
+      body: {
+        name: 'صنف اختبار الخريطة',
+        sku: 'FM-ITEM-1',
+        variants: [{ sku: 'FM-ITEM-1-V', retailPrice: '10000', reorderPoint: '1' }],
+      },
+    });
+    assert.equal(prodRes.response.status, 201);
+    const prodListData = await reqD('/api/data', { cookieStr: cookieD });
+    const variantIdD = prodListData.payload.products.find((p) => p.id === prodRes.payload.id).variants[0].id;
+
+    const purRes = await reqD('/api/purchases', {
+      method: 'POST',
+      cookieStr: cookieD,
+      body: {
+        storeId: storeIdD,
+        supplierId: supRes.payload.id,
+        idempotencyKey: randomUUID(),
+        totalAmount: '50000',
+        paidAmount: '50000',
+        paymentMethod: 'BANK_TRANSFER',
+        items: [{ variantId: variantIdD, quantity: '10', unitCost: '5000' }],
+      },
+    });
+    assert.equal(purRes.response.status, 201);
+
+    const shiftRes = await reqD('/api/shifts/start', {
+      method: 'POST',
+      cookieStr: cookieD,
+      body: { storeId: storeIdD, openingCash: '20000' },
+    });
+    assert.equal(shiftRes.response.status, 201);
+
+    for (let sIdx = 0; sIdx < 2; sIdx += 1) {
+      const saleRes = await reqD('/api/checkout', {
+        method: 'POST',
+        cookieStr: cookieD,
+        body: {
+          storeId: storeIdD,
+          idempotencyKey: randomUUID(),
+          payment: { method: 'CASH', amount: '10000' },
+          items: [{ variantId: variantIdD, quantity: '1' }],
+        },
+      });
+      assert.equal(saleRes.response.status, 201);
+    }
+
+    const expRes = await reqD('/api/expenses', {
+      method: 'POST',
+      cookieStr: cookieD,
+      body: {
+        storeId: storeIdD,
+        idempotencyKey: randomUUID(),
+        categoryCode: 'UTILITIES',
+        amount: '1500',
+        paymentMethod: 'CASH_DRAWER',
+        expenseDate: cairoDateIso(),
+        notes: 'فاتورة',
+      },
+    });
+    assert.equal(expRes.response.status, 201);
+
+    // 3. Financial Map pagination check (limit=2, offset=0 then offset=2)
+    const fmPage1 = await reqD(`/api/reports/financial-map?storeId=${storeIdD}&limit=2&offset=0`, { cookieStr: cookieD });
+    assert.equal(fmPage1.response.status, 200);
+    assert.equal(fmPage1.payload.timeline.length, 2);
+    assert.equal(fmPage1.payload.pagination.limit, 2);
+    assert.equal(fmPage1.payload.pagination.offset, 0);
+    assert.ok(fmPage1.payload.pagination.total >= 5);
+    assert.equal(fmPage1.payload.pagination.hasMore, true);
+
+    const fmPage2 = await reqD(`/api/reports/financial-map?storeId=${storeIdD}&limit=2&offset=2`, { cookieStr: cookieD });
+    assert.equal(fmPage2.response.status, 200);
+    assert.equal(fmPage2.payload.timeline.length, 2);
+    assert.equal(fmPage2.payload.pagination.offset, 2);
+    assert.equal(fmPage2.payload.timeline[0].stepNumber, fmPage1.payload.timeline[1].stepNumber - 1);
+
+    // 4. Bulk-insert 520 sales (including formula payload and signed negative amount) and verify >500-row CSV streaming + Cairo TZ
+    await stopHarnessD(procD);
+    const sampleUtcIso = '2026-11-24T12:00:00.000Z';
+    const expectedCairoParts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Africa/Cairo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(new Date(sampleUtcIso));
+    const pMap = Object.fromEntries(expectedCairoParts.map((p) => [p.type, p.value]));
+    const expectedCairoTimestamp = `${pMap.year}-${pMap.month}-${pMap.day} ${pMap.hour}:${pMap.minute}:${pMap.second}`;
+
+    const seedMgr = new SqliteDatabaseManager({ filename: dbPathD });
+    seedMgr.connect();
+    try {
+      const rawSeedDb = seedMgr.getRawDatabase();
+      const seedUser = rawSeedDb.prepare('SELECT id, tenant_id FROM users LIMIT 1').get();
+      assert.ok(seedUser?.id && seedUser?.tenant_id);
+      const insertSaleStmt = rawSeedDb.prepare(`
+        INSERT INTO sales (
+          id, tenant_id, store_id, sale_number, idempotency_key,
+          customer_name, currency, subtotal, discount_total, total, paid_total, change_given,
+          cashier_user_id, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'EGP', ?, 0, ?, ?, 0, ?, 'COMPLETED', ?)
+      `);
+      rawSeedDb.transaction(() => {
+        for (let i = 0; i < 520; i += 1) {
+          const isSpecial = i === 0;
+          const amt = isSpecial ? -500 : 2500;
+          const customerName = isSpecial ? '=SUM(A1)' : `عميل ${i}`;
+          insertSaleStmt.run(
+            `bulk-csv-sale-${i}`,
+            seedUser.tenant_id,
+            storeIdD,
+            `BULK-CSV-${String(i).padStart(4, '0')}`,
+            `bulk-csv-idem-${i}`,
+            customerName,
+            amt,
+            amt,
+            amt,
+            seedUser.id,
+            isSpecial ? sampleUtcIso : '2026-11-24T11:59:00.000Z',
+          );
+        }
+      })();
+    } finally {
+      await seedMgr.close();
+    }
+
+    procD = await startHarnessD();
+    const reLoginRes = await reqD('/api/login', {
+      method: 'POST',
+      body: { username: 'h10_owner', password: 'Harden10-Password-2026' },
+    });
+    assert.equal(reLoginRes.response.status, 200);
+    const cookieAfter = reLoginRes.response.headers.get('set-cookie').split(';')[0];
+
+    const csvExportRes = await fetch(`${urlD}/api/reports/export.csv?type=sales&storeId=${storeIdD}`, {
+      headers: { Origin: urlD, Cookie: cookieAfter },
+    });
+    assert.equal(csvExportRes.status, 200);
+    assert.equal(csvExportRes.headers.get('x-export-row-count'), '522');
+    assert.equal(csvExportRes.headers.get('x-export-truncated'), 'false');
+    assert.match(csvExportRes.headers.get('content-disposition') ?? '', /filename="raff-sales-\d{4}-\d{2}-\d{2}\.csv"/);
+
+    const csvText = Buffer.from(await csvExportRes.arrayBuffer()).toString('utf8').replace(/^\uFEFF/, '');
+    const csvLines = csvText.split('\r\n');
+    assert.equal(csvLines.length, 523);
+    assert.ok(csvText.includes(`BULK-CSV-0000,${expectedCairoTimestamp},'=SUM(A1),-5.00,-5.00,COMPLETED`));
+  } finally {
+    await stopHarnessD(procD);
+    await cleanupTempDir(dirD);
   }
 });

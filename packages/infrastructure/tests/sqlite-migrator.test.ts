@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { ScopedExecutionContext } from '@retailos/application';
 import { Permissions } from '@retailos/core';
 import { SqliteDatabaseManager } from '../src/database/sqlite.js';
-import { DatabaseMigrator } from '../src/database/migrator.js';
+import { DatabaseDowngradeError, DatabaseMigrator, REGISTERED_MIGRATION_NAMES } from '../src/database/migrator.js';
 import { SqliteUnitOfWork } from '../src/database/unit-of-work.js';
 import { SqliteAuditLogRepository } from '../src/database/repositories/sqlite-audit-log.repository.js';
 import { SqliteUserRepository } from '../src/database/repositories/sqlite-user.repository.js';
@@ -1069,5 +1069,48 @@ describe('SQLite Database & Migration Engine', () => {
     expect(BigInt(verified.actual_cash)).toBe(120000n);
 
     expect(openRow.reconciliation_status).toBe('OPEN');
+  });
+
+  it('tracks pending migrations, ensures 034_clock_reset_recovery idempotency, and blocks downgrades with DatabaseDowngradeError', async () => {
+    const db = dbManager.getDb();
+    const migrator = new DatabaseMigrator(db);
+
+    // Before first run, all registered migrations including 034 are pending
+    const pendingBefore = await migrator.getPendingMigrationNames();
+    expect(pendingBefore.length).toBe(REGISTERED_MIGRATION_NAMES.length);
+    expect(pendingBefore).toContain('034_clock_reset_recovery');
+
+    const first = await migrator.migrateToLatest();
+    expect(first.success).toBe(true);
+    expect(await migrator.getPendingMigrationNames()).toEqual([]);
+
+    // Re-running migrateToLatest is idempotent
+    const second = await migrator.migrateToLatest();
+    expect(second.success).toBe(true);
+    expect(second.executedMigrations).toEqual([]);
+
+    // Verify 034 schema additions
+    const licensingCols = (dbManager.getRawDatabase().pragma('table_info(system_licensing)') as { name: string }[]).map((c) => c.name);
+    expect(licensingCols).toContain('ignored_sales_rowid');
+    expect(licensingCols).toContain('ignored_shifts_rowid');
+    expect(licensingCols).toContain('ignored_audit_rowid');
+    const resetTable = dbManager
+      .getRawDatabase()
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'used_clock_reset_tokens'")
+      .get() as { name?: string } | undefined;
+    expect(resetTable?.name).toBe('used_clock_reset_tokens');
+
+    // Simulate opening a database migrated by a newer version of RetailOS
+    await sql`
+      INSERT INTO kysely_migration (name, timestamp)
+      VALUES ('999_future_schema', '2099-01-01T00:00:00.000Z')
+    `.execute(db);
+
+    await expect(migrator.assertNoDowngrade()).rejects.toBeInstanceOf(DatabaseDowngradeError);
+    await expect(migrator.migrateToLatest()).rejects.toMatchObject({
+      name: 'DatabaseDowngradeError',
+      code: 'DATABASE_DOWNGRADE_UNSUPPORTED',
+      unknownMigrations: ['999_future_schema'],
+    });
   });
 });

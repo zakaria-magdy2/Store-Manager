@@ -6,7 +6,7 @@ import {
   verify,
   type KeyObject,
 } from 'node:crypto';
-import type { Kysely } from 'kysely';
+import { sql, type Kysely, type Selectable } from 'kysely';
 import {
   computeRemainingDaysCeiling,
   parseLicenseTokenFormat,
@@ -15,6 +15,7 @@ import {
   type LicensePayload,
   type LicenseStatus,
 } from '@retailos/core';
+import { parseNonNegativeRowid } from '../database/migrator.js';
 import type { RetailOSDatabase, SystemLicensingTable } from '../database/types.js';
 import { resolveMachineIdentity } from './machine-fingerprint.js';
 import { EMBEDDED_LICENSE_PUBLIC_KEY_PEM } from './public-key.js';
@@ -78,6 +79,7 @@ export interface LicenseServiceOptions {
   readonly externalWatermarkMs?: number | undefined;
   readonly externalWatermarkTampered?: boolean | undefined;
   readonly onWatermarkAdvance?: ((clockMs: number) => void) | undefined;
+  readonly onWatermarkReset?: ((clockMs: number) => void) | undefined;
   readonly machineIdOverride?: string | undefined;
   readonly isHardwareBackedOverride?: boolean | undefined;
   readonly identityProvider?: (() => LicenseMachineIdentityResolution) | undefined;
@@ -98,13 +100,37 @@ export interface PasswordResetVerificationResult {
   readonly machineId: string;
 }
 
+export type ClockResetTokenPayload = PasswordResetTokenPayload;
+export type ClockResetVerificationResult = PasswordResetVerificationResult;
+
+interface LedgerRowidCutoffs {
+  readonly salesRowid: number;
+  readonly shiftsRowid: number;
+  readonly auditRowid: number;
+}
+
+const ZERO_LEDGER_CUTOFFS: LedgerRowidCutoffs = {
+  salesRowid: 0,
+  shiftsRowid: 0,
+  auditRowid: 0,
+};
+
+function readRowCutoffs(row: Partial<Selectable<SystemLicensingTable>> | undefined | null): LedgerRowidCutoffs {
+  return {
+    salesRowid: parseNonNegativeRowid(row?.ignored_sales_rowid),
+    shiftsRowid: parseNonNegativeRowid(row?.ignored_shifts_rowid),
+    auditRowid: parseNonNegativeRowid(row?.ignored_audit_rowid),
+  };
+}
+
 export class LicenseService {
   private readonly publicKeyPem: string;
   private readonly publicKey: KeyObject;
   private readonly watermarkSecret: string;
   private externalWatermarkMs: number;
-  private readonly externalWatermarkTampered: boolean;
+  private externalWatermarkTampered: boolean;
   private readonly onWatermarkAdvance: ((clockMs: number) => void) | undefined;
+  private readonly onWatermarkReset: ((clockMs: number) => void) | undefined;
   private readonly machineIdOverride: string | undefined;
   private readonly isHardwareBackedOverride: boolean | undefined;
   private readonly identityProvider: (() => LicenseMachineIdentityResolution) | undefined;
@@ -129,6 +155,7 @@ export class LicenseService {
         : 0;
     this.externalWatermarkTampered = Boolean(options?.externalWatermarkTampered);
     this.onWatermarkAdvance = options?.onWatermarkAdvance;
+    this.onWatermarkReset = options?.onWatermarkReset;
     this.machineIdOverride = options?.machineIdOverride;
     this.isHardwareBackedOverride = options?.isHardwareBackedOverride;
     this.identityProvider = options?.identityProvider;
@@ -231,7 +258,8 @@ export class LicenseService {
       throw new LicenseHardwareIdentityError();
     }
 
-    const ledgerBaseline = await this.getOperationalLedgerBaseline();
+    const rowCutoffs = readRowCutoffs(existingRow);
+    const ledgerBaseline = await this.getOperationalLedgerBaseline(rowCutoffs);
     const row = existingRow ?? (await this.ensureWatermarkRow(nowMs, ledgerBaseline, identity.machineId));
 
     if (!row) {
@@ -244,6 +272,7 @@ export class LicenseService {
       );
     }
 
+    const effectiveCutoffs = readRowCutoffs(row);
     const token = row.activation_token?.trim() || null;
     const hmacValid = this.isWatermarkHmacValid(row, identity.machineId);
     const effectiveWatermarkMs = Math.max(
@@ -264,7 +293,7 @@ export class LicenseService {
       }
       const nextWatermarkMs = Math.max(nowMs, row.last_verified_clock_ms, this.externalWatermarkMs);
       if (nextWatermarkMs > row.last_verified_clock_ms) {
-        await this.updateWatermarkRow(null, nextWatermarkMs, identity.machineId);
+        await this.updateWatermarkRow(null, nextWatermarkMs, identity.machineId, effectiveCutoffs);
       }
       this.recordWatermarkAdvance(nextWatermarkMs);
       return this.buildEvaluation(
@@ -320,7 +349,7 @@ export class LicenseService {
     const expiresMs = Date.parse(payload.expiresAt);
     if (nowMs >= expiresMs) {
       if (nextWatermarkMs > row.last_verified_clock_ms) {
-        await this.updateWatermarkRow(token, nextWatermarkMs, identity.machineId);
+        await this.updateWatermarkRow(token, nextWatermarkMs, identity.machineId, effectiveCutoffs);
       }
       this.recordWatermarkAdvance(nextWatermarkMs);
       return this.buildEvaluation(
@@ -333,7 +362,7 @@ export class LicenseService {
     }
 
     if (nextWatermarkMs > row.last_verified_clock_ms) {
-      await this.updateWatermarkRow(token, nextWatermarkMs, identity.machineId);
+      await this.updateWatermarkRow(token, nextWatermarkMs, identity.machineId, effectiveCutoffs);
     }
     this.recordWatermarkAdvance(nextWatermarkMs);
 
@@ -360,7 +389,8 @@ export class LicenseService {
       throw new LicenseHardwareIdentityError();
     }
 
-    const ledgerBaseline = await this.getOperationalLedgerBaseline();
+    const rowCutoffs = readRowCutoffs(existingPrecheck);
+    const ledgerBaseline = await this.getOperationalLedgerBaseline(rowCutoffs);
     const existingRow =
       existingPrecheck ?? (await this.ensureWatermarkRow(nowMs, ledgerBaseline, identity.machineId));
 
@@ -389,6 +419,7 @@ export class LicenseService {
     }
 
     // Enforce monotonic high-watermark across SQLite row, external DPAPI clock, and operational ledger.
+    const effectiveCutoffs = readRowCutoffs(existingRow);
     const existingWatermarkValid = this.isWatermarkHmacValid(existingRow, identity.machineId);
     const watermarkBaseline = existingWatermarkValid ? existingRow.last_verified_clock_ms : 0;
     const ledgerMax = ledgerBaseline.maxTimestampMs ?? 0;
@@ -408,9 +439,120 @@ export class LicenseService {
       });
     }
 
-    await this.updateWatermarkRow(trimmed, baselineClockMs, identity.machineId);
+    await this.updateWatermarkRow(trimmed, baselineClockMs, identity.machineId, effectiveCutoffs);
     this.recordWatermarkAdvance(baselineClockMs);
     return this.buildEvaluation('ACTIVE', payload, nowMs, null, identity.machineId);
+  }
+
+  public async resetClockWithVendorToken(rawToken: string): Promise<LicenseEvaluation> {
+    const verification = this.verifyClockResetToken(rawToken);
+    if (!verification.valid || !verification.payload) {
+      throw Object.assign(new Error(verification.reason ?? 'كود إعادة ضبط الساعة غير صالح'), {
+        status: 400,
+      });
+    }
+
+    const identity = this.resolveCurrentIdentity();
+    const precheckRow = await this.db
+      .selectFrom('system_licensing')
+      .selectAll()
+      .where('id', '=', 1)
+      .executeTakeFirst();
+
+    if (precheckRow?.activation_token?.trim() && !identity.isHardwareBacked) {
+      throw new LicenseHardwareIdentityError();
+    }
+
+    const nowMs = this.nowProvider();
+    const nowIso = new Date(nowMs).toISOString();
+    const resetPayload = verification.payload;
+    let newWatermarkMs = nowMs;
+
+    try {
+      await this.db.transaction().execute(async (trx) => {
+        const [rowInTrx, salesMaxRowid, shiftsMaxRowid, auditMaxRowid] = await Promise.all([
+          trx.selectFrom('system_licensing').selectAll().where('id', '=', 1).executeTakeFirst(),
+          sql<{ maxId: number | null }>`SELECT COALESCE(MAX(rowid), 0) AS maxId FROM sales`.execute(trx),
+          sql<{ maxId: number | null }>`SELECT COALESCE(MAX(rowid), 0) AS maxId FROM cashier_shifts`.execute(trx),
+          sql<{ maxId: number | null }>`SELECT COALESCE(MAX(rowid), 0) AS maxId FROM audit_logs`.execute(trx),
+        ]);
+
+        const cutoffs: LedgerRowidCutoffs = {
+          salesRowid: parseNonNegativeRowid(salesMaxRowid.rows[0]?.maxId),
+          shiftsRowid: parseNonNegativeRowid(shiftsMaxRowid.rows[0]?.maxId),
+          auditRowid: parseNonNegativeRowid(auditMaxRowid.rows[0]?.maxId),
+        };
+
+        const previousWatermarkMs = Math.max(
+          rowInTrx?.last_verified_clock_ms ?? 0,
+          this.externalWatermarkMs,
+        );
+
+        await trx
+          .insertInto('used_clock_reset_tokens')
+          .values({
+            reset_id: resetPayload.resetId,
+            machine_id: resetPayload.machineId,
+            issued_at: resetPayload.issuedAt,
+            applied_at: nowIso,
+            previous_watermark_ms: previousWatermarkMs,
+            new_watermark_ms: nowMs,
+          })
+          .execute();
+
+        const preservedToken = rowInTrx?.activation_token?.trim() || null;
+        const nextHmac = this.computeWatermarkHmac(
+          nowMs,
+          preservedToken,
+          identity.machineId,
+          cutoffs,
+        );
+
+        if (rowInTrx) {
+          await trx
+            .updateTable('system_licensing')
+            .set({
+              last_verified_clock_ms: nowMs,
+              clock_hmac: nextHmac,
+              ignored_sales_rowid: cutoffs.salesRowid,
+              ignored_shifts_rowid: cutoffs.shiftsRowid,
+              ignored_audit_rowid: cutoffs.auditRowid,
+              updated_at: nowIso,
+            })
+            .where('id', '=', 1)
+            .execute();
+        } else {
+          await trx
+            .insertInto('system_licensing')
+            .values({
+              id: 1,
+              activation_token: null,
+              last_verified_clock_ms: nowMs,
+              clock_hmac: nextHmac,
+              ignored_sales_rowid: cutoffs.salesRowid,
+              ignored_shifts_rowid: cutoffs.shiftsRowid,
+              ignored_audit_rowid: cutoffs.auditRowid,
+              updated_at: nowIso,
+            })
+            .execute();
+        }
+        newWatermarkMs = nowMs;
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('UNIQUE constraint failed') || msg.includes('SQLITE_CONSTRAINT')) {
+        throw Object.assign(
+          new Error('تم استخدام كود إعادة ضبط الساعة هذا من قبل — اطلب كودًا جديدًا من الدعم الفني'),
+          { status: 409 },
+        );
+      }
+      throw err;
+    }
+
+    this.externalWatermarkMs = newWatermarkMs;
+    this.externalWatermarkTampered = false;
+    this.onWatermarkReset?.(newWatermarkMs);
+    return this.getStatus();
   }
 
   public async touchWatermarkOnCheckout(): Promise<LicenseEvaluation> {
@@ -435,24 +577,28 @@ export class LicenseService {
     return status;
   }
 
-  private async getOperationalLedgerBaseline(): Promise<OperationalLedgerBaseline> {
+  private async getOperationalLedgerBaseline(
+    cutoffs: LedgerRowidCutoffs = ZERO_LEDGER_CUTOFFS,
+  ): Promise<OperationalLedgerBaseline> {
     const [salesMax, shiftsMax, auditMax] = await Promise.all([
-      this.db
-        .selectFrom('sales')
-        .select((eb) => eb.fn.max('created_at').as('maxTs'))
-        .executeTakeFirst(),
-      this.db
-        .selectFrom('cashier_shifts')
-        .select((eb) => eb.fn.max('created_at').as('maxTs'))
-        .executeTakeFirst(),
-      this.db
-        .selectFrom('audit_logs')
-        .select((eb) => eb.fn.max('created_at').as('maxTs'))
-        .executeTakeFirst(),
+      sql<{ maxTs: string | null }>`
+        SELECT MAX(created_at) AS maxTs FROM sales WHERE rowid > ${cutoffs.salesRowid}
+      `.execute(this.db),
+      sql<{ maxTs: string | null }>`
+        SELECT MAX(created_at) AS maxTs FROM cashier_shifts WHERE rowid > ${cutoffs.shiftsRowid}
+      `.execute(this.db),
+      sql<{ maxTs: string | null }>`
+        SELECT MAX(created_at) AS maxTs FROM audit_logs WHERE rowid > ${cutoffs.auditRowid}
+      `.execute(this.db),
     ]);
 
-    const rawValues = [salesMax?.maxTs, shiftsMax?.maxTs, auditMax?.maxTs];
-    let hasRecords = false;
+    const rawValues = [
+      salesMax.rows[0]?.maxTs,
+      shiftsMax.rows[0]?.maxTs,
+      auditMax.rows[0]?.maxTs,
+    ];
+    let hasRecords =
+      cutoffs.salesRowid > 0 || cutoffs.shiftsRowid > 0 || cutoffs.auditRowid > 0;
     let maxTimestampMs: number | null = null;
     for (const raw of rawValues) {
       if (raw !== null && raw !== undefined && String(raw).trim() !== '') {
@@ -464,6 +610,15 @@ export class LicenseService {
       }
     }
 
+    if (!hasRecords) {
+      const [anySale, anyShift, anyAudit] = await Promise.all([
+        this.db.selectFrom('sales').select('id').limit(1).executeTakeFirst(),
+        this.db.selectFrom('cashier_shifts').select('id').limit(1).executeTakeFirst(),
+        this.db.selectFrom('audit_logs').select('id').limit(1).executeTakeFirst(),
+      ]);
+      hasRecords = Boolean(anySale || anyShift || anyAudit);
+    }
+
     return { hasRecords, maxTimestampMs };
   }
 
@@ -471,7 +626,7 @@ export class LicenseService {
     nowMs: number,
     ledgerBaseline: OperationalLedgerBaseline,
     machineId: string,
-  ): Promise<SystemLicensingTable | null> {
+  ): Promise<Selectable<SystemLicensingTable> | null> {
     const existing = await this.db
       .selectFrom('system_licensing')
       .selectAll()
@@ -512,8 +667,14 @@ export class LicenseService {
     activationToken: string | null,
     lastVerifiedClockMs: number,
     machineId: string,
+    cutoffs: LedgerRowidCutoffs = ZERO_LEDGER_CUTOFFS,
   ): Promise<void> {
-    const nextHmac = this.computeWatermarkHmac(lastVerifiedClockMs, activationToken, machineId);
+    const nextHmac = this.computeWatermarkHmac(
+      lastVerifiedClockMs,
+      activationToken,
+      machineId,
+      cutoffs,
+    );
     const nowIso = new Date(lastVerifiedClockMs).toISOString();
     await this.db
       .updateTable('system_licensing')
@@ -531,17 +692,24 @@ export class LicenseService {
     clockMs: number,
     activationToken: string | null,
     machineId: string,
+    cutoffs: LedgerRowidCutoffs = ZERO_LEDGER_CUTOFFS,
   ): string {
+    const hasCutoffs =
+      cutoffs.salesRowid > 0 || cutoffs.shiftsRowid > 0 || cutoffs.auditRowid > 0;
+    const message = hasCutoffs
+      ? `RetailOS-Clock-Watermark-v3:${machineId}:${String(clockMs)}:${activationToken ?? ''}:${String(cutoffs.salesRowid)}:${String(cutoffs.shiftsRowid)}:${String(cutoffs.auditRowid)}`
+      : `RetailOS-Clock-Watermark-v2:${machineId}:${String(clockMs)}:${activationToken ?? ''}`;
     return createHmac('sha256', Buffer.from(this.watermarkSecret, 'utf8'))
-      .update(`RetailOS-Clock-Watermark-v2:${machineId}:${String(clockMs)}:${activationToken ?? ''}`)
+      .update(message)
       .digest('hex');
   }
 
-  private isWatermarkHmacValid(row: SystemLicensingTable, machineId: string): boolean {
+  private isWatermarkHmacValid(row: Selectable<SystemLicensingTable>, machineId: string): boolean {
     const expected = this.computeWatermarkHmac(
       row.last_verified_clock_ms,
       row.activation_token ?? null,
       machineId,
+      readRowCutoffs(row),
     );
     const actualBuf = Buffer.from(row.clock_hmac || '', 'utf8');
     const expectedBuf = Buffer.from(expected, 'utf8');
@@ -589,34 +757,38 @@ export class LicenseService {
     };
   }
 
-  public verifyPasswordResetToken(rawToken: string): PasswordResetVerificationResult {
+  private verifySignedEmergencyToken(
+    rawToken: string,
+    tokenPrefix: 'ROSRST1' | 'ROSCLK1',
+    labelAr: string,
+  ): PasswordResetVerificationResult {
     const machineId = this.getMachineId();
     const cleaned = String(rawToken ?? '').trim().replace(/\s+/g, '');
     const parts = cleaned.split('.');
-    if (parts.length !== 3 || parts[0] !== 'ROSRST1') {
+    if (parts.length !== 3 || parts[0] !== tokenPrefix) {
       return {
         valid: false,
         payload: null,
-        reason: 'صيغة كود الطوارئ غير صحيحة — تأكد من نسخ الكود كاملًا (يبدأ بـ ROSRST1.)',
+        reason: `صيغة ${labelAr} غير صحيحة — تأكد من نسخ الكود كاملًا (يبدأ بـ ${tokenPrefix}.)`,
         machineId,
       };
     }
 
     const [, payloadB64u, signatureB64u] = parts;
     if (!payloadB64u || !signatureB64u) {
-      return { valid: false, payload: null, reason: 'كود الطوارئ غير مكتمل', machineId };
+      return { valid: false, payload: null, reason: `${labelAr} غير مكتمل`, machineId };
     }
 
-    const signingInput = `ROSRST1.${payloadB64u}`;
+    const signingInput = `${tokenPrefix}.${payloadB64u}`;
     let signatureBytes: Buffer;
     try {
       signatureBytes = Buffer.from(signatureB64u, 'base64url');
     } catch {
-      return { valid: false, payload: null, reason: 'توقيع كود الطوارئ غير صالح', machineId };
+      return { valid: false, payload: null, reason: `توقيع ${labelAr} غير صالح`, machineId };
     }
 
     if (signatureBytes.length !== 64) {
-      return { valid: false, payload: null, reason: 'توقيع كود الطوارئ غير صالح', machineId };
+      return { valid: false, payload: null, reason: `توقيع ${labelAr} غير صالح`, machineId };
     }
 
     const verified = verify(null, Buffer.from(signingInput, 'utf8'), this.publicKey, signatureBytes);
@@ -624,7 +796,7 @@ export class LicenseService {
       return {
         valid: false,
         payload: null,
-        reason: 'كود الطوارئ غير صحيح أو تم التلاعب به',
+        reason: `${labelAr} غير صحيح أو تم التلاعب به`,
         machineId,
       };
     }
@@ -633,11 +805,11 @@ export class LicenseService {
     try {
       parsed = JSON.parse(Buffer.from(payloadB64u, 'base64url').toString('utf8'));
     } catch {
-      return { valid: false, payload: null, reason: 'بيانات كود الطوارئ تالفة', machineId };
+      return { valid: false, payload: null, reason: `بيانات ${labelAr} تالفة`, machineId };
     }
 
     if (!parsed || typeof parsed !== 'object') {
-      return { valid: false, payload: null, reason: 'بيانات كود الطوارئ غير صالحة', machineId };
+      return { valid: false, payload: null, reason: `بيانات ${labelAr} غير صالحة`, machineId };
     }
 
     const candidate = parsed as Record<string, unknown>;
@@ -649,14 +821,14 @@ export class LicenseService {
     const expiresMs = Date.parse(expiresAt);
 
     if (!resetId || resetId.length < 8 || !tokenMachineId || !globalThis.Number.isFinite(issuedMs) || !globalThis.Number.isFinite(expiresMs) || expiresMs <= issuedMs) {
-      return { valid: false, payload: null, reason: 'بيانات كود الطوارئ غير مكتملة أو غير صالحة', machineId };
+      return { valid: false, payload: null, reason: `بيانات ${labelAr} غير مكتملة أو غير صالحة`, machineId };
     }
 
     if (tokenMachineId !== machineId) {
       return {
         valid: false,
         payload: null,
-        reason: 'كود الطوارئ مخصص لجهاز آخر ولا يعمل على هذا الجهاز',
+        reason: `${labelAr} مخصص لجهاز آخر ولا يعمل على هذا الجهاز`,
         machineId,
       };
     }
@@ -666,7 +838,7 @@ export class LicenseService {
       return {
         valid: false,
         payload: null,
-        reason: 'انتهت صلاحية كود الطوارئ — اطلب كودًا جديدًا من الدعم الفني',
+        reason: `انتهت صلاحية ${labelAr} — اطلب كودًا جديدًا من الدعم الفني`,
         machineId,
       };
     }
@@ -685,5 +857,13 @@ export class LicenseService {
       reason: null,
       machineId,
     };
+  }
+
+  public verifyPasswordResetToken(rawToken: string): PasswordResetVerificationResult {
+    return this.verifySignedEmergencyToken(rawToken, 'ROSRST1', 'كود الطوارئ');
+  }
+
+  public verifyClockResetToken(rawToken: string): ClockResetVerificationResult {
+    return this.verifySignedEmergencyToken(rawToken, 'ROSCLK1', 'كود إعادة ضبط الساعة');
   }
 }

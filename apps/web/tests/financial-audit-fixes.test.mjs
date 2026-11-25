@@ -354,9 +354,13 @@ test('P1/P2 financial audit fixes: cross-actor shift drawer movements, single-sh
     // TEST 2 (P1): Cross-day supplier payment edit / method change / void matches
     // ledger 1010/1020 per day AND invoice details / payment history / purchase report
     // =========================================================================
-    const day1 = '2026-11-25';
-    const day2 = '2026-11-26';
-    t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 10, 25, 10, 0, 0) });
+    const futureAnchor = new Date(Date.now() + 2 * 86_400_000);
+    const day1StartMs = Date.UTC(futureAnchor.getUTCFullYear(), futureAnchor.getUTCMonth(), futureAnchor.getUTCDate(), 10, 0, 0);
+    const day2StartMs = day1StartMs + 86_400_000;
+    const formatCairoDay = (ms) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Cairo' }).format(new Date(ms));
+    const day1 = formatCairoDay(day1StartMs);
+    const day2 = formatCairoDay(day2StartMs);
+    t.mock.timers.enable({ apis: ['Date'], now: day1StartMs });
     let dayOwnerCookie = (await apiJson('/api/login', {
       method: 'POST',
       body: JSON.stringify({ username: 'owner_fin', password: 'OwnerPassword123!' }),
@@ -394,8 +398,8 @@ test('P1/P2 financial audit fixes: cross-actor shift drawer movements, single-sh
     });
     assert.equal(payRes.status, 201);
 
-    // Advance system clock to Day 2 (2026-11-26) and edit the payment from 500 EGP to 300 EGP
-    t.mock.timers.setTime(Date.UTC(2026, 10, 26, 10, 0, 0));
+    // Advance system clock to Day 2 and edit the payment from 500 EGP to 300 EGP
+    t.mock.timers.setTime(day2StartMs);
     dayOwnerCookie = (await apiJson('/api/login', {
       method: 'POST',
       body: JSON.stringify({ username: 'owner_fin', password: 'OwnerPassword123!' }),

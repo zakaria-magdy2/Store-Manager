@@ -44,6 +44,28 @@ function signTestToken(
   return `${signingInput}.${sigB64u}`;
 }
 
+function signClockResetTestToken(
+  privateKeyPem: string,
+  payload: {
+    resetId?: string;
+    machineId: string;
+    issuedAt: string;
+    expiresAt: string;
+  },
+  prefix = 'ROSCLK1',
+): string {
+  const fullPayload = {
+    resetId: payload.resetId ?? randomUUID(),
+    machineId: payload.machineId,
+    issuedAt: payload.issuedAt,
+    expiresAt: payload.expiresAt,
+  };
+  const payloadB64u = Buffer.from(JSON.stringify(fullPayload), 'utf8').toString('base64url');
+  const signingInput = `${prefix}.${payloadB64u}`;
+  const sigB64u = sign(null, Buffer.from(signingInput, 'utf8'), privateKeyPem).toString('base64url');
+  return `${signingInput}.${sigB64u}`;
+}
+
 describe('Offline Hardware-Locked Ed25519 Licensing Engine', () => {
   it('formats deterministic machine fingerprints in ROS-XXXX-XXXX-XXXX without ambiguous characters', () => {
     const idA = deriveMachineIdFromSeed('win32-guid:11111111-2222-3333-4444-555555555555');
@@ -539,6 +561,173 @@ describe('Offline Hardware-Locked Ed25519 Licensing Engine', () => {
       const recovered = await slowBootService.getStatus();
       expect(recovered.status).toBe('ACTIVE');
       expect(recovered.machineId).toBe(retried.machineId);
+    } finally {
+      await dbManager.close();
+    }
+  });
+
+  it('recovers from CLOCK_TAMPERED via single-use ROSCLK1 vendor token (even with future ledger/external watermark) while preserving forward-only checks', async () => {
+    const dbManager = new SqliteDatabaseManager({ filename: ':memory:' });
+    dbManager.connect();
+    try {
+      const db = dbManager.getDb();
+      await new DatabaseMigrator(db).migrateToLatest();
+
+      const { publicKey, privateKey } = createTestKeyPair();
+      const machineId = 'ROS-CLKR-3456-WXYZ';
+      const initialNow = Date.parse('2026-11-18T10:00:00.000Z');
+      const futureJumpMs = Date.parse('2026-12-05T10:00:00.000Z');
+      const realClockAfterJumpMs = Date.parse('2026-11-19T12:00:00.000Z');
+      let currentNow = initialNow;
+      let externalMs = initialNow;
+      const resetCallbacks: number[] = [];
+
+      const licenseToken = signTestToken(privateKey, {
+        customerName: 'متجر استعادة الساعة',
+        machineId,
+        issuedAt: '2026-11-01T00:00:00.000Z',
+        expiresAt: '2027-11-01T00:00:00.000Z',
+        planName: 'سنوية',
+      });
+
+      const tenantId = 'tenant-clock-reset';
+      const storeId = 'store-clock-reset';
+      const userId = 'user-clock-reset';
+      await db.insertInto('tenants').values({ id: tenantId, name: 'Shop', code: 'CLKRES', currency: 'EGP' }).execute();
+      await db.insertInto('stores').values({ id: storeId, tenant_id: tenantId, name: 'Main', code: 'MAIN', address: 'Cairo', phone: '0100' }).execute();
+      await db.insertInto('users').values({ id: userId, tenant_id: tenantId, store_id: storeId, username: 'cashier_clk', password_hash: 'hash', full_name: 'Cashier', role: 'CASHIER' }).execute();
+
+      const svc1 = new LicenseService(db, {
+        publicKeyPem: publicKey,
+        watermarkSecret: 'f'.repeat(64),
+        machineIdOverride: machineId,
+        isHardwareBackedOverride: true,
+        nowProvider: () => currentNow,
+        externalWatermarkMs: externalMs,
+        onWatermarkAdvance: (ms) => { externalMs = Math.max(externalMs, ms); },
+        onWatermarkReset: (ms) => {
+          externalMs = ms;
+          resetCallbacks.push(ms);
+        },
+      });
+      await svc1.activate(licenseToken);
+
+      // Clock jumps forward (CMOS / accidental sync) + a sale & audit entry get recorded at the future timestamp
+      currentNow = futureJumpMs;
+      await svc1.getStatus();
+      expect(externalMs).toBe(futureJumpMs);
+      await db.insertInto('sales').values({
+        id: 'sale-future-1',
+        tenant_id: tenantId,
+        store_id: storeId,
+        sale_number: 'INV-FUTURE-1',
+        idempotency_key: 'idem-future-1',
+        customer_name: null,
+        currency: 'EGP',
+        subtotal: 1000n,
+        discount_total: 0n,
+        total: 1000n,
+        paid_total: 1000n,
+        change_given: 0n,
+        cashier_user_id: userId,
+        status: 'COMPLETED',
+        created_at: new Date(futureJumpMs).toISOString(),
+      }).execute();
+
+      // Clock returns to the real present time (and even an external watermark tamper flag is set)
+      currentNow = realClockAfterJumpMs;
+      const tamperedService = new LicenseService(db, {
+        publicKeyPem: publicKey,
+        watermarkSecret: 'f'.repeat(64),
+        machineIdOverride: machineId,
+        isHardwareBackedOverride: true,
+        nowProvider: () => currentNow,
+        externalWatermarkMs: externalMs,
+        externalWatermarkTampered: true,
+        onWatermarkAdvance: (ms) => { externalMs = Math.max(externalMs, ms); },
+        onWatermarkReset: (ms) => {
+          externalMs = ms;
+          resetCallbacks.push(ms);
+        },
+      });
+
+      const blocked = await tamperedService.getStatus();
+      expect(blocked.status).toBe('CLOCK_TAMPERED');
+      await expect(tamperedService.assertOperationalAccess()).rejects.toBeInstanceOf(LicenseEnforcementError);
+
+      // Wrong machine, expired, and domain-separated ROS1 tokens must all fail with 400
+      const wrongMachineReset = signClockResetTestToken(privateKey, {
+        machineId: 'ROS-9999-8888-7777',
+        issuedAt: new Date(realClockAfterJumpMs - 60_000).toISOString(),
+        expiresAt: new Date(realClockAfterJumpMs + 3600_000).toISOString(),
+      });
+      await expect(tamperedService.resetClockWithVendorToken(wrongMachineReset)).rejects.toMatchObject({ status: 400 });
+
+      const expiredReset = signClockResetTestToken(privateKey, {
+        machineId,
+        issuedAt: new Date(realClockAfterJumpMs - 7200_000).toISOString(),
+        expiresAt: new Date(realClockAfterJumpMs - 60_000).toISOString(),
+      });
+      await expect(tamperedService.resetClockWithVendorToken(expiredReset)).rejects.toMatchObject({ status: 400 });
+
+      const wrongPrefix = signClockResetTestToken(
+        privateKey,
+        {
+          machineId,
+          issuedAt: new Date(realClockAfterJumpMs - 60_000).toISOString(),
+          expiresAt: new Date(realClockAfterJumpMs + 3600_000).toISOString(),
+        },
+        'ROSRST1',
+      );
+      await expect(tamperedService.resetClockWithVendorToken(wrongPrefix)).rejects.toMatchObject({ status: 400 });
+
+      // Valid ROSCLK1 token recovers the license immediately and resets cutoffs + external watermark
+      const validResetToken = signClockResetTestToken(privateKey, {
+        machineId,
+        issuedAt: new Date(realClockAfterJumpMs - 60_000).toISOString(),
+        expiresAt: new Date(realClockAfterJumpMs + 24 * 3600_000).toISOString(),
+      });
+      const recovered = await tamperedService.resetClockWithVendorToken(validResetToken);
+      expect(recovered.status).toBe('ACTIVE');
+      expect(resetCallbacks).toEqual([realClockAfterJumpMs]);
+      expect(externalMs).toBe(realClockAfterJumpMs);
+
+      const postResetStatus = await tamperedService.getStatus();
+      expect(postResetStatus.status).toBe('ACTIVE');
+      await expect(tamperedService.assertOperationalAccess()).resolves.toMatchObject({ status: 'ACTIVE' });
+
+      // Replaying the same ROSCLK1 token fails with 409
+      await expect(tamperedService.resetClockWithVendorToken(validResetToken)).rejects.toMatchObject({ status: 409 });
+
+      // Forward-only tamper detection still holds after reset: rolling clock backwards triggers CLOCK_TAMPERED
+      currentNow = realClockAfterJumpMs - 10 * 60_000;
+      const rewoundStatus = await tamperedService.getStatus();
+      expect(rewoundStatus.status).toBe('CLOCK_TAMPERED');
+
+      // New operational rows written after reset still participate in monotonic clock protection
+      currentNow = realClockAfterJumpMs + 60_000;
+      await tamperedService.getStatus();
+      const postResetSaleTime = realClockAfterJumpMs + 15 * 60_000;
+      await db.insertInto('sales').values({
+        id: 'sale-after-reset-1',
+        tenant_id: tenantId,
+        store_id: storeId,
+        sale_number: 'INV-AFTER-1',
+        idempotency_key: 'idem-after-1',
+        customer_name: null,
+        currency: 'EGP',
+        subtotal: 2000n,
+        discount_total: 0n,
+        total: 2000n,
+        paid_total: 2000n,
+        change_given: 0n,
+        cashier_user_id: userId,
+        status: 'COMPLETED',
+        created_at: new Date(postResetSaleTime).toISOString(),
+      }).execute();
+      currentNow = realClockAfterJumpMs + 2 * 60_000;
+      const rewoundAfterSale = await tamperedService.getStatus();
+      expect(rewoundAfterSale.status).toBe('CLOCK_TAMPERED');
     } finally {
       await dbManager.close();
     }

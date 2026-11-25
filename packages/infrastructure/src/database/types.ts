@@ -485,6 +485,9 @@ export interface SystemLicensingTable {
   activation_token: string | null;
   last_verified_clock_ms: number;
   clock_hmac: string;
+  ignored_sales_rowid: Generated<number>;
+  ignored_shifts_rowid: Generated<number>;
+  ignored_audit_rowid: Generated<number>;
   updated_at: string;
 }
 
@@ -527,6 +530,7 @@ export interface RetailOSDatabase {
   supplier_refunds: SupplierRefundsTable;
   system_licensing: SystemLicensingTable;
   used_password_reset_tokens: UsedPasswordResetTokensTable;
+  used_clock_reset_tokens: UsedClockResetTokensTable;
 }
 
 export interface UsedPasswordResetTokensTable {
@@ -534,4 +538,13 @@ export interface UsedPasswordResetTokensTable {
   machine_id: string;
   user_id: string;
   used_at: string;
+}
+
+export interface UsedClockResetTokensTable {
+  reset_id: string;
+  machine_id: string;
+  issued_at: string;
+  applied_at: string;
+  previous_watermark_ms: number;
+  new_watermark_ms: number;
 }

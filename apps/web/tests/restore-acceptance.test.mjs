@@ -364,7 +364,7 @@ test('full synthetic purchase, POS sale, encrypted cross-device restore, and mai
       method: 'POST', cookie: sourceCookie, body: { passphrase: backupPassphrase },
     });
     assert.equal(exported.response.status, 200);
-    assert.equal(exported.payload.subarray(0, 5).toString(), 'RFBK1');
+    assert.equal(exported.payload.subarray(0, 5).toString(), 'RFBK2');
     const sourceIdentityDb = new Database(source.databasePath, { readonly: true });
     const sourceTenant = sourceIdentityDb.prepare('SELECT id, code, currency FROM tenants').get();
     sourceIdentityDb.close();

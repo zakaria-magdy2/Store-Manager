@@ -9,9 +9,9 @@ import {
 } from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
-import { join, resolve, sep } from 'node:path';
+import { basename, join, resolve, sep } from 'node:path';
 import { EMBEDDED_LICENSE_PUBLIC_KEY_PEM } from './license-public-key.generated.js';
 
 export const DEFAULT_DESKTOP_PORT = 3210;
@@ -182,10 +182,51 @@ const DPAPI_REQUIRED_ERROR_AR =
   'تعذر تهيئة الحماية الآمنة لنظام التشغيل (Windows DPAPI غير متاح). لا يمكن تشغيل النظام بأمان دون تشفير مفاتيح التفعيل والنسخ الاحتياطي.';
 
 export const CLOCK_ADVANCE_STDOUT_PREFIX = '__RETAILOS_CLOCK_ADVANCE__:';
+export const CLOCK_RESET_STDOUT_PREFIX = '__RETAILOS_CLOCK_RESET__:';
+export const RESTART_REQUESTED_STDOUT_PREFIX = '__RETAILOS_RESTART_REQUESTED__';
 export const DAILY_KEY_UPDATE_STDOUT_PREFIX = '__RETAILOS_DAILY_KEY_UPDATE__:';
 export const DAILY_KEY_UPDATE_REQ_STDOUT_PREFIX = '__RETAILOS_DAILY_KEY_UPDATE_REQ__:';
 export const DAILY_KEY_UPDATE_ACK_STDIN_PREFIX = '__RETAILOS_DAILY_KEY_UPDATE_ACK__:';
 const DAILY_BACKUP_SECRET_PATTERN = /^[^\p{Cc}]{12,256}$/u;
+const DEFAULT_DESKTOP_LOG_MAX_BYTES = 2 * 1024 * 1024;
+
+export async function rotateLogFileIfNeeded(
+  logPath: string,
+  maxBytes = DEFAULT_DESKTOP_LOG_MAX_BYTES,
+): Promise<void> {
+  try {
+    const info = await stat(logPath);
+    if (info.size < maxBytes) {
+      return;
+    }
+    const backupLogPath = `${logPath}.1`;
+    await rm(backupLogPath, { force: true }).catch(() => undefined);
+    await rename(logPath, backupLogPath).catch(() => undefined);
+  } catch {
+    // Log file does not exist yet or cannot be stat'd.
+  }
+}
+
+export function formatArabicDesktopError(error: unknown, logPath?: string): string {
+  const raw = (error instanceof Error ? error.message : typeof error === 'string' ? error : '')
+    .split(/\r?\n/)[0]
+    ?.trim() ?? '';
+  const looksLikeStackOrTechnical =
+    !raw
+    || /^\s*at\s+/i.test(raw)
+    || /\b(TypeError|ReferenceError|SyntaxError|RangeError|ENOENT|EACCES|EPERM|EADDRINUSE|ERR_)\b/.test(raw)
+    || /[A-Za-z]:\\/.test(raw)
+    || /node_modules/.test(raw);
+  const hasArabic = /[\u0600-\u06FF]/.test(raw);
+  const summary =
+    hasArabic && !looksLikeStackOrTechnical
+      ? raw.slice(0, 260)
+      : 'تعذر تشغيل خادم رَفّ المحلي. أغلق أي نافذة مفتوحة من البرنامج وحاول مرة أخرى، وإذا استمرت المشكلة تواصل مع الدعم الفني.';
+  if (logPath) {
+    return `${summary}\n\nملف التشخيص: ${basename(logPath)}`;
+  }
+  return summary;
+}
 
 export interface DailyBackupSecretUpdateResult {
   readonly updated?: boolean | undefined;
@@ -526,6 +567,7 @@ export async function writeExternalClockWatermark(options: {
   readonly clockMs: number;
   readonly safeStorage?: SafeStorageAdapter | undefined;
   readonly requireDpapi?: boolean | undefined;
+  readonly forceReset?: boolean | undefined;
 }): Promise<void> {
   if (!globalThis.Number.isSafeInteger(options.clockMs) || options.clockMs <= 0) {
     return;
@@ -536,18 +578,20 @@ export async function writeExternalClockWatermark(options: {
     throw new Error(DPAPI_REQUIRED_ERROR_AR);
   }
 
-  const existing = await readExternalClockWatermark({
-    userDataDir: options.userDataDir,
-    watermarkSecret: options.watermarkSecret,
-    safeStorage: options.safeStorage,
-    requireDpapi: options.requireDpapi,
-  });
-  if (existing.tampered) {
-    // Do not overwrite an already tampered external clock file automatically.
-    return;
-  }
-  if (existing.clockMs !== null && existing.clockMs >= options.clockMs) {
-    return;
+  if (!options.forceReset) {
+    const existing = await readExternalClockWatermark({
+      userDataDir: options.userDataDir,
+      watermarkSecret: options.watermarkSecret,
+      safeStorage: options.safeStorage,
+      requireDpapi: options.requireDpapi,
+    });
+    if (existing.tampered) {
+      // Do not overwrite an already tampered external clock file automatically.
+      return;
+    }
+    if (existing.clockMs !== null && existing.clockMs >= options.clockMs) {
+      return;
+    }
   }
 
   await mkdir(resolve(options.userDataDir), { recursive: true });
@@ -952,6 +996,8 @@ export function startManagedServerChild(options: {
   readonly externalClockMs?: number | null | undefined;
   readonly externalClockTampered?: boolean | undefined;
   readonly onClockAdvance?: ((clockMs: number) => void) | undefined;
+  readonly onClockReset?: ((clockMs: number) => void) | undefined;
+  readonly onRestartRequested?: (() => void) | undefined;
   readonly onDailyBackupSecretUpdate?: DailyBackupSecretUpdateHandler | undefined;
 }): { readonly child: ChildProcess; readonly logs: string[] } {
   const logs: string[] = [];
@@ -1007,6 +1053,16 @@ export function startManagedServerChild(options: {
             options.onClockAdvance?.(parsedMs);
           }
         }
+      } else if (line.startsWith(CLOCK_RESET_STDOUT_PREFIX)) {
+        const rawDigits = line.slice(CLOCK_RESET_STDOUT_PREFIX.length).trim();
+        if (/^\d{10,16}$/.test(rawDigits)) {
+          const parsedMs = globalThis.Number.parseInt(rawDigits, 10);
+          if (globalThis.Number.isSafeInteger(parsedMs) && parsedMs > 0) {
+            options.onClockReset?.(parsedMs);
+          }
+        }
+      } else if (line.trim() === RESTART_REQUESTED_STDOUT_PREFIX) {
+        options.onRestartRequested?.();
       } else if (line.startsWith(DAILY_KEY_UPDATE_REQ_STDOUT_PREFIX)) {
         const rawReq = line.slice(DAILY_KEY_UPDATE_REQ_STDOUT_PREFIX.length).trim();
         let requestId = '';

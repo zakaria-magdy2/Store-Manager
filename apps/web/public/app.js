@@ -1,3 +1,14 @@
+const SUPPORT_WHATSAPP_PHONE = '01200562966';
+const SUPPORT_WHATSAPP_URL = `https://wa.me/2${SUPPORT_WHATSAPP_PHONE}`;
+
+function normalizeLocalizedNumberInput(raw) {
+  return String(raw ?? '')
+    .replace(/[\u0660-\u0669]/g, (ch) => String(ch.charCodeAt(0) - 0x0660))
+    .replace(/[\u06F0-\u06F9]/g, (ch) => String(ch.charCodeAt(0) - 0x06F0))
+    .replace(/[٫،,]/g, '.')
+    .trim();
+}
+
 function readRequestedPageFromLocation() {
   try {
     const url = new URL(window.location.href);
@@ -177,6 +188,7 @@ const state = {
   financialMap: null,
   financialMapKey: null,
   financialMapRange: 'today',
+  financialMapCustomRange: null,
   growthForecast: null,
   growthForecastKey: null,
   stocktakeList: null,
@@ -769,7 +781,7 @@ function formatDateTime(ts) {
 }
 
 function toMinor(decimal, decimals) {
-  const value = String(decimal).trim().replace(',', '.');
+  const value = normalizeLocalizedNumberInput(decimal);
   if (!/^\d+(\.\d+)?$/.test(value)) throw new Error('اكتب السعر كرقم صحيح');
   const [whole = '0', fraction = ''] = value.split('.');
   if (fraction.length > decimals) throw new Error(`العملة تسمح بحد أقصى ${decimals} خانات عشرية`);
@@ -1053,6 +1065,7 @@ function licenseActivationView() {
   const lic = state.license ?? buildRetryableLicenseState(null);
   const meta = licenseStatusMeta(lic);
   const isHardwareUnavailable = isRetryableLicenseStatus(lic);
+  const isClockTampered = lic.status === 'CLOCK_TAMPERED';
   const canEmergencyBackup = Boolean(state.user && state.data?.capabilities?.canManageBackups);
   const canEmergencyLogin = Boolean(!state.user && state.bootstrap?.configured && !state.bootstrap?.setupRequired);
   return `<main id="license-activation-screen" class="license-screen" role="dialog" aria-modal="true" aria-labelledby="license-screen-title">
@@ -1074,13 +1087,25 @@ function licenseActivationView() {
         </div>
       ` : `
         <div class="license-machine-box">
-          <label class="license-machine-label">كود الجهاز (أرسله للدعم الفني للحصول على كود التفعيل)
+          <label class="license-machine-label">كود الجهاز (أرسله للدعم الفني على واتساب <a href="${SUPPORT_WHATSAPP_URL}" target="_blank" rel="noopener noreferrer">${SUPPORT_WHATSAPP_PHONE}</a>)
             <div class="license-machine-row">
               <input id="license-machine-id" type="text" readonly dir="ltr" value="${escapeHtml(lic.machineId || '—')}">
               <button type="button" id="copy-machine-id-btn" class="button button-secondary button-sm">نسخ الكود</button>
             </div>
           </label>
         </div>
+        ${isClockTampered ? `
+          <form id="clock-reset-form" class="form-stack" style="padding:14px;border-radius:12px;background:rgba(14,165,233,0.08);border:1px solid rgba(14,165,233,0.35);">
+            <strong style="font-size:13.5px;color:var(--ink);">استعادة التوقيت بعد ضبط ساعة الويندوز</strong>
+            <p style="margin:0;font-size:12.5px;color:var(--ink-soft);">1) اضبط تاريخ ووقت الويندوز الصحيحين أولًا. 2) أرسل كود الجهاز للدعم ليصدر لك <strong>كود إعادة ضبط الساعة (ROSCLK1)</strong> والصقه هنا:</p>
+            <label>كود إعادة ضبط الساعة من الدعم (ROSCLK1...)
+              <textarea id="clock-reset-token-input" name="token" rows="3" dir="ltr" required minlength="20" placeholder="ROSCLK1...."></textarea>
+            </label>
+            <div class="license-actions-row">
+              <button type="submit" id="clock-reset-submit-btn" class="button button-primary button-wide">إعادة ضبط ساعة النظام واستكمال العمل</button>
+            </div>
+          </form>
+        ` : ''}
         <form id="license-activation-form" class="form-stack">
           <label>كود التفعيل (ROS1...)
             <textarea id="license-token-input" name="token" rows="3" dir="ltr" required minlength="20" placeholder="الصق كود التفعيل هنا..."></textarea>
@@ -1116,6 +1141,32 @@ function bindLicenseActivation() {
     } catch {
       input?.select();
       toast('حدد الكود وانسخه يدويًا من المربع');
+    }
+  });
+
+  document.querySelector('#clock-reset-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const btn = form.querySelector('#clock-reset-submit-btn');
+    const token = String(new FormData(form).get('token') ?? '').trim();
+    if (!token) return;
+    btn.disabled = true;
+    try {
+      const updated = await api('/api/license/reset-clock', {
+        method: 'POST',
+        skipConfirm: true,
+        body: JSON.stringify({ token }),
+      });
+      state.license = updated;
+      state.licenseBypassForBackups = false;
+      if (state.user) {
+        await loadData(state.data?.selectedStoreId).catch(() => {});
+      }
+      toast('تمت إعادة ضبط الساعة المرجعية للنظام بنجاح');
+      render();
+    } catch (error) {
+      toast(error.message, 'error');
+      btn.disabled = false;
     }
   });
 
@@ -1348,7 +1399,7 @@ function loginView() {
         </div>
       </div>`
     : '';
-  return `<main class="auth-layout"><section class="auth-story"><div class="brand-lockup"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="auth-story-copy"><span class="eyebrow">أهلًا بعودتك</span><h1>متجرك شغال.<br>ابدأ يومك.</h1><p>سجّل دخولك لإدارة ${escapeHtml(state.bootstrap.companyName)}.</p><div class="story-stat"><span class="story-stat-dot"></span>بياناتك محفوظة محليًا · ${escapeHtml(state.bootstrap.currency)}</div></div><div class="auth-story-footer">رَفّ · نظام إدارة المتاجر · <a href="https://wa.me/201200562966" target="_blank" rel="noopener noreferrer" style="color:#b8b1fa;text-decoration:none;font-weight:700;">الدعم (واتساب): 01200562966</a></div></section><section class="auth-form-panel"><div class="auth-form-wrap login-form-wrap"><span class="eyebrow eyebrow-dark">تسجيل الدخول</span><h2>مرحبًا بك</h2><p class="auth-subtitle">أدخل بيانات حسابك للمتابعة</p>${emergencyNotice}${postSetupKeyBanner}<form id="login-form" class="form-stack"><label>اسم المستخدم<input name="username" required maxlength="30" autocomplete="username" placeholder="اسم المستخدم"></label><label>كلمة المرور<input name="password" type="password" required maxlength="128" autocomplete="current-password" placeholder="كلمة المرور"></label><button class="button button-primary button-wide" type="submit">تسجيل الدخول <span>${icon('arrow', 18)}</span></button><button type="button" id="open-forgot-password-btn" class="button button-ghost button-wide">نسيت كلمة مرور المدير؟</button></form><p class="form-footnote">${escapeHtml(state.bootstrap.companyName)} · مساحة عمل مستقلة</p></div></section></main>`;
+  return `<main class="auth-layout"><section class="auth-story"><div class="brand-lockup"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="auth-story-copy"><span class="eyebrow">أهلًا بعودتك</span><h1>متجرك شغال.<br>ابدأ يومك.</h1><p>سجّل دخولك لإدارة ${escapeHtml(state.bootstrap.companyName)}.</p><div class="story-stat"><span class="story-stat-dot"></span>بياناتك محفوظة محليًا · ${escapeHtml(state.bootstrap.currency)}</div></div><div class="auth-story-footer">رَفّ · نظام إدارة المتاجر · <a href="${SUPPORT_WHATSAPP_URL}" target="_blank" rel="noopener noreferrer" style="color:#b8b1fa;text-decoration:none;font-weight:700;">الدعم (واتساب): ${SUPPORT_WHATSAPP_PHONE}</a></div></section><section class="auth-form-panel"><div class="auth-form-wrap login-form-wrap"><span class="eyebrow eyebrow-dark">تسجيل الدخول</span><h2>مرحبًا بك</h2><p class="auth-subtitle">أدخل بيانات حسابك للمتابعة</p>${emergencyNotice}${postSetupKeyBanner}<form id="login-form" class="form-stack"><label>اسم المستخدم<input name="username" required maxlength="30" autocomplete="username" placeholder="اسم المستخدم"></label><label>كلمة المرور<input name="password" type="password" required maxlength="128" autocomplete="current-password" placeholder="كلمة المرور"></label><button class="button button-primary button-wide" type="submit">تسجيل الدخول <span>${icon('arrow', 18)}</span></button><button type="button" id="open-forgot-password-btn" class="button button-ghost button-wide">نسيت كلمة مرور المدير؟</button></form><p class="form-footnote">${escapeHtml(state.bootstrap.companyName)} · مساحة عمل مستقلة</p></div></section></main>`;
 }
 
 function bindLogin() {
@@ -1415,7 +1466,7 @@ async function showForgotPasswordModal() {
   }
   const machineId = String(state.license?.machineId ?? '').trim();
   const root = getModalRoot();
-  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="forgot-password-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">استعادة حساب المدير</span><h2 id="forgot-password-title">إعادة تعيين كلمة المرور بكود طوارئ</h2></div><button type="button" class="modal-close" data-close-modal aria-label="إغلاق">×</button></div><form id="forgot-password-form" class="form-stack modal-form"><p class="auth-subtitle" style="margin:0;">أرسل <strong>كود الجهاز</strong> التالي للدعم الفني (واتساب: <a href="https://wa.me/201200562966" target="_blank" rel="noopener noreferrer">01200562966</a>) ليصدر لك كود طوارئ مؤقت يعمل لمرة واحدة فقط.</p><label>كود الجهاز الخاص بك<div class="license-machine-row"><input id="forgot-machine-id-input" type="text" readonly dir="ltr" value="${escapeHtml(machineId || 'جاري التحميل...')}"><button type="button" id="copy-forgot-machine-id" class="button button-secondary button-sm">نسخ الكود</button></div></label><label>كود الطوارئ المؤقت من الدعم<textarea name="resetToken" rows="3" required dir="ltr" placeholder="ROSRST1...."></textarea></label><label>اسم مستخدم المدير (اختياري — يُترك فارغًا للتعرف عليه تلقائيًا)<input name="username" maxlength="30" autocomplete="username" placeholder="اتركه فارغًا أو اكتب اسم المستخدم"></label><label>كلمة المرور الجديدة (8 أحرف على الأقل)<input name="newPassword" type="password" required minlength="8" maxlength="128" autocomplete="new-password" placeholder="أدخل كلمة مرور جديدة"></label><label>تأكيد كلمة المرور الجديدة<input name="confirmPassword" type="password" required minlength="8" maxlength="128" autocomplete="new-password" placeholder="أعد كتابة كلمة المرور الجديدة"></label><div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">تغيير كلمة المرور</button></div></form></section></div>`;
+  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="forgot-password-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">استعادة حساب المدير</span><h2 id="forgot-password-title">إعادة تعيين كلمة المرور بكود طوارئ</h2></div><button type="button" class="modal-close" data-close-modal aria-label="إغلاق">×</button></div><form id="forgot-password-form" class="form-stack modal-form"><p class="auth-subtitle" style="margin:0;">أرسل <strong>كود الجهاز</strong> التالي للدعم الفني (واتساب: <a href="${SUPPORT_WHATSAPP_URL}" target="_blank" rel="noopener noreferrer">${SUPPORT_WHATSAPP_PHONE}</a>) ليصدر لك كود طوارئ مؤقت يعمل لمرة واحدة فقط.</p><label>كود الجهاز الخاص بك<div class="license-machine-row"><input id="forgot-machine-id-input" type="text" readonly dir="ltr" value="${escapeHtml(machineId || 'جاري التحميل...')}"><button type="button" id="copy-forgot-machine-id" class="button button-secondary button-sm">نسخ الكود</button></div></label><label>كود الطوارئ المؤقت من الدعم<textarea name="resetToken" rows="3" required dir="ltr" placeholder="ROSRST1...."></textarea></label><label>اسم مستخدم المدير (اختياري — يُترك فارغًا للتعرف عليه تلقائيًا)<input name="username" maxlength="30" autocomplete="username" placeholder="اتركه فارغًا أو اكتب اسم المستخدم"></label><label>كلمة المرور الجديدة (12 حرفًا على الأقل)<input name="newPassword" type="password" required minlength="12" maxlength="128" autocomplete="new-password" placeholder="أدخل كلمة مرور جديدة من 12 حرفًا على الأقل"></label><label>تأكيد كلمة المرور الجديدة<input name="confirmPassword" type="password" required minlength="12" maxlength="128" autocomplete="new-password" placeholder="أعد كتابة كلمة المرور الجديدة"></label><div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">تغيير كلمة المرور</button></div></form></section></div>`;
 
   root.querySelectorAll('[data-close-modal]').forEach((btn) => btn.addEventListener('click', () => { root.innerHTML = ''; }));
   root.querySelector('#copy-forgot-machine-id')?.addEventListener('click', async () => {
@@ -1435,7 +1486,12 @@ async function showForgotPasswordModal() {
     const form = event.currentTarget;
     const submitBtn = form.querySelector('[type="submit"]');
     const data = Object.fromEntries(new FormData(form));
-    if (String(data.newPassword ?? '') !== String(data.confirmPassword ?? '')) {
+    const nextPassword = String(data.newPassword ?? '');
+    if (nextPassword.length < 12) {
+      toast('كلمة المرور الجديدة يجب أن تكون 12 حرفًا على الأقل', 'error');
+      return;
+    }
+    if (nextPassword !== String(data.confirmPassword ?? '')) {
       toast('كلمتا المرور غير متطابقتين', 'error');
       return;
     }
@@ -1496,7 +1552,11 @@ function shellView() {
   const deniedBanner = state.accessDeniedNotice
     ? `<div role="alert" style="margin-bottom:14px;padding:12px 16px;border-radius:12px;background:rgba(190,18,60,0.09);border:1px solid rgba(190,18,60,0.3);color:#be123c;font-weight:700;display:flex;justify-content:space-between;align-items:center;gap:12px;"><span>${escapeHtml(state.accessDeniedNotice)}</span><button type="button" class="text-action" id="dismiss-access-denied">إغلاق</button></div>`
     : '';
-  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'financial-map' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'stocktake' || state.data.capabilities.canAdjustInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item account-menu-whatsapp" role="menuitem" href="https://wa.me/201200562966" target="_blank" rel="noopener noreferrer">${icon('message', 17)}<span>تواصل مع الدعم (واتساب)<small class="support-phone-sub">01200562966</small></span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${shiftControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>⌘ K</kbd></label><button type="button" class="icon-button notification-button ${totalAlertsCount > 0 ? 'has-alerts' : ''}" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount > 0 ? `<span class="notif-count-badge">${totalAlertsCount > 99 ? '99+' : totalAlertsCount}</span>` : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${betaPreviewBanner}${licenseBypassBanner}${licenseExpiryBanner}${deniedBanner}${pageView()}</section></main>`;
+  const mirrorRecoveryBanner = state.data.capabilities?.canManageBackups && state.data.backupSafety?.lastMirrorStatus === 'UNCONFIGURED' && state.page !== 'backups'
+    ? `<div id="mirror-recovery-warning-banner" class="license-expiry-banner license-expiry-banner-critical" role="alert"><span>تحذير حماية البيانات: النسخ الاحتياطي الخارجي (خارج هذا الكمبيوتر) غير مُعد بعد. احفظ مسارًا خارجيًا واحتفظ بمفتاح الاستعادة بعيدًا عن الجهاز لتجنب فقدان البيانات عند الفرمتة أو تعطل القرص.</span><button type="button" class="button button-primary button-sm" data-page="backups">إعداد النسخ الخارجي</button></div>`
+    : '';
+  const searchShortcutLabel = /mac/i.test(navigator.platform || '') ? '⌘ K' : 'Ctrl+K';
+  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'financial-map' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'stocktake' || state.data.capabilities.canAdjustInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item account-menu-whatsapp" role="menuitem" href="${SUPPORT_WHATSAPP_URL}" target="_blank" rel="noopener noreferrer">${icon('message', 17)}<span>تواصل مع الدعم (واتساب)<small class="support-phone-sub">${SUPPORT_WHATSAPP_PHONE}</small></span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${shiftControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>${searchShortcutLabel}</kbd></label><button type="button" class="icon-button notification-button ${totalAlertsCount > 0 ? 'has-alerts' : ''}" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount > 0 ? `<span class="notif-count-badge">${totalAlertsCount > 99 ? '99+' : totalAlertsCount}</span>` : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${betaPreviewBanner}${licenseBypassBanner}${licenseExpiryBanner}${mirrorRecoveryBanner}${deniedBanner}${pageView()}</section></main>`;
 }
 
 function roleLabel(role) {
@@ -4686,26 +4746,41 @@ async function loadGrowthForecast(year = null, month = null) {
   }
 }
 
-async function loadFinancialMap(preset = state.financialMapRange || 'today') {
+async function loadFinancialMap(preset = state.financialMapRange || 'today', options = {}) {
+  const { append = false, offset = 0, customFrom = null, customTo = null } = options;
   const storeId = state.data?.selectedStoreId;
-  const { from, to } = computeHistoryPresetRange(preset, 'rolling7');
+  const { from, to } = (customFrom && customTo)
+    ? { from: customFrom, to: customTo }
+    : computeHistoryPresetRange(preset, 'rolling7');
 
-  const query = new URLSearchParams({ storeId, tzOffset: String(new Date().getTimezoneOffset()) });
+  const query = new URLSearchParams({
+    storeId,
+    tzOffset: String(new Date().getTimezoneOffset()),
+    limit: '200',
+    offset: String(offset),
+  });
   if (from) query.set('from', from);
   if (to) query.set('to', to);
 
   const key = `${storeId}:${from}:${to}`;
-  if (state.financialMapKey === key && state.financialMap) return state.financialMap;
+  if (!append && offset === 0 && state.financialMapKey === key && state.financialMap) return state.financialMap;
 
   try {
     state.financialMapKey = key;
-    state.financialMapRange = preset;
+    if (!(customFrom && customTo)) state.financialMapRange = preset;
     const result = await api(`/api/reports/financial-map?${query.toString()}`);
-    state.financialMap = result;
+    if (append && state.financialMap) {
+      state.financialMap = {
+        ...result,
+        timeline: [...(state.financialMap.timeline ?? []), ...(result.timeline ?? [])],
+      };
+    } else {
+      state.financialMap = result;
+    }
     render();
-    return result;
+    return state.financialMap;
   } catch (e) {
-    state.financialMapKey = null;
+    if (!append) state.financialMapKey = null;
     toast(e.message, 'error');
     return null;
   }
@@ -4722,7 +4797,8 @@ function financialMapView() {
     return `<div class="panel empty-chart" style="padding:60px 20px;"><div class="empty-illustration">${icon('chart', 32)}</div><strong>جاري إعداد المسار المالي وتدفق الأرباح...</strong><p>يتم تجميع كافة عمليات البيع وسداد التجار والمصروفات بالترتيب الزمني.</p></div>`;
   }
 
-  const { summary, timeline, range } = mapData;
+  const { summary, timeline, range, pagination } = mapData;
+  const totalEvents = pagination?.total ?? summary?.eventsCount ?? timeline.length;
   const fmFrom = range?.from ?? '';
   const fmTo = range?.to ?? '';
   const activePreset = syncPresetWithDates(state.financialMapRange, fmFrom, fmTo, ['all', 'today', 'week', 'month', 'year'], 'rolling7', 'all');
@@ -4803,7 +4879,7 @@ function financialMapView() {
       <div class="panel-heading">
         <div>
           <h3 style="font-size:16px;font-weight:800;color:var(--ink);">المسار المالي خطوة بخطوة (الأحدث أولاً)</h3>
-          <p>عرض كافة العمليات المسجلة من أحدث حركة نزولاً حتى البداية مع الرصيد بعد كل حركة (${timeline.length} حركة مسجلة)</p>
+          <p>عرض ${timeline.length} من أصل ${totalEvents} حركة مسجلة من أحدث حركة نزولاً حتى البداية مع الرصيد بعد كل حركة</p>
         </div>
       </div>
 
@@ -4909,7 +4985,7 @@ function financialMapView() {
 
                 return `
                   <tr>
-                    <td style="text-align:center;font-weight:800;color:var(--muted);font-size:11.5px;">#${item.stepNumber ?? (timeline.length - index)}</td>
+                    <td style="text-align:center;font-weight:800;color:var(--muted);font-size:11.5px;">#${item.stepNumber ?? (totalEvents - index)}</td>
                     <td>
                       <span class="fm-badge ${badgeClass}">
                         <span>${badgeIcon}</span> ${escapeHtml(item.category)}
@@ -4938,6 +5014,11 @@ function financialMapView() {
             </tbody>
           </table>
         </div>
+        ${pagination?.hasMore ? `
+          <div style="text-align:center;margin-top:14px;">
+            <button type="button" id="load-more-fm-btn" class="button button-secondary">عرض المزيد من الحركات (${timeline.length} / ${totalEvents})</button>
+          </div>
+        ` : ''}
       ` : `
         <div class="empty-chart" style="padding:40px 15px;">
           <div class="empty-illustration">${icon('chart', 28)}</div>
@@ -5236,7 +5317,7 @@ function computePosCartState() {
   let totalPieces = 0n;
 
   for (const item of state.cart) {
-    const raw = String(item.rawQuantity !== undefined ? item.rawQuantity : item.quantity).trim();
+    const raw = normalizeLocalizedNumberInput(item.rawQuantity !== undefined ? item.rawQuantity : item.quantity);
     if (/^\d{12,14}$/.test(raw)) {
       qtyErrors.push('تم مسح باركود بالخطأ داخل حقل الكمية — استخدم خانة البحث لقراءة الباركود');
       continue;
@@ -5256,7 +5337,7 @@ function computePosCartState() {
 
   let discountMinor = 0n;
   let discountError = '';
-  const rawDisc = String(state.cartDiscountRaw ?? '').trim();
+  const rawDisc = normalizeLocalizedNumberInput(state.cartDiscountRaw);
   if (rawDisc && state.cart.length > 0 && state.data?.capabilities?.canDiscount) {
     if (/^\d{12,14}$/.test(rawDisc)) {
       discountError = 'يبدو أنه تم مسح باركود بالخطأ داخل حقل الخصم — يرجى المسح في خانة البحث';
@@ -5281,14 +5362,14 @@ function computePosCartState() {
   if (state.paymentMethod === 'SPLIT' && state.cart.length > 0 && totalMinor > 0n && !qtyErrors.length && !discountError) {
     try {
       if (state.splitLastEdited === 'electronic') {
-        const rawElec = String(state.splitElectronicRaw ?? '').trim();
+        const rawElec = normalizeLocalizedNumberInput(state.splitElectronicRaw);
         if (!rawElec) throw new Error('أدخل قيمة الدفع الإلكتروني');
         splitElectronicMinor = BigInt(toMinor(rawElec, decimals));
         if (splitElectronicMinor <= 0n) throw new Error('المبلغ الإلكتروني في الدفع المجزأ يجب أن يكون أكبر من صفر');
         if (splitElectronicMinor >= totalMinor) throw new Error('المبلغ الإلكتروني يجب أن يكون أقل من صافي الفاتورة');
         splitCashMinor = totalMinor - splitElectronicMinor;
       } else {
-        const rawCash = String(state.splitCashRaw ?? '').trim();
+        const rawCash = normalizeLocalizedNumberInput(state.splitCashRaw);
         if (!rawCash) throw new Error('أدخل قيمة الدفع النقدي');
         splitCashMinor = BigInt(toMinor(rawCash, decimals));
         if (splitCashMinor <= 0n) throw new Error('المبلغ النقدي في الدفع المجزأ يجب أن يكون أكبر من صفر');
@@ -5391,7 +5472,7 @@ function posView() {
       </label>
     </div>
   ` : '';
-  return `<div class="pos-layout"><section class="pos-catalog">${shiftBanner}<div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>${mustStartShift ? 'ابدأ الشيفت أولاً لإتاحة اختيار المنتجات وإتمام البيع.' : 'ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.'}</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="${mustStartShift ? 'ابدأ الشيفت أولاً لتفعيل نقطة البيع...' : 'ابحث باسم الموديل أو كود الموديل أو الباركود'}" value="${escapeHtml(state.query)}" ${(mustStartShift || isCheckoutLocked) ? 'disabled' : 'autofocus'}><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="" ${isCheckoutLocked ? 'disabled' : ''}>كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}" ${isCheckoutLocked ? 'disabled' : ''}>${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products" style="${mustStartShift ? 'opacity:0.55;' : ''}">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const pricingSummary = summarizeProductPricing(product); const price = pricingSummary.labelText; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${(mustStartShift || isCheckoutLocked || (product.itemKind === 'PRODUCT' && stock <= 0n)) ? 'disabled' : ''}><span class="pos-product-art ${product.imagePath ? 'has-image' : `art-${index % 6}`}">${product.imagePath ? renderProductThumb(product, '', 'pos-product-thumb') : icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${escapeHtml(price)}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><span>المدير يضيف المنتجات من صفحة المشتريات عند تسجيل فاتورة شراء.</span></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${(state.cart.length && !isCheckoutLocked) ? '' : 'disabled'}>مسح الكل</button></div>${pendingBanner}<div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${mustStartShift ? `<div class="cart-empty"><span class="cart-empty-icon cart-empty-icon-shift">${icon('clock', 23)}</span><strong>يجب بدء الشيفت أولاً</strong><p>لا يمكن إجراء أي عملية بيع قبل تسجيل بدء الشيفت واستلام الدرج.</p><button type="button" id="cart-start-shift-btn" class="button button-sm shift-start-cta" style="margin-top:12px;">${icon('play', 15)}<span>بدء الشيفت الآن</span></button></div>` : state.cart.length ? state.cart.map((item) => { const matchedProd = productByVariantId.get(item.variantId); const valAttr = item.rawQuantity !== undefined ? item.rawQuantity : String(item.quantity); const lineTotalMinor = (/^[1-9]\d{0,5}$/.test(String(valAttr).trim())) ? (BigInt(item.price.amount) * BigInt(String(valAttr).trim())).toString() : '0'; return `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art ${matchedProd?.imagePath ? 'has-image' : ''}">${matchedProd?.imagePath ? renderProductThumb(matchedProd, icon('box', 16), 'cart-line-thumb') : icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف" ${isCheckoutLocked ? 'disabled' : ''}>×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button type="button" aria-label="إنقاص الكمية" data-qty="${item.variantId}" data-delta="-1" ${isCheckoutLocked ? 'disabled' : ''}>−</button><input type="text" inputmode="numeric" class="cart-qty-input" data-qty-input="${item.variantId}" aria-label="كمية ${escapeHtml(item.name)}" value="${escapeHtml(valAttr)}" ${isCheckoutLocked ? 'disabled' : ''} style="width:46px;text-align:center;font-weight:800;border:1px solid var(--line);border-radius:7px;padding:2px 4px;background:var(--surface);color:var(--ink);font-size:13px;"><button type="button" aria-label="زيادة الكمية" data-qty="${item.variantId}" data-delta="1" ${isCheckoutLocked ? 'disabled' : ''}>+</button></div><strong data-line-total="${item.variantId}">${money({ ...item.price, amount: lineTotalMinor })}</strong></div></div>`; }).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة بالبحث أو اللمس (أو بالباركود إن وجد) عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong id="pos-total-pieces">${totalPieces.toString()}</strong></div><div><span>الإجمالي الفرعي</span><strong id="pos-subtotal-summary">${money({ amount: subtotalMinor.toString(), currency, decimals })}</strong></div>${canDiscount ? `<div style="align-items:center;"><span>خصم الفاتورة (${currency})</span><input type="text" id="pos-discount-input" inputmode="decimal" aria-label="خصم الفاتورة" placeholder="0.00" value="${escapeHtml(state.cartDiscountRaw)}" ${(!mustStartShift && state.cart.length && !isCheckoutLocked) ? '' : 'disabled'} style="width:110px;text-align:left;font-weight:700;border:1px solid var(--line);border-radius:8px;padding:4px 8px;background:var(--surface);color:var(--ink);"></div>` : `<div><span>الخصم</span><strong id="pos-discount-summary">${money(discountMoneyObj)}</strong></div>`}<div class="cart-grand-total"><span>الإجمالي المستحق</span><strong id="pos-grand-total">${money(total)}</strong></div></div><div id="pos-input-error" role="alert" style="${hasError ? 'display:block;' : 'display:none;'}margin-bottom:10px;padding:8px 10px;border-radius:8px;background:rgba(190,18,60,0.09);border:1px solid rgba(190,18,60,0.3);color:#be123c;font-size:12px;font-weight:700;">${escapeHtml(errorMessage)}</div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦'], ['SPLIT', 'دفع مجزأ (نقدي + إلكتروني)', '⇄']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}" ${(mustStartShift || isCheckoutLocked) ? 'disabled' : ''}><span>${mark}</span>${label}</button>`).join('')}</div>${splitPanel}<button id="checkout-button" class="button button-primary checkout-button ${mustStartShift ? 'checkout-button-locked' : ''}" ${(!mustStartShift && !isCheckoutLocked && state.cart.length && !state.isSaving && !hasError) ? '' : 'disabled'}><span>${mustStartShift ? 'ابدأ الشيفت أولاً' : isCheckoutLocked ? 'بانتظار حسم العملية المعلقة' : 'إتمام البيع'}</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
+  return `<div class="pos-layout"><section class="pos-catalog">${shiftBanner}<div class="pos-page-title"><div><span class="eyebrow eyebrow-dark">نقطة البيع</span><h2>عملية بيع جديدة</h2><p>${mustStartShift ? 'ابدأ الشيفت أولاً لإتاحة اختيار المنتجات وإتمام البيع.' : 'ابحث باسم الموديل أو الكود ثم اختر اللون والمقاس المطلوب بضغطة واحدة.'}</p></div><div class="pos-shortcut">${icon('scan', 18)}<span>نقطة بيع الفرع</span><kbd>F2</kbd></div></div><label class="pos-search">${icon('search', 20)}<input id="pos-search" placeholder="${mustStartShift ? 'ابدأ الشيفت أولاً لتفعيل نقطة البيع...' : 'ابحث باسم الموديل أو كود الموديل أو الباركود'}" value="${escapeHtml(state.query)}" ${(mustStartShift || isCheckoutLocked) ? 'disabled' : 'autofocus'}><kbd>Enter</kbd></label><div class="pos-category-row"><button type="button" class="category-chip ${!selectedCategory ? 'active' : ''}" data-pos-cat="" ${isCheckoutLocked ? 'disabled' : ''}>كل الموديلات <span>${state.data.products.filter((p) => p.isActive).length}</span></button>${state.data.categories.map((category) => { const count = state.data.products.filter((p) => p.isActive && p.categoryId === category.id).length; return `<button type="button" class="category-chip ${selectedCategory === category.id ? 'active' : ''}" data-pos-cat="${category.id}" ${isCheckoutLocked ? 'disabled' : ''}>${escapeHtml(category.name)} <span>${count}</span></button>`; }).join('')}</div><div class="pos-products" style="${mustStartShift ? 'opacity:0.55;' : ''}">${products.map((product, index) => { const stock = product.variants.reduce((sum, variant) => sum + BigInt(variant.quantity), 0n); const pricingSummary = summarizeProductPricing(product); const price = pricingSummary.labelText; const subMeta = product.matrix.isMatrix ? `${product.matrix.rawColors.length ? `${product.matrix.rawColors.length} لون` : ''}${product.matrix.rawColors.length && product.matrix.rawSizes.length ? ' · ' : ''}${product.matrix.sizeRangeLabel}` : `${product.variants.length} نسخة`; return `<button class="pos-product-card" data-pick-product="${product.id}" ${(mustStartShift || isCheckoutLocked || (product.itemKind === 'PRODUCT' && stock <= 0n)) ? 'disabled' : ''}><span class="pos-product-art ${product.imagePath ? 'has-image' : `art-${index % 6}`}">${product.imagePath ? renderProductThumb(product, '', 'pos-product-thumb') : icon('box', 27)}</span><span class="pos-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(subMeta)} · ${product.itemKind === 'SERVICE' ? 'خدمة' : `${stock} متاح`}</small><b>${escapeHtml(price)}</b></span><span class="add-product-mark">${icon('plus', 16)}</span></button>`; }).join('') || `<div class="pos-no-products"><div class="empty-illustration">${icon('search', 27)}</div><strong>${state.data.products.length ? 'مفيش منتج مطابق للبحث' : 'أضف منتجاتك الأول'}</strong><span>المدير يضيف المنتجات من صفحة المشتريات عند تسجيل فاتورة شراء.</span></div>`}</div></section><aside class="cart-panel"><div class="cart-header"><div><span class="eyebrow eyebrow-dark">الفاتورة الحالية</span><h3>فاتورة جديدة</h3></div><button id="clear-cart" class="text-action" ${(state.cart.length && !isCheckoutLocked) ? '' : 'disabled'}>مسح الكل</button></div>${pendingBanner}<div class="cart-store-name">${icon('store', 16)} ${escapeHtml(state.data.stores.find((store) => store.id === state.data.selectedStoreId)?.name ?? '')}<span class="live-dot"></span></div><div class="cart-items" id="cart-items">${mustStartShift ? `<div class="cart-empty"><span class="cart-empty-icon cart-empty-icon-shift">${icon('clock', 23)}</span><strong>يجب بدء الشيفت أولاً</strong><p>لا يمكن إجراء أي عملية بيع قبل تسجيل بدء الشيفت واستلام الدرج.</p><button type="button" id="cart-start-shift-btn" class="button button-sm shift-start-cta" style="margin-top:12px;">${icon('play', 15)}<span>بدء الشيفت الآن</span></button></div>` : state.cart.length ? state.cart.map((item) => { const matchedProd = productByVariantId.get(item.variantId); const valAttr = item.rawQuantity !== undefined ? item.rawQuantity : String(item.quantity); const normalizedLineQty = normalizeLocalizedNumberInput(valAttr); const lineTotalMinor = (/^[1-9]\d{0,5}$/.test(normalizedLineQty)) ? (BigInt(item.price.amount) * BigInt(normalizedLineQty)).toString() : '0'; return `<div class="cart-line"><div class="cart-line-main"><span class="cart-line-art ${matchedProd?.imagePath ? 'has-image' : ''}">${matchedProd?.imagePath ? renderProductThumb(matchedProd, icon('box', 16), 'cart-line-thumb') : icon('box', 16)}</span><div><strong>${escapeHtml(item.name)}</strong><small>${money(item.price)} × ${item.quantity}</small></div><button class="remove-line" data-remove="${item.variantId}" aria-label="حذف" ${isCheckoutLocked ? 'disabled' : ''}>×</button></div><div class="cart-line-bottom"><div class="quantity-control"><button type="button" aria-label="إنقاص الكمية" data-qty="${item.variantId}" data-delta="-1" ${isCheckoutLocked ? 'disabled' : ''}>−</button><input type="text" inputmode="numeric" class="cart-qty-input" data-qty-input="${item.variantId}" aria-label="كمية ${escapeHtml(item.name)}" value="${escapeHtml(valAttr)}" ${isCheckoutLocked ? 'disabled' : ''} style="width:46px;text-align:center;font-weight:800;border:1px solid var(--line);border-radius:7px;padding:2px 4px;background:var(--surface);color:var(--ink);font-size:13px;"><button type="button" aria-label="زيادة الكمية" data-qty="${item.variantId}" data-delta="1" ${isCheckoutLocked ? 'disabled' : ''}>+</button></div><strong data-line-total="${item.variantId}">${money({ ...item.price, amount: lineTotalMinor })}</strong></div></div>`; }).join('') : `<div class="cart-empty"><span class="cart-empty-icon">${icon('bag', 23)}</span><strong>الفاتورة لسه فاضية</strong><p>اختار منتج من القائمة بالبحث أو اللمس (أو بالباركود إن وجد) عشان تضيفه.</p></div>`}</div><div class="cart-footer"><div class="cart-totals"><div><span>عدد القطع</span><strong id="pos-total-pieces">${totalPieces.toString()}</strong></div><div><span>الإجمالي الفرعي</span><strong id="pos-subtotal-summary">${money({ amount: subtotalMinor.toString(), currency, decimals })}</strong></div>${canDiscount ? `<div style="align-items:center;"><span>خصم الفاتورة (${currency})</span><input type="text" id="pos-discount-input" inputmode="decimal" aria-label="خصم الفاتورة" placeholder="0.00" value="${escapeHtml(state.cartDiscountRaw)}" ${(!mustStartShift && state.cart.length && !isCheckoutLocked) ? '' : 'disabled'} style="width:110px;text-align:left;font-weight:700;border:1px solid var(--line);border-radius:8px;padding:4px 8px;background:var(--surface);color:var(--ink);"></div>` : `<div><span>الخصم</span><strong id="pos-discount-summary">${money(discountMoneyObj)}</strong></div>`}<div class="cart-grand-total"><span>الإجمالي المستحق</span><strong id="pos-grand-total">${money(total)}</strong></div></div><div id="pos-input-error" role="alert" style="${hasError ? 'display:block;' : 'display:none;'}margin-bottom:10px;padding:8px 10px;border-radius:8px;background:rgba(190,18,60,0.09);border:1px solid rgba(190,18,60,0.3);color:#be123c;font-size:12px;font-weight:700;">${escapeHtml(errorMessage)}</div><div class="payment-heading"><span>طريقة الدفع</span></div><div class="payment-methods">${[['CASH', 'نقدي', '◉'], ['CARD', 'بطاقة', '▤'], ['MOBILE', 'محفظة', '▦'], ['SPLIT', 'دفع مجزأ (نقدي + إلكتروني)', '⇄']].map(([method, label, mark]) => `<button class="payment-method ${state.paymentMethod === method ? 'selected' : ''}" data-method="${method}" ${(mustStartShift || isCheckoutLocked) ? 'disabled' : ''}><span>${mark}</span>${label}</button>`).join('')}</div>${splitPanel}<button id="checkout-button" class="button button-primary checkout-button ${mustStartShift ? 'checkout-button-locked' : ''}" ${(!mustStartShift && !isCheckoutLocked && state.cart.length && !state.isSaving && !hasError) ? '' : 'disabled'}><span>${mustStartShift ? 'ابدأ الشيفت أولاً' : isCheckoutLocked ? 'بانتظار حسم العملية المعلقة' : 'إتمام البيع'}</span><strong>${money(total)}</strong></button><p class="secure-checkout">${icon('wallet', 14)} العملية هتتحفظ مباشرة في قاعدة بيانات المتجر</p></div></div>`;
 }
 
 function supplierModal(html, formId, endpoint, convert = (data) => data, successMessage = 'تم حفظ الحركة في سجل التاجر', method = 'POST') {
@@ -5436,6 +5517,7 @@ function supplierModal(html, formId, endpoint, convert = (data) => data, success
 function bindFinancialMap() {
   document.querySelectorAll('[data-fm-preset]').forEach((btn) => btn.addEventListener('click', () => {
     state.financialMapRange = btn.dataset.fmPreset;
+    state.financialMapCustomRange = null;
     state.financialMapKey = null;
     void loadFinancialMap(btn.dataset.fmPreset);
   }));
@@ -5455,13 +5537,22 @@ function bindFinancialMap() {
     }
     if (!from && !to) {
       state.financialMapRange = 'all';
+      state.financialMapCustomRange = null;
       state.financialMapKey = null;
       void loadFinancialMap('all');
       return;
     }
     const storeId = state.data?.selectedStoreId;
-    const query = new URLSearchParams({ storeId, from, to, tzOffset: String(new Date().getTimezoneOffset()) });
+    const query = new URLSearchParams({
+      storeId,
+      from,
+      to,
+      tzOffset: String(new Date().getTimezoneOffset()),
+      limit: '200',
+      offset: '0'
+    });
     state.financialMapRange = syncPresetWithDates(null, from, to, ['all', 'today', 'week', 'month', 'year'], 'rolling7', 'all');
+    state.financialMapCustomRange = { from, to };
     state.financialMapKey = `${storeId}:${from}:${to}`;
     void api(`/api/reports/financial-map?${query.toString()}`).then((res) => {
       state.financialMap = res;
@@ -5471,8 +5562,18 @@ function bindFinancialMap() {
 
   document.querySelector('#reset-fm-filter')?.addEventListener('click', () => {
     state.financialMapRange = 'all';
+    state.financialMapCustomRange = null;
     state.financialMapKey = null;
     void loadFinancialMap('all');
+  });
+
+  document.querySelector('#load-more-fm-btn')?.addEventListener('click', () => {
+    void loadFinancialMap(state.financialMapRange, {
+      append: true,
+      offset: state.financialMap?.timeline?.length ?? 0,
+      customFrom: state.financialMapCustomRange?.from ?? null,
+      customTo: state.financialMapCustomRange?.to ?? null
+    });
   });
 }
 
@@ -8448,7 +8549,10 @@ function bindShell() {
   document.querySelector('#header-end-shift-btn')?.addEventListener('click', () => {
     showEndShiftModal();
   });
-  document.addEventListener('keydown', handleShortcuts, { once: true });
+  if (!shortcutsBound) {
+    document.addEventListener('keydown', handleShortcuts);
+    shortcutsBound = true;
+  }
 }
 
 function bindAuditLogs() { const key = `${state.data.selectedStoreId}:audit`; if (state.auditLogsKey === key && state.auditLogs) return; state.auditLogsKey = key; void api(`/api/audit-logs?storeId=${encodeURIComponent(state.data.selectedStoreId)}&limit=100`).then((result) => { state.auditLogs = result.entries; state.auditChainVerification = result.chainVerification; render(); }).catch((error) => { state.auditLogsKey = null; toast(error.message, 'error'); }); }
@@ -9434,9 +9538,25 @@ function bindProfitLoss() {
   if (!state.report || state.reportKey !== `${state.data.selectedStoreId}:${state.reportFrom}:${state.reportTo}`) void load(state.reportFrom, state.reportTo);
 }
 
+let shortcutsBound = false;
+
 function handleShortcuts(event) {
-  if (event.key === 'F2') { event.preventDefault(); state.page = 'pos'; state.query = ''; render(); }
-  document.addEventListener('keydown', handleShortcuts, { once: true });
+  if (!state.user || !state.data) return;
+  if (event.key === 'F2') {
+    event.preventDefault();
+    state.page = 'pos';
+    state.query = '';
+    render();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && String(event.key).toLowerCase() === 'k') {
+    event.preventDefault();
+    const globalSearch = document.querySelector('#global-search');
+    if (globalSearch) {
+      globalSearch.focus();
+      globalSearch.select?.();
+    }
+  }
 }
 
 function bindLocalSearch() {
@@ -10093,7 +10213,7 @@ function syncPosTotalsDom() {
     errEl.style.display = hasError ? 'block' : 'none';
   }
   for (const item of state.cart) {
-    const raw = String(item.rawQuantity !== undefined ? item.rawQuantity : item.quantity).trim();
+    const raw = normalizeLocalizedNumberInput(item.rawQuantity !== undefined ? item.rawQuantity : item.quantity);
     const lineEl = document.querySelector(`[data-line-total="${item.variantId}"]`);
     if (lineEl) {
       const lineMinor = /^[1-9]\d{0,5}$/.test(raw) ? (BigInt(item.price.amount) * BigInt(raw)).toString() : '0';
@@ -10171,7 +10291,7 @@ function bindPos() {
       state.cartIdempotencyKey = null;
       const val = input.value;
       item.rawQuantity = val;
-      const trimmed = String(val).trim();
+      const trimmed = normalizeLocalizedNumberInput(val);
       if (/^[1-9]\d{0,5}$/.test(trimmed)) {
         const parsed = Number(trimmed);
         if (!item.stockTracked || BigInt(parsed) <= BigInt(item.available)) {
@@ -10353,7 +10473,8 @@ function changeQuantity(variantId, delta) {
   if (state.pendingCheckout) return;
   const item = state.cart.find((line) => line.variantId === variantId);
   if (!item) return;
-  const curQty = (item.rawQuantity !== undefined && !/^[1-9]\d{0,5}$/.test(String(item.rawQuantity).trim())) ? item.quantity : Number(item.rawQuantity ?? item.quantity);
+  const normalizedRaw = normalizeLocalizedNumberInput(item.rawQuantity);
+  const curQty = (item.rawQuantity !== undefined && !/^[1-9]\d{0,5}$/.test(normalizedRaw)) ? item.quantity : Number(item.rawQuantity !== undefined ? normalizedRaw : item.quantity);
   if (delta > 0 && item.stockTracked && BigInt(curQty) >= BigInt(item.available)) { toast('الكمية المطلوبة أكبر من الرصيد المتاح', 'error'); return; }
   state.cartIdempotencyKey = null;
   item.rawQuantity = undefined;

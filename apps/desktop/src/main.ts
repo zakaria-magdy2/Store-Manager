@@ -8,10 +8,12 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  Menu,
   safeStorage,
   session,
   shell,
   type IpcMainInvokeEvent,
+  type WebContents,
 } from 'electron';
 import {
   buildServerProcessEnv,
@@ -19,6 +21,7 @@ import {
   DEFAULT_DESKTOP_PORT,
   type DesktopDataPaths,
   type DesktopWindowSecurityPolicy,
+  formatArabicDesktopError,
   readDesktopDailyBackupHistory,
   readExternalClockWatermark,
   resolveAvailableLoopbackPort,
@@ -26,6 +29,7 @@ import {
   resolveDesktopDataPaths,
   resolveOrCreateDesktopDailyBackupSecret,
   resolveOrCreateDesktopWatermarkSecret,
+  rotateLogFileIfNeeded,
   startManagedServerChild,
   stopManagedServerProcess,
   updateDesktopDailyBackupSecret,
@@ -57,6 +61,8 @@ if (!singleInstanceLock) {
   app.quit();
 }
 
+const isProductionMode = app.isPackaged || process.env.NODE_ENV === 'production';
+
 let mainWindow: BrowserWindow | null = null;
 let serverChild: ChildProcess | null = null;
 let serverOrigin = `http://127.0.0.1:${String(DEFAULT_DESKTOP_PORT)}`;
@@ -66,8 +72,16 @@ let quitHandled = false;
 let shutdownInFlight: Promise<void> | null = null;
 let pendingClockPersist: Promise<void> = Promise.resolve();
 let pendingDailyKeyPersist: Promise<void> = Promise.resolve();
+let pendingLogWrite: Promise<void> = Promise.resolve();
 let webContentsGuardInstalled = false;
+let serverCrashCount = 0;
+let lastServerStartMs = Date.now();
 const trustedPopupWebContentsIds = new Set<number>();
+
+function desktopLogPath(): string | undefined {
+  const targetDir = desktopPaths?.dataDir ?? overrideUserDataDir;
+  return targetDir ? join(targetDir, 'desktop.log') : undefined;
+}
 
 function writeDesktopLog(message: string, force = false): void {
   if (!force && process.env.RETAILOS_DESKTOP_LOG !== '1') {
@@ -77,10 +91,36 @@ function writeDesktopLog(message: string, force = false): void {
   if (!targetDir) {
     return;
   }
+  const logFile = join(targetDir, 'desktop.log');
   const line = `[${new Date().toISOString()}] ${message}\n`;
-  void mkdir(targetDir, { recursive: true })
-    .then(() => appendFile(join(targetDir, 'desktop.log'), line, 'utf8'))
+  pendingLogWrite = pendingLogWrite
+    .then(async () => {
+      await mkdir(targetDir, { recursive: true });
+      await rotateLogFileIfNeeded(logFile);
+      await appendFile(logFile, line, 'utf8');
+    })
     .catch(() => undefined);
+}
+
+function attachProductionWebContentsLockdown(contents: WebContents): void {
+  if (!isProductionMode) {
+    return;
+  }
+  contents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') {
+      return;
+    }
+    const keyLower = input.key.toLowerCase();
+    const isDevToolsShortcut =
+      input.key === 'F12'
+      || ((input.control || input.meta) && (input.shift || input.alt) && keyLower === 'i');
+    const isReloadShortcut =
+      input.key === 'F5'
+      || ((input.control || input.meta) && keyLower === 'r');
+    if (isDevToolsShortcut || isReloadShortcut) {
+      event.preventDefault();
+    }
+  });
 }
 
 function resolveWebServerScriptPath(): string {
@@ -125,6 +165,7 @@ async function shutdownServerOnce(): Promise<void> {
     }
     await pendingClockPersist.catch(() => undefined);
     await pendingDailyKeyPersist.catch(() => undefined);
+    await pendingLogWrite.catch(() => undefined);
     serverChild = null;
   })();
   return shutdownInFlight;
@@ -212,9 +253,14 @@ function createMainWindow(origin: string, securityPolicy: DesktopWindowSecurityP
       sandbox: securityPolicy.sandbox,
       webSecurity: securityPolicy.webSecurity,
       allowRunningInsecureContent: securityPolicy.allowRunningInsecureContent,
+      devTools: !isProductionMode,
       preload: preloadPath,
     },
   });
+  if (isProductionMode) {
+    win.removeMenu();
+  }
+  attachProductionWebContentsLockdown(win.webContents);
 
   win.webContents.on('will-navigate', (event, targetUrl) => {
     if (!securityPolicy.isAllowedNavigationUrl(targetUrl)) {
@@ -223,6 +269,10 @@ function createMainWindow(origin: string, securityPolicy: DesktopWindowSecurityP
   });
 
   win.webContents.on('did-create-window', (childWindow, details) => {
+    if (isProductionMode) {
+      childWindow.removeMenu();
+    }
+    attachProductionWebContentsLockdown(childWindow.webContents);
     const childContentsId = childWindow.webContents.id;
     if (
       activeSecurityPolicy &&
@@ -248,6 +298,7 @@ function createMainWindow(origin: string, securityPolicy: DesktopWindowSecurityP
             sandbox: securityPolicy.sandbox,
             webSecurity: securityPolicy.webSecurity,
             allowRunningInsecureContent: securityPolicy.allowRunningInsecureContent,
+            devTools: !isProductionMode,
           },
         },
       };
@@ -281,6 +332,38 @@ function createMainWindow(origin: string, securityPolicy: DesktopWindowSecurityP
     writeDesktopLog(
       `webContents did-fail-load code=${String(errorCode)} desc=${errorDescription} url=${validatedUrl}`,
     );
+  });
+
+  let rendererCrashCount = 0;
+  let lastRendererStartMs = Date.now();
+  win.webContents.on('render-process-gone', (_event, details) => {
+    writeDesktopLog(
+      `webContents render-process-gone reason=${details.reason} exitCode=${String(details.exitCode)}`,
+      true,
+    );
+    if (details.reason === 'clean-exit' || quitHandled || shutdownInFlight) {
+      return;
+    }
+    const now = Date.now();
+    if (now - lastRendererStartMs > 60_000) {
+      rendererCrashCount = 0;
+    }
+    lastRendererStartMs = now;
+    rendererCrashCount += 1;
+    if (rendererCrashCount <= 2 && !win.isDestroyed()) {
+      writeDesktopLog(
+        `auto-reloading renderer after crash (${String(rendererCrashCount)}/2)`,
+        true,
+      );
+      void win.loadURL(origin).catch(() => undefined);
+      return;
+    }
+    dialog.showErrorBox(
+      'رف — توقف واجهة العرض',
+      'تعذر استكمال تشغيل شاشة البرنامج بعد عدة محاولات لإعادة التحميل.\n\nيرجى إعادة فتح البرنامج، وإذا تكررت المشكلة تواصل مع الدعم الفني.',
+    );
+    quitHandled = true;
+    void shutdownServerOnce().finally(() => app.exit(1));
   });
 
   win.on('closed', () => {
@@ -320,9 +403,13 @@ function installGlobalWebContentsGuards(): void {
 }
 
 async function bootDesktopApplication(): Promise<void> {
+  if (isProductionMode) {
+    Menu.setApplicationMenu(null);
+  }
   const userDataDir = app.getPath('userData');
   const paths = resolveDesktopDataPaths(userDataDir);
   desktopPaths = paths;
+  serverCrashCount = 0;
   await mkdir(paths.dataDir, { recursive: true });
   await mkdir(paths.dailyBackupDir, { recursive: true });
 
@@ -334,11 +421,11 @@ async function bootDesktopApplication(): Promise<void> {
   const desktopVersion = app.getVersion();
   process.env.RETAILOS_DESKTOP_VERSION = desktopVersion;
 
-  const requireDpapi = process.platform === 'win32' && (app.isPackaged || process.env.NODE_ENV === 'production');
+  const requireDpapi = process.platform === 'win32' && isProductionMode;
   const serverScriptPath = resolveWebServerScriptPath();
   await verifyStagedRuntimeIntegrity({
     webDir: dirname(serverScriptPath),
-    requireManifest: app.isPackaged || process.env.NODE_ENV === 'production',
+    requireManifest: isProductionMode,
   });
 
   const watermarkSecret = await resolveOrCreateDesktopWatermarkSecret({
@@ -347,78 +434,186 @@ async function bootDesktopApplication(): Promise<void> {
     requireDpapi,
     legacyPlaintextKeyPath: join(paths.dataDir, '.retailos-watermark.key'),
   });
-  const dailyBackupSecret = await resolveOrCreateDesktopDailyBackupSecret({
-    userDataDir: paths.userDataDir,
-    safeStorage,
-    requireDpapi,
-    legacyPlaintextKeyPath: join(paths.dataDir, '.retailos-daily.key'),
-  });
-  const dailyBackupKeyHistory = (
-    await readDesktopDailyBackupHistory({
+
+  let initialBootFinished = false;
+  let respawnInFlight: Promise<void> | null = null;
+
+  const spawnAndAwaitServer = async (): Promise<void> => {
+    const dailyBackupSecret = await resolveOrCreateDesktopDailyBackupSecret({
       userDataDir: paths.userDataDir,
       safeStorage,
       requireDpapi,
-    })
-  ).filter((item) => item !== dailyBackupSecret);
-  const externalClock = await readExternalClockWatermark({
-    userDataDir: paths.userDataDir,
-    watermarkSecret,
-    safeStorage,
-    requireDpapi,
-  });
+      legacyPlaintextKeyPath: join(paths.dataDir, '.retailos-daily.key'),
+    });
+    const dailyBackupKeyHistory = (
+      await readDesktopDailyBackupHistory({
+        userDataDir: paths.userDataDir,
+        safeStorage,
+        requireDpapi,
+      })
+    ).filter((item) => item !== dailyBackupSecret);
+    const externalClock = await readExternalClockWatermark({
+      userDataDir: paths.userDataDir,
+      watermarkSecret,
+      safeStorage,
+      requireDpapi,
+    });
 
-  const childEnv = buildServerProcessEnv(process.env, paths, port, {
-    runAsNode: true,
-    desktopVersion,
-  });
+    const childEnv = buildServerProcessEnv(process.env, paths, port, {
+      runAsNode: true,
+      desktopVersion,
+    });
 
-  const managed = startManagedServerChild({
-    execPath: process.execPath,
-    serverScriptPath,
-    cwd: dirname(serverScriptPath),
-    env: childEnv,
-    watermarkSecret,
-    dailyBackupSecret,
-    dailyBackupKeyHistory,
-    externalClockMs: externalClock.clockMs,
-    externalClockTampered: externalClock.tampered,
-    onClockAdvance: (nextClockMs) => {
-      pendingClockPersist = pendingClockPersist
-        .then(() =>
-          writeExternalClockWatermark({
+    let cleanRestartRequested = false;
+    lastServerStartMs = Date.now();
+    const managed = startManagedServerChild({
+      execPath: process.execPath,
+      serverScriptPath,
+      cwd: dirname(serverScriptPath),
+      env: childEnv,
+      watermarkSecret,
+      dailyBackupSecret,
+      dailyBackupKeyHistory,
+      externalClockMs: externalClock.clockMs,
+      externalClockTampered: externalClock.tampered,
+      onClockAdvance: (nextClockMs) => {
+        pendingClockPersist = pendingClockPersist
+          .then(() =>
+            writeExternalClockWatermark({
+              userDataDir: paths.userDataDir,
+              watermarkSecret,
+              clockMs: nextClockMs,
+              safeStorage,
+              requireDpapi,
+            }),
+          )
+          .catch(() => undefined);
+      },
+      onClockReset: (resetClockMs) => {
+        pendingClockPersist = pendingClockPersist
+          .then(() =>
+            writeExternalClockWatermark({
+              userDataDir: paths.userDataDir,
+              watermarkSecret,
+              clockMs: resetClockMs,
+              safeStorage,
+              requireDpapi,
+              forceReset: true,
+            }),
+          )
+          .catch(() => undefined);
+      },
+      onRestartRequested: () => {
+        cleanRestartRequested = true;
+        writeDesktopLog('server requested controlled restart after restore', true);
+      },
+      onDailyBackupSecretUpdate: (nextSecret) => {
+        const task = pendingDailyKeyPersist.then(() =>
+          updateDesktopDailyBackupSecret({
             userDataDir: paths.userDataDir,
-            watermarkSecret,
-            clockMs: nextClockMs,
+            dailyBackupSecret: nextSecret,
             safeStorage,
             requireDpapi,
           }),
-        )
-        .catch(() => undefined);
-    },
-    onDailyBackupSecretUpdate: (nextSecret) => {
-      const task = pendingDailyKeyPersist.then(() =>
-        updateDesktopDailyBackupSecret({
-          userDataDir: paths.userDataDir,
-          dailyBackupSecret: nextSecret,
-          safeStorage,
-          requireDpapi,
-        }),
-      );
-      pendingDailyKeyPersist = task.then(
-        () => undefined,
-        () => undefined,
-      );
-      return task;
-    },
-  });
-  serverChild = managed.child;
+        );
+        pendingDailyKeyPersist = task.then(
+          () => undefined,
+          () => undefined,
+        );
+        return task;
+      },
+    });
+    serverChild = managed.child;
 
-  await waitForServerReady({
-    origin: serverOrigin,
-    child: managed.child,
-    logs: managed.logs,
-  });
-  writeDesktopLog(`server ready at ${serverOrigin}`);
+    managed.child.once('exit', (code, signal) => {
+      if (!initialBootFinished || quitHandled || shutdownInFlight || serverChild !== managed.child) {
+        return;
+      }
+      if (cleanRestartRequested) {
+        serverCrashCount = 0;
+        if (!respawnInFlight) {
+          respawnInFlight = pendingClockPersist
+            .catch(() => undefined)
+            .then(() => pendingDailyKeyPersist.catch(() => undefined))
+            .then(() => spawnAndAwaitServer())
+            .then(() => {
+              if (mainWindow && !mainWindow.isDestroyed()) {
+                void mainWindow.loadURL(serverOrigin).catch(() => undefined);
+              }
+            })
+            .catch((err: unknown) => {
+              const detail = err instanceof Error ? err.stack ?? err.message : String(err);
+              writeDesktopLog(`post-restore server respawn failed: ${detail}`, true);
+              dialog.showErrorBox(
+                'رف — تعذر إعادة تشغيل الخادم',
+                formatArabicDesktopError(err, desktopLogPath()),
+              );
+              quitHandled = true;
+              void shutdownServerOnce().finally(() => app.exit(1));
+            })
+            .finally(() => {
+              respawnInFlight = null;
+            });
+        }
+        return;
+      }
+
+      writeDesktopLog(
+        `managed server exited unexpectedly code=${String(code)} signal=${String(signal)}`,
+        true,
+      );
+      const now = Date.now();
+      if (now - lastServerStartMs > 60_000) {
+        serverCrashCount = 0;
+      }
+      serverCrashCount += 1;
+      if (serverCrashCount <= 2) {
+        writeDesktopLog(
+          `auto-restarting managed server (${String(serverCrashCount)}/2)`,
+          true,
+        );
+        if (!respawnInFlight) {
+          respawnInFlight = spawnAndAwaitServer()
+            .then(() => {
+              if (mainWindow && !mainWindow.isDestroyed()) {
+                void mainWindow.loadURL(serverOrigin).catch(() => undefined);
+              }
+            })
+            .catch((err: unknown) => {
+              const detail = err instanceof Error ? err.stack ?? err.message : String(err);
+              writeDesktopLog(`auto-restart server failed: ${detail}`, true);
+              dialog.showErrorBox(
+                'رف — توقف الخادم المحلي',
+                formatArabicDesktopError(err, desktopLogPath()),
+              );
+              quitHandled = true;
+              void shutdownServerOnce().finally(() => app.exit(1));
+            })
+            .finally(() => {
+              respawnInFlight = null;
+            });
+        }
+        return;
+      }
+
+      dialog.showErrorBox(
+        'رف — توقف الخادم المحلي',
+        'توقف خادم رَفّ المحلي بشكل غير متوقع بعد محاولتي إعادة تشغيل تلقائي.\n\nيرجى إعادة تشغيل البرنامج، وإذا تكرر الخطأ تواصل مع الدعم الفني.',
+      );
+      quitHandled = true;
+      void shutdownServerOnce().finally(() => app.exit(1));
+    });
+
+    await waitForServerReady({
+      origin: serverOrigin,
+      child: managed.child,
+      logs: managed.logs,
+    });
+    writeDesktopLog(`server ready at ${serverOrigin}`);
+  };
+
+  await spawnAndAwaitServer();
+  initialBootFinished = true;
 
   installGlobalWebContentsGuards();
 
@@ -510,9 +705,10 @@ if (singleInstanceLock) {
       const detail = error instanceof Error ? error.stack ?? error.message : String(error);
       writeDesktopLog(`fatal startup error: ${detail}`, true);
       await shutdownServerOnce().catch(() => undefined);
+      await pendingLogWrite.catch(() => undefined);
       dialog.showErrorBox(
         'رف — تعذر تشغيل النظام',
-        `حدث خطأ أثناء تشغيل خادم رَفّ المحلي:\n\n${detail}`,
+        formatArabicDesktopError(error, desktopLogPath()),
       );
       quitHandled = true;
       app.exit(1);

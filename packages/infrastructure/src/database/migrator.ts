@@ -1,4 +1,5 @@
 import type { Kysely } from 'kysely';
+import { sql } from 'kysely';
 import type { Migration } from 'kysely/migration';
 import { Migrator } from 'kysely/migration';
 import { Logger } from '../logger/logger.js';
@@ -36,6 +37,7 @@ import * as editablePurchasesPaymentsExpenses from './migrations/030_editable_pu
 import * as passwordResetTokens from './migrations/031_password_reset_tokens.js';
 import * as singleOpenShiftPerStore from './migrations/032_single_open_shift_per_store.js';
 import * as shiftReconciliationStatus from './migrations/033_shift_reconciliation_status.js';
+import * as clockResetRecovery from './migrations/034_clock_reset_recovery.js';
 
 const MIGRATION_REGISTRY: Record<string, Migration> = {
   '001_initial_foundation': {
@@ -170,6 +172,10 @@ const MIGRATION_REGISTRY: Record<string, Migration> = {
     up: shiftReconciliationStatus.up,
     down: shiftReconciliationStatus.down,
   },
+  '034_clock_reset_recovery': {
+    up: clockResetRecovery.up,
+    down: clockResetRecovery.down,
+  },
 };
 
 export const REGISTERED_MIGRATION_NAMES: readonly string[] = Object.freeze(
@@ -178,6 +184,38 @@ export const REGISTERED_MIGRATION_NAMES: readonly string[] = Object.freeze(
 
 export const MINIMUM_SUPPORTED_BACKUP_MIGRATION = '014_supplier_returns';
 
+export function parseNonNegativeRowid(value: unknown): number {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value > 0 ? value : 0;
+  }
+  if (typeof value === 'bigint') {
+    return value > 0n && value <= BigInt(Number.MAX_SAFE_INTEGER)
+      ? Number.parseInt(value.toString(), 10)
+      : 0;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (/^\d+$/.test(trimmed)) {
+      const parsed = Number.parseInt(trimmed, 10);
+      return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 0;
+    }
+  }
+  return 0;
+}
+
+export class DatabaseDowngradeError extends Error {
+  public readonly code = 'DATABASE_DOWNGRADE_UNSUPPORTED';
+  public readonly unknownMigrations: readonly string[];
+
+  constructor(unknownMigrations: readonly string[]) {
+    super(
+      'قاعدة البيانات الحالية محدثة لإصدار أحدث من البرنامج ولا يمكن فتحها بهذا الإصدار الأقدم. يرجى تثبيت أحدث إصدار من رَفّ.',
+    );
+    this.name = 'DatabaseDowngradeError';
+    this.unknownMigrations = Object.freeze([...unknownMigrations]);
+  }
+}
+
 export class DatabaseMigrator {
   private readonly logger: Logger;
 
@@ -185,11 +223,44 @@ export class DatabaseMigrator {
     this.logger = new Logger('DatabaseMigrator');
   }
 
+  public async getAppliedMigrationNames(): Promise<string[]> {
+    const tableResult = await sql<{ name: string }>`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'kysely_migration'
+    `.execute(this.db);
+    if (tableResult.rows.length === 0) {
+      return [];
+    }
+    const rows = await sql<{ name: string }>`
+      SELECT name FROM kysely_migration ORDER BY name ASC
+    `.execute(this.db);
+    return rows.rows.map((r) => String(r.name ?? '')).filter(Boolean);
+  }
+
+  public async assertNoDowngrade(): Promise<void> {
+    const applied = await this.getAppliedMigrationNames();
+    const unknown = applied.filter(
+      (name) => !Object.prototype.hasOwnProperty.call(MIGRATION_REGISTRY, name),
+    );
+    if (unknown.length > 0) {
+      this.logger.error(
+        `Detected newer database migrations unsupported by this version: ${unknown.join(', ')}`,
+      );
+      throw new DatabaseDowngradeError(unknown);
+    }
+  }
+
+  public async getPendingMigrationNames(): Promise<string[]> {
+    const applied = new Set(await this.getAppliedMigrationNames());
+    return REGISTERED_MIGRATION_NAMES.filter((name) => !applied.has(name));
+  }
+
   public async migrateToLatest(maxMigrationName?: string): Promise<{
     success: boolean;
     executedMigrations: string[];
     error?: Error;
   }> {
+    await this.assertNoDowngrade();
+
     const migrations = maxMigrationName
       ? Object.fromEntries(
           Object.entries(MIGRATION_REGISTRY).filter(([name]) => name <= maxMigrationName),

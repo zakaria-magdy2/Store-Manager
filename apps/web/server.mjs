@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { homedir } from 'node:os';
 import { Transform } from 'node:stream';
 import { createReadStream, createWriteStream, existsSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -461,6 +461,7 @@ function evaluateBetaTrialStatus() {
 const backupBaseDir = process.env.RETAILOS_BACKUP_DIR ? resolve(process.env.RETAILOS_BACKUP_DIR) : join(dataDir, 'backups');
 const dailyBackupDir = join(backupBaseDir, 'daily');
 const preRestoreBackupDir = join(backupBaseDir, 'pre-restore');
+const preMigrationBackupDir = join(backupBaseDir, 'pre-migration');
 const quarantineBackupDir = join(backupBaseDir, 'quarantine');
 const backupSettingsPath = join(dataDir, 'backup-settings.json');
 const MAX_DAILY_BACKUPS = 30;
@@ -715,8 +716,69 @@ try {
     }
   }
 }
+function buildProductImageUrl(productId, rawImagePath) {
+  if (!rawImagePath || typeof rawImagePath !== 'string') return null;
+  const trimmed = rawImagePath.trim();
+  if (!trimmed) return null;
+  if (/^data:image\/(?:png|jpe?g|webp|gif);base64,/i.test(trimmed)) {
+    const digest = createHash('sha256').update(trimmed).digest('hex').slice(0, 12);
+    return `/api/products/${productId}/image?v=${digest}`;
+  }
+  return trimmed;
+}
+
 const db = database.getDb();
-const migration = await new DatabaseMigrator(db).migrateToLatest();
+const migrator = new DatabaseMigrator(db);
+await migrator.assertNoDowngrade();
+const appliedMigrations = await migrator.getAppliedMigrationNames();
+const pendingMigrations = await migrator.getPendingMigrationNames();
+if (appliedMigrations.length > 0 && pendingMigrations.length > 0) {
+  await mkdir(preMigrationBackupDir, { recursive: true });
+  const preMigStamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const candidatePassphrase = resolveDailyBackupCandidatePassphrases()[0] ?? null;
+  database.checkpointPassive();
+  if (candidatePassphrase) {
+    const encrypted = await createEncryptedSqliteBackup(
+      database.getRawDatabase(),
+      preMigrationBackupDir,
+      candidatePassphrase,
+    );
+    const finalEncPath = join(
+      preMigrationBackupDir,
+      `retailos-pre-migration-${preMigStamp}.rfbackup`,
+    );
+    try {
+      await copyFileAtomic(encrypted.path, finalEncPath);
+    } finally {
+      await removeBackupArtifact(encrypted.path).catch(() => undefined);
+    }
+  } else {
+    const plainPath = join(
+      preMigrationBackupDir,
+      `retailos-pre-migration-${preMigStamp}.sqlite`,
+    );
+    const tempPlain = `${plainPath}.${randomBytes(6).toString('hex')}.tmp`;
+    try {
+      await database.getRawDatabase().backup(tempPlain);
+      const quick = checkSqliteFileQuick(tempPlain);
+      if (!quick.ok) {
+        throw new Error('فشل التحقق من نسخة الأمان السابقة للترقية');
+      }
+      await rename(tempPlain, plainPath);
+    } catch (err) {
+      await rm(tempPlain, { force: true }).catch(() => undefined);
+      throw err;
+    }
+  }
+  const existingPreMigrations = (await readdir(preMigrationBackupDir))
+    .filter((f) => /^retailos-pre-migration-.*\.(rfbackup|sqlite)$/.test(f))
+    .sort()
+    .reverse();
+  for (const oldFile of existingPreMigrations.slice(10)) {
+    await rm(join(preMigrationBackupDir, oldFile), { force: true }).catch(() => undefined);
+  }
+}
+const migration = await migrator.migrateToLatest();
 if (!migration.success) throw migration.error ?? new Error('Database migration failed');
 
 /** Allocates a monotonically increasing, collision-free document number inside Kysely's serialized transaction queue. */
@@ -781,6 +843,14 @@ const licenseService = new LicenseService(db, {
       options.onWatermarkAdvance?.(clockMs);
     }
   },
+  onWatermarkReset: (clockMs) => {
+    latestExternalClockMs = clockMs;
+    hostSecrets.externalClockTampered = false;
+    if (process.argv.includes('--electron-stdio-secret')) {
+      process.stdout.write(`__RETAILOS_CLOCK_RESET__:${String(clockMs)}\n`);
+    }
+    options.onWatermarkReset?.(clockMs);
+  },
   identityProvider: typeof options.licenseIdentityProvider === 'function' ? options.licenseIdentityProvider : undefined,
   nowProvider: typeof options.nowProvider === 'function' ? options.nowProvider : undefined,
 });
@@ -811,6 +881,7 @@ async function recordAudit(ctx, details) {
     entityId: details.entityId ?? null,
     summary: details.summary,
     metadata: details.metadata ?? {},
+    occurredAt: details.occurredAt ?? new Date(typeof options.nowProvider === 'function' ? options.nowProvider() : Date.now()),
   });
 }
 
@@ -828,6 +899,7 @@ async function recordAuditInTrx(trx, ctx, details) {
     entityId: details.entityId ?? null,
     summary: details.summary,
     metadata: details.metadata ?? {},
+    occurredAt: details.occurredAt ?? new Date(typeof options.nowProvider === 'function' ? options.nowProvider() : Date.now()),
   });
 }
 
@@ -1806,9 +1878,38 @@ async function verifyCurrentUserPasswordOrThrow(ctx, currentPassword) {
   return currentUser;
 }
 
+function formatTimestampInTimeZone(value, timeZone) {
+  const safeTz = resolveValidTimeZone(timeZone);
+  let date;
+  if (value instanceof Date) {
+    date = value;
+  } else {
+    const raw = String(value ?? '').trim();
+    if (!raw) return '';
+    const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(raw)
+      ? `${raw.replace(' ', 'T')}Z`
+      : raw;
+    date = new Date(normalized);
+  }
+  if (!Number.isFinite(date.getTime())) return String(value ?? '');
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: safeTz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+  return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second}`;
+}
+
 function escapeCsvCell(value) {
   const str = String(value ?? '');
-  const sanitized = /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
+  const isPlainSignedNumber = /^-?\d+(?:\.\d+)?$/.test(str);
+  const sanitized = (!isPlainSignedNumber && /^[=+\-@\t\r]/.test(str)) ? `'${str}` : str;
   if (/[",\r\n]/.test(sanitized)) return `"${sanitized.replaceAll('"', '""')}"`;
   return sanitized;
 }
@@ -2391,7 +2492,7 @@ function loadStocktakeSessionDetail(ctx, sessionId, { includeBlindReview = false
       variantLabel: parseVariantLabelFromJson(line.attributes_json),
       sku: line.sku,
       barcode: line.barcode ?? null,
-      imageUrl: line.image_path ?? null,
+      imageUrl: buildProductImageUrl(line.product_id, line.image_path),
       categoryId: line.category_id ?? null,
       categoryName: line.category_name ?? null,
       expectedQuantity: hideBlind ? null : effectiveExpectedQty,
@@ -3966,6 +4067,13 @@ async function financialMapReport(ctx, url) {
   const netReturnLossMinor = totalRefundsMinor - totalReturnedCostMinor;
   const operatingProfitMinor = totalGrossProfitMinor - totalExpensesMinor - netReturnLossMinor - supplierReturnVarianceMinor - totalInvAdjustmentLossMinor + totalShiftCashVarianceMinor;
 
+  const offsetParam = Number.parseInt(url.searchParams.get('offset') ?? '0', 10);
+  const limitParam = Number.parseInt(url.searchParams.get('limit') ?? '200', 10);
+  const offset = Number.isFinite(offsetParam) && offsetParam > 0 ? Math.min(offsetParam, 100_000_000) : 0;
+  const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 500) : 200;
+  const totalEvents = timeline.length;
+  const pagedTimeline = timeline.slice(offset, offset + limit);
+
   return {
     currency,
     range: { from, to },
@@ -3987,9 +4095,15 @@ async function financialMapReport(ctx, url) {
       netCashFlow: netCashFlowMinor.toString(),
       realizedCashProfit: netCashFlowMinor.toString(),
       runningFinalCash: runningCashMinor.toString(),
-      eventsCount: timeline.length,
+      eventsCount: totalEvents,
     },
-    timeline: timeline, // Reversed chronological: newest event first, keeping cumulative runningCash per step
+    pagination: {
+      total: totalEvents,
+      offset,
+      limit,
+      hasMore: offset + limit < totalEvents,
+    },
+    timeline: pagedTimeline, // Reversed chronological: newest event first, keeping cumulative runningCash per step
   };
 }
 
@@ -4474,7 +4588,8 @@ async function currentData(ctx, url) {
     categoryId: product.categoryId ?? null,
     description: product.description ?? null,
     brand: product.brand ?? null,
-    imagePath: product.imagePath ?? null,
+    imagePath: buildProductImageUrl(product.id, product.imagePath),
+    hasImage: Boolean(product.imagePath),
     options: product.options,
     isActive: product.isActive,
     variants: variants.filter((variant) => variant.productId === product.id).map((variant) => {
@@ -4802,10 +4917,14 @@ const LicenseActivateSchema = z.object({
   token: z.string().trim().min(20, 'كود التفعيل غير صالح').max(4096, 'كود التفعيل أطول من المسموح'),
 });
 
+const ClockResetSchema = z.object({
+  token: z.string().trim().min(20, 'كود إعادة ضبط الساعة غير صالح').max(4096, 'كود إعادة ضبط الساعة أطول من المسموح'),
+});
+
 const VendorPasswordResetSchema = z.object({
   resetToken: z.string().trim().min(20, 'كود الطوارئ غير صالح').max(4096, 'كود الطوارئ أطول من المسموح'),
   username: z.string().trim().max(30).optional(),
-  newPassword: z.string().min(8, 'كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل').max(128, 'كلمة المرور أطول من المسموح'),
+  newPassword: z.string().min(12, 'كلمة المرور الجديدة يجب أن تكون 12 حرفًا على الأقل').max(128, 'كلمة المرور أطول من المسموح'),
 });
 
 function isLicenseExemptMutationPath(path) {
@@ -4856,6 +4975,55 @@ async function handleApi(req, res, url) {
       } catch { /* activation allowed before login */ }
     }
     return json(res, 200, activated);
+  }
+
+  if (method === 'POST' && path === '/api/license/reset-clock') {
+    const body = validate(ClockResetSchema, await readJson(req));
+    pruneFailedLogins();
+    const rateKey = 'vendor-clock-reset';
+    const failures = getAuthFailures('vendor_clock_reset', rateKey);
+    const cooldownMs = computeLoginBackoffMs(failures.count);
+    const elapsedMs = Date.now() - failures.startedAt;
+    if (cooldownMs > 0 && elapsedMs < cooldownMs) {
+      const waitSeconds = Math.max(1, Math.ceil((cooldownMs - elapsedMs) / 1000));
+      throw Object.assign(new Error(`محاولات كثيرة. انتظر ${waitSeconds} ثانية ثم حاول مرة أخرى.`), { status: 429 });
+    }
+    let resetEvaluation;
+    try {
+      resetEvaluation = await licenseService.resetClockWithVendorToken(body.token);
+    } catch (err) {
+      recordAuthFailure('vendor_clock_reset', rateKey);
+      throw err;
+    }
+    clearAuthFailures('vendor_clock_reset', rateKey);
+    try {
+      const tenants = await tenantRepo.listAll();
+      if (tenants.length === 1) {
+        let actorCtx = null;
+        const sessionToken = readCookie(req, 'retailos_session');
+        if (sessionToken) {
+          actorCtx = await auth.validateSession(sessionToken).catch(() => null);
+        }
+        const auditCtx = actorCtx ?? new ScopedExecutionContext({
+          tenantId: tenants[0].id,
+          userId: 'system',
+          roleId: 'OWNER',
+          permissions: new Set(['*']),
+          correlationId: randomUUID(),
+        });
+        await recordAudit(auditCtx, {
+          actorUserId: actorCtx?.userId ?? null,
+          actorUsername: actorCtx ? undefined : 'system',
+          actorRole: actorCtx?.roleId ?? 'SYSTEM',
+          action: 'CLOCK_WATERMARK_RESET_BY_VENDOR_TOKEN',
+          entityType: 'LICENSE',
+          entityId: 'system',
+          summary: 'إعادة ضبط علامة التوقيت المرجعية للنظام بكود دعم فني معتمد',
+          metadata: { machineId: resetEvaluation.machineId, statusAfterReset: resetEvaluation.status },
+        });
+      }
+    } catch { /* best-effort audit before login */ }
+    return json(res, 200, resetEvaluation);
   }
 
   if (method === 'POST' && path === '/api/internal/shutdown') {
@@ -5484,14 +5652,52 @@ async function handleApi(req, res, url) {
     const requestedStore = url.searchParams.get('storeId');
     const storeId = ctx.storeId ?? requestedStore ?? stores[0]?.id;
     if (!storeId || !stores.some((s) => s.id === storeId)) throw Object.assign(new Error('الفرع غير متاح'), { status: 403 });
-    const rows = [];
+
+    const from = url.searchParams.get('from');
+    const to = url.searchParams.get('to');
+    if (Boolean(from) !== Boolean(to)) {
+      throw Object.assign(new Error('يجب تحديد تاريخ البداية والنهاية معًا'), { status: 400 });
+    }
+    let bounds = null;
+    if (from && to) {
+      const fromDate = reportDay(from);
+      const toDate = reportDay(to);
+      if (fromDate > toDate) {
+        throw Object.assign(new Error('تاريخ البداية يجب أن يسبق تاريخ النهاية'), { status: 400 });
+      }
+      bounds = queryRangeBounds(from, to, url);
+    }
+
+    const tenant = await tenantRepo.findById(ctx.tenantId);
+    const exportTz = resolveValidTimeZone(tenant?.timezone ?? companyConfig.timezone);
+    const localDate = businessDateInTimeZone(new Date(), exportTz);
+    const rawDb = database.getRawDatabase();
+    const MAX_CSV_EXPORT_ROWS = 100_000;
+
+    let headerRow;
+    let rawRows;
+    let formatRow = (r) => r;
+
     if (exportType === 'sales') {
       ctx.assertPermission(Permissions.REPORTS_DAILY_VIEW);
-      const salesList = await saleRepo.listByStore(ctx, storeId, 500);
-      rows.push(['رقم الفاتورة', 'التاريخ', 'العميل', 'الإجمالي', 'المدفوع', 'الحالة']);
-      for (const s of salesList) {
-        rows.push([s.saleNumber, s.createdAt.toISOString(), s.customerName ?? 'عميل نقدي', s.total.toDecimalString(), s.paidTotal.toDecimalString(), s.status]);
+      headerRow = ['رقم الفاتورة', 'التاريخ', 'العميل', 'الإجمالي', 'المدفوع', 'الحالة'];
+      const sqlParams = [ctx.tenantId, storeId];
+      let salesSql = 'SELECT sale_number, created_at, customer_name, currency, total, paid_total, status FROM sales WHERE tenant_id = ? AND store_id = ?';
+      if (bounds) {
+        salesSql += ' AND created_at >= ? AND created_at < ?';
+        sqlParams.push(bounds.startIso, bounds.endExclusiveIso);
       }
+      salesSql += ' ORDER BY created_at DESC LIMIT ?';
+      sqlParams.push(MAX_CSV_EXPORT_ROWS + 1);
+      rawRows = rawDb.prepare(salesSql).all(...sqlParams);
+      formatRow = (s) => [
+        s.sale_number,
+        formatTimestampInTimeZone(s.created_at, exportTz),
+        s.customer_name ?? 'عميل نقدي',
+        Money.fromMinor(BigInt(s.total ?? 0), s.currency).toDecimalString(),
+        Money.fromMinor(BigInt(s.paid_total ?? 0), s.currency).toDecimalString(),
+        s.status,
+      ];
     } else if (exportType === 'inventory') {
       ctx.assertPermission(Permissions.INVENTORY_VIEW);
       const products = await catalog.listProducts(ctx);
@@ -5500,11 +5706,12 @@ async function handleApi(req, res, url) {
       const posByVar = new Map(positions.map((p) => [p.variantId, p]));
       const productById = new Map(products.map((p) => [p.id, p]));
       const canSeeWac = ctx.hasPermission(Permissions.REPORTS_COGS_VIEW);
-      rows.push(['المنتج', 'كود النسخة (SKU)', 'الباركود', 'الكمية المتاحة', 'حد إعادة الطلب', 'سعر البيع', ...(canSeeWac ? ['متوسط التكلفة (WAC)'] : [])]);
-      for (const v of variants) {
+      headerRow = ['المنتج', 'كود النسخة (SKU)', 'الباركود', 'الكمية المتاحة', 'حد إعادة الطلب', 'سعر البيع', ...(canSeeWac ? ['متوسط التكلفة (WAC)'] : [])];
+      rawRows = variants.slice(0, MAX_CSV_EXPORT_ROWS + 1);
+      formatRow = (v) => {
         const prod = productById.get(v.productId);
         const pos = posByVar.get(v.id);
-        rows.push([
+        return [
           prod?.name ?? '',
           v.sku,
           v.barcode ?? '',
@@ -5512,33 +5719,66 @@ async function handleApi(req, res, url) {
           v.reorderPoint.toString(),
           v.retailPrice.toDecimalString(),
           ...(canSeeWac ? [(pos?.wacCost ?? Money.zero(v.retailPrice.currency.code)).toDecimalString()] : []),
-        ]);
-      }
+        ];
+      };
     } else if (exportType === 'accounting') {
       ctx.assertPermission(Permissions.REPORTS_FINANCIAL_VIEW);
-      const headers = await db.selectFrom('journal_entries').selectAll().where('tenant_id', '=', ctx.tenantId).where('store_id', '=', storeId).orderBy('entry_date', 'desc').limit(500).execute();
-      rows.push(['رقم القيد', 'التاريخ', 'المصدر', 'الحالة']);
-      for (const h of headers) {
-        rows.push([h.entry_number, h.entry_date, h.source_type, h.status]);
+      headerRow = ['رقم القيد', 'التاريخ', 'المصدر', 'الحالة'];
+      const sqlParams = [ctx.tenantId, storeId];
+      let accSql = 'SELECT entry_number, entry_date, source_type, status FROM journal_entries WHERE tenant_id = ? AND store_id = ?';
+      if (from && to) {
+        accSql += ' AND entry_date >= ? AND entry_date <= ?';
+        sqlParams.push(from, to);
       }
+      accSql += ' ORDER BY entry_date DESC, created_at DESC LIMIT ?';
+      sqlParams.push(MAX_CSV_EXPORT_ROWS + 1);
+      rawRows = rawDb.prepare(accSql).all(...sqlParams);
+      formatRow = (h) => [h.entry_number, h.entry_date, h.source_type, h.status];
     } else if (exportType === 'audit') {
       ctx.assertPermission(Permissions.AUDIT_LOG_VIEW);
-      const entries = await auditLogs.list(ctx, { storeId, limit: 500 });
-      rows.push(['التسلسل', 'التاريخ', 'المستخدم', 'الدور', 'الإجراء', 'الملخص', 'البصمة (SHA-256)']);
-      for (const e of entries) {
-        rows.push([String(e.sequenceNo), e.createdAt, e.actorUsername, e.actorRole, e.action, e.summary, e.entryHash]);
+      headerRow = ['التسلسل', 'التاريخ', 'المستخدم', 'الدور', 'الإجراء', 'الملخص', 'البصمة (SHA-256)'];
+      const sqlParams = [ctx.tenantId, storeId];
+      let auditSql = 'SELECT sequence_no, created_at, actor_username, actor_role, action, summary, entry_hash FROM audit_logs WHERE tenant_id = ? AND (store_id = ? OR store_id IS NULL)';
+      if (bounds) {
+        auditSql += ' AND created_at >= ? AND created_at < ?';
+        sqlParams.push(bounds.startIso, bounds.endExclusiveIso);
       }
+      auditSql += ' ORDER BY sequence_no DESC LIMIT ?';
+      sqlParams.push(MAX_CSV_EXPORT_ROWS + 1);
+      rawRows = rawDb.prepare(auditSql).all(...sqlParams);
+      formatRow = (e) => [
+        String(e.sequence_no),
+        formatTimestampInTimeZone(e.created_at, exportTz),
+        e.actor_username,
+        e.actor_role,
+        e.action,
+        e.summary,
+        e.entry_hash,
+      ];
     } else {
       throw Object.assign(new Error('نوع التقرير غير مدعوم'), { status: 400 });
     }
-    const csvContent = '\uFEFF' + rows.map((r) => r.map(escapeCsvCell).join(',')).join('\r\n');
+
+    const truncated = rawRows.length > MAX_CSV_EXPORT_ROWS;
+    const exportRows = truncated ? rawRows.slice(0, MAX_CSV_EXPORT_ROWS) : rawRows;
     res.writeHead(200, {
       'Content-Type': 'text/csv; charset=utf-8',
-      'Content-Disposition': `attachment; filename="retailos-${exportType}-${new Date().toISOString().slice(0, 10)}.csv"`,
+      'Content-Disposition': `attachment; filename="raff-${exportType}-${localDate}.csv"`,
+      'X-Export-Row-Count': String(exportRows.length),
+      'X-Export-Truncated': truncated ? 'true' : 'false',
       'Cache-Control': 'no-store',
       ...securityHeaders(),
     });
-    res.end(csvContent);
+    res.write('\uFEFF' + headerRow.map(escapeCsvCell).join(','));
+    const CHUNK_SIZE = 200;
+    for (let i = 0; i < exportRows.length; i += CHUNK_SIZE) {
+      const slice = exportRows.slice(i, i + CHUNK_SIZE);
+      res.write('\r\n' + slice.map((r) => formatRow(r).map(escapeCsvCell).join(',')).join('\r\n'));
+    }
+    if (truncated) {
+      res.write('\r\n' + ['تنبيه', `تم تصدير أول ${MAX_CSV_EXPORT_ROWS} صف فقط لحماية الأداء؛ استخدم فلاتر التاريخ لتقسيم التصدير`].map(escapeCsvCell).join(','));
+    }
+    res.end();
     return;
   }
 
@@ -6738,7 +6978,7 @@ if (method === 'GET' && path === '/api/shifts/current') {
     const created = await catalog.createProduct(ctx, {
       id: randomUUID(), name: body.name, sku: body.sku, barcode: body.barcode, itemKind: 'PRODUCT',
       categoryId: body.categoryId, hasVariants: body.hasVariants,
-      description: body.description, brand: body.brand, imagePath: body.imagePath, options: body.options,
+      description: body.description, brand: body.brand, imagePath: body.imagePath || undefined, options: body.options,
       variants: body.variants.map((variant) => ({
         id: randomUUID(), sku: variant.sku, barcode: variant.barcode, attributes: variant.attributes,
         retailPrice: Money.fromMinor(BigInt(variant.retailPrice), tenant.currency),
@@ -6747,6 +6987,40 @@ if (method === 'GET' && path === '/api/shifts/current') {
     });
     await recordAudit(ctx, { action: 'PRODUCT_CREATED', entityType: 'PRODUCT', entityId: created.product.id, summary: `إضافة منتج جديد (${created.product.name} - ${created.product.sku})`, metadata: { sku: created.product.sku, variantCount: body.variants.length } });
     return json(res, 201, { id: created.product.id, name: created.product.name });
+  }
+
+  const productImageMatch = method === 'GET' ? path.match(/^\/api\/products\/([0-9a-f-]+)\/image$/i) : null;
+  if (productImageMatch) {
+    ctx.assertPermission(Permissions.INVENTORY_VIEW);
+    const productId = productImageMatch[1];
+    const product = await productRepo.findById(ctx, productId);
+    if (!product || !product.imagePath) {
+      throw Object.assign(new Error('صورة المنتج غير موجودة'), { status: 404 });
+    }
+    const dataMatch = product.imagePath.match(/^data:(image\/(?:png|jpeg|jpg|webp|gif));base64,([A-Za-z0-9+/=]+)$/i);
+    if (!dataMatch) {
+      throw Object.assign(new Error('صورة المنتج غير متوفرة بصيغة ثنائية'), { status: 404 });
+    }
+    const etag = `"${createHash('sha256').update(product.imagePath).digest('hex').slice(0, 24)}"`;
+    const headers = {
+      'Cache-Control': 'private, max-age=31536000, immutable',
+      ETag: etag,
+      ...securityHeaders(),
+    };
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, headers);
+      res.end();
+      return;
+    }
+    const mime = dataMatch[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : dataMatch[1].toLowerCase();
+    const binary = Buffer.from(dataMatch[2], 'base64');
+    res.writeHead(200, {
+      ...headers,
+      'Content-Type': mime,
+      'Content-Length': String(binary.length),
+    });
+    res.end(binary);
+    return;
   }
 
   const productMutation = path.match(/^\/api\/products\/([0-9a-f-]+)$/i);
@@ -6805,8 +7079,13 @@ if (method === 'GET' && path === '/api/shifts/current') {
       const balances = await db.selectFrom('inventory_items').select('quantity_on_hand').where('tenant_id', '=', ctx.tenantId).where('variant_id', '=', variant.id).execute();
       if (balances.some((balance) => BigInt(balance.quantity_on_hand) !== 0n)) throw Object.assign(new Error(`لا يمكن إيقاف النسخة ${variant.sku} قبل تصريف مخزونها في كل الفروع`), { status: 409 });
     }
+    const isPreservedImageUrl =
+      typeof body.imagePath === 'string' && body.imagePath.startsWith(`/api/products/${productId}/image`);
+    const nextImagePath = isPreservedImageUrl
+      ? (product.imagePath ?? null)
+      : (body.imagePath || null);
     await db.transaction().execute(async (trx) => {
-      await trx.updateTable('products').set({ name: body.name, sku: body.sku.toUpperCase(), category_id: body.categoryId, description: body.description ?? null, brand: body.brand ?? null, image_path: body.imagePath ?? null, options_json: JSON.stringify(body.options), has_variants: body.options.length ? 1 : 0 }).where('tenant_id', '=', ctx.tenantId).where('id', '=', productId).execute();
+      await trx.updateTable('products').set({ name: body.name, sku: body.sku.toUpperCase(), category_id: body.categoryId, description: body.description ?? null, brand: body.brand ?? null, image_path: nextImagePath, options_json: JSON.stringify(body.options), has_variants: body.options.length ? 1 : 0 }).where('tenant_id', '=', ctx.tenantId).where('id', '=', productId).execute();
       for (const variant of body.variants) {
         const existing = variant.id ? currentById.get(variant.id) : null;
         const nextBarcode = variant.barcode === undefined ? (existing?.barcode ?? null) : (variant.barcode?.trim() || null);
@@ -6816,7 +7095,7 @@ if (method === 'GET' && path === '/api/shifts/current') {
       }
       for (const variant of omittedVariants) await trx.updateTable('product_variants').set({ is_active: 0 }).where('tenant_id', '=', ctx.tenantId).where('product_id', '=', productId).where('id', '=', variant.id).execute();
     });
-    await recordAudit(ctx, { action: 'PRODUCT_UPDATED', entityType: 'PRODUCT', entityId: productId, summary: `تحديث بيانات الموديل (${body.name} - ${body.sku.toUpperCase()})`, metadata: { sku: body.sku.toUpperCase(), variantCount: body.variants.length, hasImage: Boolean(body.imagePath) } });
+    await recordAudit(ctx, { action: 'PRODUCT_UPDATED', entityType: 'PRODUCT', entityId: productId, summary: `تحديث بيانات الموديل (${body.name} - ${body.sku.toUpperCase()})`, metadata: { sku: body.sku.toUpperCase(), variantCount: body.variants.length, hasImage: Boolean(nextImagePath) } });
     return json(res, 200, { id: productId, updated: true });
   }
   if (productMutation && method === 'DELETE') {
@@ -9046,6 +9325,11 @@ function restartLocalServer() {
   server.close(() => {
     database.checkpointPassive();
     void database.close().then(() => {
+      if (process.argv.includes('--electron-stdio-secret')) {
+        process.stdout.write('__RETAILOS_RESTART_REQUESTED__\n');
+        setTimeout(() => process.exit(0), 100);
+        return;
+      }
       const child = spawn(process.execPath, [serverFilePath, '--electron-stdio-secret'], {
         cwd: appDir,
         env: process.env,

@@ -2,21 +2,46 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync }
 import { createReadStream, createWriteStream } from 'node:fs';
 import { copyFile, mkdtemp, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { createGunzip, createGzip, gunzipSync } from 'node:zlib';
 import Database, { type Database as DatabaseInstance } from 'better-sqlite3';
-import type { SystemLicensingTable } from '../database/types.js';
 import {
   MINIMUM_SUPPORTED_BACKUP_MIGRATION,
+  parseNonNegativeRowid,
   REGISTERED_MIGRATION_NAMES,
 } from '../database/migrator.js';
 
-const MAGIC = Buffer.from('RFBK1');
+const MAGIC_V1 = Buffer.from('RFBK1');
+const MAGIC_V2 = Buffer.from('RFBK2');
 const SALT_BYTES = 16;
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
-const HEADER_BYTES = MAGIC.length + SALT_BYTES + IV_BYTES;
+const HEADER_BYTES = MAGIC_V1.length + SALT_BYTES + IV_BYTES;
 const MAX_DATABASE_BYTES = 2 * 1024 * 1024 * 1024;
 const RESTORE_MARKER = '.retailos-restore.json';
+
+function resolveArchiveMagicVersion(prefix: Buffer): 1 | 2 | null {
+  if (prefix.length < MAGIC_V1.length) return null;
+  const tag = prefix.subarray(0, MAGIC_V1.length);
+  if (tag.equals(MAGIC_V2)) return 2;
+  if (tag.equals(MAGIC_V1)) return 1;
+  return null;
+}
+
+function createDecompressionLimitTransform(maxBytes: number): Transform {
+  let totalBytes = 0;
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      totalBytes += Buffer.byteLength(chunk as Buffer);
+      if (totalBytes > maxBytes) {
+        callback(new Error('Restored database size is invalid'));
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+}
 
 function deriveKey(passphrase: string, salt: Buffer): Buffer {
   if (passphrase.length < 12 || passphrase.length > 256) throw new Error('Backup passphrase must contain 12 to 256 characters');
@@ -24,14 +49,16 @@ function deriveKey(passphrase: string, salt: Buffer): Buffer {
 }
 
 export function decryptBackupArchive(archive: Buffer, passphrase: string): Buffer {
-  if (archive.length < HEADER_BYTES + TAG_BYTES || !archive.subarray(0, MAGIC.length).equals(MAGIC)) throw new Error('Invalid backup archive');
-  const salt = archive.subarray(MAGIC.length, MAGIC.length + SALT_BYTES);
-  const iv = archive.subarray(MAGIC.length + SALT_BYTES, HEADER_BYTES);
+  const version = archive.length >= HEADER_BYTES + TAG_BYTES ? resolveArchiveMagicVersion(archive) : null;
+  if (!version) throw new Error('Invalid backup archive');
+  const salt = archive.subarray(MAGIC_V1.length, MAGIC_V1.length + SALT_BYTES);
+  const iv = archive.subarray(MAGIC_V1.length + SALT_BYTES, HEADER_BYTES);
   const tag = archive.subarray(archive.length - TAG_BYTES);
   const ciphertext = archive.subarray(HEADER_BYTES, archive.length - TAG_BYTES);
   const decipher = createDecipheriv('aes-256-gcm', deriveKey(passphrase, salt), iv);
   decipher.setAuthTag(tag);
-  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  return version === 2 ? gunzipSync(decrypted, { maxOutputLength: MAX_DATABASE_BYTES }) : decrypted;
 }
 
 export async function createEncryptedSqliteBackup(
@@ -60,10 +87,15 @@ export async function createEncryptedSqliteBackup(
     } finally {
       verification.close();
     }
-    await pipeline(createReadStream(snapshotPath), cipher, createWriteStream(ciphertextPath, { flags: 'wx' }));
+    await pipeline(
+      createReadStream(snapshotPath),
+      createGzip({ level: 6 }),
+      cipher,
+      createWriteStream(ciphertextPath, { flags: 'wx' }),
+    );
     const output = await open(outputPath, 'wx');
     try {
-      await output.write(Buffer.concat([MAGIC, salt, iv]));
+      await output.write(Buffer.concat([MAGIC_V2, salt, iv]));
       for await (const chunk of createReadStream(ciphertextPath)) {
         await output.write(Buffer.from(chunk as Uint8Array));
       }
@@ -145,9 +177,20 @@ export function checkSqliteFileQuick(path: string): { ok: boolean; messages: str
   }
 }
 
+export interface DeviceLicenseStateSnapshot {
+  readonly id: number;
+  readonly activation_token: string | null;
+  readonly last_verified_clock_ms: number;
+  readonly clock_hmac: string;
+  readonly updated_at: string;
+  readonly ignored_sales_rowid?: number | undefined;
+  readonly ignored_shifts_rowid?: number | undefined;
+  readonly ignored_audit_rowid?: number | undefined;
+}
+
 export interface RestorePreparationOptions {
   /** Keep the target installation's device-bound activation and clock watermark. */
-  readonly deviceLicenseState?: SystemLicensingTable | undefined;
+  readonly deviceLicenseState?: DeviceLicenseStateSnapshot | undefined;
 }
 
 export interface RestoreFileOperations {
@@ -190,7 +233,7 @@ export function verifySqliteFile(
   }
 }
 
-function preserveDeviceLicenseState(path: string, state: SystemLicensingTable | undefined): void {
+function preserveDeviceLicenseState(path: string, state: DeviceLicenseStateSnapshot | undefined): void {
   if (!state) return;
   if (
     state.id !== 1
@@ -203,8 +246,53 @@ function preserveDeviceLicenseState(path: string, state: SystemLicensingTable | 
   ) {
     throw new Error('Local device licensing state is invalid; restore was not prepared');
   }
+  const salesRowid = parseNonNegativeRowid(state.ignored_sales_rowid);
+  const shiftsRowid = parseNonNegativeRowid(state.ignored_shifts_rowid);
+  const auditRowid = parseNonNegativeRowid(state.ignored_audit_rowid);
   const target = new Database(path);
   try {
+    const columns = new Set(
+      (target.pragma('table_info(system_licensing)') as { name?: string }[]).map((c) => c.name ?? ''),
+    );
+    const hasCutoffs =
+      columns.has('ignored_sales_rowid')
+      && columns.has('ignored_shifts_rowid')
+      && columns.has('ignored_audit_rowid');
+    if (hasCutoffs) {
+      const update = target.prepare(`
+        UPDATE system_licensing
+        SET activation_token = ?, last_verified_clock_ms = ?, clock_hmac = ?, updated_at = ?,
+            ignored_sales_rowid = ?, ignored_shifts_rowid = ?, ignored_audit_rowid = ?
+        WHERE id = 1
+      `).run(
+        state.activation_token,
+        state.last_verified_clock_ms,
+        state.clock_hmac,
+        state.updated_at,
+        salesRowid,
+        shiftsRowid,
+        auditRowid,
+      );
+      if (update.changes === 0) {
+        target.prepare(`
+          INSERT INTO system_licensing (
+            id, activation_token, last_verified_clock_ms, clock_hmac, updated_at,
+            ignored_sales_rowid, ignored_shifts_rowid, ignored_audit_rowid
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          state.id,
+          state.activation_token,
+          state.last_verified_clock_ms,
+          state.clock_hmac,
+          state.updated_at,
+          salesRowid,
+          shiftsRowid,
+          auditRowid,
+        );
+      }
+      return;
+    }
+
     const update = target.prepare(`
       UPDATE system_licensing
       SET activation_token = ?, last_verified_clock_ms = ?, clock_hmac = ?, updated_at = ?
@@ -247,12 +335,32 @@ export async function prepareEncryptedSqliteRestore(
     if (archiveStats.size < HEADER_BYTES + TAG_BYTES || archiveStats.size > MAX_DATABASE_BYTES + HEADER_BYTES + TAG_BYTES || archiveStats.size > 2 * 1024 * 1024 * 1024) throw new Error('Backup archive size is invalid');
     await archive.read(header, 0, HEADER_BYTES, 0);
     await archive.read(tag, 0, TAG_BYTES, archiveStats.size - TAG_BYTES);
-    if (!header.subarray(0, MAGIC.length).equals(MAGIC)) throw new Error('Invalid backup archive');
-    const salt = header.subarray(MAGIC.length, MAGIC.length + SALT_BYTES);
-    const iv = header.subarray(MAGIC.length + SALT_BYTES, HEADER_BYTES);
+    const version = resolveArchiveMagicVersion(header);
+    if (!version) throw new Error('Invalid backup archive');
+    const salt = header.subarray(MAGIC_V1.length, MAGIC_V1.length + SALT_BYTES);
+    const iv = header.subarray(MAGIC_V1.length + SALT_BYTES, HEADER_BYTES);
     const decipher = createDecipheriv('aes-256-gcm', deriveKey(passphrase, salt), iv);
     decipher.setAuthTag(tag);
-    await pipeline(archive.createReadStream({ start: HEADER_BYTES, end: archiveStats.size - TAG_BYTES - 1, autoClose: false }), decipher, createWriteStream(candidatePath, { flags: 'wx', mode: 0o600 }));
+    const encryptedStream = archive.createReadStream({
+      start: HEADER_BYTES,
+      end: archiveStats.size - TAG_BYTES - 1,
+      autoClose: false,
+    });
+    if (version === 2) {
+      await pipeline(
+        encryptedStream,
+        decipher,
+        createGunzip(),
+        createDecompressionLimitTransform(MAX_DATABASE_BYTES),
+        createWriteStream(candidatePath, { flags: 'wx', mode: 0o600 }),
+      );
+    } else {
+      await pipeline(
+        encryptedStream,
+        decipher,
+        createWriteStream(candidatePath, { flags: 'wx', mode: 0o600 }),
+      );
+    }
     const candidateStats = await stat(candidatePath);
     if (candidateStats.size === 0 || candidateStats.size > MAX_DATABASE_BYTES) throw new Error('Restored database size is invalid');
     preserveDeviceLicenseState(candidatePath, options?.deviceLicenseState);
