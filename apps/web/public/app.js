@@ -2612,7 +2612,7 @@ function inventoryView() {
       </div>
     </div>`;
 
-  return `<div class="page-heading-row"><div><p class="page-lead">${isCashier ? 'متابعة أرصدة المخزون والمقاسات والأسعار المتاحة للبيع.' : 'متابعة وجرد أرصدة المخزون للموديلات والأصناف الحالية وتقييم رأس المال والأرباح المتوقعة.'}</p></div><div class="products-heading-actions">${data.capabilities.canManageStores ? '<button class="button button-secondary" id="new-store-btn">+ إضافة فرع</button>' : ''}${data.capabilities.canTransferInventory && data.stores.length > 1 ? '<button class="button button-secondary" id="transfer-stock-btn">تحويل مخزون بين الفروع</button>' : ''}${data.capabilities.canAdjustInventory ? `<button class="button button-secondary" id="record-damage-btn">تسجيل تالف / هالك</button><button class="button button-secondary" id="adjust-stock-btn">تسوية سريعة لصنف</button><button class="button button-primary" id="open-full-stocktake-btn" data-page="stocktake">${icon('scan', 16)} جرد شامل للمحل</button>` : ''}<a class="button button-secondary" href="/api/reports/export.csv?type=inventory&storeId=${encodeURIComponent(data.selectedStoreId)}" download>تصدير CSV</a>${!isCashier ? `<button class="button button-primary" data-page="suppliers">فاتورة شراء من تاجر</button>` : ''}</div></div>
+  return `<div class="page-heading-row"><div><p class="page-lead">${isCashier ? 'متابعة أرصدة المخزون والمقاسات والأسعار المتاحة للبيع.' : 'متابعة وجرد أرصدة المخزون للموديلات والأصناف الحالية وتقييم رأس المال والأرباح المتوقعة.'}</p></div><div class="products-heading-actions">${data.capabilities.canManageStores ? '<button class="button button-secondary" id="new-store-btn">+ إضافة فرع</button>' : ''}${data.capabilities.canTransferInventory && data.stores.length > 1 ? '<button class="button button-secondary" id="transfer-stock-btn">تحويل مخزون بين الفروع</button>' : ''}${data.capabilities.canAdjustInventory ? `${data.capabilities.canManageCatalog ? `<button class="button button-secondary" id="opening-inventory-import-btn">${icon('plus', 15)} إضافة المخزن الافتتاحي (إكسيل)</button>` : ''}<button class="button button-secondary" id="record-damage-btn">تسجيل تالف / هالك</button><button class="button button-secondary" id="adjust-stock-btn">تسوية سريعة لصنف</button><button class="button button-primary" id="open-full-stocktake-btn" data-page="stocktake">${icon('scan', 16)} جرد شامل للمحل</button>` : ''}<a class="button button-secondary" href="/api/reports/export.csv?type=inventory&storeId=${encodeURIComponent(data.selectedStoreId)}" download>تصدير CSV</a>${!isCashier ? `<button class="button button-primary" data-page="suppliers">فاتورة شراء من تاجر</button>` : ''}</div></div>
   <div class="inventory-summary ${isCashier ? '' : 'expense-summary-grid'}">${summaryCardsHtml}
   </div>
   <section class="panel"><div class="panel-heading"><div><h3>أرصدة الموديلات والمقاسات</h3><p>اضغط على الموديل لعرض مصفوفة الألوان والمقاسات</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="ابحث عن الموديل أو الكود أو المقاس" value="${escapeHtml(state.query)}"></label></div>${items.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل</th><th>كود الموديل</th><th>الألوان والمقاسات</th><th class="cell-center">إجمالي الرصيد</th>${!isCashier ? '<th>سعر التكلفة (الفعلي)</th><th>سعر البيع</th><th>المكسب المتوقع</th>' : '<th>سعر البيع</th>'}<th>حالة المقاسات</th></tr></thead><tbody>${items.map((product) => `<tr><td><button type="button" class="product-name-action inventory-product-details" data-product-id="${product.id}"><span class="product-avatar ${product.imagePath ? 'has-image' : ''}">${product.imagePath ? renderProductThumb(product) : escapeHtml(product.name.slice(0, 1))}</span><span class="product-name-stack"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand || 'اضغط لعرض جدول المقاسات')}</small></span></button></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${product.matrix.isMatrix ? `<div class="model-sub-badges">${product.matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(product.matrix.colorSummaryLabel)}</span>` : ''}${product.matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(product.matrix.sizeRangeLabel)}</span>` : ''}</div>` : `<small>${product.variants.length} نسخة</small>`}</td><td class="cell-center"><strong>${product.quantity}</strong> قطعة</td>${!isCashier ? (() => {
@@ -3734,19 +3734,21 @@ function suppliersView() {
     const hasExpectedRetail = purchase.expectedRetailTotal && BigInt(purchase.expectedRetailTotal.amount) > 0n;
     const expectedProfitMinor = hasExpectedRetail ? (BigInt(purchase.expectedRetailTotal.amount) - BigInt(purchase.totalAmount.amount)) : null;
 
+    const isOpeningDebt = Boolean(purchase.isOpeningDebt || purchase.entryKind === 'OPENING_DEBT');
     return `
       <details class="purchase-card">
         <summary class="purchase-summary-row">
           <div class="purchase-summary-info">
-            <span class="purchase-inv-tag">${icon('box', 14)} ${escapeHtml(invoiceLabel)}</span>
+            <span class="purchase-inv-tag">${icon(isOpeningDebt ? 'wallet' : 'box', 14)} ${escapeHtml(invoiceLabel)}</span>
+            ${isOpeningDebt ? '<span class="purchase-meta-pill" style="background:rgba(217,119,6,0.12);color:#92400e;">مديونية افتتاحية (بدون فاتورة)</span>' : ''}
             <span class="purchase-date-pill">${icon('calendar', 14)} ${dateFormatted}</span>
-            <span class="purchase-meta-pill">المستلم: <strong>${escapeHtml(purchase.createdByName || 'المسؤول')}</strong></span>
-            <span class="purchase-meta-pill"><strong>${totalPieces} قطعة</strong> في ${modelGroups.length} موديل</span>
+            <span class="purchase-meta-pill">${isOpeningDebt ? 'سُجلت بواسطة' : 'المستلم'}: <strong>${escapeHtml(purchase.createdByName || 'المسؤول')}</strong></span>
+            ${isOpeningDebt ? '' : `<span class="purchase-meta-pill"><strong>${totalPieces} قطعة</strong> في ${modelGroups.length} موديل</span>`}
             ${purchase.targetProfitPercent !== null && purchase.targetProfitPercent !== undefined ? `<span class="purchase-meta-pill" style="color:var(--purple);">هدف ربح: <strong>${purchase.targetProfitPercent}%</strong></span>` : ''}
           </div>
           <div class="purchase-summary-finances">
             <div class="purchase-summary-total">
-              <small>إجمالي الفاتورة</small>
+              <small>${isOpeningDebt ? 'قيمة المديونية' : 'إجمالي الفاتورة'}</small>
               <strong class="table-total">${money(purchase.totalAmount)}</strong>
             </div>
             <span class="status-pill ${isPaid || hasSupplierCredit ? 'status-complete' : 'status-low'}">
@@ -3783,6 +3785,7 @@ function suppliersView() {
             `}
           </div>
 
+          ${isOpeningDebt ? '' : `
           <div class="table-scroll">
             <table class="invoice-table" style="margin:4px 0;">
               <thead>
@@ -3829,6 +3832,7 @@ function suppliersView() {
               </tbody>
             </table>
           </div>
+          `}
 
           <div class="purchase-footer-bar">
             <div class="purchase-footer-buttons">
@@ -3837,11 +3841,9 @@ function suppliersView() {
                   ${icon('wallet', 15)} تسجيل سداد للتاجر
                 </button>
               ` : hasSupplierCredit ? `<span class="status-pill status-complete">رصيد مرتجع لصالح المحل +<bdi dir="ltr">${money(absRemaining)}</bdi></span>` : '<span class="status-pill status-complete">✓ مسددة بالكامل</span>'}
-              <button type="button" class="button button-secondary button-sm print-purchase-labels" data-purchase-id="${purchase.id}">
-                طباعة باركود العلب
-              </button>
+              ${isOpeningDebt ? '' : `<button type="button" class="button button-secondary button-sm print-purchase-labels" data-purchase-id="${purchase.id}">طباعة باركود العلب</button>`}
               <button type="button" class="button button-secondary button-sm edit-purchase-meta" data-purchase-id="${purchase.id}">
-                تعديل بيانات الفاتورة
+                ${isOpeningDebt ? 'تعديل المرجع / الملاحظات' : 'تعديل بيانات الفاتورة'}
               </button>
             </div>
             <div class="purchase-footer-meta">
@@ -3890,6 +3892,7 @@ function suppliersView() {
       </div>
       <div>
         <button class="button button-secondary" id="new-supplier">إضافة تاجر</button>
+        <button class="button button-secondary" id="new-opening-debt">+ إضافة مديونية افتتاحية</button>
         <button class="button button-secondary" id="new-category">إضافة فئة</button>
         <button class="button button-secondary" id="toggle-archived-suppliers">${state.showArchivedSuppliers ? 'عرض التجار النشطين' : 'أرشيف التجار'}</button>
         <button class="button button-primary" id="new-purchase">تسجيل فاتورة شراء</button>
@@ -3978,7 +3981,7 @@ function suppliersView() {
             <button type="button" class="button button-secondary button-sm edit-supplier-btn" data-supplier="${supplier.id}">تعديل</button>
             <button type="button" class="button button-secondary button-sm toggle-supplier-archive" data-supplier="${supplier.id}" data-active="${supplier.isActive === false ? '0' : '1'}">${supplier.isActive === false ? 'إعادة تفعيل' : 'أرشفة'}</button>
             ${creditAvailable > 0n ? `<button type="button" class="button button-primary button-sm collect-supplier-refund" data-supplier="${supplier.id}" data-supplier-name="${escapeHtml(supplier.name)}" data-credit="${creditAvailable.toString()}">استلام مرتجع نقدي</button>` : ''}
-            ${supplier.isActive === false ? '' : `<button type="button" class="button button-secondary button-sm purchase-for-supplier" data-supplier="${supplier.id}">+ فاتورة شراء جديدة</button>`}
+            ${supplier.isActive === false ? '' : `<button type="button" class="button button-secondary button-sm opening-debt-for-supplier" data-supplier="${supplier.id}">+ مديونية افتتاحية</button><button type="button" class="button button-secondary button-sm purchase-for-supplier" data-supplier="${supplier.id}">+ فاتورة شراء جديدة</button>`}
             <span class="disclosure-chevron" aria-hidden="true">${icon('chevron', 16)}</span>
           </div>
         </summary>
@@ -3989,8 +3992,11 @@ function suppliersView() {
       <section class="panel empty-chart">
         <div class="empty-illustration">${icon('users', 28)}</div>
         <strong>ابدأ بإضافة أول تاجر</strong>
-        <p>سجّل فواتير الشراء، المبالغ المدفوعة، والرصيد المتبقي.</p>
-        <button class="button button-primary" id="empty-new-supplier">إضافة تاجر</button>
+        <p>سجّل فواتير الشراء، الديون الافتتاحية السابقة، المبالغ المدفوعة، والرصيد المتبقي.</p>
+        <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
+          <button class="button button-primary" id="empty-new-supplier">إضافة تاجر</button>
+          <button class="button button-secondary" id="empty-new-opening-debt">+ إضافة تاجر بمديونية افتتاحية</button>
+        </div>
       </section>
     `}
     ${hasMorePurchases ? `<div class="sales-history-more"><button type="button" class="button button-secondary" id="purchases-history-more">عرض فواتير أقدم (${loadedPurchasesCount} من ${totalPurchasesCount})</button></div>` : ''}
@@ -4168,12 +4174,6 @@ function profitLossView() {
         <button type="button" class="button button-secondary" id="btn-open-trial-balance">
           ${icon('chart', 16)} ميزان المراجعة
         </button>
-        ${state.data.capabilities.canClosePeriod ? (() => {
-          const postedOpening = state.data.openingBalanceEntry;
-          return postedOpening
-            ? `<button type="button" class="button button-secondary" id="btn-open-opening-balances" disabled title="تم تسجيل الأرصدة الافتتاحية مسبقًا بالقيد ${escapeHtml(postedOpening.entryNumber)} بتاريخ ${escapeHtml(postedOpening.entryDate)}">${icon('check', 16)} الأرصدة الافتتاحية مسجلة (${escapeHtml(postedOpening.entryDate)})</button>`
-            : `<button type="button" class="button button-secondary" id="btn-open-opening-balances">${icon('plus', 16)} الأرصدة الافتتاحية</button>`;
-        })() : ''}
         <button type="button" class="button button-secondary" id="btn-open-journal-ledger">
           ${icon('box', 16)} دفتر القيود المحاسبية
         </button>
@@ -7290,11 +7290,118 @@ function bindSuppliers() {
     void fetchPurchasesHistory(0, false);
   });
 
+  document.querySelector('#new-opening-debt, #empty-new-opening-debt')?.addEventListener('click', () => {
+    showOpeningDebtModal('');
+  });
+
+  document.querySelectorAll('.opening-debt-for-supplier').forEach((button) => {
+    button.addEventListener('click', () => {
+      showOpeningDebtModal(button.dataset.supplier || '');
+    });
+  });
+
   document.querySelector('#purchases-history-more')?.addEventListener('click', (event) => {
     const button = event.currentTarget;
     button.disabled = true;
     const currentLength = (state.purchasesHistory ?? []).length;
     void fetchPurchasesHistory(currentLength, true, button);
+  });
+}
+
+function showOpeningDebtModal(preselectedSupplierId = '') {
+  const root = getModalRoot();
+  const activeSuppliers = (state.data.suppliers ?? []).filter((s) => s.isActive !== false);
+  const currency = state.data.company.currency;
+  const decimals = currencyDecimals(currency);
+  const today = localDateIso();
+  const initialMode = preselectedSupplierId || activeSuppliers.length > 0 ? 'EXISTING' : 'NEW';
+
+  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="opening-debt-modal-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">أرصدة التجار الافتتاحية</span><h2 id="opening-debt-modal-title">إضافة مديونية افتتاحية لتاجر</h2><p>سجّل المبلغ المستحق للتاجر من قبل تشغيل النظام بدون الحاجة لإدخال فواتير أو أصناف مخزن.</p></div><button type="button" class="modal-close" data-close-opening-debt aria-label="إغلاق">×</button></div><form id="opening-debt-form" class="form-stack modal-form"><div class="field-group"><label style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;"><span style="display:flex;gap:6px;align-items:center;"><input type="radio" name="supplierMode" value="EXISTING" ${initialMode === 'EXISTING' ? 'checked' : ''} ${activeSuppliers.length === 0 ? 'disabled' : ''}> اختيار تاجر مسجل</span><span style="display:flex;gap:6px;align-items:center;"><input type="radio" name="supplierMode" value="NEW" ${initialMode === 'NEW' ? 'checked' : ''}> إضافة تاجر جديد بالمديونية</span></label></div><div id="opening-debt-existing-wrap" ${initialMode === 'EXISTING' ? '' : 'hidden'}><label>التاجر<select name="supplierId">${activeSuppliers.map((s) => `<option value="${s.id}" ${s.id === preselectedSupplierId ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('')}</select></label></div><div id="opening-debt-new-wrap" class="form-stack" ${initialMode === 'NEW' ? '' : 'hidden'}><label>اسم التاجر الجديد<input name="newSupplierName" maxlength="120" placeholder="مثال: مصنع النور للملابس"></label><label>رقم الهاتف (اختياري)<input name="newSupplierPhone" maxlength="40" type="tel"></label><label>ملاحظات التاجر (اختياري)<input name="newSupplierNotes" maxlength="500"></label></div><label>قيمة المديونية الافتتاحية المستحقة للتاجر (${escapeHtml(currency)})<input name="amount" inputmode="decimal" placeholder="مثال: 15000" required></label><label>تاريخ المديونية<input type="date" name="entryDate" value="${today}" required></label><label>ملاحظات المديونية (اختياري)<input name="notes" maxlength="500" placeholder="مثال: رصيد مرحّل من دفتر الحسابات القديم"></label><div class="modal-actions"><button type="button" class="button button-secondary" data-close-opening-debt>إلغاء</button><button type="submit" class="button button-primary">حفظ المديونية الافتتاحية</button></div></form></section></div>`;
+
+  const closeModal = () => {
+    root.innerHTML = '';
+  };
+  root.querySelectorAll('[data-close-opening-debt]').forEach((btn) => btn.addEventListener('click', closeModal));
+
+  const form = root.querySelector('#opening-debt-form');
+  const existingWrap = root.querySelector('#opening-debt-existing-wrap');
+  const newWrap = root.querySelector('#opening-debt-new-wrap');
+  const existingSelect = form?.querySelector('select[name="supplierId"]');
+  const newNameInput = form?.querySelector('input[name="newSupplierName"]');
+
+  const syncMode = () => {
+    const selectedMode = form?.querySelector('input[name="supplierMode"]:checked')?.value || initialMode;
+    const isExisting = selectedMode === 'EXISTING';
+    if (existingWrap) existingWrap.hidden = !isExisting;
+    if (newWrap) newWrap.hidden = isExisting;
+    if (existingSelect) existingSelect.disabled = !isExisting;
+    if (newNameInput) newNameInput.required = !isExisting;
+  };
+  form?.querySelectorAll('input[name="supplierMode"]').forEach((radio) => radio.addEventListener('change', syncMode));
+  syncMode();
+
+  const idempotencyKey = crypto.randomUUID();
+  let isSubmitting = false;
+  form?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (isSubmitting) return;
+    const fd = new FormData(event.currentTarget);
+    const mode = String(fd.get('supplierMode') || initialMode);
+    let amountMinor;
+    try {
+      amountMinor = toMinor(String(fd.get('amount') ?? '').trim(), decimals);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'قيمة المديونية غير صالحة', 'error');
+      return;
+    }
+    if (BigInt(amountMinor) <= 0n) {
+      toast('قيمة المديونية يجب أن تكون أكبر من صفر', 'error');
+      return;
+    }
+
+    const payload = {
+      idempotencyKey,
+      storeId: state.data.selectedStoreId,
+      amount: amountMinor,
+      entryDate: String(fd.get('entryDate') || today),
+      notes: String(fd.get('notes') ?? '').trim() || undefined,
+    };
+
+    if (mode === 'EXISTING') {
+      const supId = String(fd.get('supplierId') ?? '').trim();
+      if (!supId) {
+        toast('اختر التاجر أولًا', 'error');
+        return;
+      }
+      payload.supplierId = supId;
+    } else {
+      const supName = String(fd.get('newSupplierName') ?? '').trim();
+      if (supName.length < 2) {
+        toast('اسم التاجر الجديد يجب أن يكون حرفين على الأقل', 'error');
+        return;
+      }
+      payload.newSupplier = {
+        name: supName,
+        phone: String(fd.get('newSupplierPhone') ?? '').trim() || undefined,
+        notes: String(fd.get('newSupplierNotes') ?? '').trim() || undefined,
+      };
+    }
+
+    isSubmitting = true;
+    const submitBtn = form.querySelector('[type="submit"]');
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      await api('/api/suppliers/opening-debt', { method: 'POST', body: JSON.stringify(payload) });
+      closeModal();
+      invalidateFinancialCaches();
+      await loadData(state.data.selectedStoreId);
+      render();
+      toast('تم تسجيل المديونية الافتتاحية للتاجر بنجاح');
+    } catch (error) {
+      isSubmitting = false;
+      if (submitBtn) submitBtn.disabled = false;
+      toast(error.message, 'error');
+    }
   });
 }
 
@@ -9445,46 +9552,10 @@ async function showTrialBalanceModal() {
   await fetchTb().catch((err) => toast(err.message, 'error'));
 }
 
-function showOpeningBalancesModal() {
-  if (state.data.openingBalanceEntry) {
-    toast(`تم تسجيل الأرصدة الافتتاحية لهذا الفرع مسبقًا بتاريخ ${state.data.openingBalanceEntry.entryDate}`, 'error');
-    return;
-  }
-  const decimals = currencyDecimals(state.data.company.currency);
-  const currency = state.data.company.currency;
-  const today = localDateIso();
-  supplierModal(
-    `<p>أدخل الأرصدة الافتتاحية للدرج والخزينة والبنك وأي بضاعة أو مستحقات تجار سابقة، وسيتم قيد صافي الفرق تلقائيًا في حساب رأس المال (3010) بقيد متوازن.</p>
-     <label>تاريخ الأرصدة الافتتاحية<input type="date" name="entryDate" value="${today}" required></label>
-     <label>درج النقدية (1010) — ${currency}<input name="cashDrawer" inputmode="decimal" value="0" required></label>
-     <label>الخزينة الرئيسية (1015) — ${currency}<input name="cashSafe" inputmode="decimal" value="0" required></label>
-     <label>البنك / التحصيل الإلكتروني (1020) — ${currency}<input name="bank" inputmode="decimal" value="0" required></label>
-     <label>قيمة بضاعة أول المدة (1300) اختياري — ${currency}<input name="inventory" inputmode="decimal" value="0" required></label>
-     <label>مستحقات تجار سابقة (2010) اختياري — ${currency}<input name="supplierPayables" inputmode="decimal" value="0" required></label>
-     <label>ملاحظات<input name="notes" maxlength="300" placeholder="مثال: أرصدة افتتاحية عند بدء التشغيل"></label>
-     <input type="hidden" name="storeId" value="${state.data.selectedStoreId}">
-     <input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`,
-    'opening-balances-form',
-    '/api/accounting/opening-balances',
-    (data) => ({
-      ...data,
-      cashDrawer: toMinor(data.cashDrawer || '0', decimals),
-      cashSafe: toMinor(data.cashSafe || '0', decimals),
-      bank: toMinor(data.bank || '0', decimals),
-      inventory: toMinor(data.inventory || '0', decimals),
-      supplierPayables: toMinor(data.supplierPayables || '0', decimals),
-    }),
-    'تم تسجيل قيد الأرصدة الافتتاحية بنجاح',
-  );
-}
-
 function bindProfitLoss() {
   bindAccounting();
   document.querySelector('#btn-open-trial-balance')?.addEventListener('click', () => {
     void showTrialBalanceModal();
-  });
-  document.querySelector('#btn-open-opening-balances')?.addEventListener('click', () => {
-    showOpeningBalancesModal();
   });
   document.querySelector('#btn-open-journal-ledger')?.addEventListener('click', () => {
     void showJournalLedgerModal();
@@ -9980,10 +10051,177 @@ function showCategoryModal(onCreated = null) {
 function bindInventory() {
   bindLocalSearch();
   bindStoreStockActions();
+  document.querySelector('#opening-inventory-import-btn')?.addEventListener('click', () => {
+    showOpeningInventoryModal();
+  });
   document.querySelectorAll('.inventory-product-details').forEach((button) => button.addEventListener('click', () => {
     const product = state.data.products.find((item) => item.id === button.dataset.productId);
     if (product) showInventoryProductDetails(product);
   }));
+}
+
+function showOpeningInventoryModal() {
+  const modal = getModalRoot();
+  const today = localDateIso();
+  const readFileAsBase64 = async (file) => {
+    const arrayBuffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+  };
+
+  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="opening-inv-modal-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">استيراد بضاعة أول المدة</span><h2 id="opening-inv-modal-title">إضافة المخزن الافتتاحي من شيت إكسيل</h2><p>ارفع ملف إكسيل (.xlsx) أو (.csv) يحتوي على الأصناف والفئات والأكواد والألوان والمقاسات والكميات والأسعار.</p></div><button type="button" class="modal-close" data-close-opening-inv aria-label="إغلاق">×</button></div><form id="opening-inv-form" class="form-stack modal-form"><div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface-alt, #f8fafc);"><div><strong>1. جهّز الشيت على القالب الرسمي</strong><div style="font-size:12.5px;color:var(--muted);">يحتوي القالب على الأعمدة المطلوبة وتعليمات التعبئة وأمثلة جاهزة.</div></div><a class="button button-secondary button-sm" href="/api/inventory/opening-template.xlsx" download="قالب-المخزن-الافتتاحي-رف.xlsx">${icon('download', 14)} تحميل قالب الإكسيل (.xlsx)</a></div><label>2. اختر ملف الإكسيل أو CSV بعد تعبئته<input type="file" name="sheetFile" accept=".xlsx,.csv" required></label><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;"><label>تاريخ المخزن الافتتاحي<input type="date" name="entryDate" value="${today}" required></label><label>ملاحظات (اختياري)<input name="notes" maxlength="300" placeholder="مثال: جرد البضاعة قبل بدء التشغيل"></label></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><button type="button" class="button button-secondary" id="opening-inv-preview-btn">فحص ومعاينة الشيت</button><span id="opening-inv-file-hint" style="font-size:12.5px;color:var(--muted);"></span></div><div id="opening-inv-preview-area"></div><div class="modal-actions"><button type="button" class="button button-secondary" data-close-opening-inv>إلغاء</button><button type="submit" class="button button-primary" id="opening-inv-commit-btn" disabled>تأكيد وإضافة المخزن الافتتاحي</button></div></form></section></div>`;
+
+  const closeModal = () => {
+    modal.innerHTML = '';
+  };
+  modal.querySelectorAll('[data-close-opening-inv]').forEach((btn) => btn.addEventListener('click', closeModal));
+
+  const form = modal.querySelector('#opening-inv-form');
+  const fileInput = form?.querySelector('input[name="sheetFile"]');
+  const previewBtn = modal.querySelector('#opening-inv-preview-btn');
+  const commitBtn = modal.querySelector('#opening-inv-commit-btn');
+  const previewArea = modal.querySelector('#opening-inv-preview-area');
+  const fileHint = modal.querySelector('#opening-inv-file-hint');
+
+  let stagedUpload = null;
+  let lastPreview = null;
+  let commitKey = crypto.randomUUID();
+  let isCommitting = false;
+
+  const renderPreview = (preview) => {
+    if (!previewArea) return;
+    const errors = preview.errors ?? [];
+    const conflicts = preview.conflicts ?? [];
+    const issues = [...errors, ...conflicts];
+    const summary = preview.summary;
+
+    previewArea.innerHTML = `
+      <div class="inventory-summary" style="margin:8px 0;">
+        <div class="inventory-summary-card"><div><small>عدد الموديلات</small><strong>${summary.productCount}</strong></div></div>
+        <div class="inventory-summary-card"><div><small>الألوان والمقاسات</small><strong>${summary.variantCount}</strong></div></div>
+        <div class="inventory-summary-card"><div><small>إجمالي القطع</small><strong>${summary.totalUnits}</strong></div></div>
+        <div class="inventory-summary-card"><div><small>إجمالي تكلفة البضاعة</small><strong class="table-total">${money(summary.totalCost)}</strong></div></div>
+      </div>
+      ${issues.length ? `
+        <div style="padding:12px 14px;border-radius:10px;border:1px solid #fecdd3;background:#fff1f2;color:#9f1239;margin-bottom:10px;">
+          <strong>يوجد ملاحظات يجب تصحيحها قبل الاستيراد (${issues.length}):</strong>
+          <ul style="margin:6px 0 0;padding-right:18px;">
+            ${issues.slice(0, 12).map((msg) => `<li>${escapeHtml(msg)}</li>`).join('')}
+          </ul>
+          ${issues.length > 12 ? `<div style="margin-top:4px;font-size:12px;">+ ${issues.length - 12} ملاحظة إضافية</div>` : ''}
+        </div>
+      ` : '<div style="padding:10px 14px;border-radius:10px;border:1px solid #bbf7d0;background:#f0fdf4;color:#166534;margin-bottom:10px;">✓ الشيت سليم وجاهز لإضافة المخزن الافتتاحي وقيد رأس المال (1300 / 3010).</div>'}
+      <div class="table-scroll" style="max-height:260px;">
+        <table>
+          <thead>
+            <tr>
+              <th>الصنف</th>
+              <th>الفئة</th>
+              <th>الكود</th>
+              <th>اللون / المقاس</th>
+              <th>الكمية</th>
+              <th>التكلفة</th>
+              <th>سعر البيع</th>
+              <th>الإجمالي</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${preview.products.flatMap((prod) => prod.variants.map((v) => `
+              <tr>
+                <td><strong>${escapeHtml(prod.name)}</strong></td>
+                <td>${escapeHtml(prod.category)}</td>
+                <td><span class="sku-code">${escapeHtml(v.sku)}</span></td>
+                <td>${escapeHtml([v.color, v.size].filter(Boolean).join(' / ') || 'قطعة واحدة')}</td>
+                <td><strong>${v.quantity}</strong></td>
+                <td class="table-total">${money(v.unitCost)}</td>
+                <td class="table-total">${money(v.retailPrice)}</td>
+                <td class="table-total">${money(v.lineCost)}</td>
+              </tr>
+            `)).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  };
+
+  fileInput?.addEventListener('change', () => {
+    stagedUpload = null;
+    lastPreview = null;
+    commitKey = crypto.randomUUID();
+    if (commitBtn) commitBtn.disabled = true;
+    if (previewArea) previewArea.innerHTML = '';
+    const file = fileInput.files?.[0];
+    if (fileHint) fileHint.textContent = file ? `الملف المختار: ${file.name}` : '';
+  });
+
+  previewBtn?.addEventListener('click', async () => {
+    const file = fileInput?.files?.[0];
+    if (!file) {
+      toast('اختر ملف إكسيل أو CSV أولًا', 'error');
+      return;
+    }
+    previewBtn.disabled = true;
+    if (commitBtn) commitBtn.disabled = true;
+    try {
+      const fileBase64 = await readFileAsBase64(file);
+      stagedUpload = { filename: file.name, fileBase64 };
+      commitKey = crypto.randomUUID();
+      const preview = await api('/api/inventory/opening-import/preview', {
+        method: 'POST',
+        body: JSON.stringify({
+          storeId: state.data.selectedStoreId,
+          filename: file.name,
+          fileBase64,
+        }),
+      });
+      lastPreview = preview;
+      renderPreview(preview);
+      if (commitBtn) commitBtn.disabled = !preview.readyToCommit;
+    } catch (error) {
+      lastPreview = null;
+      if (previewArea) {
+        previewArea.innerHTML = `<div style="padding:12px;border-radius:10px;border:1px solid #fecdd3;background:#fff1f2;color:#9f1239;">${escapeHtml(error.message)}</div>`;
+      }
+      toast(error.message, 'error');
+    } finally {
+      previewBtn.disabled = false;
+    }
+  });
+
+  form?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (isCommitting || !stagedUpload || !lastPreview?.readyToCommit) return;
+    isCommitting = true;
+    if (commitBtn) commitBtn.disabled = true;
+    const fd = new FormData(event.currentTarget);
+    try {
+      const result = await api('/api/inventory/opening-import/commit', {
+        method: 'POST',
+        body: JSON.stringify({
+          idempotencyKey: commitKey,
+          storeId: state.data.selectedStoreId,
+          filename: stagedUpload.filename,
+          fileBase64: stagedUpload.fileBase64,
+          entryDate: String(fd.get('entryDate') || today),
+          notes: String(fd.get('notes') ?? '').trim() || undefined,
+        }),
+      });
+      closeModal();
+      invalidateFinancialCaches();
+      await loadData(state.data.selectedStoreId);
+      render();
+      toast(`تمت إضافة المخزن الافتتاحي بنجاح (${result.summary.productCount} صنف / ${result.summary.totalUnits} قطعة)`);
+    } catch (error) {
+      isCommitting = false;
+      if (commitBtn) commitBtn.disabled = false;
+      toast(error.message, 'error');
+    }
+  });
 }
 
 function showInventoryProductDetails(product) {

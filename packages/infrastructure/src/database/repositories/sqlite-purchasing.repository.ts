@@ -85,6 +85,23 @@ export interface DeleteSupplierPaymentInput {
   deletedAt: Date;
 }
 
+export interface RecordSupplierOpeningDebtInput {
+  id: string;
+  idempotencyKey: string;
+  supplierId?: string | undefined;
+  newSupplier?: {
+    id: string;
+    name: string;
+    phone?: string | null | undefined;
+    notes?: string | null | undefined;
+  } | undefined;
+  storeId: string;
+  amount: Money;
+  debtDate: Date;
+  entryDate?: string | undefined;
+  notes?: string | undefined;
+}
+
 function badRequest(message: string): Error {
   return Object.assign(new Error(message), { status: 400 });
 }
@@ -592,6 +609,178 @@ export class SqlitePurchasingRepository {
         },
       });
       return input.id;
+    });
+  }
+
+  /**
+   * Records an invoice-less supplier opening payable (`entry_kind = 'OPENING_DEBT'`)
+   * so legacy balances owed to suppliers can be tracked and paid down cleanly without
+   * inventing fake inventory lines. Posts DEBIT 3010 / CREDIT 2010 atomically.
+   */
+  public async recordSupplierOpeningDebt(
+    ctx: ExecutionContext,
+    input: RecordSupplierOpeningDebtInput,
+  ): Promise<{ id: string; invoiceNumber: string; supplierId: string }> {
+    if (ctx.storeId && ctx.storeId !== input.storeId) {
+      throw Object.assign(new Error('لا تملك صلاحية تسجيل مديونية على هذا الفرع'), { status: 403 });
+    }
+    if (input.amount.amount <= 0n) {
+      throw badRequest('قيمة المديونية الافتتاحية يجب أن تكون أكبر من صفر');
+    }
+    if (!input.supplierId && !input.newSupplier) {
+      throw badRequest('يجب تحديد تاجر حالي أو إدخال بيانات تاجر جديد');
+    }
+
+    return this.db.transaction().execute(async (trx) => {
+      const replay = await trx
+        .selectFrom('supplier_purchases')
+        .selectAll()
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('idempotency_key', '=', input.idempotencyKey)
+        .executeTakeFirst();
+      if (replay) {
+        if (
+          replay.entry_kind !== 'OPENING_DEBT' ||
+          (input.supplierId && replay.supplier_id !== input.supplierId) ||
+          replay.store_id !== input.storeId ||
+          BigInt(replay.total_amount) !== input.amount.amount ||
+          replay.currency !== input.amount.currency.code
+        ) {
+          throw conflict('مفتاح العملية مستخدم لمديونية أو فاتورة مختلفة');
+        }
+        return {
+          id: replay.id,
+          invoiceNumber: replay.invoice_number ?? 'ODEBT',
+          supplierId: replay.supplier_id,
+        };
+      }
+
+      const [store, tenant] = await Promise.all([
+        trx.selectFrom('stores').select('id').where('id', '=', input.storeId).where('tenant_id', '=', ctx.tenantId).executeTakeFirst(),
+        trx.selectFrom('tenants').select('currency').where('id', '=', ctx.tenantId).executeTakeFirst(),
+      ]);
+      if (!store) throw Object.assign(new Error('الفرع غير موجود'), { status: 404 });
+      if (!tenant || tenant.currency !== input.amount.currency.code) {
+        throw badRequest('عملة المديونية لا تطابق عملة الشركة');
+      }
+
+      let resolvedSupplierId = input.supplierId;
+      let resolvedSupplierName = '';
+      if (resolvedSupplierId) {
+        const existingSupplier = await trx
+          .selectFrom('suppliers')
+          .select(['id', 'name', 'is_active'])
+          .where('id', '=', resolvedSupplierId)
+          .where('tenant_id', '=', ctx.tenantId)
+          .executeTakeFirst();
+        if (!existingSupplier || existingSupplier.is_active !== 1) {
+          throw Object.assign(new Error('التاجر غير موجود أو غير نشط'), { status: 404 });
+        }
+        resolvedSupplierName = existingSupplier.name;
+      } else if (input.newSupplier) {
+        const trimmedSupName = input.newSupplier.name.trim();
+        if (trimmedSupName.length < 2) {
+          throw badRequest('اسم التاجر الجديد يجب أن يكون حرفين على الأقل');
+        }
+        resolvedSupplierId = input.newSupplier.id;
+        resolvedSupplierName = trimmedSupName;
+        await trx
+          .insertInto('suppliers')
+          .values({
+            id: resolvedSupplierId,
+            tenant_id: ctx.tenantId,
+            name: trimmedSupName,
+            phone: input.newSupplier.phone?.trim() || null,
+            notes: input.newSupplier.notes?.trim() || null,
+          })
+          .execute();
+      }
+      if (!resolvedSupplierId) {
+        throw badRequest('تعذر تحديد التاجر للمديونية الافتتاحية');
+      }
+
+      const invoiceNumber = await allocateDocumentNumberInTransaction(trx, {
+        tenantId: ctx.tenantId,
+        docType: 'SUPPLIER_OPENING_DEBT',
+        prefix: 'ODEBT-',
+        existingTable: 'supplier_purchases',
+        existingCol: 'invoice_number',
+      });
+
+      const trimmedNotes = input.notes?.trim() || null;
+      await trx
+        .insertInto('supplier_purchases')
+        .values({
+          id: input.id,
+          tenant_id: ctx.tenantId,
+          store_id: input.storeId,
+          supplier_id: resolvedSupplierId,
+          invoice_number: invoiceNumber,
+          idempotency_key: input.idempotencyKey,
+          entry_kind: 'OPENING_DEBT',
+          purchased_at: input.debtDate.toISOString(),
+          total_amount: input.amount.amount,
+          initial_paid_amount: 0n,
+          currency: input.amount.currency.code,
+          target_profit_percent: null,
+          expected_retail_total: null,
+          notes: trimmedNotes,
+          created_by_user_id: ctx.userId,
+        })
+        .execute();
+
+      await postJournalEntry(trx, ctx, {
+        storeId: input.storeId,
+        currency: input.amount.currency.code,
+        date: input.debtDate,
+        entryDate: input.entryDate,
+        sourceType: 'ADJUSTMENT',
+        sourceId: input.id,
+        idempotencyKey: `supplier-opening-debt:${input.idempotencyKey}`,
+        description: `مديونية افتتاحية للتاجر (${resolvedSupplierName}) — ${invoiceNumber}`,
+        lines: [
+          {
+            accountCode: '3010',
+            side: 'DEBIT',
+            amount: input.amount.amount,
+            memo: 'رصيد افتتاحي — مديونية تاجر سابقة',
+          },
+          {
+            accountCode: '2010',
+            side: 'CREDIT',
+            amount: input.amount.amount,
+            memo: 'مديونية افتتاحية مستحقة للتاجر بدون فاتورة',
+          },
+        ],
+      });
+
+      const actor = ctx.userId === 'system'
+        ? undefined
+        : await trx
+            .selectFrom('users')
+            .select('username')
+            .where('tenant_id', '=', ctx.tenantId)
+            .where('id', '=', ctx.userId)
+            .executeTakeFirst();
+      await recordAuditLogInTransaction(trx, ctx, {
+        storeId: input.storeId,
+        actorUserId: ctx.userId === 'system' ? null : ctx.userId,
+        actorUsername: actor?.username ?? 'system',
+        actorRole: ctx.roleId,
+        action: 'SUPPLIER_OPENING_DEBT_RECORDED',
+        entityType: 'PURCHASE',
+        entityId: input.id,
+        summary: `تسجيل مديونية افتتاحية للتاجر ${resolvedSupplierName} (${invoiceNumber})`,
+        metadata: {
+          supplierId: resolvedSupplierId,
+          supplierName: resolvedSupplierName,
+          invoiceNumber,
+          amount: input.amount.amount.toString(),
+          notes: trimmedNotes,
+        },
+      });
+
+      return { id: input.id, invoiceNumber, supplierId: resolvedSupplierId };
     });
   }
 

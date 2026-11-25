@@ -4,7 +4,7 @@ import type { RetailOSDatabase } from '../types.js';
 
 export interface DocSequenceConfig {
   tenantId: string;
-  docType: 'SALE' | 'PURCHASE' | 'SHIFT' | 'RETURN' | 'STOCKTAKE';
+  docType: 'SALE' | 'PURCHASE' | 'SHIFT' | 'RETURN' | 'STOCKTAKE' | 'SUPPLIER_OPENING_DEBT';
   prefix: string;
   existingTable:
     | 'sales'

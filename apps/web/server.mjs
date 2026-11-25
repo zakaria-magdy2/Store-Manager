@@ -16,7 +16,7 @@ import {
   ScopedExecutionContext,
   TenantService,
 } from '@retailos/application';
-import { Cart, DomainError, Money, Permissions, SalePayment, User } from '@retailos/core';
+import { Cart, DomainError, Money, Permissions, SalePayment, User, serializeAttributes } from '@retailos/core';
 import {
   Argon2PasswordHasher,
   CryptoTokenService,
@@ -68,6 +68,10 @@ import {
 } from '@retailos/shared';
 import { z } from 'zod';
 import { isPreviewResetConfiguration, resetDevelopmentOperationalData } from './dev-data-reset.mjs';
+import {
+  generateOpeningInventoryTemplateXlsx,
+  parseOpeningInventorySpreadsheet,
+} from './excel-spreadsheet.mjs';
 
 const serverFilePath = fileURLToPath(import.meta.url);
 
@@ -1255,6 +1259,35 @@ const InventoryAdjustSchema = z.object({
   unitCost: z.string().regex(/^\d{1,15}$/).optional(),
   reason: z.string().max(300).trim().optional(),
 });
+const SupplierOpeningDebtSchema = z.object({
+  idempotencyKey: z.string().uuid('معرف العملية غير صالح'),
+  storeId: z.string().uuid('اختر الفرع أولًا'),
+  supplierId: z.string().uuid('التاجر المحدد غير صالح').optional(),
+  newSupplier: SupplierSchema.optional(),
+  amount: PositiveMoneyMinorSchema,
+  entryDate: BusinessDateSchema.optional(),
+  notes: z.string().max(500).trim().optional(),
+}).superRefine((body, refinementCtx) => {
+  if (!body.supplierId && !body.newSupplier) {
+    refinementCtx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'اختر تاجرًا حاليًا أو أدخل بيانات التاجر الجديد',
+    });
+  }
+});
+const OpeningInventoryPreviewSchema = z.object({
+  storeId: z.string().uuid('اختر الفرع أولًا'),
+  filename: z.string().min(1).max(200).trim(),
+  fileBase64: z.string().min(4).max(15_000_000),
+});
+const OpeningInventoryCommitSchema = z.object({
+  idempotencyKey: z.string().uuid('معرف العملية غير صالح'),
+  storeId: z.string().uuid('اختر الفرع أولًا'),
+  filename: z.string().min(1).max(200).trim(),
+  fileBase64: z.string().min(4).max(15_000_000),
+  entryDate: BusinessDateSchema.optional(),
+  notes: z.string().max(300).trim().optional(),
+});
 
 function timeZoneStartOfDayUtcMs(dateStr, timeZone = companyConfig.timezone) {
   const safeTz = resolveValidTimeZone(timeZone);
@@ -1743,6 +1776,8 @@ async function loadPurchaseEntries(tenantId, purchaseRows, userMap) {
       id: purchase.id,
       supplierId: purchase.supplier_id,
       invoiceNumber: purchase.invoice_number,
+      entryKind: purchase.entry_kind ?? 'PURCHASE',
+      isOpeningDebt: (purchase.entry_kind ?? 'PURCHASE') === 'OPENING_DEBT',
       purchasedAt: purchase.purchased_at,
       createdByUserId: purchase.created_by_user_id,
       createdByName: userMap.get(purchase.created_by_user_id) || 'المسؤول',
@@ -3576,9 +3611,9 @@ async function financialMapReport(ctx, url) {
   salesSql += ` ORDER BY s.created_at ASC`;
   const salesRows = rawDb.prepare(salesSql).all(...salesParams);
 
-  // 2. Supplier Purchase Bills (includes credit / partial purchases for complete timeline audit)
+  // 2. Supplier Purchase Bills (includes credit / partial purchases & opening debt for complete timeline audit)
   let supBillsSql = `
-    SELECT p.id, p.invoice_number, COALESCE(p.purchased_at, p.created_at) AS created_at, p.total_amount, p.initial_paid_amount, p.notes, p.created_by_user_id, s.name AS supplier_name
+    SELECT p.id, p.invoice_number, p.entry_kind, COALESCE(p.purchased_at, p.created_at) AS created_at, p.total_amount, p.initial_paid_amount, p.notes, p.created_by_user_id, s.name AS supplier_name
     FROM supplier_purchases p
     INNER JOIN suppliers s ON s.id = p.supplier_id AND s.tenant_id = p.tenant_id
     WHERE p.tenant_id = ? AND p.store_id = ?
@@ -3771,13 +3806,14 @@ async function financialMapReport(ctx, url) {
     const billAmt = BigInt(b.total_amount ?? 0);
     const invRef = b.invoice_number || b.id.slice(0, 8);
     const formattedBill = `${Money.fromMinor(billAmt, currency).toDecimalString()} ${currency}`;
+    const isOpeningDebt = b.entry_kind === 'OPENING_DEBT';
     timeline.push({
       id: `${b.id}-bill`,
       timestamp: toIsoTimestamp(b.created_at),
       sortOrder: 2,
       type: 'SUPPLIER_PURCHASE',
-      category: 'فاتورة شراء',
-      title: `فاتورة بضاعة #${invRef} بقيمة ${formattedBill}`,
+      category: isOpeningDebt ? 'مديونية افتتاحية لتاجر' : 'فاتورة شراء',
+      title: isOpeningDebt ? `مديونية افتتاحية #${invRef} بقيمة ${formattedBill}` : `فاتورة بضاعة #${invRef} بقيمة ${formattedBill}`,
       reference: b.invoice_number,
       party: `التاجر: ${b.supplier_name}`,
       actor: userMap.get(b.created_by_user_id) || 'المسؤول',
@@ -3785,7 +3821,9 @@ async function financialMapReport(ctx, url) {
       amountOut: '0',
       billAmount: billAmt.toString(),
       profitImpact: '0',
-      details: `استلام بضاعة للمخزون بقيمة ${formattedBill} من ${b.supplier_name} (السداد النقدي يُخصم في بند سداد التاجر)${b.notes ? ` · ${b.notes}` : ''}`,
+      details: isOpeningDebt
+        ? `إثبات مديونية افتتاحية مستحقة للتاجر ${b.supplier_name} بدون فاتورة شراء${b.notes ? ` · ${b.notes}` : ''}`
+        : `استلام بضاعة للمخزون بقيمة ${formattedBill} من ${b.supplier_name} (السداد النقدي يُخصم في بند سداد التاجر)${b.notes ? ` · ${b.notes}` : ''}`,
     });
   }
 
@@ -7621,6 +7659,15 @@ if (method === 'GET' && path === '/api/shifts/current') {
   if (supplierReturnMatch) {
     ctx.assertPermission(Permissions.CATALOG_MANAGE);
     const body = validate(SupplierReturnSchema, await readJson(req));
+    const targetPurchase = await db
+      .selectFrom('supplier_purchases')
+      .select(['id', 'entry_kind'])
+      .where('tenant_id', '=', ctx.tenantId)
+      .where('id', '=', supplierReturnMatch[1])
+      .executeTakeFirst();
+    if (targetPurchase?.entry_kind === 'OPENING_DEBT') {
+      throw Object.assign(new Error('لا يمكن تسجيل مرتجع أصناف على مديونية افتتاحية بدون فاتورة'), { status: 400 });
+    }
     const result = await supplierReturnsRepo.record(ctx, { id: randomUUID(), idempotencyKey: body.idempotencyKey,
       purchaseId: supplierReturnMatch[1], storeId: body.storeId, occurredAt: new Date(),
       lines: body.items.map((item) => ({ purchaseItemId: item.purchaseItemId, quantity: BigInt(item.quantity) })) });
@@ -8146,6 +8193,372 @@ if (method === 'GET' && path === '/api/shifts/current') {
       id: entryRes.id,
       entryNumber: entryRes.entryNumber,
       netEquity: moneyJson(Money.fromMinor(netEquity, tenant.currency)),
+    });
+  }
+
+  if (method === 'POST' && path === '/api/suppliers/opening-debt') {
+    ctx.assertPermission(Permissions.CATALOG_MANAGE);
+    const body = validate(SupplierOpeningDebtSchema, await readJson(req));
+    if (ctx.storeId && ctx.storeId !== body.storeId) {
+      throw Object.assign(new Error('الفرع غير متاح لهذا المستخدم'), { status: 403 });
+    }
+    const tenant = await tenantRepo.findById(ctx.tenantId);
+    if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
+    const debtId = randomUUID();
+    const resolvedEntryDate =
+      body.entryDate || businessDateInTimeZone(new Date(), resolveValidTimeZone(tenant.timezone));
+    const result = await purchasing.recordSupplierOpeningDebt(ctx, {
+      id: debtId,
+      idempotencyKey: body.idempotencyKey,
+      supplierId: body.supplierId,
+      newSupplier: body.supplierId || !body.newSupplier
+        ? undefined
+        : {
+            id: randomUUID(),
+            name: body.newSupplier.name,
+            phone: body.newSupplier.phone,
+            notes: body.newSupplier.notes,
+          },
+      storeId: body.storeId,
+      amount: Money.fromMinor(BigInt(body.amount), tenant.currency),
+      debtDate: new Date(`${resolvedEntryDate}T12:00:00.000Z`),
+      entryDate: resolvedEntryDate,
+      notes: body.notes,
+    });
+    return json(res, 201, {
+      id: result.id,
+      invoiceNumber: result.invoiceNumber,
+      supplierId: result.supplierId,
+    });
+  }
+
+  if (method === 'GET' && path === '/api/inventory/opening-template.xlsx') {
+    ctx.assertPermission(Permissions.INVENTORY_VIEW);
+    const workbook = generateOpeningInventoryTemplateXlsx();
+    const encodedName = encodeURIComponent('قالب-المخزن-الافتتاحي-رف.xlsx');
+    res.writeHead(200, {
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="raff-opening-inventory-template.xlsx"; filename*=UTF-8''${encodedName}`,
+      'Content-Length': String(workbook.length),
+      'Cache-Control': 'no-store',
+      ...securityHeaders(),
+    });
+    res.end(workbook);
+    return;
+  }
+
+  const decodeSpreadsheetUpload = (rawBase64) => {
+    const cleaned = String(rawBase64 ?? '').replace(/^data:[^;]+;base64,/i, '').replace(/\s+/g, '');
+    if (!cleaned || !/^[A-Za-z0-9+/=]+$/.test(cleaned)) {
+      throw Object.assign(new Error('صيغة الملف المرفوع غير صالحة (Base64)'), { status: 400 });
+    }
+    const buffer = Buffer.from(cleaned, 'base64');
+    if (buffer.length === 0 || buffer.length > 10 * 1024 * 1024) {
+      throw Object.assign(new Error('حجم الملف المرفوع غير صالح أو يتجاوز 10 ميجابايت'), { status: 400 });
+    }
+    return buffer;
+  };
+
+  const findOpeningImportConflicts = async (executor, tenantId, parsed) => {
+    const conflicts = [];
+    const [existingProducts, existingVariants] = await Promise.all([
+      executor.selectFrom('products').select(['sku', 'barcode', 'name']).where('tenant_id', '=', tenantId).execute(),
+      executor.selectFrom('product_variants').select(['sku', 'barcode']).where('tenant_id', '=', tenantId).execute(),
+    ]);
+    const existingProductSkus = new Set(existingProducts.map((p) => String(p.sku ?? '').trim().toUpperCase()));
+    const existingVariantSkus = new Set(existingVariants.map((v) => String(v.sku ?? '').trim().toUpperCase()));
+    const existingBarcodes = new Set([
+      ...existingProducts.map((p) => p.barcode).filter(Boolean),
+      ...existingVariants.map((v) => v.barcode).filter(Boolean),
+    ]);
+
+    for (const prod of parsed.products) {
+      const normalizedModelSku = prod.modelSku.trim().toUpperCase();
+      if (existingProductSkus.has(normalizedModelSku)) {
+        conflicts.push(`كود الموديل (${normalizedModelSku}) مسجل بالفعل في المخزن لمنتج آخر`);
+      }
+      for (const variant of prod.variants) {
+        const normalizedVariantSku = variant.sku.trim().toUpperCase();
+        if (existingVariantSkus.has(normalizedVariantSku)) {
+          conflicts.push(`صف ${variant.rowNumber}: كود النسخة (${normalizedVariantSku}) مستخدم بالفعل في المخزن`);
+        }
+        if (variant.barcode && existingBarcodes.has(variant.barcode)) {
+          conflicts.push(`صف ${variant.rowNumber}: الباركود (${variant.barcode}) مسجل بالفعل على صنف آخر`);
+        }
+      }
+    }
+    return conflicts;
+  };
+
+  const serializeOpeningImportPreview = (parsed, conflicts, tenantCurrency) => ({
+    summary: {
+      rowCount: parsed.summary.rowCount,
+      productCount: parsed.summary.productCount,
+      variantCount: parsed.summary.variantCount,
+      categoryNames: parsed.summary.categoryNames,
+      totalUnits: parsed.summary.totalUnits,
+      totalCost: moneyJson(Money.fromMinor(BigInt(parsed.summary.totalCostMinor), tenantCurrency)),
+    },
+    products: parsed.products.map((prod) => ({
+      modelSku: prod.modelSku,
+      name: prod.name,
+      category: prod.category,
+      brand: prod.brand,
+      options: prod.options,
+      variants: prod.variants.map((v) => ({
+        rowNumber: v.rowNumber,
+        sku: v.sku,
+        color: v.color,
+        size: v.size,
+        quantity: v.quantity,
+        unitCost: moneyJson(Money.fromMinor(BigInt(v.unitCostMinor), tenantCurrency)),
+        retailPrice: moneyJson(Money.fromMinor(BigInt(v.retailPriceMinor), tenantCurrency)),
+        lineCost: moneyJson(Money.fromMinor(BigInt(v.lineCostMinor), tenantCurrency)),
+        barcode: v.barcode,
+        reorderPoint: v.reorderPoint,
+      })),
+    })),
+    errors: parsed.errors,
+    conflicts,
+    readyToCommit: parsed.errors.length === 0 && conflicts.length === 0 && parsed.rows.length > 0,
+  });
+
+  if (method === 'POST' && path === '/api/inventory/opening-import/preview') {
+    ctx.assertPermission(Permissions.CATALOG_MANAGE);
+    ctx.assertPermission(Permissions.INVENTORY_ADJUST);
+    const body = validate(OpeningInventoryPreviewSchema, await readJson(req, 15 * 1024 * 1024));
+    if (ctx.storeId && ctx.storeId !== body.storeId) {
+      throw Object.assign(new Error('الفرع غير متاح لهذا المستخدم'), { status: 403 });
+    }
+    const tenant = await tenantRepo.findById(ctx.tenantId);
+    if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
+    const fileBuffer = decodeSpreadsheetUpload(body.fileBase64);
+    let parsed;
+    try {
+      parsed = parseOpeningInventorySpreadsheet(fileBuffer, body.filename, tenant.currency);
+    } catch (err) {
+      throw Object.assign(new Error(err instanceof Error ? err.message : 'تعذر قراءة ملف المخزن الافتتاحي'), { status: 400 });
+    }
+    const conflicts = await findOpeningImportConflicts(db, ctx.tenantId, parsed);
+    return json(res, 200, serializeOpeningImportPreview(parsed, conflicts, tenant.currency));
+  }
+
+  if (method === 'POST' && path === '/api/inventory/opening-import/commit') {
+    ctx.assertPermission(Permissions.CATALOG_MANAGE);
+    ctx.assertPermission(Permissions.INVENTORY_ADJUST);
+    const body = validate(OpeningInventoryCommitSchema, await readJson(req, 15 * 1024 * 1024));
+    if (ctx.storeId && ctx.storeId !== body.storeId) {
+      throw Object.assign(new Error('الفرع غير متاح لهذا المستخدم'), { status: 403 });
+    }
+    const tenant = await tenantRepo.findById(ctx.tenantId);
+    if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
+    const fileBuffer = decodeSpreadsheetUpload(body.fileBase64);
+    let parsed;
+    try {
+      parsed = parseOpeningInventorySpreadsheet(fileBuffer, body.filename, tenant.currency);
+    } catch (err) {
+      throw Object.assign(new Error(err instanceof Error ? err.message : 'تعذر قراءة ملف المخزن الافتتاحي'), { status: 400 });
+    }
+    if (parsed.errors.length > 0) {
+      throw Object.assign(new Error(parsed.errors.slice(0, 5).join(' | ')), { status: 400 });
+    }
+    const totalCostMinor = BigInt(parsed.summary.totalCostMinor);
+    if (totalCostMinor <= 0n || parsed.rows.length === 0) {
+      throw Object.assign(new Error('الشيت لا يحتوي على بضاعة بتكلفة موجبة'), { status: 400 });
+    }
+    for (const prod of parsed.products) {
+      assertVariantOptions(prod.options, prod.variants);
+    }
+
+    const payloadDigest = createHash('sha256').update(fileBuffer).digest('hex').slice(0, 36);
+    const resolvedEntryDate =
+      body.entryDate || businessDateInTimeZone(new Date(), resolveValidTimeZone(tenant.timezone));
+    const journalKey = `opening-inventory:${body.idempotencyKey}`;
+
+    const commitRes = await db.transaction().execute(async (trx) => {
+      const replay = await trx
+        .selectFrom('journal_entries')
+        .select(['id', 'entry_number', 'store_id', 'source_id', 'entry_date'])
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('idempotency_key', '=', journalKey)
+        .executeTakeFirst();
+      if (replay) {
+        if (
+          replay.store_id !== body.storeId ||
+          replay.source_id !== payloadDigest ||
+          (body.entryDate && replay.entry_date !== resolvedEntryDate)
+        ) {
+          throw Object.assign(new Error('مفتاح العملية مستخدم لاستيراد مخزن افتتاحي مختلف'), { status: 409 });
+        }
+        return {
+          journalEntryId: replay.id,
+          entryNumber: replay.entry_number,
+          isReplay: true,
+        };
+      }
+
+      const store = await trx
+        .selectFrom('stores')
+        .select('id')
+        .where('id', '=', body.storeId)
+        .where('tenant_id', '=', ctx.tenantId)
+        .executeTakeFirst();
+      if (!store) throw Object.assign(new Error('الفرع غير موجود'), { status: 404 });
+
+      const conflicts = await findOpeningImportConflicts(trx, ctx.tenantId, parsed);
+      if (conflicts.length > 0) {
+        throw Object.assign(new Error(conflicts.slice(0, 5).join(' | ')), { status: 409 });
+      }
+
+      const existingCategories = await trx
+        .selectFrom('categories')
+        .select(['id', 'name'])
+        .where('tenant_id', '=', ctx.tenantId)
+        .execute();
+      const categoryByName = new Map(
+        existingCategories.map((c) => [String(c.name ?? '').trim().toLowerCase(), c.id]),
+      );
+
+      for (const prod of parsed.products) {
+        const catKey = prod.category.trim().toLowerCase();
+        let categoryId = categoryByName.get(catKey);
+        if (!categoryId) {
+          categoryId = randomUUID();
+          await trx
+            .insertInto('categories')
+            .values({
+              id: categoryId,
+              tenant_id: ctx.tenantId,
+              parent_id: null,
+              name: prod.category.trim(),
+              code: `CAT-${randomUUID().slice(0, 8).toUpperCase()}`,
+              is_active: 1,
+            })
+            .execute();
+          categoryByName.set(catKey, categoryId);
+        }
+
+        const productId = randomUUID();
+        const normalizedProductSku = prod.modelSku.trim().toUpperCase();
+        await trx
+          .insertInto('products')
+          .values({
+            id: productId,
+            tenant_id: ctx.tenantId,
+            name: prod.name.trim(),
+            sku: normalizedProductSku,
+            barcode: null,
+            category_id: categoryId,
+            has_variants: prod.options.length > 0 ? 1 : 0,
+            item_kind: 'PRODUCT',
+            description: null,
+            brand: prod.brand ? prod.brand.trim() : null,
+            image_path: null,
+            options_json: JSON.stringify(prod.options),
+            is_active: 1,
+          })
+          .execute();
+
+        for (const variant of prod.variants) {
+          const variantId = randomUUID();
+          const normalizedVariantSku = variant.sku.trim().toUpperCase();
+          await trx
+            .insertInto('product_variants')
+            .values({
+              id: variantId,
+              tenant_id: ctx.tenantId,
+              product_id: productId,
+              sku: normalizedVariantSku,
+              barcode: variant.barcode || null,
+              attributes_json: serializeAttributes(variant.attributes),
+              retail_price: BigInt(variant.retailPriceMinor),
+              currency: tenant.currency,
+              reorder_point: BigInt(variant.reorderPoint ?? '0'),
+              is_active: 1,
+            })
+            .execute();
+
+          await applyStockMovementInTransaction(trx, ctx, {
+            id: randomUUID(),
+            storeId: body.storeId,
+            variantId,
+            currency: tenant.currency,
+            movementType: 'INVENTORY_ADJUSTMENT',
+            quantityDelta: BigInt(variant.quantity),
+            unitCost: Money.fromMinor(BigInt(variant.unitCostMinor), tenant.currency),
+            sourceType: 'ADJUSTMENT',
+            sourceId: body.idempotencyKey,
+            allowNegativeStock: tenant.allowNegativeStock,
+          });
+        }
+      }
+
+      await postJournalEntry(trx, ctx, {
+        storeId: body.storeId,
+        currency: tenant.currency,
+        date: new Date(`${resolvedEntryDate}T12:00:00.000Z`),
+        entryDate: resolvedEntryDate,
+        sourceType: 'ADJUSTMENT',
+        sourceId: payloadDigest,
+        idempotencyKey: journalKey,
+        description: `استيراد المخزن الافتتاحي (${parsed.summary.productCount} صنف / ${parsed.summary.totalUnits} قطعة)${body.notes ? ` - ${body.notes}` : ''}`,
+        lines: [
+          {
+            accountCode: '1300',
+            side: 'DEBIT',
+            amount: totalCostMinor,
+            memo: 'رصيد المخزون الافتتاحي بتكلفة الشراء من شيت الإكسيل',
+          },
+          {
+            accountCode: '3010',
+            side: 'CREDIT',
+            amount: totalCostMinor,
+            memo: 'مقابل رأس المال والأرصدة الافتتاحية للمخزون',
+          },
+        ],
+      });
+
+      const createdJournal = await trx
+        .selectFrom('journal_entries')
+        .select(['id', 'entry_number'])
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('idempotency_key', '=', journalKey)
+        .executeTakeFirstOrThrow();
+
+      await recordAuditInTrx(trx, ctx, {
+        storeId: body.storeId,
+        action: 'OPENING_INVENTORY_IMPORTED',
+        entityType: 'JOURNAL_ENTRY',
+        entityId: createdJournal.id,
+        summary: `استيراد المخزن الافتتاحي (${parsed.summary.productCount} صنف / ${parsed.summary.variantCount} تركيبة / ${parsed.summary.totalUnits} قطعة)`,
+        metadata: {
+          filename: body.filename,
+          entryNumber: createdJournal.entry_number,
+          entryDate: resolvedEntryDate,
+          productCount: parsed.summary.productCount,
+          variantCount: parsed.summary.variantCount,
+          totalUnits: parsed.summary.totalUnits,
+          totalCostMinor: parsed.summary.totalCostMinor,
+        },
+      });
+
+      return {
+        journalEntryId: createdJournal.id,
+        entryNumber: createdJournal.entry_number,
+        isReplay: false,
+      };
+    });
+
+    return json(res, 201, {
+      journalEntryId: commitRes.journalEntryId,
+      entryNumber: commitRes.entryNumber,
+      summary: {
+        rowCount: parsed.summary.rowCount,
+        productCount: parsed.summary.productCount,
+        variantCount: parsed.summary.variantCount,
+        totalUnits: parsed.summary.totalUnits,
+        totalCost: moneyJson(Money.fromMinor(totalCostMinor, tenant.currency)),
+      },
     });
   }
 

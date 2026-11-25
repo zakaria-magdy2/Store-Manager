@@ -154,6 +154,7 @@ if (process.argv.includes('--preview-data-reset')) {
 
 const requiredPaths = [
   join(stageWebDir, 'server.mjs'),
+  join(stageWebDir, 'excel-spreadsheet.mjs'),
   join(stageWebDir, 'public', 'index.html'),
   join(stageWebDir, 'public', 'app.js'),
   join(stageWebDir, 'public', 'styles.css'),

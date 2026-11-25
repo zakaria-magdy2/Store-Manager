@@ -308,6 +308,7 @@ export interface SuppliersTable {
 export interface SupplierPurchasesTable {
   id: string; tenant_id: string; store_id: string; supplier_id: string; invoice_number: string | null;
   idempotency_key: string;
+  entry_kind: Generated<'PURCHASE' | 'OPENING_DEBT'>;
   purchased_at: string; total_amount: bigint; initial_paid_amount: Generated<bigint>; currency: string;
   target_profit_percent: number | null; expected_retail_total: bigint | null;
   notes: string | null; created_by_user_id: string; created_at: Generated<string>;
