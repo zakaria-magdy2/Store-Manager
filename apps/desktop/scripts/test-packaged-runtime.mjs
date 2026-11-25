@@ -149,10 +149,10 @@ function collectAsarPaths(node, prefix = '', acc = []) {
 }
 
 function defaultRunPowerShellProcessQuery(encodedCommand) {
-  return spawnSync('powershell', ['-NoProfile', '-EncodedCommand', encodedCommand], {
+  return spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedCommand], {
     encoding: 'utf8',
     windowsHide: true,
-    timeout: 15_000,
+    timeout: 60_000,
     maxBuffer: 32 * 1024 * 1024,
   });
 }
