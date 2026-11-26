@@ -10,6 +10,7 @@ await Promise.all([
   copyFile(join(root, 'excel-spreadsheet.mjs'), join(output, 'excel-spreadsheet.mjs')),
   copyFile(join(root, 'public', 'index.html'), join(output, 'public', 'index.html')),
   copyFile(join(root, 'public', 'app.js'), join(output, 'public', 'app.js')),
+  copyFile(join(root, 'public', 'carton-presets.mjs'), join(output, 'public', 'carton-presets.mjs')),
   copyFile(join(root, 'public', 'styles.css'), join(output, 'public', 'styles.css')),
   copyFile(join(root, 'public', 'favicon.png'), join(output, 'public', 'favicon.png')),
 ]);

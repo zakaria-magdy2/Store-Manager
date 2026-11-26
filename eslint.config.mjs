@@ -125,13 +125,13 @@ export default tseslint.config(
     },
   },
 
-  // ─── WEB CLIENT UI (Browser ESM / Script) ─────────────────────────────────
+  // ─── WEB CLIENT UI (Browser ESM) ────────────────────────────────────────────
   {
-    files: ['apps/web/public/**/*.js'],
+    files: ['apps/web/public/**/*.js', 'apps/web/public/**/*.mjs'],
     ...tseslint.configs.disableTypeChecked,
     languageOptions: {
       ecmaVersion: 2024,
-      sourceType: 'script',
+      sourceType: 'module',
       globals: {
         AbortController: 'readonly',
         alert: 'readonly',

@@ -1240,10 +1240,8 @@ const OpeningBalancesSchema = z.object({
   cashDrawer: NonNegativeMoneyMinorSchema.default('0'),
   cashSafe: NonNegativeMoneyMinorSchema.default('0'),
   bank: NonNegativeMoneyMinorSchema.default('0'),
-  inventory: NonNegativeMoneyMinorSchema.default('0'),
-  supplierPayables: NonNegativeMoneyMinorSchema.default('0'),
   notes: z.string().max(300).trim().optional(),
-});
+}).strict('لا يقبل رصيد الكاش الافتتاحي حقول المخزون أو مديونية التجار');
 const InventoryDamageSchema = z.object({
   storeId: z.string().uuid(),
   idempotencyKey: z.string().uuid(),
@@ -1529,6 +1527,24 @@ async function computeTreasuryBalancesMinor(conn, tenantId, storeId) {
 async function computeDrawerBookBalanceMinor(conn, tenantId, storeId) {
   const { drawer } = await computeTreasuryBalancesMinor(conn, tenantId, storeId);
   return drawer;
+}
+
+function resolveLastClosedShiftRemainingCash(rawDb, tenantId, storeId) {
+  const row = rawDb.prepare(`
+    SELECT ended_at, actual_cash, handover_cash
+    FROM cashier_shifts
+    WHERE tenant_id = ? AND store_id = ? AND status = 'CLOSED'
+      AND COALESCE(reconciliation_status, 'VERIFIED') = 'VERIFIED'
+    ORDER BY COALESCE(ended_at, created_at) DESC, created_at DESC
+    LIMIT 1
+  `).get(tenantId, storeId);
+  if (!row) return null;
+  const actual = BigInt(row.actual_cash ?? 0);
+  const transferred = BigInt(row.handover_cash ?? 0);
+  return {
+    endedAt: row.ended_at ?? null,
+    remainingMinor: actual > transferred ? (actual - transferred) : 0n,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -4823,7 +4839,8 @@ async function currentData(ctx, url) {
   const managedUsers = canManageUsers ? await userRepo.listByTenant(ctx) : [];
   const canCloseShift = ctx.hasPermission(Permissions.POS_DRAWER_OPEN);
   const canClosePeriod = ctx.hasPermission(Permissions.SETTINGS_MANAGE);
-  const treasuryMinor = (canViewAccounting || canCloseShift)
+  const canViewTreasury = canViewAccounting || ['OWNER', 'STORE_MANAGER'].includes(ctx.roleId);
+  const treasuryMinor = canViewTreasury
     ? await computeTreasuryBalancesMinor(db, ctx.tenantId, storeId)
     : null;
   const drawerBookBalanceMinor = treasuryMinor ? treasuryMinor.drawer : null;
@@ -4832,6 +4849,10 @@ async function currentData(ctx, url) {
     : [];
 
   const rawDatabase = database.getRawDatabase();
+  const lastClosedShiftCash = resolveLastClosedShiftRemainingCash(rawDatabase, ctx.tenantId, storeId);
+  const suggestedOpeningCashMinor = lastClosedShiftCash
+    ? lastClosedShiftCash.remainingMinor
+    : (drawerBookBalanceMinor !== null && drawerBookBalanceMinor > 0n ? drawerBookBalanceMinor : 0n);
   const rawActiveShift = findOpenShiftForStore(rawDatabase, ctx.tenantId, storeId, ctx.userId, true);
   const activeShiftRow = rawActiveShift ? {
     id: rawActiveShift.id,
@@ -4884,7 +4905,7 @@ async function currentData(ctx, url) {
   const userOwnOpenShift = activeShiftRow && activeShiftRow.userId === ctx.userId ? activeShiftRow : null;
   const userCheckedInToday = Boolean(userCheckedInRecord || userOwnOpenShift);
   const userCheckInTime = userCheckedInRecord?.createdAt ?? userOwnOpenShift?.startedAt ?? null;
-  const existingOpeningEntry = canViewAccounting
+  const existingOpeningEntry = (canViewAccounting || ctx.roleId === 'OWNER')
     ? await db.selectFrom('journal_entries')
         .select(['id', 'entry_number as entryNumber', 'entry_date as entryDate'])
         .where('tenant_id', '=', ctx.tenantId)
@@ -4933,6 +4954,7 @@ async function currentData(ctx, url) {
     openingBalanceEntry: existingOpeningEntry ? { id: existingOpeningEntry.id, entryNumber: existingOpeningEntry.entryNumber, entryDate: existingOpeningEntry.entryDate } : null,
     openingInventoryEntry: existingOpeningInventoryEntry ? { id: existingOpeningInventoryEntry.id, entryNumber: existingOpeningInventoryEntry.entryNumber, entryDate: existingOpeningInventoryEntry.entryDate } : null,
     hasOpeningSupplierDebts: Boolean(existingOpeningDebtRow),
+    suggestedOpeningCash: suggestedOpeningCashMinor.toString(),
     stores: stores.map((store) => ({ id: store.id, name: store.name, code: store.code, address: store.address ?? null, phone: store.phone ?? null })),
     users: managedUsers.map((user) => ({ id: user.id, username: user.username, fullName: user.fullName, phone: user.phone ?? null, employmentStartDate: user.employmentStartDate, shiftStartTime: user.shiftStartTime ?? null, lateGraceMinutes: user.lateGraceMinutes ?? 0, role: user.role, storeId: user.storeId ?? null, isActive: user.isActive, createdAt: user.createdAt.toISOString() })),
     selectedStoreId: storeId,
@@ -6435,9 +6457,18 @@ if (method === 'GET' && path === '/api/shifts/current') {
     const startIdempotencyKey = typeof body.idempotencyKey === 'string' && body.idempotencyKey.trim()
       ? body.idempotencyKey.trim().slice(0, 100)
       : null;
-    const openingCash = parseNonNegativeMinorInput(body.openingCash ?? '0', 'الرصيد الافتتاحي');
+    const rawDbForStart = database.getRawDatabase();
+    const lastClosedForStart = resolveLastClosedShiftRemainingCash(rawDbForStart, ctx.tenantId, storeId);
+    const hasExplicitOpeningCash =
+      body.openingCash !== undefined &&
+      body.openingCash !== null &&
+      String(body.openingCash).trim() !== '';
+    const openingCash = hasExplicitOpeningCash
+      ? parseNonNegativeMinorInput(body.openingCash, 'الرصيد الافتتاحي')
+      : (lastClosedForStart?.remainingMinor ?? 0n);
     const notes = body.notes?.trim() || null;
-    const nowIso = new Date().toISOString();
+    const lastClosedMs = lastClosedForStart?.endedAt ? new Date(lastClosedForStart.endedAt).getTime() : 0;
+    const nowIso = new Date(Math.max(Date.now(), Number.isFinite(lastClosedMs) ? lastClosedMs + 1 : 0)).toISOString();
 
     const txResult = await db.transaction().execute(async (trx) => {
       if (startIdempotencyKey) {
@@ -6561,7 +6592,23 @@ if (method === 'GET' && path === '/api/shifts/current') {
       ? body.idempotencyKey.trim().slice(0, 100)
       : null;
     const actualCash = parseNonNegativeMinorInput(body.actualCash ?? '0', 'النقدية الفعلية');
-    const handoverCash = parseNonNegativeMinorInput(body.handoverCash ?? '0', 'مبلغ التسليم');
+    const hasTransferToSafe =
+      body.transferToSafe !== undefined &&
+      body.transferToSafe !== null &&
+      String(body.transferToSafe).trim() !== '';
+    const transferToSafe = hasTransferToSafe
+      ? parseNonNegativeMinorInput(body.transferToSafe, 'مبلغ التحويل للخزينة')
+      : 0n;
+    const isManagerOrOwner = ctx.roleId === 'OWNER' || ctx.roleId === 'STORE_MANAGER';
+    if (transferToSafe > 0n && !isManagerOrOwner) {
+      throw Object.assign(new Error('غير مصرح للكاشير بتحويل النقدية للخزينة عند إغلاق الشيفت'), { status: 403 });
+    }
+    if (transferToSafe > actualCash) {
+      throw Object.assign(new Error('مبلغ التحويل للخزينة لا يمكن أن يتجاوز النقدية الفعلية في الدرج'), { status: 400 });
+    }
+    const effectiveHandoverCash = hasTransferToSafe
+      ? transferToSafe
+      : (isManagerOrOwner ? parseNonNegativeMinorInput(body.handoverCash ?? '0', 'مبلغ التسليم') : 0n);
     const nowIso = new Date().toISOString();
 
     const txResult = await db.transaction().execute(async (trx) => {
@@ -6576,6 +6623,8 @@ if (method === 'GET' && path === '/api/shifts/current') {
           if (replayed.id !== shiftId) {
             throw Object.assign(new Error('مفتاح العملية مستخدم لإغلاق شيفت مختلف'), { status: 409 });
           }
+          const replayActual = BigInt(replayed.actual_cash ?? 0);
+          const replayHandover = BigInt(replayed.handover_cash ?? 0);
           return {
             replay: true,
             storeId: replayed.store_id,
@@ -6589,6 +6638,8 @@ if (method === 'GET' && path === '/api/shifts/current') {
               actualCash: String(replayed.actual_cash ?? 0),
               variance: String(replayed.variance ?? 0),
               handoverCash: String(replayed.handover_cash ?? 0),
+              transferredToSafe: String(replayed.handover_cash ?? 0),
+              remainingDrawerCash: (replayActual > replayHandover ? replayActual - replayHandover : 0n).toString(),
               salesCount: 0,
               status: replayed.status,
             },
@@ -6649,7 +6700,7 @@ if (method === 'GET' && path === '/api/shifts/current') {
           expected_cash: expectedCashMinor,
           actual_cash: actualCash,
           variance: varianceMinor,
-          handover_cash: handoverCash,
+          handover_cash: effectiveHandoverCash,
           status: 'CLOSED',
           reconciliation_status: 'VERIFIED',
           notes,
@@ -6665,18 +6716,45 @@ if (method === 'GET' && path === '/api/shifts/current') {
         throw Object.assign(new Error('هذا الشفت مغلق بالفعل'), { status: 409 });
       }
 
+      if (transferToSafe > 0n) {
+        const tenantForTransfer = await trx
+          .selectFrom('tenants')
+          .select('currency')
+          .where('id', '=', ctx.tenantId)
+          .executeTakeFirst();
+        await postJournalEntry(trx, ctx, {
+          storeId: shift.store_id,
+          currency: tenantForTransfer?.currency ?? 'EGP',
+          date: new Date(nowIso),
+          sourceType: 'TRANSFER',
+          sourceId: shift.id,
+          idempotencyKey: closeIdempotencyKey
+            ? `shift-safe-transfer:${closeIdempotencyKey}`
+            : `shift-safe-transfer:${shift.id}`,
+          description: `تحويل نقدية من الدرج إلى الخزينة عند تقفيل الشيفت (${shift.shift_number})`,
+          lines: [
+            { accountCode: '1015', side: 'DEBIT', amount: transferToSafe, memo: 'توريد نقدية للخزينة الرئيسية عند تقفيل الشيفت' },
+            { accountCode: '1010', side: 'CREDIT', amount: transferToSafe, memo: 'تحويل نقدية من الدرج للخزينة عند تقفيل الشيفت' },
+          ],
+        });
+      }
+
+      const remainingDrawerCash = actualCash > effectiveHandoverCash ? (actualCash - effectiveHandoverCash) : 0n;
+
       await recordAuditInTrx(trx, ctx, {
         storeId: shift.store_id,
         action: 'SHIFT_CLOSED',
         entityType: 'SHIFT',
         entityId: shift.id,
-        summary: `إنهاء الشيفت (${shift.shift_number}): متوقع ${expectedCashMinor.toString()}، فعلي ${actualCash.toString()}، الفارق ${varianceMinor.toString()}`,
+        summary: `إنهاء الشيفت (${shift.shift_number}): متوقع ${expectedCashMinor.toString()}، فعلي ${actualCash.toString()}، الفارق ${varianceMinor.toString()}${transferToSafe > 0n ? `، تحويل للخزينة ${transferToSafe.toString()}` : ''}`,
         metadata: {
           shiftNumber: shift.shift_number,
           expectedCash: expectedCashMinor.toString(),
           actualCash: actualCash.toString(),
           variance: varianceMinor.toString(),
-          handoverCash: handoverCash.toString(),
+          handoverCash: effectiveHandoverCash.toString(),
+          transferredToSafe: transferToSafe.toString(),
+          remainingDrawerCash: remainingDrawerCash.toString(),
         },
       });
 
@@ -6692,7 +6770,9 @@ if (method === 'GET' && path === '/api/shifts/current') {
           expectedCash: expectedCashMinor.toString(),
           actualCash: actualCash.toString(),
           variance: varianceMinor.toString(),
-          handoverCash: handoverCash.toString(),
+          handoverCash: effectiveHandoverCash.toString(),
+          transferredToSafe: transferToSafe.toString(),
+          remainingDrawerCash: remainingDrawerCash.toString(),
           salesCount: salesDuringShift.length,
           status: 'CLOSED',
         },
@@ -8138,7 +8218,9 @@ if (method === 'GET' && path === '/api/shifts/current') {
   }
 
   if (method === 'POST' && path === '/api/accounting/treasury-transfer') {
-    ctx.assertPermission(Permissions.POS_DRAWER_OPEN);
+    if (!['OWNER', 'STORE_MANAGER'].includes(ctx.roleId)) {
+      throw Object.assign(new Error('تحويل النقدية بين الحسابات متاح للمالك أو مدير الفرع فقط'), { status: 403 });
+    }
     const body = validate(TreasuryTransferSchema, await readJson(req));
     if (ctx.storeId && ctx.storeId !== body.storeId) throw Object.assign(new Error('الفرع غير متاح لهذا المستخدم'), { status: 403 });
     if (body.fromAccount === body.toAccount) throw Object.assign(new Error('لا يمكن التحويل لنفس الحساب'), { status: 400 });
@@ -8243,7 +8325,9 @@ if (method === 'GET' && path === '/api/shifts/current') {
   }
 
   if (method === 'POST' && path === '/api/accounting/opening-balances') {
-    ctx.assertPermission(Permissions.SETTINGS_MANAGE);
+    if (ctx.roleId !== 'OWNER') {
+      throw Object.assign(new Error('تسجيل رصيد الكاش الافتتاحي متاح لمالك المتجر فقط'), { status: 403 });
+    }
     const body = validate(OpeningBalancesSchema, await readJson(req));
     if (ctx.storeId && ctx.storeId !== body.storeId) throw Object.assign(new Error('الفرع غير متاح لهذا المستخدم'), { status: 403 });
     const tenant = await tenantRepo.findById(ctx.tenantId);
@@ -8252,21 +8336,16 @@ if (method === 'GET' && path === '/api/shifts/current') {
     const cashDrawer = BigInt(body.cashDrawer);
     const cashSafe = BigInt(body.cashSafe);
     const bank = BigInt(body.bank);
-    const inventoryVal = BigInt(body.inventory);
-    const supplierPayables = BigInt(body.supplierPayables);
-    const totalAssets = cashDrawer + cashSafe + bank + inventoryVal;
-    if (totalAssets === 0n && supplierPayables === 0n) {
-      throw Object.assign(new Error('يجب إدخال قيمة واحدة على الأقل للأرصدة الافتتاحية'), { status: 400 });
+    const totalCash = cashDrawer + cashSafe + bank;
+    if (totalCash === 0n) {
+      throw Object.assign(new Error('يجب إدخال قيمة واحدة على الأقل لرصيد الكاش الافتتاحي'), { status: 400 });
     }
-    const netEquity = totalAssets - supplierPayables;
+    const netEquity = totalCash;
     const journalLines = [];
     if (cashDrawer > 0n) journalLines.push({ accountCode: '1010', side: 'DEBIT', amount: cashDrawer, memo: 'رصيد افتتاحي — درج النقدية' });
     if (cashSafe > 0n) journalLines.push({ accountCode: '1015', side: 'DEBIT', amount: cashSafe, memo: 'رصيد افتتاحي — الخزينة الرئيسية' });
-    if (bank > 0n) journalLines.push({ accountCode: '1020', side: 'DEBIT', amount: bank, memo: 'رصيد افتتاحي — البنك' });
-    if (inventoryVal > 0n) journalLines.push({ accountCode: '1300', side: 'DEBIT', amount: inventoryVal, memo: 'رصيد افتتاحي — المخزون' });
-    if (supplierPayables > 0n) journalLines.push({ accountCode: '2010', side: 'CREDIT', amount: supplierPayables, memo: 'رصيد افتتاحي — مستحقات تجار سابقة' });
-    if (netEquity > 0n) journalLines.push({ accountCode: '3010', side: 'CREDIT', amount: netEquity, memo: 'رصيد افتتاحي — رأس المال' });
-    else if (netEquity < 0n) journalLines.push({ accountCode: '3010', side: 'DEBIT', amount: -netEquity, memo: 'رصيد افتتاحي — عجز رأس المال' });
+    if (bank > 0n) journalLines.push({ accountCode: '1020', side: 'DEBIT', amount: bank, memo: 'رصيد افتتاحي — البنك والمحفظة' });
+    journalLines.push({ accountCode: '3010', side: 'CREDIT', amount: netEquity, memo: 'رصيد افتتاحي — رأس المال النقدي' });
 
     const journalKey = `opening-balance:${body.idempotencyKey}`;
     const entryRes = await db.transaction().execute(async (trx) => {
@@ -8288,7 +8367,7 @@ if (method === 'GET' && path === '/api/shifts/current') {
         .executeTakeFirst();
       if (existingOpening) {
         throw Object.assign(
-          new Error(`تم تسجيل الأرصدة الافتتاحية لهذا الفرع مسبقًا بالقيد (${existingOpening.entryNumber}) بتاريخ ${existingOpening.entryDate} — لا يمكن تكرار الأرصدة الافتتاحية لنفس الفرع`),
+          new Error(`تم تسجيل رصيد الكاش الافتتاحي لهذا الفرع مسبقًا بالقيد (${existingOpening.entryNumber}) بتاريخ ${existingOpening.entryDate} — لا يمكن تكرار الأرصدة الافتتاحية لنفس الفرع`),
           { status: 409 },
         );
       }
@@ -8301,7 +8380,7 @@ if (method === 'GET' && path === '/api/shifts/current') {
         sourceType: 'ADJUSTMENT',
         sourceId: body.idempotencyKey,
         idempotencyKey: journalKey,
-        description: `أرصدة افتتاحية بتاريخ ${body.entryDate}${body.notes ? ` (${body.notes})` : ''}`,
+        description: `رصيد الكاش الافتتاحي بتاريخ ${body.entryDate}${body.notes ? ` (${body.notes})` : ''}`,
         lines: journalLines,
       });
       const created = await trx.selectFrom('journal_entries').select(['id', 'entry_number'])
@@ -8311,14 +8390,12 @@ if (method === 'GET' && path === '/api/shifts/current') {
         action: 'OPENING_BALANCE_POSTED',
         entityType: 'JOURNAL_ENTRY',
         entityId: created.id,
-        summary: `تسجيل أرصدة افتتاحية بتاريخ ${body.entryDate}`,
+        summary: `تسجيل رصيد الكاش الافتتاحي بتاريخ ${body.entryDate}`,
         metadata: {
           entryNumber: created.entry_number,
           cashDrawer: body.cashDrawer,
           cashSafe: body.cashSafe,
           bank: body.bank,
-          inventory: body.inventory,
-          supplierPayables: body.supplierPayables,
           netEquity: netEquity.toString(),
         },
       });
@@ -8428,52 +8505,202 @@ if (method === 'GET' && path === '/api/shifts/current') {
     return buffer;
   };
 
-  const findOpeningImportConflicts = async (executor, tenantId, parsed) => {
+  const planOpeningInventoryImport = async (executor, tenantId, parsed) => {
     const conflicts = [];
     const [existingProducts, existingVariants] = await Promise.all([
-      executor.selectFrom('products').select(['sku', 'barcode', 'name']).where('tenant_id', '=', tenantId).execute(),
-      executor.selectFrom('product_variants').select(['sku', 'barcode']).where('tenant_id', '=', tenantId).execute(),
+      executor
+        .selectFrom('products')
+        .select(['id', 'sku', 'barcode', 'name', 'options_json', 'has_variants'])
+        .where('tenant_id', '=', tenantId)
+        .execute(),
+      executor
+        .selectFrom('product_variants')
+        .select(['id', 'product_id', 'sku', 'barcode', 'attributes_json'])
+        .where('tenant_id', '=', tenantId)
+        .execute(),
     ]);
-    const existingProductSkus = new Set(existingProducts.map((p) => String(p.sku ?? '').trim().toUpperCase()));
-    const existingVariantSkus = new Set(existingVariants.map((v) => String(v.sku ?? '').trim().toUpperCase()));
+    const existingProductBySku = new Map(
+      existingProducts.map((p) => [String(p.sku ?? '').trim().toUpperCase(), p]),
+    );
+    const existingVariantSkus = new Set(
+      existingVariants.map((v) => String(v.sku ?? '').trim().toUpperCase()),
+    );
     const existingBarcodes = new Set([
       ...existingProducts.map((p) => p.barcode).filter(Boolean),
       ...existingVariants.map((v) => v.barcode).filter(Boolean),
     ]);
+    const variantsByProductId = new Map();
+    for (const v of existingVariants) {
+      const bucket = variantsByProductId.get(v.product_id) ?? [];
+      bucket.push(v);
+      variantsByProductId.set(v.product_id, bucket);
+    }
+
+    const plannedProducts = [];
+    let effectiveRowCount = 0;
+    let effectiveVariantCount = 0;
+    let effectiveTotalUnits = 0n;
+    let effectiveTotalCostMinor = 0n;
+    const effectiveCategories = new Set();
 
     for (const prod of parsed.products) {
       const normalizedModelSku = prod.modelSku.trim().toUpperCase();
-      if (existingProductSkus.has(normalizedModelSku)) {
-        conflicts.push(`كود الموديل (${normalizedModelSku}) مسجل بالفعل في المخزن لمنتج آخر`);
+      const existingProd = existingProductBySku.get(normalizedModelSku) ?? null;
+
+      if (!existingProd) {
+        const plannedVariants = prod.variants.map((variant) => {
+          const normalizedVariantSku = variant.sku.trim().toUpperCase();
+          if (existingVariantSkus.has(normalizedVariantSku)) {
+            conflicts.push(`صف ${variant.rowNumber}: كود النسخة (${normalizedVariantSku}) مستخدم بالفعل في المخزن`);
+          }
+          if (variant.barcode && existingBarcodes.has(variant.barcode)) {
+            conflicts.push(`صف ${variant.rowNumber}: الباركود (${variant.barcode}) مسجل بالفعل على صنف آخر`);
+          }
+          const qty = BigInt(variant.quantity);
+          const cost = BigInt(variant.lineCostMinor);
+          effectiveRowCount += 1;
+          effectiveVariantCount += 1;
+          effectiveTotalUnits += qty;
+          effectiveTotalCostMinor += cost;
+          return { ...variant, sku: normalizedVariantSku };
+        });
+        effectiveCategories.add(prod.category);
+        plannedProducts.push({
+          ...prod,
+          existingProd: null,
+          mergedOptions: prod.options,
+          variants: plannedVariants,
+        });
+        continue;
       }
+
+      let existingOptions = [];
+      try {
+        const parsedOpts = JSON.parse(existingProd.options_json || '[]');
+        if (Array.isArray(parsedOpts)) existingOptions = parsedOpts.map((o) => ({ key: o.key, name: o.name, values: [...(o.values ?? [])] }));
+      } catch {
+        existingOptions = [];
+      }
+      const existingColorOpt = existingOptions.find((o) => o.key === 'color' || /لون/.test(String(o.name ?? '')));
+      const existingSizeOpt = existingOptions.find((o) => o.key === 'size' || /مقاس/.test(String(o.name ?? '')));
+      const prodVariants = variantsByProductId.get(existingProd.id) ?? [];
+
+      const sheetHasColor = prod.options.some((o) => o.key === 'color');
+      const sheetHasSize = prod.options.some((o) => o.key === 'size');
+      if (prodVariants.length > 0) {
+        if ((sheetHasColor && !existingColorOpt) || (sheetHasSize && !existingSizeOpt) || (!sheetHasColor && Boolean(existingColorOpt)) || (!sheetHasSize && Boolean(existingSizeOpt))) {
+          conflicts.push(`كود الموديل (${normalizedModelSku}) مسجل مسبقًا بخيارات مختلفة (${existingOptions.map((o) => o.name).join(' / ') || 'بدون خيارات'})`);
+          continue;
+        }
+      }
+
+      const colorKey = existingColorOpt?.key ?? 'color';
+      const sizeKey = existingSizeOpt?.key ?? 'size';
+      const existingComboSet = new Set();
+      const existingProdVariantSkus = new Set();
+      for (const ev of prodVariants) {
+        existingProdVariantSkus.add(String(ev.sku ?? '').trim().toUpperCase());
+        let evAttrs;
+        try {
+          evAttrs = JSON.parse(ev.attributes_json || '{}');
+        } catch {
+          evAttrs = {};
+        }
+        const evColor = existingColorOpt ? String(evAttrs[colorKey] ?? evAttrs.color ?? '').trim().toLowerCase() : '';
+        const evSize = existingSizeOpt ? String(evAttrs[sizeKey] ?? evAttrs.size ?? '').trim().toLowerCase() : '';
+        existingComboSet.add(`${evColor}\u0000${evSize}`);
+      }
+
+      const missingVariants = [];
       for (const variant of prod.variants) {
-        const normalizedVariantSku = variant.sku.trim().toUpperCase();
-        if (existingVariantSkus.has(normalizedVariantSku)) {
-          conflicts.push(`صف ${variant.rowNumber}: كود النسخة (${normalizedVariantSku}) مستخدم بالفعل في المخزن`);
+        const vColor = String(variant.color ?? '').trim();
+        const vSize = String(variant.size ?? '').trim();
+        const comboKey = `${vColor.toLowerCase()}\u0000${vSize.toLowerCase()}`;
+        let candidateSku = variant.sku.trim().toUpperCase();
+        if (existingComboSet.has(comboKey) || existingProdVariantSkus.has(candidateSku)) {
+          continue;
         }
         if (variant.barcode && existingBarcodes.has(variant.barcode)) {
           conflicts.push(`صف ${variant.rowNumber}: الباركود (${variant.barcode}) مسجل بالفعل على صنف آخر`);
         }
+        if (existingVariantSkus.has(candidateSku)) {
+          candidateSku = `${candidateSku}-${variant.rowNumber}`;
+        }
+        existingVariantSkus.add(candidateSku);
+        existingComboSet.add(comboKey);
+
+        const nextAttrs = {};
+        for (const opt of existingOptions) {
+          if (opt.key === colorKey && vColor) nextAttrs[opt.key] = vColor;
+          else if (opt.key === sizeKey && vSize) nextAttrs[opt.key] = vSize;
+          else if (opt.values.length > 0) nextAttrs[opt.key] = opt.values[0];
+        }
+        if (vColor && existingColorOpt && !existingColorOpt.values.includes(vColor)) {
+          existingColorOpt.values.push(vColor);
+        }
+        if (vSize && existingSizeOpt && !existingSizeOpt.values.includes(vSize)) {
+          existingSizeOpt.values.push(vSize);
+        }
+
+        const qty = BigInt(variant.quantity);
+        const cost = BigInt(variant.lineCostMinor);
+        effectiveRowCount += 1;
+        effectiveVariantCount += 1;
+        effectiveTotalUnits += qty;
+        effectiveTotalCostMinor += cost;
+
+        missingVariants.push({
+          ...variant,
+          sku: candidateSku,
+          attributes: existingOptions.length > 0 ? nextAttrs : variant.attributes,
+        });
+      }
+
+      if (missingVariants.length > 0) {
+        effectiveCategories.add(prod.category);
+        plannedProducts.push({
+          ...prod,
+          existingProd,
+          mergedOptions: existingOptions,
+          variants: missingVariants,
+        });
       }
     }
-    return conflicts;
+
+    if (parsed.errors.length === 0 && parsed.rows.length > 0 && effectiveVariantCount === 0 && conflicts.length === 0) {
+      conflicts.push('جميع الأصناف والمقاسات والألوان في الشيت مسجلة بالفعل في المخزن');
+    }
+
+    return {
+      conflicts,
+      products: plannedProducts,
+      summary: {
+        rowCount: effectiveRowCount,
+        productCount: plannedProducts.length,
+        variantCount: effectiveVariantCount,
+        categoryNames: [...effectiveCategories],
+        totalUnits: effectiveTotalUnits.toString(),
+        totalCostMinor: effectiveTotalCostMinor.toString(),
+      },
+    };
   };
 
-  const serializeOpeningImportPreview = (parsed, conflicts, tenantCurrency) => ({
+  const serializeOpeningImportPreview = (parsed, plan, tenantCurrency) => ({
     summary: {
-      rowCount: parsed.summary.rowCount,
-      productCount: parsed.summary.productCount,
-      variantCount: parsed.summary.variantCount,
-      categoryNames: parsed.summary.categoryNames,
-      totalUnits: parsed.summary.totalUnits,
-      totalCost: moneyJson(Money.fromMinor(BigInt(parsed.summary.totalCostMinor), tenantCurrency)),
+      rowCount: plan.summary.rowCount,
+      productCount: plan.summary.productCount,
+      variantCount: plan.summary.variantCount,
+      categoryNames: plan.summary.categoryNames,
+      totalUnits: plan.summary.totalUnits,
+      totalCost: moneyJson(Money.fromMinor(BigInt(plan.summary.totalCostMinor), tenantCurrency)),
     },
-    products: parsed.products.map((prod) => ({
+    products: plan.products.map((prod) => ({
       modelSku: prod.modelSku,
       name: prod.name,
       category: prod.category,
       brand: prod.brand,
-      options: prod.options,
+      existingProductId: prod.existingProd?.id ?? null,
+      options: prod.mergedOptions,
       variants: prod.variants.map((v) => ({
         rowNumber: v.rowNumber,
         sku: v.sku,
@@ -8488,13 +8715,14 @@ if (method === 'GET' && path === '/api/shifts/current') {
       })),
     })),
     errors: parsed.errors,
-    conflicts,
-    readyToCommit: parsed.errors.length === 0 && conflicts.length === 0 && parsed.rows.length > 0,
+    conflicts: plan.conflicts,
+    readyToCommit: parsed.errors.length === 0 && plan.conflicts.length === 0 && plan.summary.variantCount > 0,
   });
 
   if (method === 'POST' && path === '/api/inventory/opening-import/preview') {
-    ctx.assertPermission(Permissions.CATALOG_MANAGE);
-    ctx.assertPermission(Permissions.INVENTORY_ADJUST);
+    if (ctx.roleId !== 'OWNER') {
+      throw Object.assign(new Error('استيراد المخزن الافتتاحي متاح لمالك المتجر فقط'), { status: 403 });
+    }
     const body = validate(OpeningInventoryPreviewSchema, await readJson(req, 15 * 1024 * 1024));
     if (ctx.storeId && ctx.storeId !== body.storeId) {
       throw Object.assign(new Error('الفرع غير متاح لهذا المستخدم'), { status: 403 });
@@ -8508,7 +8736,7 @@ if (method === 'GET' && path === '/api/shifts/current') {
     } catch (err) {
       throw Object.assign(new Error(err instanceof Error ? err.message : 'تعذر قراءة ملف المخزن الافتتاحي'), { status: 400 });
     }
-    const conflicts = await findOpeningImportConflicts(db, ctx.tenantId, parsed);
+    const plan = await planOpeningInventoryImport(db, ctx.tenantId, parsed);
     const existingOpeningInv = await db
       .selectFrom('journal_entries')
       .select(['id', 'entry_number'])
@@ -8519,14 +8747,15 @@ if (method === 'GET' && path === '/api/shifts/current') {
       .where('status', '=', 'POSTED')
       .executeTakeFirst();
     if (existingOpeningInv) {
-      conflicts.unshift('تم تسجيل المخزن الافتتاحي لهذا الفرع مسبقًا — لا يمكن تكرار استيراد المخزن الافتتاحي');
+      plan.conflicts.unshift('تم تسجيل المخزن الافتتاحي لهذا الفرع مسبقًا — لا يمكن تكرار استيراد المخزن الافتتاحي');
     }
-    return json(res, 200, serializeOpeningImportPreview(parsed, conflicts, tenant.currency));
+    return json(res, 200, serializeOpeningImportPreview(parsed, plan, tenant.currency));
   }
 
   if (method === 'POST' && path === '/api/inventory/opening-import/commit') {
-    ctx.assertPermission(Permissions.CATALOG_MANAGE);
-    ctx.assertPermission(Permissions.INVENTORY_ADJUST);
+    if (ctx.roleId !== 'OWNER') {
+      throw Object.assign(new Error('استيراد المخزن الافتتاحي متاح لمالك المتجر فقط'), { status: 403 });
+    }
     const body = validate(OpeningInventoryCommitSchema, await readJson(req, 15 * 1024 * 1024));
     if (ctx.storeId && ctx.storeId !== body.storeId) {
       throw Object.assign(new Error('الفرع غير متاح لهذا المستخدم'), { status: 403 });
@@ -8543,8 +8772,7 @@ if (method === 'GET' && path === '/api/shifts/current') {
     if (parsed.errors.length > 0) {
       throw Object.assign(new Error(parsed.errors.slice(0, 5).join(' | ')), { status: 400 });
     }
-    const totalCostMinor = BigInt(parsed.summary.totalCostMinor);
-    if (totalCostMinor <= 0n || parsed.rows.length === 0) {
+    if (parsed.rows.length === 0) {
       throw Object.assign(new Error('الشيت لا يحتوي على بضاعة بتكلفة موجبة'), { status: 400 });
     }
     for (const prod of parsed.products) {
@@ -8574,6 +8802,13 @@ if (method === 'GET' && path === '/api/shifts/current') {
         return {
           journalEntryId: replay.id,
           entryNumber: replay.entry_number,
+          summary: {
+            rowCount: parsed.summary.rowCount,
+            productCount: parsed.summary.productCount,
+            variantCount: parsed.summary.variantCount,
+            totalUnits: parsed.summary.totalUnits,
+            totalCostMinor: parsed.summary.totalCostMinor,
+          },
           isReplay: true,
         };
       }
@@ -8602,9 +8837,13 @@ if (method === 'GET' && path === '/api/shifts/current') {
         );
       }
 
-      const conflicts = await findOpeningImportConflicts(trx, ctx.tenantId, parsed);
-      if (conflicts.length > 0) {
-        throw Object.assign(new Error(conflicts.slice(0, 5).join(' | ')), { status: 409 });
+      const plan = await planOpeningInventoryImport(trx, ctx.tenantId, parsed);
+      if (plan.conflicts.length > 0) {
+        throw Object.assign(new Error(plan.conflicts.slice(0, 5).join(' | ')), { status: 409 });
+      }
+      const effectiveTotalCostMinor = BigInt(plan.summary.totalCostMinor);
+      if (effectiveTotalCostMinor <= 0n || plan.products.length === 0) {
+        throw Object.assign(new Error('الشيت لا يحتوي على بضاعة جديدة بتكلفة موجبة'), { status: 400 });
       }
 
       const existingCategories = await trx
@@ -8616,45 +8855,58 @@ if (method === 'GET' && path === '/api/shifts/current') {
         existingCategories.map((c) => [String(c.name ?? '').trim().toLowerCase(), c.id]),
       );
 
-      for (const prod of parsed.products) {
-        const catKey = prod.category.trim().toLowerCase();
-        let categoryId = categoryByName.get(catKey);
-        if (!categoryId) {
-          categoryId = randomUUID();
+      for (const prod of plan.products) {
+        let productId = prod.existingProd?.id ?? null;
+        if (!productId) {
+          const catKey = prod.category.trim().toLowerCase();
+          let categoryId = categoryByName.get(catKey);
+          if (!categoryId) {
+            categoryId = randomUUID();
+            await trx
+              .insertInto('categories')
+              .values({
+                id: categoryId,
+                tenant_id: ctx.tenantId,
+                parent_id: null,
+                name: prod.category.trim(),
+                code: `CAT-${randomUUID().slice(0, 8).toUpperCase()}`,
+                is_active: 1,
+              })
+              .execute();
+            categoryByName.set(catKey, categoryId);
+          }
+
+          productId = randomUUID();
+          const normalizedProductSku = prod.modelSku.trim().toUpperCase();
           await trx
-            .insertInto('categories')
+            .insertInto('products')
             .values({
-              id: categoryId,
+              id: productId,
               tenant_id: ctx.tenantId,
-              parent_id: null,
-              name: prod.category.trim(),
-              code: `CAT-${randomUUID().slice(0, 8).toUpperCase()}`,
+              name: prod.name.trim(),
+              sku: normalizedProductSku,
+              barcode: null,
+              category_id: categoryId,
+              has_variants: prod.mergedOptions.length > 0 ? 1 : 0,
+              item_kind: 'PRODUCT',
+              description: null,
+              brand: prod.brand ? prod.brand.trim() : null,
+              image_path: null,
+              options_json: JSON.stringify(prod.mergedOptions),
               is_active: 1,
             })
             .execute();
-          categoryByName.set(catKey, categoryId);
+        } else {
+          await trx
+            .updateTable('products')
+            .set({
+              options_json: JSON.stringify(prod.mergedOptions),
+              has_variants: prod.mergedOptions.length > 0 ? 1 : 0,
+            })
+            .where('tenant_id', '=', ctx.tenantId)
+            .where('id', '=', productId)
+            .execute();
         }
-
-        const productId = randomUUID();
-        const normalizedProductSku = prod.modelSku.trim().toUpperCase();
-        await trx
-          .insertInto('products')
-          .values({
-            id: productId,
-            tenant_id: ctx.tenantId,
-            name: prod.name.trim(),
-            sku: normalizedProductSku,
-            barcode: null,
-            category_id: categoryId,
-            has_variants: prod.options.length > 0 ? 1 : 0,
-            item_kind: 'PRODUCT',
-            description: null,
-            brand: prod.brand ? prod.brand.trim() : null,
-            image_path: null,
-            options_json: JSON.stringify(prod.options),
-            is_active: 1,
-          })
-          .execute();
 
         for (const variant of prod.variants) {
           const variantId = randomUUID();
@@ -8698,18 +8950,18 @@ if (method === 'GET' && path === '/api/shifts/current') {
         sourceType: 'ADJUSTMENT',
         sourceId: payloadDigest,
         idempotencyKey: journalKey,
-        description: `استيراد المخزن الافتتاحي (${parsed.summary.productCount} صنف / ${parsed.summary.totalUnits} قطعة)${body.notes ? ` - ${body.notes}` : ''}`,
+        description: `استيراد المخزن الافتتاحي (${plan.summary.productCount} صنف / ${plan.summary.totalUnits} قطعة)${body.notes ? ` - ${body.notes}` : ''}`,
         lines: [
           {
             accountCode: '1300',
             side: 'DEBIT',
-            amount: totalCostMinor,
+            amount: effectiveTotalCostMinor,
             memo: 'رصيد المخزون الافتتاحي بتكلفة الشراء من شيت الإكسيل',
           },
           {
             accountCode: '3010',
             side: 'CREDIT',
-            amount: totalCostMinor,
+            amount: effectiveTotalCostMinor,
             memo: 'مقابل رأس المال والأرصدة الافتتاحية للمخزون',
           },
         ],
@@ -8727,21 +8979,22 @@ if (method === 'GET' && path === '/api/shifts/current') {
         action: 'OPENING_INVENTORY_IMPORTED',
         entityType: 'JOURNAL_ENTRY',
         entityId: createdJournal.id,
-        summary: `استيراد المخزن الافتتاحي (${parsed.summary.productCount} صنف / ${parsed.summary.variantCount} تركيبة / ${parsed.summary.totalUnits} قطعة)`,
+        summary: `استيراد المخزن الافتتاحي (${plan.summary.productCount} صنف / ${plan.summary.variantCount} تركيبة / ${plan.summary.totalUnits} قطعة)`,
         metadata: {
           filename: body.filename,
           entryNumber: createdJournal.entry_number,
           entryDate: resolvedEntryDate,
-          productCount: parsed.summary.productCount,
-          variantCount: parsed.summary.variantCount,
-          totalUnits: parsed.summary.totalUnits,
-          totalCostMinor: parsed.summary.totalCostMinor,
+          productCount: plan.summary.productCount,
+          variantCount: plan.summary.variantCount,
+          totalUnits: plan.summary.totalUnits,
+          totalCostMinor: plan.summary.totalCostMinor,
         },
       });
 
       return {
         journalEntryId: createdJournal.id,
         entryNumber: createdJournal.entry_number,
+        summary: plan.summary,
         isReplay: false,
       };
     });
@@ -8750,11 +9003,11 @@ if (method === 'GET' && path === '/api/shifts/current') {
       journalEntryId: commitRes.journalEntryId,
       entryNumber: commitRes.entryNumber,
       summary: {
-        rowCount: parsed.summary.rowCount,
-        productCount: parsed.summary.productCount,
-        variantCount: parsed.summary.variantCount,
-        totalUnits: parsed.summary.totalUnits,
-        totalCost: moneyJson(Money.fromMinor(totalCostMinor, tenant.currency)),
+        rowCount: commitRes.summary.rowCount,
+        productCount: commitRes.summary.productCount,
+        variantCount: commitRes.summary.variantCount,
+        totalUnits: commitRes.summary.totalUnits,
+        totalCost: moneyJson(Money.fromMinor(BigInt(commitRes.summary.totalCostMinor), tenant.currency)),
       },
     });
   }
@@ -9770,7 +10023,7 @@ if (method === 'GET' && path === '/api/shifts/current') {
 }
 
 function mimeType(path) {
-  return ({ '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' })[extname(path)] ?? 'application/octet-stream';
+  return ({ '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' })[extname(path)] ?? 'application/octet-stream';
 }
 
 function formatClientErrorMessage(error, status, databaseConflict) {

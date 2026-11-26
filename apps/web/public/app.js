@@ -1,3 +1,10 @@
+import {
+  CARTON_SIZES,
+  CARTON_TYPES,
+  buildCartonDistribution,
+  mergeDuplicateSkuNewProducts,
+} from './carton-presets.mjs';
+
 const SUPPORT_WHATSAPP_PHONE = '01200562966';
 const SUPPORT_WHATSAPP_URL = `https://wa.me/2${SUPPORT_WHATSAPP_PHONE}`;
 
@@ -709,6 +716,8 @@ function mutationLabel(path, method) {
   if (path === '/api/checkout') return 'تسجيل عملية البيع';
   if (path === '/api/shifts/start') return 'بدء الشيفت';
   if (path === '/api/shifts/end') return 'إنهاء الشيفت وتقفيل الدرج';
+  if (path === '/api/accounting/opening-balances') return 'تسجيل رصيد الكاش الافتتاحي';
+  if (path === '/api/accounting/treasury-transfer') return 'تحويل النقدية بين الدرج والخزينة والبنك';
   if (/^\/api\/purchases\/[^/?]+\/payments\/[^/?]+$/.test(path)) return method === 'DELETE' ? 'إلغاء وعكس دفعة السداد للتاجر' : 'تعديل دفعة السداد للتاجر وتحديث الحسابات';
   if (/^\/api\/purchases\/[^/?]+$/.test(path) && method === 'PATCH') return 'تعديل بيانات فاتورة الشراء';
   if (path.startsWith('/api/purchases')) return 'حفظ عملية المشتريات أو السداد';
@@ -2613,7 +2622,7 @@ function inventoryView() {
       </div>
     </div>`;
 
-  return `<div class="page-heading-row"><div><p class="page-lead">${isCashier ? 'متابعة أرصدة المخزون والمقاسات والأسعار المتاحة للبيع.' : 'متابعة وجرد أرصدة المخزون للموديلات والأصناف الحالية وتقييم رأس المال والأرباح المتوقعة.'}</p></div><div class="products-heading-actions">${data.capabilities.canManageStores ? '<button class="button button-secondary" id="new-store-btn">إدارة الفروع</button>' : ''}${data.capabilities.canTransferInventory && data.stores.length > 1 ? '<button class="button button-secondary" id="transfer-stock-btn">تحويل مخزون بين الفروع</button>' : ''}${data.capabilities.canAdjustInventory ? `${data.capabilities.canManageCatalog && !data.openingInventoryEntry ? `<button class="button button-secondary" id="opening-inventory-import-btn">${icon('plus', 15)} إضافة المخزن الافتتاحي (إكسيل)</button>` : ''}<button class="button button-secondary" id="record-damage-btn">تسجيل تالف / هالك</button><button class="button button-secondary" id="adjust-stock-btn">تسوية سريعة لصنف</button>` : ''}<a class="button button-secondary" href="/api/reports/export.csv?type=inventory&storeId=${encodeURIComponent(data.selectedStoreId)}" download>تصدير CSV</a></div></div>
+  return `<div class="page-heading-row"><div><p class="page-lead">${isCashier ? 'متابعة أرصدة المخزون والمقاسات والأسعار المتاحة للبيع.' : 'متابعة وجرد أرصدة المخزون للموديلات والأصناف الحالية وتقييم رأس المال والأرباح المتوقعة.'}</p></div><div class="products-heading-actions">${data.capabilities.canManageStores ? '<button class="button button-secondary" id="new-store-btn">إدارة الفروع</button>' : ''}${data.capabilities.canTransferInventory && data.stores.length > 1 ? '<button class="button button-secondary" id="transfer-stock-btn">تحويل مخزون بين الفروع</button>' : ''}${data.capabilities.canAdjustInventory ? `${data.user.role === 'OWNER' && !data.openingInventoryEntry ? `<button class="button button-secondary" id="opening-inventory-import-btn">${icon('plus', 15)} إضافة المخزن الافتتاحي (إكسيل)</button>` : ''}<button class="button button-secondary" id="record-damage-btn">تسجيل تالف / هالك</button><button class="button button-secondary" id="adjust-stock-btn">تسوية سريعة لصنف</button>` : ''}<a class="button button-secondary" href="/api/reports/export.csv?type=inventory&storeId=${encodeURIComponent(data.selectedStoreId)}" download>تصدير CSV</a></div></div>
   <div class="inventory-summary ${isCashier ? '' : 'expense-summary-grid'}">${summaryCardsHtml}
   </div>
   <section class="panel"><div class="panel-heading"><div><h3>أرصدة الموديلات والمقاسات</h3><p>اضغط على الموديل لعرض مصفوفة الألوان والمقاسات</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="ابحث عن الموديل أو الكود أو المقاس" value="${escapeHtml(state.query)}"></label></div>${items.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل</th><th>كود الموديل</th><th>الألوان والمقاسات</th><th class="cell-center">إجمالي الرصيد</th>${!isCashier ? '<th>سعر التكلفة (الفعلي)</th><th>سعر البيع</th><th>المكسب المتوقع</th>' : '<th>سعر البيع</th>'}<th>حالة المقاسات</th></tr></thead><tbody>${items.map((product) => `<tr><td><button type="button" class="product-name-action inventory-product-details" data-product-id="${product.id}"><span class="product-avatar ${product.imagePath ? 'has-image' : ''}">${product.imagePath ? renderProductThumb(product) : escapeHtml(product.name.slice(0, 1))}</span><span class="product-name-stack"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand || 'اضغط لعرض جدول المقاسات')}</small></span></button></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${product.matrix.isMatrix ? `<div class="model-sub-badges">${product.matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(product.matrix.colorSummaryLabel)}</span>` : ''}${product.matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(product.matrix.sizeRangeLabel)}</span>` : ''}</div>` : `<small>${product.variants.length} نسخة</small>`}</td><td class="cell-center"><strong>${product.quantity}</strong> قطعة</td>${!isCashier ? (() => {
@@ -2901,6 +2910,8 @@ function shiftsView() {
       </div>
     </div>
 
+    ${renderTreasuryOverviewPanel()}
+
     <section class="pro-filter-card">
       <div class="pro-filter-row">
         <div class="pro-filter-pills">
@@ -2978,7 +2989,7 @@ function shiftsView() {
                 <th>المتوقع بالدرج</th>
                 <th>الفعلي المعدود</th>
                 <th class="cell-center">الفارق</th>
-                <th>المبلغ المورد</th>
+                <th>المحول للخزينة</th>
                 <th class="cell-center">الفواتير</th>
               </tr>
             </thead>
@@ -3137,6 +3148,7 @@ function showStartShiftModal() {
   const root = getModalRoot();
   const currency = state.data.company.currency;
   const decimals = currencyDecimals(currency);
+  const suggestedVal = decimalPrice({ amount: state.data?.suggestedOpeningCash ?? '0', currency, decimals });
 
   root.innerHTML = `
     <div class="modal-backdrop">
@@ -3150,10 +3162,10 @@ function showStartShiftModal() {
         </div>
         <form id="start-shift-form" class="form-stack modal-form" style="padding:20px 24px;">
           <p style="font-size:13px;color:var(--muted);margin:0 0 12px;line-height:1.6;">
-            أدخل المبلغ المستلم في الدرج (عهدة البداية) للبدء في البيع وتسجيل الحضور فوراً.
+            أدخل المبلغ المستلم في الدرج (عهدة البداية — القيمة الافتراضية هي المتبقي في الدرج من الشيفت السابق).
           </p>
           <label style="font-weight:750;display:flex;flex-direction:column;gap:8px;">المبلغ المستلم في الدرج (${currency}) *
-            <input name="openingCash" id="start-shift-opening-cash" inputmode="decimal" value="0.00" required placeholder="0.00" style="font-size:18px;font-weight:800;color:var(--ink);padding:10px 14px;" autofocus>
+            <input name="openingCash" id="start-shift-opening-cash" inputmode="decimal" value="${escapeHtml(suggestedVal)}" required placeholder="0.00" style="font-size:18px;font-weight:800;color:var(--ink);padding:10px 14px;" autofocus>
           </label>
           <div class="modal-actions" style="margin-top:16px;padding:16px 0 0;">
             <button type="button" class="button button-secondary" data-close-modal>إلغاء</button>
@@ -3281,23 +3293,23 @@ async function showEndShiftModal() {
       modalBody.innerHTML = `
         ${shiftSummaryCard}
         <form id="end-shift-form" class="form-stack" style="gap:14px;">
-          <label style="font-weight:750;display:flex;flex-direction:column;gap:6px;">المبلغ المسلم بنهاية الشيفت (${currency}) *
-            <input name="handoverCash" id="shift-handover-cash" inputmode="decimal" required placeholder="0.00" style="font-size:18px;font-weight:800;color:var(--ink);padding:10px 14px;" autofocus>
-            <small style="color:var(--muted);font-size:11.5px;">عِدّ النقدية الموجودة بالدرج وسلّم المبلغ واكتب قيمته هنا لإغلاق الشيفت.</small>
+          <label style="font-weight:750;display:flex;flex-direction:column;gap:6px;">النقدية الفعلية المعدودة في الدرج عند الإغلاق (${currency}) *
+            <input name="actualCash" id="shift-actual-cash" inputmode="decimal" required placeholder="0.00" style="font-size:18px;font-weight:800;color:var(--ink);padding:10px 14px;" autofocus>
+            <small style="color:var(--muted);font-size:11.5px;">عِدّ النقدية الموجودة بالدرج واكتب القيمة الفعلية لإغلاق الشيفت.</small>
           </label>
           <div id="shift-variance-preview" style="display:none;padding:10px 14px;border-radius:10px;font-size:12px;font-weight:750;"></div>
-          <label style="font-weight:750;display:flex;flex-direction:column;gap:6px;">ملاحظات التسليم (اختياري)
-            <input name="notes" maxlength="250" placeholder="مثال: تم تسليم الدرج ومراجعة الفواتير" style="padding:10px 14px;">
+          <label style="font-weight:750;display:flex;flex-direction:column;gap:6px;">ملاحظات الإغلاق (اختياري)
+            <input name="notes" maxlength="250" placeholder="مثال: تم عدّ الدرج ومراجعة الفواتير" style="padding:10px 14px;">
           </label>
           <div class="modal-actions" style="margin-top:8px;padding:16px 0 0;">
             <button type="button" class="button button-secondary" data-close-modal>إلغاء</button>
-            <button type="submit" class="button button-primary" style="background:#5948d8;border-color:#5948d8;font-weight:750;padding:8px 20px;">تأكيد تسليم النقدية وإنهاء الشيفت</button>
+            <button type="submit" class="button button-primary" style="background:#5948d8;border-color:#5948d8;font-weight:750;padding:8px 20px;">تأكيد عدّ الدرج وإنهاء الشيفت</button>
           </div>
         </form>
       `;
 
       modalBody.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
-      const cashInput = modalBody.querySelector('#shift-handover-cash');
+      const cashInput = modalBody.querySelector('#shift-actual-cash');
       const variancePreview = modalBody.querySelector('#shift-variance-preview');
       cashInput?.focus();
       cashInput?.select();
@@ -3313,7 +3325,7 @@ async function showEndShiftModal() {
           variancePreview.style.display = 'block';
           if (diff === 0n) {
             variancePreview.className = 'variance-box variance-match';
-            variancePreview.textContent = '✓ المبلغ المسلم متطابق تماماً مع مبيعات الشيفت والنقدية المتوقعة.';
+            variancePreview.textContent = '✓ النقدية الفعلية متطابقة تماماً مع مبيعات الشيفت والنقدية المتوقعة.';
           } else if (diff < 0n) {
             variancePreview.className = 'variance-box variance-shortage';
             variancePreview.textContent = `يوجد فرق عجز مقارنة بالمتوقع بمقدار: ${format(diff.toString())}`;
@@ -3337,19 +3349,18 @@ async function showEndShiftModal() {
         submitBtn.disabled = true;
         try {
           const formData = new FormData(form);
-          const enteredMinor = toMinor(formData.get('handoverCash') || '0', decimals);
+          const enteredMinor = toMinor(formData.get('actualCash') || '0', decimals);
           const res = await api('/api/shifts/end', {
             method: 'POST',
             body: JSON.stringify({
               idempotencyKey: cashierCloseKey,
               shiftId: currentShift.id,
               actualCash: enteredMinor,
-              handoverCash: enteredMinor,
               notes: formData.get('notes') || 'تسليم شيفت كاشير',
             })
           });
           root.innerHTML = '';
-          toast(`تم إنهاء الشيفت #${res.shift.shiftNumber} بنجاح وتسليم الدرج`);
+          toast(`تم إنهاء الشيفت #${res.shift.shiftNumber} بنجاح`);
           invalidateFinancialCaches();
           await loadData(state.data.selectedStoreId);
           render();
@@ -3372,12 +3383,15 @@ async function showEndShiftModal() {
 
         <div id="shift-variance-preview" style="display:none;padding:10px 14px;border-radius:10px;font-size:12px;font-weight:750;"></div>
 
-        <label style="font-weight:750;display:flex;flex-direction:column;gap:6px;">المبلغ المورد للشيفت القادم / الخزينة (${currency})
-          <input name="handoverCash" inputmode="decimal" placeholder="المبلغ المسلم للشيفت التالي أو الخزينة" value="0.00" style="padding:10px 14px;">
+        <label style="font-weight:750;display:flex;flex-direction:column;gap:6px;">تحويل للخزنة (1015) (${currency})
+          <input name="transferToSafe" id="shift-transfer-to-safe" inputmode="decimal" placeholder="0.00" value="0.00" style="padding:10px 14px;">
+          <small style="color:var(--muted);font-size:11px;">يُرحَّل قيد تحويل فوري (من الدرج 1010 إلى الخزينة 1015) ويبقى الباقي كرصيد فتح للشيفت القادم</small>
         </label>
 
-        <label style="font-weight:750;display:flex;flex-direction:column;gap:6px;">ملاحظات التقفيل والتسليم (اختياري)
-          <input name="notes" maxlength="250" placeholder="مثال: تم تسليم الكاش بدون أي عجز" style="padding:10px 14px;">
+        <div id="shift-remaining-drawer-preview" style="display:none;padding:10px 14px;border-radius:10px;font-size:12.5px;font-weight:750;background:var(--surface-soft);border:1px solid var(--line);"></div>
+
+        <label style="font-weight:750;display:flex;flex-direction:column;gap:6px;">ملاحظات التقفيل والتحويل (اختياري)
+          <input name="notes" maxlength="250" placeholder="مثال: تم تقفيل الدرج وتوريد الفائض للخزينة" style="padding:10px 14px;">
         </label>
 
         <div class="modal-actions" style="margin-top:8px;padding:16px 0 0;">
@@ -3389,32 +3403,54 @@ async function showEndShiftModal() {
 
     modalBody.querySelectorAll('[data-close-modal]').forEach((b) => b.addEventListener('click', () => { root.innerHTML = ''; }));
     const actualInput = modalBody.querySelector('#shift-actual-cash');
+    const transferInput = modalBody.querySelector('#shift-transfer-to-safe');
     const variancePreview = modalBody.querySelector('#shift-variance-preview');
+    const remainingPreview = modalBody.querySelector('#shift-remaining-drawer-preview');
 
-    actualInput?.addEventListener('input', () => {
-      const valStr = actualInput.value.trim();
-      if (!valStr || !variancePreview) {
+    const updateEndShiftPreviews = () => {
+      const valStr = actualInput?.value.trim() ?? '';
+      if (!valStr) {
         if (variancePreview) variancePreview.style.display = 'none';
+        if (remainingPreview) remainingPreview.style.display = 'none';
         return;
       }
       try {
         const actualMinor = BigInt(toMinor(valStr, decimals));
         const diff = actualMinor - expectedCashBig;
-        variancePreview.style.display = 'block';
-        if (diff === 0n) {
-          variancePreview.className = 'variance-box variance-match';
-          variancePreview.textContent = '✓ رصيد الدرج متطابق تماماً مع المبيعات والنقدية المسجلة.';
-        } else if (diff < 0n) {
-          variancePreview.className = 'variance-box variance-shortage';
-          variancePreview.textContent = `يوجد عجز في الدرج بمقدار: ${format(diff.toString())}`;
-        } else {
-          variancePreview.className = 'variance-box variance-overage';
-          variancePreview.textContent = `توجد زيادة في الدرج بمقدار: +${format(diff.toString())}`;
+        if (variancePreview) {
+          variancePreview.style.display = 'block';
+          if (diff === 0n) {
+            variancePreview.className = 'variance-box variance-match';
+            variancePreview.textContent = '✓ رصيد الدرج متطابق تماماً مع المبيعات والنقدية المسجلة.';
+          } else if (diff < 0n) {
+            variancePreview.className = 'variance-box variance-shortage';
+            variancePreview.textContent = `يوجد عجز في الدرج بمقدار: ${format(diff.toString())}`;
+          } else {
+            variancePreview.className = 'variance-box variance-overage';
+            variancePreview.textContent = `توجد زيادة في الدرج بمقدار: +${format(diff.toString())}`;
+          }
+        }
+        if (remainingPreview) {
+          const tStr = (transferInput?.value ?? '').trim() || '0';
+          const transferMinor = BigInt(toMinor(tStr, decimals));
+          remainingPreview.style.display = 'block';
+          if (transferMinor > actualMinor) {
+            remainingPreview.className = 'variance-box variance-shortage';
+            remainingPreview.textContent = 'مبلغ التحويل للخزنة يتجاوز النقدية الفعلية بالدرج.';
+          } else {
+            const left = actualMinor - transferMinor;
+            remainingPreview.className = '';
+            remainingPreview.textContent = `المتبقي في الدرج (1010) لفتح الشيفت القادم: ${format(left.toString())}`;
+          }
         }
       } catch {
-        variancePreview.style.display = 'none';
+        if (variancePreview) variancePreview.style.display = 'none';
+        if (remainingPreview) remainingPreview.style.display = 'none';
       }
-    });
+    };
+
+    actualInput?.addEventListener('input', updateEndShiftPreviews);
+    transferInput?.addEventListener('input', updateEndShiftPreviews);
 
     let endSubmitting = false;
     const closeKey = crypto.randomUUID();
@@ -3428,14 +3464,14 @@ async function showEndShiftModal() {
       try {
         const formData = new FormData(form);
         const actualMinor = toMinor(formData.get('actualCash') || '0', decimals);
-        const handoverMinor = toMinor(formData.get('handoverCash') || '0', decimals);
+        const transferMinor = toMinor(formData.get('transferToSafe') || '0', decimals);
         const res = await api('/api/shifts/end', {
           method: 'POST',
           body: JSON.stringify({
             idempotencyKey: closeKey,
             shiftId: currentShift.id,
             actualCash: actualMinor,
-            handoverCash: handoverMinor,
+            transferToSafe: transferMinor,
             notes: formData.get('notes') || '',
           })
         });
@@ -3457,6 +3493,7 @@ async function showEndShiftModal() {
 
 
 function bindShifts() {
+  bindAccounting();
   document.querySelector('#shifts-start-now-btn')?.addEventListener('click', () => {
     showStartShiftModal();
   });
@@ -4809,6 +4846,8 @@ function financialMapView() {
       </div>
     </div>
 
+    ${renderTreasuryOverviewPanel()}
+
     <section class="pro-filter-card" style="margin-bottom:18px;">
       <div class="pro-filter-row">
         <div class="pro-filter-pills">
@@ -5488,6 +5527,8 @@ function supplierModal(html, formId, endpoint, convert = (data) => data, success
     'monthly-obligation-form': 'إضافة التزام شهري',
     'edit-obligation-form': 'تعديل بيانات الالتزام الشهري',
     'monthly-actual-form': 'تأكيد المصروف الفعلي',
+    'opening-cash-form': 'رصيد الكاش الافتتاحي',
+    'treasury-transfer-form': 'تحويل نقدية بين الدرج والخزينة والبنك',
   };
   const modalTitle = modalTitles[formId] ?? 'تسجيل سداد';
   root.innerHTML = `<div class="modal-backdrop"><section class="modal-card ${formId === 'purchase-form' ? 'product-variants-modal' : ''}" role="dialog" aria-modal="true"><div class="modal-heading"><h2>${modalTitle}</h2><button type="button" class="modal-close" data-close-modal aria-label="إغلاق">×</button></div><form id="${formId}" class="form-stack modal-form">${html}<div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>إلغاء</button><button type="submit" class="button button-primary">${submitText}</button></div></form></section></div>`;
@@ -5512,6 +5553,7 @@ function supplierModal(html, formId, endpoint, convert = (data) => data, success
 }
 
 function bindFinancialMap() {
+  bindAccounting();
   document.querySelectorAll('[data-fm-preset]').forEach((btn) => btn.addEventListener('click', () => {
     state.financialMapRange = btn.dataset.fmPreset;
     state.financialMapCustomRange = null;
@@ -5755,6 +5797,21 @@ function bindSuppliers() {
       { name: 'المقاس', valuesText: '41، 42، 43، 44، 45' },
     ];
 
+    const applyCartonToGroupState = (gs) => {
+      const dist = buildCartonDistribution({
+        typeId: gs.cartonTypeId,
+        cartonSize: gs.cartonSize,
+        colors: gs.cartonColors,
+      });
+      gs.options = dist.options.map((opt) => ({
+        name: opt.name,
+        valuesText: opt.values.join('، '),
+      }));
+      gs.newQuantities = new Map(dist.quantitiesMap);
+      gs.cartonEvenSplit = dist.evenSplit;
+      return dist;
+    };
+
     const ensureGroupState = (index, preferredMode = null) => {
       const key = String(index);
       let gs = groupStates.get(key);
@@ -5763,7 +5820,15 @@ function bindSuppliers() {
           mode: preferredMode || (products.length > 0 ? 'EXISTING' : 'NEW'),
           options: defaultNewOptions(),
           newQuantities: new Map(),
+          cartonTypeId: 'men',
+          cartonSize: 10,
+          cartonColors: ['', '', ''],
+          cartonMatrixOpen: false,
+          cartonEvenSplit: true,
         };
+        if (gs.mode === 'CARTON') {
+          applyCartonToGroupState(gs);
+        }
         groupStates.set(key, gs);
       }
       return gs;
@@ -5888,21 +5953,27 @@ function bindSuppliers() {
     const groupMarkup = (index, preferredMode = null) => {
       const gs = ensureGroupState(index, preferredMode);
       const isNew = gs.mode === 'NEW';
+      const isCarton = gs.mode === 'CARTON';
+      const isNewLike = isNew || isCarton;
       return `
         <section class="invoice-model-card" data-purchase-group="${index}">
           <div class="invoice-model-head" style="flex-direction:column;align-items:stretch;gap:10px;">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
-              <div class="product-kind-toggle" style="margin-bottom:0;max-width:360px;">
-                <button type="button" class="product-kind-btn ${!isNew ? 'active' : ''}" data-group-mode="EXISTING" ${!products.length ? 'disabled title="لا توجد منتجات مسجلة بعد — أضف منتجًا جديدًا داخل الفاتورة"' : ''}>منتج موجود (إعادة طلب)</button>
-                <button type="button" class="product-kind-btn ${isNew ? 'active' : ''}" data-group-mode="NEW">+ منتج جديد</button>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <div class="product-kind-toggle" style="margin-bottom:0;max-width:480px;">
+                  <button type="button" class="product-kind-btn ${!isNewLike ? 'active' : ''}" data-group-mode="EXISTING" ${!products.length ? 'disabled title="لا توجد منتجات مسجلة بعد — أضف منتجًا جديدًا داخل الفاتورة"' : ''}>منتج موجود (إعادة طلب)</button>
+                  <button type="button" class="product-kind-btn ${isNew ? 'active' : ''}" data-group-mode="NEW">+ منتج جديد</button>
+                  <button type="button" class="product-kind-btn ${isCarton ? 'active' : ''}" data-group-mode="CARTON">كرتونة</button>
+                </div>
+                <span class="status-pill status-complete carton-number-badge" data-carton-badge="${index}" ${!isCarton ? 'hidden' : ''}>كرتونة 1</span>
               </div>
               <button type="button" class="text-action remove-purchase-group" style="color:var(--rose, #be123c);">× حذف</button>
             </div>
 
-            <div class="purchase-existing-fields" ${isNew ? 'hidden' : ''}>
+            <div class="purchase-existing-fields" ${isNewLike ? 'hidden' : ''}>
               <div class="purchase-group-inputs">
                 <label style="margin:0;"><strong>الموديل:</strong>
-                  <select name="purchaseProduct_${index}" style="margin-top:4px;" ${isNew ? 'disabled' : ''}>
+                  <select name="purchaseProduct_${index}" style="margin-top:4px;" ${isNewLike ? 'disabled' : ''}>
                     ${products.map((product) => `<option value="${product.id}" ${index === 0 && product.id === initialProductId ? 'selected' : ''}>${escapeHtml(product.name)} (${escapeHtml(product.sku)})</option>`).join('')}
                   </select>
                 </label>
@@ -5915,9 +5986,9 @@ function bindSuppliers() {
               </div>
             </div>
 
-            <div class="purchase-new-fields" ${!isNew ? 'hidden' : ''}>
+            <div class="purchase-new-fields" ${!isNewLike ? 'hidden' : ''}>
               ${products.length > 0 ? `
-                <div style="margin-bottom:10px;padding:8px 10px;border-radius:10px;background:var(--surface-soft, #f8fafc);border:1px dashed var(--line-strong, #cbd5e1);">
+                <div class="purchase-copy-product-box" ${!isNew ? 'hidden' : ''} style="margin-bottom:10px;padding:8px 10px;border-radius:10px;background:var(--surface-soft, #f8fafc);border:1px dashed var(--line-strong, #cbd5e1);">
                   <label style="margin:0;font-size:12.5px;"><strong>نسخ مواصفات منتج موجود (ينسخ الفئة والألوان والمقاسات والأسعار تلقائيًا):</strong>
                     <select data-copy-from-product="${index}" style="margin-top:4px;">
                       <option value="">— بدء منتج جديد من الصفر —</option>
@@ -5928,10 +5999,10 @@ function bindSuppliers() {
               ` : ''}
               <div class="form-grid" style="gap:10px;margin-bottom:8px;">
                 <label style="margin:0;"><strong>اسم المنتج الجديد:</strong>
-                  <input name="newProductName_${index}" minlength="2" maxlength="120" placeholder="مثال: كوتشي ميلانو رانينج" ${isNew ? 'required' : ''} style="margin-top:4px;">
+                  <input name="newProductName_${index}" minlength="2" maxlength="120" placeholder="مثال: كوتشي ميلانو رانينج" ${isNewLike ? 'required' : ''} style="margin-top:4px;">
                 </label>
                 <label style="margin:0;"><strong>كود المنتج:</strong>
-                  <input name="newProductSku_${index}" maxlength="64" placeholder="مثال: MIL-205" ${isNew ? 'required' : ''} style="margin-top:4px;">
+                  <input name="newProductSku_${index}" maxlength="64" placeholder="مثال: MIL-205" ${isNewLike ? 'required' : ''} style="margin-top:4px;">
                 </label>
                 <label style="margin:0;"><strong>الفئة:</strong>
                   <div class="category-select-row" style="margin-top:4px;">
@@ -5944,13 +6015,13 @@ function bindSuppliers() {
               </div>
               <div class="form-grid" style="gap:10px;margin-bottom:8px;">
                 <label style="margin:0;"><strong>سعر الشراء / الجملة (${currency}):</strong>
-                  <input name="newPurchaseCost_${index}" inputmode="decimal" ${isNew ? 'required' : ''} placeholder="مثال: 300" style="margin-top:4px;">
+                  <input name="newPurchaseCost_${index}" inputmode="decimal" ${isNewLike ? 'required' : ''} placeholder="مثال: 300" style="margin-top:4px;">
                 </label>
                 <label style="margin:0;"><strong>سعر البيع (${currency}) (اختياري):</strong>
                   <input name="newPurchaseRetailPrice_${index}" inputmode="decimal" placeholder="اختياري — للتسعير لاحقًا" style="margin-top:4px;">
                 </label>
               </div>
-              <div class="inline-options-box" data-inline-options-box="${index}" style="padding:10px;border-radius:10px;background:var(--surface-soft, #f8fafc);border:1px solid var(--line, #e2e8f0);">
+              <div class="inline-options-box" data-inline-options-box="${index}" ${!isNew ? 'hidden' : ''} style="padding:10px;border-radius:10px;background:var(--surface-soft, #f8fafc);border:1px solid var(--line, #e2e8f0);">
                 <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
                   <strong style="font-size:12px;">خيارات المنتج المرنة (مثل اللون، المقاس، الخامة، السعة...):</strong>
                   <div style="display:flex;gap:6px;flex-wrap:wrap;">
@@ -5961,6 +6032,33 @@ function bindSuppliers() {
                   </div>
                 </div>
                 <div class="inline-options-list" data-inline-options-list="${index}" style="display:grid;gap:6px;"></div>
+              </div>
+              <div class="carton-builder-box" data-carton-box="${index}" ${!isCarton ? 'hidden' : ''} style="padding:12px;border-radius:10px;background:var(--surface-soft, #f8fafc);border:1px solid var(--line-strong, #cbd5e1);display:grid;gap:10px;">
+                <div>
+                  <strong style="font-size:12px;display:block;margin-bottom:6px;">نوع الكرتونة (نطاق المقاسات):</strong>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    ${CARTON_TYPES.map((ct) => `<button type="button" class="date-preset-chip ${gs.cartonTypeId === ct.id ? 'active' : ''}" data-carton-type="${ct.id}">${escapeHtml(ct.label)} (${escapeHtml(ct.rangeLabel)})</button>`).join('')}
+                  </div>
+                </div>
+                <div>
+                  <strong style="font-size:12px;display:block;margin-bottom:6px;">حجم الكرتونة:</strong>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    ${CARTON_SIZES.map((sz) => `<button type="button" class="date-preset-chip ${gs.cartonSize === sz ? 'active' : ''}" data-carton-size="${sz}">${sz} قطع</button>`).join('')}
+                  </div>
+                </div>
+                <div>
+                  <strong style="font-size:12px;display:block;margin-bottom:6px;">الألوان (اختياري — حتى 3 ألوان):</strong>
+                  <div style="display:grid;grid-template-columns:repeat(3, minmax(0, 1fr));gap:8px;">
+                    <input maxlength="64" data-carton-color="0" value="${escapeHtml(gs.cartonColors[0] ?? '')}" placeholder="لون 1 (اختياري)">
+                    <input maxlength="64" data-carton-color="1" value="${escapeHtml(gs.cartonColors[1] ?? '')}" placeholder="لون 2 (اختياري)">
+                    <input maxlength="64" data-carton-color="2" value="${escapeHtml(gs.cartonColors[2] ?? '')}" placeholder="لون 3 (اختياري)">
+                  </div>
+                  <small style="color:var(--muted);font-size:11px;display:block;margin-top:4px;">اترك الألوان فارغة لكرتونة بدون لون، أو اكتب لونًا أو اثنين أو ثلاثة.</small>
+                </div>
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;padding-top:8px;border-top:1px dashed var(--line-strong, #cbd5e1);">
+                  <span data-carton-summary="${index}" style="font-size:12px;color:var(--ink);"></span>
+                  <button type="button" class="button button-secondary button-sm" data-carton-toggle-matrix="${index}">تعديل جدول الألوان والمقاسات ▾</button>
+                </div>
               </div>
             </div>
           </div>
@@ -6039,6 +6137,9 @@ function bindSuppliers() {
       <div id="purchase-lines">${groupMarkup(groupIndex, initialMode)}</div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+        <button id="add-purchase-carton" type="button" class="button button-secondary">
+          + إضافة كرتونة
+        </button>
         <button id="add-purchase-new-product" type="button" class="button button-secondary">
           + إضافة منتج جديد للفاتورة
         </button>
@@ -6200,6 +6301,8 @@ function bindSuppliers() {
         targetProfitPercent = parsedPct;
       }
 
+      const mergedNewProducts = mergeDuplicateSkuNewProducts(newProducts);
+
       return {
         idempotencyKey: data.idempotencyKey,
         supplierId: data.supplierId,
@@ -6209,7 +6312,7 @@ function bindSuppliers() {
         paymentMethod: data.paymentMethod,
         targetProfitPercent,
         items,
-        newProducts,
+        newProducts: mergedNewProducts,
         totalAmount: exactTotalMinor.toString(),
         paidAmount: toMinor(data.paidAmount, decimals),
       };
@@ -6220,15 +6323,66 @@ function bindSuppliers() {
     let currentPayMode = 'FULL_CASH';
     const fmtMoney = (minor) => money({ amount: minor.toString(), currency, decimals });
 
+    const syncCartonTitles = () => {
+      let cartonSeq = 0;
+      root.querySelectorAll('[data-purchase-group]').forEach((section) => {
+        const index = section.dataset.purchaseGroup;
+        const gs = ensureGroupState(index);
+        const badge = section.querySelector(`[data-carton-badge="${index}"]`);
+        const isCarton = gs.mode === 'CARTON';
+        if (badge) {
+          if (isCarton) {
+            cartonSeq += 1;
+            badge.textContent = `كرتونة ${cartonSeq}`;
+            badge.hidden = false;
+          } else {
+            badge.hidden = true;
+          }
+        }
+      });
+    };
+
+    const refreshCartonBoxSummary = (section, gs, plan) => {
+      if (!section || gs.mode !== 'CARTON') return;
+      const index = section.dataset.purchaseGroup;
+      const box = section.querySelector(`[data-carton-box="${index}"]`);
+      if (!box) return;
+      box.querySelectorAll('[data-carton-type]').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.cartonType === gs.cartonTypeId);
+      });
+      box.querySelectorAll('[data-carton-size]').forEach((btn) => {
+        btn.classList.toggle('active', Number.parseInt(btn.dataset.cartonSize ?? '0', 10) === gs.cartonSize);
+      });
+      const toggleBtn = box.querySelector(`[data-carton-toggle-matrix="${index}"]`);
+      if (toggleBtn) {
+        toggleBtn.textContent = gs.cartonMatrixOpen ? 'إخفاء جدول الألوان والمقاسات ▴' : 'تعديل جدول الألوان والمقاسات ▾';
+      }
+      const summaryEl = box.querySelector(`[data-carton-summary="${index}"]`);
+      if (summaryEl) {
+        const typeObj = CARTON_TYPES.find((ct) => ct.id === gs.cartonTypeId);
+        const totalQty = (plan?.combinations ?? []).reduce((sum, combo) => sum + (Number(combo.qty) || 0), 0);
+        const activeColors = gs.cartonColors.map((c) => String(c ?? '').trim()).filter(Boolean);
+        summaryEl.innerHTML = `المقاسات: <strong>${escapeHtml(typeObj?.rangeLabel ?? '')}</strong> · ${activeColors.length ? `الألوان: <strong>${escapeHtml(activeColors.join('، '))}</strong>` : '<strong>بدون لون</strong>'} · الإجمالي: <strong>${totalQty} قطعة</strong>${!gs.cartonEvenSplit ? ' <span style="color:var(--muted);">(يمكنك ضبط الفروق من الجدول)</span>' : ''}`;
+      }
+    };
+
     const syncGroupRequiredFields = (section) => {
       if (!section) return;
       const index = section.dataset.purchaseGroup;
       const gs = ensureGroupState(index);
       const isNew = gs.mode === 'NEW';
+      const isCarton = gs.mode === 'CARTON';
+      const isNewLike = isNew || isCarton;
       const existingWrap = section.querySelector('.purchase-existing-fields');
       const newWrap = section.querySelector('.purchase-new-fields');
-      if (existingWrap) existingWrap.hidden = isNew;
-      if (newWrap) newWrap.hidden = !isNew;
+      const copyBox = section.querySelector('.purchase-copy-product-box');
+      const inlineOptBox = section.querySelector(`[data-inline-options-box="${index}"]`);
+      const cartonBox = section.querySelector(`[data-carton-box="${index}"]`);
+      if (existingWrap) existingWrap.hidden = isNewLike;
+      if (newWrap) newWrap.hidden = !isNewLike;
+      if (copyBox) copyBox.hidden = !isNew;
+      if (inlineOptBox) inlineOptBox.hidden = !isNew;
+      if (cartonBox) cartonBox.hidden = !isCarton;
 
       const existingSelect = section.querySelector(`[name="purchaseProduct_${index}"]`);
       const existingCost = section.querySelector(`[name="purchaseCost_${index}"]`);
@@ -6236,15 +6390,16 @@ function bindSuppliers() {
       const newSku = section.querySelector(`[name="newProductSku_${index}"]`);
       const newCost = section.querySelector(`[name="newPurchaseCost_${index}"]`);
 
-      if (existingSelect) existingSelect.disabled = isNew;
-      if (existingCost) { existingCost.disabled = isNew; existingCost.required = !isNew; }
-      if (newName) { newName.disabled = !isNew; newName.required = isNew; }
-      if (newSku) { newSku.disabled = !isNew; newSku.required = isNew; }
-      if (newCost) { newCost.disabled = !isNew; newCost.required = isNew; }
+      if (existingSelect) existingSelect.disabled = isNewLike;
+      if (existingCost) { existingCost.disabled = isNewLike; existingCost.required = !isNewLike; }
+      if (newName) { newName.disabled = !isNewLike; newName.required = isNewLike; }
+      if (newSku) { newSku.disabled = !isNewLike; newSku.required = isNewLike; }
+      if (newCost) { newCost.disabled = !isNewLike; newCost.required = isNewLike; }
 
       section.querySelectorAll('[data-group-mode]').forEach((btn) => {
         btn.classList.toggle('active', btn.dataset.groupMode === gs.mode);
       });
+      syncCartonTitles();
     };
 
     const syncGroupDefaultRetailPrice = (section) => {
@@ -6308,11 +6463,14 @@ function bindSuppliers() {
       root.querySelectorAll('[data-purchase-group]').forEach((section) => {
         const index = section.dataset.purchaseGroup;
         const gs = ensureGroupState(index);
-        const isNew = gs.mode === 'NEW';
+        const isNew = gs.mode === 'NEW' || gs.mode === 'CARTON';
         const product = !isNew
           ? products.find((item) => item.id === section.querySelector(`[name="purchaseProduct_${index}"]`)?.value)
           : null;
         const plan = isNew ? buildInlineProductPlan(section, gs) : null;
+        if (gs.mode === 'CARTON') {
+          refreshCartonBoxSummary(section, gs, plan);
+        }
 
         let groupQty = 0n;
         if (isNew) {
@@ -6598,8 +6756,14 @@ function bindSuppliers() {
       const gridEl = section.querySelector('.purchase-variant-grid');
       if (!gridEl) return;
 
-      if (gs.mode === 'NEW') {
+      if (gs.mode === 'NEW' || gs.mode === 'CARTON') {
         const plan = buildInlineProductPlan(section, gs);
+        if (gs.mode === 'CARTON') {
+          refreshCartonBoxSummary(section, gs, plan);
+          gridEl.hidden = !gs.cartonMatrixOpen;
+        } else {
+          gridEl.hidden = false;
+        }
         if (plan.duplicateOptionName) {
           gridEl.innerHTML = '<div style="padding:10px;border-radius:8px;color:var(--rose,#be123c);font-size:12px;">لا يمكن تكرار نفس اسم الخيار مرتين.</div>';
           return;
@@ -6697,6 +6861,7 @@ function bindSuppliers() {
         return;
       }
 
+      gridEl.hidden = false;
       const product = products.find((item) => item.id === section.querySelector(`[name="purchaseProduct_${index}"]`)?.value);
       if (!product) {
         gridEl.innerHTML = '<div style="padding:10px;color:var(--muted);font-size:12px;">لا يوجد منتج محدد.</div>';
@@ -6840,6 +7005,7 @@ function bindSuppliers() {
       renderInlineOptionsEditor(firstGroup);
       renderGroup(firstGroup);
       syncGroupDefaultRetailPrice(firstGroup);
+      syncCartonTitles();
       updatePurchaseTotal();
     }
 
@@ -6872,6 +7038,16 @@ function bindSuppliers() {
         const optIdx = Number(e.target.dataset.optValues);
         if (gs.options[optIdx]) {
           gs.options[optIdx].valuesText = e.target.value;
+          renderGroup(section);
+          updatePurchaseTotal();
+        }
+        return;
+      }
+      if (e.target.matches('[data-carton-color]')) {
+        const colorIdx = Number.parseInt(e.target.dataset.cartonColor ?? '0', 10);
+        if (colorIdx >= 0 && colorIdx < 3) {
+          gs.cartonColors[colorIdx] = e.target.value;
+          applyCartonToGroupState(gs);
           renderGroup(section);
           updatePurchaseTotal();
         }
@@ -6931,8 +7107,35 @@ function bindSuppliers() {
       if (modeBtn && !modeBtn.disabled) {
         gs.mode = modeBtn.dataset.groupMode;
         if (gs.mode === 'NEW') renderInlineOptionsEditor(section);
+        else if (gs.mode === 'CARTON') applyCartonToGroupState(gs);
+        syncCartonTitles();
         renderGroup(section);
         if (gs.mode === 'EXISTING') syncGroupDefaultRetailPrice(section);
+        updatePurchaseTotal();
+        return;
+      }
+
+      const cartonTypeBtn = e.target.closest('[data-carton-type]');
+      if (cartonTypeBtn) {
+        gs.cartonTypeId = cartonTypeBtn.dataset.cartonType;
+        applyCartonToGroupState(gs);
+        renderGroup(section);
+        updatePurchaseTotal();
+        return;
+      }
+
+      const cartonSizeBtn = e.target.closest('[data-carton-size]');
+      if (cartonSizeBtn) {
+        gs.cartonSize = Number.parseInt(cartonSizeBtn.dataset.cartonSize ?? '10', 10);
+        applyCartonToGroupState(gs);
+        renderGroup(section);
+        updatePurchaseTotal();
+        return;
+      }
+
+      if (e.target.closest('[data-carton-toggle-matrix]')) {
+        gs.cartonMatrixOpen = !gs.cartonMatrixOpen;
+        renderGroup(section);
         updatePurchaseTotal();
         return;
       }
@@ -6998,6 +7201,7 @@ function bindSuppliers() {
           selections.delete(idx);
           groupStates.delete(String(idx));
           section.remove();
+          syncCartonTitles();
           updatePurchaseTotal();
         } else {
           toast('يجب أن تحتوي الفاتورة على موديل واحد على الأقل', 'error');
@@ -7006,7 +7210,7 @@ function bindSuppliers() {
       }
 
       if (e.target.closest('[data-fill-serie="standard"]')) {
-        if (gs.mode === 'NEW') {
+        if (gs.mode === 'NEW' || gs.mode === 'CARTON') {
           const plan = buildInlineProductPlan(section, gs);
           const axis2Values = plan.options[1]?.values ?? [];
           section.querySelectorAll('[data-new-qty-key]').forEach((inp) => {
@@ -7032,7 +7236,7 @@ function bindSuppliers() {
       }
 
       if (e.target.closest('[data-fill-serie="one"]')) {
-        if (gs.mode === 'NEW') {
+        if (gs.mode === 'NEW' || gs.mode === 'CARTON') {
           section.querySelectorAll('[data-new-qty-key]').forEach((inp) => {
             const next = (Number(inp.value) || 0) + 1;
             inp.value = String(next);
@@ -7052,7 +7256,7 @@ function bindSuppliers() {
       }
 
       if (e.target.closest('[data-clear-all]')) {
-        if (gs.mode === 'NEW') {
+        if (gs.mode === 'NEW' || gs.mode === 'CARTON') {
           gs.newQuantities.clear();
           section.querySelectorAll('[data-new-qty-key]').forEach((inp) => {
             inp.value = '0';
@@ -7074,9 +7278,11 @@ function bindSuppliers() {
       renderInlineOptionsEditor(newSection);
       renderGroup(newSection);
       syncGroupDefaultRetailPrice(newSection);
+      syncCartonTitles();
       updatePurchaseTotal();
     };
 
+    root.querySelector('#add-purchase-carton')?.addEventListener('click', () => addGroup('CARTON'));
     root.querySelector('#add-purchase-new-product')?.addEventListener('click', () => addGroup('NEW'));
     root.querySelector('#add-purchase-product')?.addEventListener('click', () => addGroup('EXISTING'));
   };
@@ -8960,7 +9166,79 @@ async function showThermalReceiptModal(saleId) {
     toast(error.message, 'error');
   }
 }
-function bindAccounting() { const decimals = currencyDecimals(state.data.company.currency); document.querySelectorAll('#treasury-transfer-btn').forEach((btn) => btn.addEventListener('click', () => { supplierModal(`<p>تحويل النقدية بين الدرج والخزينة والبنك مع ترحيل قيد مزدوج فوري.</p><label>من حساب<select name="fromAccount" required><option value="1010">درج النقدية (1010)</option><option value="1015">الخزينة الرئيسية (1015)</option><option value="1020">البنك والتحصيل الإلكتروني (1020)</option></select></label><label>إلى حساب<select name="toAccount" required><option value="1015">الخزينة الرئيسية (1015)</option><option value="1020">البنك والتحصيل الإلكتروني (1020)</option><option value="1010">درج النقدية (1010)</option></select></label><label>المبلغ (${state.data.company.currency})<input name="amount" inputmode="decimal" required></label><label>ملاحظات (اختياري)<input name="notes" maxlength="300" placeholder="مثال: توريد نقدية نهاية اليوم"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'treasury-transfer-form', '/api/accounting/treasury-transfer', (data) => ({ ...data, amount: toMinor(data.amount, decimals) }), 'تم تحويل النقدية وترحيل القيد المحاسبي بنجاح'); })); document.querySelectorAll('#close-shift-btn').forEach((btn) => btn.addEventListener('click', () => { const bookLabel = state.data.drawerBookBalance ? money(state.data.drawerBookBalance) : '—'; supplierModal(`<p>الرصيد الدفتري الحالي لدرج النقدية (1010): <strong>${bookLabel}</strong>. أدخل النقدية الفعلية المعدودة في الدرج لإثبات التطابق أو تسوية العجز/الزيادة محاسبيًا.</p><label>النقدية الفعلية في الدرج (${state.data.company.currency})<input name="actualCashAmount" inputmode="decimal" required></label><label>ملاحظات التقفيل (اختياري)<input name="notes" maxlength="300"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'shift-close-form', '/api/accounting/shift-close', (data) => ({ ...data, actualCashAmount: toMinor(data.actualCashAmount, decimals) }), 'تم تقفيل الشيفت وتسوية رصيد درج النقدية'); })); document.querySelectorAll('.close-period-btn').forEach((btn) => btn.addEventListener('click', async () => { const accepted = await showConfirmModal({ title: 'إقفال الفترة المحاسبية', message: `هل تريد إقفال الفترة المحاسبية (${btn.dataset.periodName}) نهائيًا؟ لا يمكن تسجيل قيود بتاريخ قديم داخلها بعد الإقفال.`, confirmText: 'تأكيد الإقفال', cancelText: 'إلغاء', danger: true }); if (!accepted) return; btn.disabled = true; try { await api('/api/accounting/periods/close', { method: 'POST', skipConfirm: true, body: JSON.stringify({ periodId: btn.dataset.periodId }) }); await loadData(state.data.selectedStoreId); render(); toast('تم إقفال الفترة المحاسبية بنجاح'); } catch (error) { toast(error.message, 'error'); btn.disabled = false; } })); }
+function renderTreasuryOverviewPanel() {
+  const balances = state.data?.treasuryBalances;
+  if (!balances) return '';
+  const isOwner = state.data?.user?.role === 'OWNER';
+  const canTransfer = ['OWNER', 'STORE_MANAGER'].includes(state.data?.user?.role);
+  const showOpeningCashBtn = isOwner && !state.data?.openingBalanceEntry;
+  return `
+    <section class="panel compact-panel treasury-overview-panel" style="margin-bottom:16px;">
+      <div class="panel-heading" style="margin-bottom:12px;">
+        <div>
+          <h3>أرصدة الخزينة والنقدية الحالية</h3>
+          <p>الأرصدة الدفترية المباشرة لدرج النقدية والخزينة الرئيسية والبنك / المحفظة لهذا الفرع.</p>
+        </div>
+        <div class="table-actions-inline" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          ${showOpeningCashBtn ? `<button type="button" class="button button-secondary button-sm" id="opening-cash-balance-btn">${icon('plus', 15)} رصيد الكاش الافتتاحي</button>` : ''}
+          ${canTransfer ? `<button type="button" class="button button-primary button-sm" id="treasury-transfer-btn">تحويل نقدية (درج / خزينة / بنك)</button>` : ''}
+        </div>
+      </div>
+      <div class="fm-card-grid" style="margin-bottom:0;">
+        <div class="fm-kpi-card">
+          <small>درج النقدية (1010)</small>
+          <strong class="table-total">${money(balances.drawer)}</strong>
+          <small>الرصيد النقدي المتاح بالدرج</small>
+        </div>
+        <div class="fm-kpi-card">
+          <small>الخزينة الرئيسية (1015)</small>
+          <strong class="table-total text-green">${money(balances.safe)}</strong>
+          <small>الخزينة الداخلية بالفرع</small>
+        </div>
+        <div class="fm-kpi-card">
+          <small>البنك / المحفظة (1020)</small>
+          <strong class="table-total text-purple">${money(balances.bank)}</strong>
+          <small>التحصيل البنكي والمحافظ الإلكترونية</small>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function showOpeningCashModal() {
+  if (state.data?.user?.role !== 'OWNER' || state.data?.openingBalanceEntry) return;
+  const currency = state.data.company.currency;
+  const decimals = currencyDecimals(currency);
+  const today = localDateIso();
+  supplierModal(
+    `<p>أدخل رصيد الكاش الافتتاحي للفرع (درج، خزينة، بنك/محفظة فقط) — يُسجَّل لمرة واحدة بقيد متوازن مقابل رأس المال (3010).</p>
+     <div class="form-grid">
+       <label>رصيد درج النقدية — 1010 (${currency})<input name="cashDrawer" inputmode="decimal" value="0.00" required autofocus></label>
+       <label>رصيد الخزينة الرئيسية — 1015 (${currency})<input name="cashSafe" inputmode="decimal" value="0.00" required></label>
+     </div>
+     <div class="form-grid">
+       <label>رصيد البنك / المحفظة — 1020 (${currency})<input name="bank" inputmode="decimal" value="0.00" required></label>
+       <label>تاريخ القيد الافتتاحي<input name="entryDate" type="date" value="${today}" required></label>
+     </div>
+     <label>ملاحظات (اختياري)<input name="notes" maxlength="300" placeholder="مثال: رصيد بداية التشغيل"></label>
+     <input type="hidden" name="storeId" value="${state.data.selectedStoreId}">
+     <input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`,
+    'opening-cash-form',
+    '/api/accounting/opening-balances',
+    (data) => ({
+      storeId: data.storeId,
+      idempotencyKey: data.idempotencyKey,
+      entryDate: data.entryDate,
+      cashDrawer: toMinor(data.cashDrawer || '0', decimals),
+      cashSafe: toMinor(data.cashSafe || '0', decimals),
+      bank: toMinor(data.bank || '0', decimals),
+      ...(String(data.notes ?? '').trim() ? { notes: String(data.notes).trim() } : {}),
+    }),
+    'تم تسجيل رصيد الكاش الافتتاحي بنجاح',
+  );
+}
+
+function bindAccounting() { const decimals = currencyDecimals(state.data.company.currency); document.querySelectorAll('#opening-cash-balance-btn').forEach((btn) => btn.addEventListener('click', () => { showOpeningCashModal(); })); document.querySelectorAll('#treasury-transfer-btn').forEach((btn) => btn.addEventListener('click', () => { supplierModal(`<p>تحويل النقدية بين الدرج والخزينة والبنك مع ترحيل قيد مزدوج فوري.</p><label>من حساب<select name="fromAccount" required><option value="1010">درج النقدية (1010)</option><option value="1015">الخزينة الرئيسية (1015)</option><option value="1020">البنك والتحصيل الإلكتروني (1020)</option></select></label><label>إلى حساب<select name="toAccount" required><option value="1015">الخزينة الرئيسية (1015)</option><option value="1020">البنك والتحصيل الإلكتروني (1020)</option><option value="1010">درج النقدية (1010)</option></select></label><label>المبلغ (${state.data.company.currency})<input name="amount" inputmode="decimal" required></label><label>ملاحظات (اختياري)<input name="notes" maxlength="300" placeholder="مثال: توريد نقدية نهاية اليوم"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'treasury-transfer-form', '/api/accounting/treasury-transfer', (data) => ({ ...data, amount: toMinor(data.amount, decimals) }), 'تم تحويل النقدية وترحيل القيد المحاسبي بنجاح'); })); document.querySelectorAll('#close-shift-btn').forEach((btn) => btn.addEventListener('click', () => { const bookLabel = state.data.drawerBookBalance ? money(state.data.drawerBookBalance) : '—'; supplierModal(`<p>الرصيد الدفتري الحالي لدرج النقدية (1010): <strong>${bookLabel}</strong>. أدخل النقدية الفعلية المعدودة في الدرج لإثبات التطابق أو تسوية العجز/الزيادة محاسبيًا.</p><label>النقدية الفعلية في الدرج (${state.data.company.currency})<input name="actualCashAmount" inputmode="decimal" required></label><label>ملاحظات التقفيل (اختياري)<input name="notes" maxlength="300"></label><input type="hidden" name="storeId" value="${state.data.selectedStoreId}"><input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`, 'shift-close-form', '/api/accounting/shift-close', (data) => ({ ...data, actualCashAmount: toMinor(data.actualCashAmount, decimals) }), 'تم تقفيل الشيفت وتسوية رصيد درج النقدية'); })); document.querySelectorAll('.close-period-btn').forEach((btn) => btn.addEventListener('click', async () => { const accepted = await showConfirmModal({ title: 'إقفال الفترة المحاسبية', message: `هل تريد إقفال الفترة المحاسبية (${btn.dataset.periodName}) نهائيًا؟ لا يمكن تسجيل قيود بتاريخ قديم داخلها بعد الإقفال.`, confirmText: 'تأكيد الإقفال', cancelText: 'إلغاء', danger: true }); if (!accepted) return; btn.disabled = true; try { await api('/api/accounting/periods/close', { method: 'POST', skipConfirm: true, body: JSON.stringify({ periodId: btn.dataset.periodId }) }); await loadData(state.data.selectedStoreId); render(); toast('تم إقفال الفترة المحاسبية بنجاح'); } catch (error) { toast(error.message, 'error'); btn.disabled = false; } })); }
 function backupView() {
   const daily = state.dailyBackups;
   const backupsList = daily?.backups ?? [];

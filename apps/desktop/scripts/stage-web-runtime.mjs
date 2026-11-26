@@ -157,6 +157,7 @@ const requiredPaths = [
   join(stageWebDir, 'excel-spreadsheet.mjs'),
   join(stageWebDir, 'public', 'index.html'),
   join(stageWebDir, 'public', 'app.js'),
+  join(stageWebDir, 'public', 'carton-presets.mjs'),
   join(stageWebDir, 'public', 'styles.css'),
   join(
     stageWebDir,

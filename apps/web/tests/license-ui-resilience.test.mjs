@@ -4,9 +4,19 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
+import {
+  CARTON_SIZES,
+  CARTON_TYPES,
+  buildCartonDistribution,
+  mergeDuplicateSkuNewProducts,
+} from '../public/carton-presets.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const appSource = await readFile(join(here, '..', 'public', 'app.js'), 'utf8');
+const rawAppSource = await readFile(join(here, '..', 'public', 'app.js'), 'utf8');
+const appSource = rawAppSource.replace(
+  /^\s*import\s*\{[\s\S]*?\}\s*from\s*['"]\.\/carton-presets\.mjs['"];?\s*/u,
+  '',
+);
 
 function createElement(id = '') {
   const listeners = {};
@@ -99,6 +109,10 @@ function loadApp(routes) {
     Intl,
     Date,
     FormData: class { constructor() { this.entries = []; } get() { return null; } },
+    CARTON_SIZES,
+    CARTON_TYPES,
+    buildCartonDistribution,
+    mergeDuplicateSkuNewProducts,
   };
   windowStub.document = documentStub;
   vm.createContext(context);

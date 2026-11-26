@@ -146,6 +146,11 @@ test('UI removes main Opening Balances dialog, deduplicates buttons, adds one-ti
   assert.equal(appJs.includes('empty-new-monthly-obligation'), false);
   assert.equal(appJs.includes('!state.data.hasOpeningSupplierDebts'), true);
   assert.equal(appJs.includes('!data.openingInventoryEntry'), true);
+  assert.equal(appJs.includes("data.user.role === 'OWNER' && !data.openingInventoryEntry"), true);
+  assert.equal(appJs.includes('opening-cash-balance-btn'), true);
+  assert.equal(appJs.includes('renderTreasuryOverviewPanel'), true);
+  assert.equal(appJs.includes('treasury-transfer-btn'), true);
+  assert.equal(appJs.includes('shift-transfer-to-safe'), true);
   assert.equal(appJs.includes('new-opening-debt'), true);
   assert.equal(appJs.includes('opening-inventory-import-btn'), true);
   assert.equal(appJs.includes('showEditOpeningDebtModal'), true);
@@ -569,4 +574,290 @@ test('supplier opening debt batch without invoice, one-time guard, editing, payd
   assert.equal(fmRes.status, 200);
   const openingDebtEvents = fmRes.body.timeline.filter((e) => e.category === 'مديونية افتتاحية لتاجر');
   assert.ok(openingDebtEvents.length >= 2);
+});
+
+test('opening cash (OWNER-only, no inventory/payables, 409 repeat), RBAC, manager shift-end transfer to safe, and existing-product variant merge', async () => {
+  const ownerCookie = cookie;
+  const reqAs = async (actorCookie, path, options = {}) => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      ...options,
+      headers: {
+        Origin: baseUrl,
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(actorCookie ? { Cookie: actorCookie } : {}),
+        ...(options.headers ?? {}),
+      },
+    });
+    const text = await response.text();
+    return { status: response.status, headers: response.headers, body: text ? JSON.parse(text) : null };
+  };
+  const loginAs = async (username, password) => {
+    const loginRes = await fetch(`${baseUrl}/api/login`, {
+      method: 'POST',
+      headers: { Origin: baseUrl, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    assert.equal(loginRes.status, 200);
+    return (loginRes.headers.get('set-cookie') ?? '').split(';')[0];
+  };
+
+  // Create fresh 3rd store (branch C) with zero prior opening balances or opening inventory
+  const store3Res = await reqAs(ownerCookie, '/api/stores', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'فرع التجمع', code: 'TAGM', address: 'التجمع الخامس' }),
+  });
+  assert.equal(store3Res.status, 201);
+  const store3Id = store3Res.body.id;
+
+  // Create CASHIER and STORE_MANAGER users
+  assert.equal((await reqAs(ownerCookie, '/api/users', {
+    method: 'POST',
+    body: JSON.stringify({
+      username: 'cashier_rbac',
+      fullName: 'كاشير الاختبار',
+      password: 'Cashier-Rbac-Pass-2026',
+      role: 'CASHIER',
+      storeId: store3Id,
+    }),
+  })).status, 201);
+  assert.equal((await reqAs(ownerCookie, '/api/users', {
+    method: 'POST',
+    body: JSON.stringify({
+      username: 'manager_rbac',
+      fullName: 'مدير الفرع',
+      password: 'Manager-Rbac-Pass-2026',
+      role: 'STORE_MANAGER',
+      storeId: store3Id,
+    }),
+  })).status, 201);
+
+  const cashierCookie = await loginAs('cashier_rbac', 'Cashier-Rbac-Pass-2026');
+  const managerCookie = await loginAs('manager_rbac', 'Manager-Rbac-Pass-2026');
+
+  // 1. Opening cash rejects inventory / supplierPayables (400 Strict Zod)
+  const rejectedFieldsOb = await reqAs(ownerCookie, '/api/accounting/opening-balances', {
+    method: 'POST',
+    body: JSON.stringify({
+      storeId: store3Id,
+      idempotencyKey: randomUUID(),
+      entryDate: '2026-10-01',
+      cashDrawer: '100000',
+      cashSafe: '50000',
+      bank: '25000',
+      inventory: '10000',
+      supplierPayables: '5000',
+    }),
+  });
+  assert.equal(rejectedFieldsOb.status, 400);
+
+  // 2. Non-OWNER (CASHIER & STORE_MANAGER) are rejected (403) from opening cash & opening inventory
+  const dummyCsvBase64 = Buffer.from(
+    '\uFEFFاسم الصنف,النوع / الفئة,كود الموديل,اللون,المقاس,الكمية,سعر التكلفة (جنيه),سعر البيع (جنيه)\nتيشيرت بيكيه,ملابس,SHIRT-EX,أسود,M,5,100,250\n',
+    'utf8',
+  ).toString('base64');
+  for (const deniedCookie of [cashierCookie, managerCookie]) {
+    assert.equal((await reqAs(deniedCookie, '/api/accounting/opening-balances', {
+      method: 'POST',
+      body: JSON.stringify({
+        storeId: store3Id,
+        idempotencyKey: randomUUID(),
+        entryDate: '2026-10-01',
+        cashDrawer: '50000',
+      }),
+    })).status, 403);
+    assert.equal((await reqAs(deniedCookie, '/api/inventory/opening-import/preview', {
+      method: 'POST',
+      body: JSON.stringify({ storeId: store3Id, filename: 's.csv', fileBase64: dummyCsvBase64 }),
+    })).status, 403);
+    assert.equal((await reqAs(deniedCookie, '/api/inventory/opening-import/commit', {
+      method: 'POST',
+      body: JSON.stringify({ idempotencyKey: randomUUID(), storeId: store3Id, filename: 's.csv', fileBase64: dummyCsvBase64 }),
+    })).status, 403);
+  }
+
+  // CASHIER is also rejected (403) from manual treasury transfer
+  assert.equal((await reqAs(cashierCookie, '/api/accounting/treasury-transfer', {
+    method: 'POST',
+    body: JSON.stringify({
+      storeId: store3Id,
+      idempotencyKey: randomUUID(),
+      fromAccount: '1010',
+      toAccount: '1015',
+      amount: '1000',
+    }),
+  })).status, 403);
+
+  // 3. OWNER posts opening cash once (1010=100,000; 1015=50,000; 1020=25,000 -> Cr 3010=175,000), repeat fails with 409
+  const cashOb1 = await reqAs(ownerCookie, '/api/accounting/opening-balances', {
+    method: 'POST',
+    body: JSON.stringify({
+      storeId: store3Id,
+      idempotencyKey: randomUUID(),
+      entryDate: '2026-10-01',
+      cashDrawer: '100000', // 1,000 EGP
+      cashSafe: '50000',    // 500 EGP
+      bank: '25000',        // 250 EGP
+      notes: 'رصيد كاش التجمع',
+    }),
+  });
+  assert.equal(cashOb1.status, 201, JSON.stringify(cashOb1.body));
+  const cashOb2 = await reqAs(ownerCookie, '/api/accounting/opening-balances', {
+    method: 'POST',
+    body: JSON.stringify({
+      storeId: store3Id,
+      idempotencyKey: randomUUID(),
+      entryDate: '2026-10-01',
+      cashDrawer: '10000',
+    }),
+  });
+  assert.equal(cashOb2.status, 409);
+
+  // 4. Existing product + missing colors/sizes merge on opening inventory import (P&L unaffected)
+  const catsRes = await reqAs(ownerCookie, `/api/data?storeId=${store3Id}`);
+  const catId = catsRes.body.categories[0]?.id ?? null;
+  const createExistingProd = await reqAs(ownerCookie, '/api/products', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'تيشيرت موجود مسبقًا',
+      sku: 'SHIRT-EX',
+      categoryId: catId,
+      hasVariants: true,
+      options: [
+        { key: 'color', name: 'اللون', values: ['أسود'] },
+        { key: 'size', name: 'المقاس', values: ['M'] },
+      ],
+      variants: [
+        { sku: 'SHIRT-EX-BLK-M', attributes: { color: 'أسود', size: 'M' }, retailPrice: '30000', reorderPoint: '1' },
+      ],
+    }),
+  });
+  assert.equal(createExistingProd.status, 201, JSON.stringify(createExistingProd.body));
+
+  // Sheet contains existing (أسود / M) + two NEW missing variants (أسود / XL) and (كحلي / L)
+  const mergeCsv = Buffer.from(
+    '\uFEFFاسم الصنف,النوع / الفئة,كود الموديل,اللون,المقاس,الكمية,سعر التكلفة (جنيه),سعر البيع (جنيه)\n'
+    + 'تيشيرت موجود مسبقًا,ملابس,SHIRT-EX,أسود,M,5,150,300\n'
+    + 'تيشيرت موجود مسبقًا,ملابس,SHIRT-EX,أسود,XL,8,150,320\n'
+    + 'تيشيرت موجود مسبقًا,ملابس,SHIRT-EX,كحلي,L,4,160,320\n',
+    'utf8',
+  ).toString('base64');
+  const mergePreview = await reqAs(ownerCookie, '/api/inventory/opening-import/preview', {
+    method: 'POST',
+    body: JSON.stringify({ storeId: store3Id, filename: 'merge.csv', fileBase64: mergeCsv }),
+  });
+  assert.equal(mergePreview.status, 200);
+  assert.equal(mergePreview.body.readyToCommit, true, JSON.stringify(mergePreview.body));
+  assert.equal(mergePreview.body.summary.variantCount, 2); // Only the 2 missing variants!
+  assert.equal(mergePreview.body.summary.totalUnits, '12'); // 8 + 4
+
+  const mergeCommit = await reqAs(ownerCookie, '/api/inventory/opening-import/commit', {
+    method: 'POST',
+    body: JSON.stringify({
+      idempotencyKey: randomUUID(),
+      storeId: store3Id,
+      filename: 'merge.csv',
+      fileBase64: mergeCsv,
+      entryDate: '2026-10-01',
+    }),
+  });
+  assert.equal(mergeCommit.status, 201, JSON.stringify(mergeCommit.body));
+  assert.equal(mergeCommit.body.summary.totalCost.amount, '184000'); // (8*150 + 4*160) EGP = 1,840 EGP
+
+  const dataAfterMerge = await reqAs(ownerCookie, `/api/data?storeId=${store3Id}`);
+  const mergedProd = dataAfterMerge.body.products.find((p) => p.sku === 'SHIRT-EX');
+  assert.equal(mergedProd.variants.length, 3); // M (existing) + XL + L
+
+  // 5. Shift closing rules: Cashier cannot transfer to safe; Manager transfers & remaining drawer becomes next shift opening
+  const cShift = await reqAs(cashierCookie, '/api/shifts/start', {
+    method: 'POST',
+    body: JSON.stringify({ storeId: store3Id, openingCash: '100000' }),
+  });
+  assert.equal(cShift.status, 201);
+  assert.equal((await reqAs(cashierCookie, '/api/shifts/end', {
+    method: 'POST',
+    body: JSON.stringify({
+      idempotencyKey: randomUUID(),
+      shiftId: cShift.body.shift.id,
+      actualCash: '100000',
+      transferToSafe: '20000',
+    }),
+  })).status, 403);
+  assert.equal((await reqAs(cashierCookie, '/api/shifts/end', {
+    method: 'POST',
+    body: JSON.stringify({
+      idempotencyKey: randomUUID(),
+      shiftId: cShift.body.shift.id,
+      actualCash: '100000',
+      notes: 'عد إغلاق كاشير فقط',
+    }),
+  })).status, 200);
+
+  // Manager closes own shift with 70,000 transferred from drawer (1010) to safe (1015) -> 30,000 stays in drawer
+  const mShiftStart = await reqAs(managerCookie, '/api/shifts/start', {
+    method: 'POST',
+    body: JSON.stringify({ storeId: store3Id }), // omits openingCash -> defaults to 100,000 remaining!
+  });
+  assert.equal(mShiftStart.status, 201);
+  assert.equal(mShiftStart.body.shift.openingCash, '100000');
+
+  const mShiftClose = await reqAs(managerCookie, '/api/shifts/end', {
+    method: 'POST',
+    body: JSON.stringify({
+      idempotencyKey: randomUUID(),
+      shiftId: mShiftStart.body.shift.id,
+      actualCash: '100000',
+      transferToSafe: '70000',
+      notes: 'توريد للخزينة عند التقفيل',
+    }),
+  });
+  assert.equal(mShiftClose.status, 200, JSON.stringify(mShiftClose.body));
+  assert.equal(mShiftClose.body.shift.transferredToSafe, '70000');
+  assert.equal(mShiftClose.body.shift.remainingDrawerCash, '30000');
+
+  // Manager manual treasury transfer: move 10,000 from Safe (1015) to Bank (1020)
+  const mgrManualTransfer = await reqAs(managerCookie, '/api/accounting/treasury-transfer', {
+    method: 'POST',
+    body: JSON.stringify({
+      storeId: store3Id,
+      idempotencyKey: randomUUID(),
+      fromAccount: '1015',
+      toAccount: '1020',
+      amount: '10000',
+      notes: 'إيداع بنكي يدوي',
+    }),
+  });
+  assert.equal(mgrManualTransfer.status, 201);
+
+  // Check treasuryBalances & Trial Balance & suggestedOpeningCash for next shift match!
+  // Drawer (1010) = 100,000 - 70,000 = 30,000
+  // Safe   (1015) = 50,000 + 70,000 - 10,000 = 110,000
+  // Bank   (1020) = 25,000 + 10,000 = 35,000
+  const mgrDataAfter = await reqAs(managerCookie, `/api/data?storeId=${store3Id}`);
+  assert.equal(mgrDataAfter.status, 200);
+  assert.equal(mgrDataAfter.body.treasuryBalances.drawer.amount, '30000');
+  assert.equal(mgrDataAfter.body.treasuryBalances.safe.amount, '110000');
+  assert.equal(mgrDataAfter.body.treasuryBalances.bank.amount, '35000');
+  assert.equal(mgrDataAfter.body.suggestedOpeningCash, '30000');
+
+  const tb3 = await reqAs(ownerCookie, `/api/reports/trial-balance?storeId=${store3Id}`);
+  assert.equal(tb3.status, 200);
+  const acc3 = (code) => tb3.body.accounts.find((a) => a.accountCode === code);
+  assert.equal(BigInt(acc3('1010').debitBalance.amount) - BigInt(acc3('1010').creditBalance.amount), 30000n);
+  assert.equal(BigInt(acc3('1015').debitBalance.amount) - BigInt(acc3('1015').creditBalance.amount), 110000n);
+  assert.equal(BigInt(acc3('1020').debitBalance.amount) - BigInt(acc3('1020').creditBalance.amount), 35000n);
+  assert.equal(BigInt(acc3('1300').debitBalance.amount) - BigInt(acc3('1300').creditBalance.amount), 184000n);
+  assert.equal(BigInt(acc3('3010').creditBalance.amount) - BigInt(acc3('3010').debitBalance.amount), 175000n + 184000n);
+
+  // Verify P&L on branch C remains completely unaffected (0 profit/loss)
+  const pl3 = await reqAs(ownerCookie, `/api/reports/profit-loss?storeId=${store3Id}&from=2026-10-01&to=2026-12-31`);
+  assert.equal(pl3.status, 200);
+  assert.equal(BigInt(pl3.body.profitLoss.operatingProfit.amount), 0n);
+
+  // Verify next shift defaults openingCash to remaining 30,000 automatically
+  const nextShift = await reqAs(cashierCookie, '/api/shifts/start', {
+    method: 'POST',
+    body: JSON.stringify({ storeId: store3Id }),
+  });
+  assert.equal(nextShift.status, 201);
+  assert.equal(nextShift.body.shift.openingCash, '30000');
 });

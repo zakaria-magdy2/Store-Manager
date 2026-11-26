@@ -55,7 +55,7 @@ export function decryptBackupArchive(archive: Buffer, passphrase: string): Buffe
   const iv = archive.subarray(MAGIC_V1.length + SALT_BYTES, HEADER_BYTES);
   const tag = archive.subarray(archive.length - TAG_BYTES);
   const ciphertext = archive.subarray(HEADER_BYTES, archive.length - TAG_BYTES);
-  const decipher = createDecipheriv('aes-256-gcm', deriveKey(passphrase, salt), iv);
+  const decipher = createDecipheriv('aes-256-gcm', deriveKey(passphrase, salt), iv, { authTagLength: 16 });
   decipher.setAuthTag(tag);
   const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
   return version === 2 ? gunzipSync(decrypted, { maxOutputLength: MAX_DATABASE_BYTES }) : decrypted;
@@ -339,7 +339,7 @@ export async function prepareEncryptedSqliteRestore(
     if (!version) throw new Error('Invalid backup archive');
     const salt = header.subarray(MAGIC_V1.length, MAGIC_V1.length + SALT_BYTES);
     const iv = header.subarray(MAGIC_V1.length + SALT_BYTES, HEADER_BYTES);
-    const decipher = createDecipheriv('aes-256-gcm', deriveKey(passphrase, salt), iv);
+    const decipher = createDecipheriv('aes-256-gcm', deriveKey(passphrase, salt), iv, { authTagLength: 16 });
     decipher.setAuthTag(tag);
     const encryptedStream = archive.createReadStream({
       start: HEADER_BYTES,

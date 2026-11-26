@@ -2889,7 +2889,7 @@ test('adversarial POS stress suite: race conditions, dirty inputs, discounted pa
     const openingRes = await sReq('/api/accounting/opening-balances', {
       method: 'POST',
       cookieStr: ownerCookie,
-      body: { storeId, idempotencyKey: randomUUID(), entryDate: todayStr, cashDrawer: '50000', cashSafe: '100000', bank: '0', inventory: '0', supplierPayables: '0', notes: 'افتتاحي' },
+      body: { storeId, idempotencyKey: randomUUID(), entryDate: todayStr, cashDrawer: '50000', cashSafe: '100000', bank: '0', notes: 'افتتاحي' },
     });
     assert.equal(openingRes.response.status, 201, JSON.stringify(openingRes.payload));
     const tbRes = await sReq(`/api/reports/trial-balance?storeId=${storeId}`, { cookieStr: auditorCookie });
@@ -3199,7 +3199,7 @@ test('Pre-launch hardening: duplicate opening balances 409 guard and Trial Balan
 
     // 1. Initial Opening Balance on 2026-10-01 -> 201 Created
     const obKey1 = randomUUID();
-    const obPayload1 = { storeId, idempotencyKey: obKey1, entryDate: '2026-10-01', cashDrawer: '100000', cashSafe: '200000', bank: '0', inventory: '0', supplierPayables: '0', notes: 'أول تشغيل' };
+    const obPayload1 = { storeId, idempotencyKey: obKey1, entryDate: '2026-10-01', cashDrawer: '100000', cashSafe: '200000', bank: '0', notes: 'أول تشغيل' };
     const ob1 = await hReq('/api/accounting/opening-balances', { method: 'POST', cookieStr: ownerCookie, body: obPayload1 });
     assert.equal(ob1.response.status, 201, JSON.stringify(ob1.payload));
 
@@ -3338,7 +3338,7 @@ test('Final POS & accounting regression: split cash+electronic checkout GL (1010
     assert.equal((await req('/api/accounting/opening-balances', {
       method: 'POST',
       cookieStr,
-      body: { storeId, idempotencyKey: randomUUID(), entryDate: mOpen.from, cashDrawer: '100000', cashSafe: '100000', bank: '0', inventory: '0', supplierPayables: '0', notes: 'افتتاحي' },
+      body: { storeId, idempotencyKey: randomUUID(), entryDate: mOpen.from, cashDrawer: '100000', cashSafe: '100000', bank: '0', notes: 'افتتاحي' },
     })).response.status, 201);
 
     // Two expenses in mOpen: 10000 (to reverse later) + 30000 (stays active) from CASH_DRAWER
