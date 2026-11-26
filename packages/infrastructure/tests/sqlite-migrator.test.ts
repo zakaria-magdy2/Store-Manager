@@ -1075,11 +1075,12 @@ describe('SQLite Database & Migration Engine', () => {
     const db = dbManager.getDb();
     const migrator = new DatabaseMigrator(db);
 
-    // Before first run, all registered migrations including 034 and 035 are pending
+    // Before first run, all registered migrations including 034, 035, and 036 are pending
     const pendingBefore = await migrator.getPendingMigrationNames();
     expect(pendingBefore.length).toBe(REGISTERED_MIGRATION_NAMES.length);
     expect(pendingBefore).toContain('034_clock_reset_recovery');
     expect(pendingBefore).toContain('035_supplier_opening_debt');
+    expect(pendingBefore).toContain('036_opening_debt_uniqueness');
 
     const first = await migrator.migrateToLatest();
     expect(first.success).toBe(true);
@@ -1090,13 +1091,18 @@ describe('SQLite Database & Migration Engine', () => {
     expect(second.success).toBe(true);
     expect(second.executedMigrations).toEqual([]);
 
-    // Verify 034 and 035 schema additions
+    // Verify 034, 035, and 036 schema additions
     const licensingCols = (dbManager.getRawDatabase().pragma('table_info(system_licensing)') as { name: string }[]).map((c) => c.name);
     expect(licensingCols).toContain('ignored_sales_rowid');
     expect(licensingCols).toContain('ignored_shifts_rowid');
     expect(licensingCols).toContain('ignored_audit_rowid');
     const purchaseCols = (dbManager.getRawDatabase().pragma('table_info(supplier_purchases)') as { name: string }[]).map((c) => c.name);
     expect(purchaseCols).toContain('entry_kind');
+    const openingDebtIdx = dbManager
+      .getRawDatabase()
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_supplier_opening_debt_unique'")
+      .get() as { name?: string } | undefined;
+    expect(openingDebtIdx?.name).toBe('idx_supplier_opening_debt_unique');
     const resetTable = dbManager
       .getRawDatabase()
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'used_clock_reset_tokens'")

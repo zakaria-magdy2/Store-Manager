@@ -2182,7 +2182,7 @@ function dashboardView() {
           <button type="button" class="button button-primary button-sm" data-page="backups">إعداد النسخ الخارجي</button>
         </div>`
       : '');
-  return `<div class="welcome-row"><div><div class="welcome-date">${new Intl.DateTimeFormat('ar-EG', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date())}</div><h2>${greeting}، ${escapeHtml((data.user.fullName ?? 'مدير النظام').split(' ')[0])} </h2><p>ده ملخص سريع للي بيحصل في متجرك النهارده.</p></div><button class="button button-primary" data-page="pos">${icon('plus', 18)} عملية بيع جديدة</button></div>${safetyBanner}<div class="metric-grid"><article class="metric-card"><div class="metric-head"><span>مبيعات اليوم</span><span class="metric-icon metric-purple">${icon('wallet', 19)}</span></div><strong>${data.summary.todayRevenue ? money(data.summary.todayRevenue) : '—'}</strong><div class="metric-foot"><span class="metric-muted">${data.summary.todaySalesCount ?? '—'} فاتورة اليوم</span><span class="metric-period">صافي اليوم</span></div></article><article class="metric-card"><div class="metric-head"><span>عدد الفواتير</span><span class="metric-icon metric-green">${icon('bag', 19)}</span></div><strong>${data.summary.todaySalesCount ?? '—'}</strong><div class="metric-foot"><span class="metric-muted">إجمالي العمليات المكتملة</span><span class="metric-positive">اليوم</span></div></article><article class="metric-card"><div class="metric-head"><span>أصناف المنتجات</span><span class="metric-icon metric-blue">${icon('box', 19)}</span></div><strong>${data.summary.productCount}</strong><div class="metric-foot"><span class="metric-muted">منتج مسجل في الكتالوج</span><span class="metric-period">الكتالوج</span></div></article><article class="metric-card"><div class="metric-head"><span>تنبيهات المخزون</span><span class="metric-icon metric-orange">${icon('store', 19)}</span></div><strong>${data.summary.lowStockCount}</strong><div class="metric-foot"><span class="metric-muted">منتجات عند حد إعادة الطلب</span><button class="text-action" data-page="inventory">عرض القائمة ←</button></div></article></div><div class="dashboard-grid"><section class="panel sales-panel"><div class="panel-heading"><div><h3>حركة المبيعات</h3><p>آخر عمليات البيع المسجلة على النظام</p></div><button class="text-action" data-page="sales">كل المبيعات <span>←</span></button></div>${data.sales.length ? `<div class="chart-legend"><span><i></i>صافي الفاتورة</span><span class="chart-period">آخر الفواتير</span></div><div class="sales-chart">${data.sales.slice(0, 7).reverse().map((sale, index) => { const displayTotal = sale.netTotal ?? sale.total; const pct = maxRevenue > 0n ? Number((BigInt(displayTotal.amount) * 100n) / maxRevenue) : 0; return `<div class="chart-column"><span class="bar-tooltip">${money(displayTotal)}</span><div class="chart-bar ${index === 6 ? 'bar-highlight' : ''}" style="height:${Math.max(12, pct)}%"></div><span class="chart-label">${new Intl.DateTimeFormat('ar-EG', { hour: '2-digit', minute: '2-digit' }).format(new Date(sale.createdAt))}</span></div>`; }).join('')}</div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('chart', 28)}</div><strong>المبيعات هتظهر هنا</strong><p>أول ما تسجل عملية بيع، هتلاقي ملخصها في الصفحة دي.</p><button class="button button-secondary" data-page="pos">ابدأ أول عملية بيع</button></div>`}</section><section class="panel stock-panel"><div class="panel-heading"><div><h3>محتاج إعادة طلب</h3><p>المنتجات اللي عندها تركيبات وصلت لحد الطلب</p></div><button class="icon-button small-icon" data-page="inventory">${icon('arrow', 17)}</button></div>${data.lowStock.length ? `<div class="stock-list">${data.lowStock.slice(0, 5).map((item) => `<div class="stock-row"><div class="stock-thumb">${icon('box', 17)}</div><div class="stock-copy"><strong>${escapeHtml(item.productName)}</strong><small>${item.lowVariantCount} تركيبة تحتاج طلب</small></div><span class="stock-count">${item.quantity} <small>إجمالي</small></span></div>`).join('')}</div>` : `<div class="empty-inline"><span class="empty-check">✓</span><strong>المخزون تمام</strong><p>مفيش أصناف محتاجة إعادة طلب حاليًا.</p></div>`}</section></div><section class="panel recent-panel"><div class="panel-heading"><div><h3>آخر الفواتير</h3><p>متابعة سريعة لأحدث عمليات البيع</p></div><button class="text-action" data-page="sales">عرض الكل <span>←</span></button></div>${sales.length ? salesTable(sales) : `<div class="empty-row">لسه مفيش فواتير. سجّل أول عملية بيع عشان تبدأ تتابع الحركة.</div>`}</section>`;
+  return `<div class="welcome-row"><div><div class="welcome-date">${new Intl.DateTimeFormat('ar-EG', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date())}</div><h2>${greeting}، ${escapeHtml((data.user.fullName ?? 'مدير النظام').split(' ')[0])} </h2><p>ده ملخص سريع للي بيحصل في متجرك النهارده.</p></div><button class="button button-primary" data-page="pos">${icon('plus', 18)} عملية بيع جديدة</button></div>${safetyBanner}<div class="metric-grid"><article class="metric-card"><div class="metric-head"><span>مبيعات اليوم</span><span class="metric-icon metric-purple">${icon('wallet', 19)}</span></div><strong>${data.summary.todayRevenue ? money(data.summary.todayRevenue) : '—'}</strong><div class="metric-foot"><span class="metric-muted">${data.summary.todaySalesCount ?? '—'} فاتورة اليوم</span><span class="metric-period">صافي اليوم</span></div></article><article class="metric-card"><div class="metric-head"><span>عدد الفواتير</span><span class="metric-icon metric-green">${icon('bag', 19)}</span></div><strong>${data.summary.todaySalesCount ?? '—'}</strong><div class="metric-foot"><span class="metric-muted">إجمالي العمليات المكتملة</span><span class="metric-positive">اليوم</span></div></article><article class="metric-card"><div class="metric-head"><span>أصناف المنتجات</span><span class="metric-icon metric-blue">${icon('box', 19)}</span></div><strong>${data.summary.productCount}</strong><div class="metric-foot"><span class="metric-muted">منتج مسجل في الكتالوج</span><span class="metric-period">الكتالوج</span></div></article><article class="metric-card"><div class="metric-head"><span>تنبيهات المخزون</span><span class="metric-icon metric-orange">${icon('store', 19)}</span></div><strong>${data.summary.lowStockCount}</strong><div class="metric-foot"><span class="metric-muted">منتجات عند حد إعادة الطلب</span><button class="text-action" data-page="inventory">عرض القائمة ←</button></div></article></div><div class="dashboard-grid"><section class="panel sales-panel"><div class="panel-heading"><div><h3>حركة المبيعات</h3><p>آخر عمليات البيع المسجلة على النظام</p></div><button class="text-action" data-page="sales">كل المبيعات <span>←</span></button></div>${data.sales.length ? `<div class="chart-legend"><span><i></i>صافي الفاتورة</span><span class="chart-period">آخر الفواتير</span></div><div class="sales-chart">${data.sales.slice(0, 7).reverse().map((sale, index) => { const displayTotal = sale.netTotal ?? sale.total; const pct = maxRevenue > 0n ? Number((BigInt(displayTotal.amount) * 100n) / maxRevenue) : 0; return `<div class="chart-column"><span class="bar-tooltip">${money(displayTotal)}</span><div class="chart-bar ${index === 6 ? 'bar-highlight' : ''}" style="height:${Math.max(12, pct)}%"></div><span class="chart-label">${new Intl.DateTimeFormat('ar-EG', { hour: '2-digit', minute: '2-digit' }).format(new Date(sale.createdAt))}</span></div>`; }).join('')}</div>` : `<div class="empty-chart"><div class="empty-illustration">${icon('chart', 28)}</div><strong>المبيعات هتظهر هنا</strong><p>أول ما تسجل عملية بيع من زر «عملية بيع جديدة» بالأعلى، هتلاقي ملخصها في الصفحة دي.</p></div>`}</section><section class="panel stock-panel"><div class="panel-heading"><div><h3>محتاج إعادة طلب</h3><p>المنتجات اللي عندها تركيبات وصلت لحد الطلب</p></div><button class="icon-button small-icon" data-page="inventory">${icon('arrow', 17)}</button></div>${data.lowStock.length ? `<div class="stock-list">${data.lowStock.slice(0, 5).map((item) => `<div class="stock-row"><div class="stock-thumb">${icon('box', 17)}</div><div class="stock-copy"><strong>${escapeHtml(item.productName)}</strong><small>${item.lowVariantCount} تركيبة تحتاج طلب</small></div><span class="stock-count">${item.quantity} <small>إجمالي</small></span></div>`).join('')}</div>` : `<div class="empty-inline"><span class="empty-check">✓</span><strong>المخزون تمام</strong><p>مفيش أصناف محتاجة إعادة طلب حاليًا.</p></div>`}</section></div><section class="panel recent-panel"><div class="panel-heading"><div><h3>آخر الفواتير</h3><p>متابعة سريعة لأحدث عمليات البيع</p></div><button class="text-action" data-page="sales">عرض الكل <span>←</span></button></div>${sales.length ? salesTable(sales) : `<div class="empty-row">لسه مفيش فواتير. سجّل أول عملية بيع عشان تبدأ تتابع الحركة.</div>`}</section>`;
 }
 
 function salesTable(sales) {
@@ -2613,7 +2613,7 @@ function inventoryView() {
       </div>
     </div>`;
 
-  return `<div class="page-heading-row"><div><p class="page-lead">${isCashier ? 'متابعة أرصدة المخزون والمقاسات والأسعار المتاحة للبيع.' : 'متابعة وجرد أرصدة المخزون للموديلات والأصناف الحالية وتقييم رأس المال والأرباح المتوقعة.'}</p></div><div class="products-heading-actions">${data.capabilities.canManageStores ? '<button class="button button-secondary" id="new-store-btn">+ إضافة فرع</button>' : ''}${data.capabilities.canTransferInventory && data.stores.length > 1 ? '<button class="button button-secondary" id="transfer-stock-btn">تحويل مخزون بين الفروع</button>' : ''}${data.capabilities.canAdjustInventory ? `${data.capabilities.canManageCatalog ? `<button class="button button-secondary" id="opening-inventory-import-btn">${icon('plus', 15)} إضافة المخزن الافتتاحي (إكسيل)</button>` : ''}<button class="button button-secondary" id="record-damage-btn">تسجيل تالف / هالك</button><button class="button button-secondary" id="adjust-stock-btn">تسوية سريعة لصنف</button><button class="button button-primary" id="open-full-stocktake-btn" data-page="stocktake">${icon('scan', 16)} جرد شامل للمحل</button>` : ''}<a class="button button-secondary" href="/api/reports/export.csv?type=inventory&storeId=${encodeURIComponent(data.selectedStoreId)}" download>تصدير CSV</a>${!isCashier ? `<button class="button button-primary" data-page="suppliers">فاتورة شراء من تاجر</button>` : ''}</div></div>
+  return `<div class="page-heading-row"><div><p class="page-lead">${isCashier ? 'متابعة أرصدة المخزون والمقاسات والأسعار المتاحة للبيع.' : 'متابعة وجرد أرصدة المخزون للموديلات والأصناف الحالية وتقييم رأس المال والأرباح المتوقعة.'}</p></div><div class="products-heading-actions">${data.capabilities.canManageStores ? '<button class="button button-secondary" id="new-store-btn">إدارة الفروع</button>' : ''}${data.capabilities.canTransferInventory && data.stores.length > 1 ? '<button class="button button-secondary" id="transfer-stock-btn">تحويل مخزون بين الفروع</button>' : ''}${data.capabilities.canAdjustInventory ? `${data.capabilities.canManageCatalog && !data.openingInventoryEntry ? `<button class="button button-secondary" id="opening-inventory-import-btn">${icon('plus', 15)} إضافة المخزن الافتتاحي (إكسيل)</button>` : ''}<button class="button button-secondary" id="record-damage-btn">تسجيل تالف / هالك</button><button class="button button-secondary" id="adjust-stock-btn">تسوية سريعة لصنف</button>` : ''}<a class="button button-secondary" href="/api/reports/export.csv?type=inventory&storeId=${encodeURIComponent(data.selectedStoreId)}" download>تصدير CSV</a></div></div>
   <div class="inventory-summary ${isCashier ? '' : 'expense-summary-grid'}">${summaryCardsHtml}
   </div>
   <section class="panel"><div class="panel-heading"><div><h3>أرصدة الموديلات والمقاسات</h3><p>اضغط على الموديل لعرض مصفوفة الألوان والمقاسات</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="ابحث عن الموديل أو الكود أو المقاس" value="${escapeHtml(state.query)}"></label></div>${items.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل</th><th>كود الموديل</th><th>الألوان والمقاسات</th><th class="cell-center">إجمالي الرصيد</th>${!isCashier ? '<th>سعر التكلفة (الفعلي)</th><th>سعر البيع</th><th>المكسب المتوقع</th>' : '<th>سعر البيع</th>'}<th>حالة المقاسات</th></tr></thead><tbody>${items.map((product) => `<tr><td><button type="button" class="product-name-action inventory-product-details" data-product-id="${product.id}"><span class="product-avatar ${product.imagePath ? 'has-image' : ''}">${product.imagePath ? renderProductThumb(product) : escapeHtml(product.name.slice(0, 1))}</span><span class="product-name-stack"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand || 'اضغط لعرض جدول المقاسات')}</small></span></button></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${product.matrix.isMatrix ? `<div class="model-sub-badges">${product.matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(product.matrix.colorSummaryLabel)}</span>` : ''}${product.matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(product.matrix.sizeRangeLabel)}</span>` : ''}</div>` : `<small>${product.variants.length} نسخة</small>`}</td><td class="cell-center"><strong>${product.quantity}</strong> قطعة</td>${!isCashier ? (() => {
@@ -3844,7 +3844,7 @@ function suppliersView() {
               ` : hasSupplierCredit ? `<span class="status-pill status-complete">رصيد مرتجع لصالح المحل +<bdi dir="ltr">${money(absRemaining)}</bdi></span>` : '<span class="status-pill status-complete">✓ مسددة بالكامل</span>'}
               ${isOpeningDebt ? '' : `<button type="button" class="button button-secondary button-sm print-purchase-labels" data-purchase-id="${purchase.id}">طباعة باركود العلب</button>`}
               <button type="button" class="button button-secondary button-sm edit-purchase-meta" data-purchase-id="${purchase.id}">
-                ${isOpeningDebt ? 'تعديل المرجع / الملاحظات' : 'تعديل بيانات الفاتورة'}
+                ${isOpeningDebt ? 'تعديل المديونية' : 'تعديل بيانات الفاتورة'}
               </button>
             </div>
             <div class="purchase-footer-meta">
@@ -3893,7 +3893,7 @@ function suppliersView() {
       </div>
       <div class="suppliers-heading-actions">
         <button class="button button-secondary" id="new-supplier">إضافة تاجر</button>
-        <button class="button button-secondary" id="new-opening-debt">+ إضافة مديونية افتتاحية</button>
+        ${!state.data.hasOpeningSupplierDebts ? '<button class="button button-secondary" id="new-opening-debt">+ إضافة الديون الافتتاحية</button>' : ''}
         <button class="button button-secondary" id="new-category">إضافة فئة</button>
         <button class="button button-secondary" id="toggle-archived-suppliers">${state.showArchivedSuppliers ? 'عرض التجار النشطين' : 'أرشيف التجار'}</button>
         <button class="button button-primary" id="new-purchase">تسجيل فاتورة شراء</button>
@@ -3982,7 +3982,6 @@ function suppliersView() {
             <button type="button" class="button button-secondary button-sm edit-supplier-btn" data-supplier="${supplier.id}">تعديل</button>
             <button type="button" class="button button-secondary button-sm toggle-supplier-archive" data-supplier="${supplier.id}" data-active="${supplier.isActive === false ? '0' : '1'}">${supplier.isActive === false ? 'إعادة تفعيل' : 'أرشفة'}</button>
             ${creditAvailable > 0n ? `<button type="button" class="button button-primary button-sm collect-supplier-refund" data-supplier="${supplier.id}" data-supplier-name="${escapeHtml(supplier.name)}" data-credit="${creditAvailable.toString()}">استلام مرتجع نقدي</button>` : ''}
-            ${supplier.isActive === false ? '' : `<button type="button" class="button button-secondary button-sm opening-debt-for-supplier" data-supplier="${supplier.id}">+ مديونية افتتاحية</button><button type="button" class="button button-secondary button-sm purchase-for-supplier" data-supplier="${supplier.id}">+ فاتورة شراء جديدة</button>`}
             <span class="disclosure-chevron" aria-hidden="true">${icon('chevron', 16)}</span>
           </div>
         </summary>
@@ -3992,12 +3991,8 @@ function suppliersView() {
     `; }).join('') : `
       <section class="panel empty-chart">
         <div class="empty-illustration">${icon('users', 28)}</div>
-        <strong>ابدأ بإضافة أول تاجر</strong>
-        <p>سجّل فواتير الشراء، الديون الافتتاحية السابقة، المبالغ المدفوعة، والرصيد المتبقي.</p>
-        <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
-          <button class="button button-primary" id="empty-new-supplier">إضافة تاجر</button>
-          <button class="button button-secondary" id="empty-new-opening-debt">+ إضافة تاجر بمديونية افتتاحية</button>
-        </div>
+        <strong>لا يوجد تجار مسجلون بعد</strong>
+        <p>استخدم الأزرار في الأعلى لإضافة تاجر، أو تسجيل الديون الافتتاحية، أو تسجيل فاتورة شراء.</p>
       </section>
     `}
     ${hasMorePurchases ? `<div class="sales-history-more"><button type="button" class="button button-secondary" id="purchases-history-more">عرض فواتير أقدم (${loadedPurchasesCount} من ${totalPurchasesCount})</button></div>` : ''}
@@ -5180,7 +5175,8 @@ function expensesView() {
                   <span class="purchase-meta-pill" style="color:${remainingMinor > 0n ? 'var(--rose, #be123c)' : 'var(--green, #15803d)'};">متبقي: <strong>${money(item.actual.remainingAmount)}</strong></span>
                 </div>
               </div>
-              <div style="display:flex;align-items:center;gap:10px;">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <button type="button" class="button button-secondary button-sm edit-obligation-btn" data-obligation="${item.id}">تعديل</button>
                 ${remainingMinor > 0n ? `
                   <button type="button" class="button button-primary button-sm pay-monthly"
                           data-actual="${item.actual.id}"
@@ -5234,7 +5230,8 @@ function expensesView() {
                 <span class="purchase-meta-pill" style="color:var(--muted);">لم يتم تحديد قيمة شهر ${monthName}</span>
               </div>
             </div>
-            <div style="display:flex;align-items:center;gap:10px;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <button type="button" class="button button-secondary button-sm edit-obligation-btn" data-obligation="${item.id}">تعديل</button>
               <button type="button" class="button button-primary button-sm confirm-monthly"
                       data-obligation="${item.id}"
                       data-name="${escapeHtml(item.name)}"
@@ -5250,8 +5247,7 @@ function expensesView() {
       <section class="panel empty-chart" style="padding:28px;">
         <div class="empty-illustration">${icon('wallet', 28)}</div>
         <strong>لا توجد التزامات مسجلة بعد</strong>
-        <p>أضف التزامك (مثل إيجار المحل أو المرتبات) لتسجيله ومتابعته وسداده بسهولة.</p>
-        <button type="button" class="button button-primary" id="empty-new-monthly-obligation" style="margin-top:12px;">+ إضافة التزام جديد</button>
+        <p>استخدم زر «+ إضافة التزام» في أعلى الصفحة لتسجيل إيجار المحل أو المرتبات.</p>
       </section>
     `}
 
@@ -5262,7 +5258,6 @@ function expensesView() {
           <h3>سجل المصروفات المباشرة لشهر ${monthName} (${currentMonthExpenses.length} مصروف)</h3>
           <p>المصروفات التي تم تسجيلها (كهرباء، فواتير، مستلزمات، صيانة...).</p>
         </div>
-        <button type="button" class="button button-primary button-sm" id="new-expense-table-btn">+ إضافة مصروف جديد</button>
       </div>
 
       ${currentMonthExpenses.length ? `
@@ -5491,6 +5486,7 @@ function supplierModal(html, formId, endpoint, convert = (data) => data, success
     'return-form': 'تسجيل مرتجع مرتبط بالفاتورة',
     'supplier-return-form': 'تسجيل مرتجع للمورد',
     'monthly-obligation-form': 'إضافة التزام شهري',
+    'edit-obligation-form': 'تعديل بيانات الالتزام الشهري',
     'monthly-actual-form': 'تأكيد المصروف الفعلي',
   };
   const modalTitle = modalTitles[formId] ?? 'تسجيل سداد';
@@ -5588,7 +5584,6 @@ function bindExpenses() {
   };
 
   document.querySelector('#new-expense')?.addEventListener('click', openExpenseModal);
-  document.querySelector('#new-expense-table-btn')?.addEventListener('click', openExpenseModal);
   document.querySelectorAll('.edit-expense-btn').forEach((btn) => btn.addEventListener('click', () => {
     const expenseId = btn.dataset.editExpense;
     const expense = (state.data.expenses ?? []).find((e) => e.id === expenseId);
@@ -5738,9 +5733,7 @@ function showDevelopmentResetModal() {
 }
 
 function bindSuppliers() {
-  document.querySelectorAll('#new-supplier, #empty-new-supplier').forEach((button) => {
-    button.addEventListener('click', () => supplierModal('<label>اسم التاجر<input name="name" required minlength="2" maxlength="120"></label><label>رقم الهاتف<input name="phone" maxlength="40" type="tel"></label><label>ملاحظات<input name="notes" maxlength="500"></label>', 'supplier-form', '/api/suppliers'));
-  });
+  document.querySelector('#new-supplier')?.addEventListener('click', () => supplierModal('<label>اسم التاجر<input name="name" required minlength="2" maxlength="120"></label><label>رقم الهاتف<input name="phone" maxlength="40" type="tel"></label><label>ملاحظات<input name="notes" maxlength="500"></label>', 'supplier-form', '/api/suppliers'));
   const purchase = (supplierId = '', initialProductId = '', copyFromProductId = '') => {
     const activeSuppliers = state.data.suppliers.filter((supplier) => supplier.isActive !== false);
     if (!activeSuppliers.length) { toast('أضف تاجرًا نشطًا أو أعد تفعيل تاجر من الأرشيف قبل تسجيل الفاتورة', 'error'); return; }
@@ -7120,21 +7113,22 @@ function bindSuppliers() {
     const { purchase: foundPurchase } = findLoadedPurchase(button.dataset.purchaseId);
     if (!foundPurchase) return;
     const isOpeningDebt = Boolean(foundPurchase.isOpeningDebt || foundPurchase.entryKind === 'OPENING_DEBT');
+    if (isOpeningDebt) {
+      showEditOpeningDebtModal(foundPurchase);
+      return;
+    }
     supplierModal(
-      isOpeningDebt
-        ? `<label>رقم المرجع<input name="invoiceNumber" maxlength="80" value="${escapeHtml(foundPurchase.invoiceNumber ?? '')}" placeholder="رقم المرجع"></label>
-           <label>ملاحظات المديونية<input name="notes" maxlength="500" value="${escapeHtml(foundPurchase.notes ?? '')}"></label>`
-        : `<label>رقم الفاتورة<input name="invoiceNumber" maxlength="80" value="${escapeHtml(foundPurchase.invoiceNumber ?? '')}" placeholder="رقم فاتورة التاجر"></label>
-           <label>نسبة الربح المستهدفة % (اختياري)<input name="targetProfitPercent" type="number" min="0" max="100000" step="0.5" value="${foundPurchase.targetProfitPercent ?? ''}"></label>
-           <label>ملاحظات الفاتورة<input name="notes" maxlength="500" value="${escapeHtml(foundPurchase.notes ?? '')}"></label>`,
+      `<label>رقم الفاتورة<input name="invoiceNumber" maxlength="80" value="${escapeHtml(foundPurchase.invoiceNumber ?? '')}" placeholder="رقم فاتورة التاجر"></label>
+       <label>نسبة الربح المستهدفة % (اختياري)<input name="targetProfitPercent" type="number" min="0" max="100000" step="0.5" value="${foundPurchase.targetProfitPercent ?? ''}"></label>
+       <label>ملاحظات الفاتورة<input name="notes" maxlength="500" value="${escapeHtml(foundPurchase.notes ?? '')}"></label>`,
       'edit-purchase-meta-form',
       `/api/purchases/${encodeURIComponent(foundPurchase.id)}`,
       (data) => ({
         invoiceNumber: String(data.invoiceNumber ?? '').trim() || null,
         notes: String(data.notes ?? '').trim() || null,
-        ...(isOpeningDebt ? {} : { targetProfitPercent: String(data.targetProfitPercent ?? '').trim() === '' ? null : Number(data.targetProfitPercent) }),
+        targetProfitPercent: String(data.targetProfitPercent ?? '').trim() === '' ? null : Number(data.targetProfitPercent),
       }),
-      isOpeningDebt ? 'تم تعديل بيانات المديونية الافتتاحية بنجاح' : 'تم تعديل بيانات فاتورة الشراء بنجاح',
+      'تم تعديل بيانات فاتورة الشراء بنجاح',
       'PATCH',
     );
   }));
@@ -7195,10 +7189,6 @@ function bindSuppliers() {
       render();
       toast(button.dataset.active === '1' ? 'تم أرشفة التاجر مع الاحتفاظ بفواتيره' : 'تمت إعادة تفعيل التاجر');
     } catch (error) { toast(error.message, 'error'); button.disabled = false; }
-  }));
-  document.querySelectorAll('.purchase-for-supplier').forEach((button) => button.addEventListener('click', (e) => {
-    e.stopPropagation();
-    purchase(button.dataset.supplier);
   }));
   if (state.pendingOrderAgainProductId) {
     const productId = state.pendingOrderAgainProductId;
@@ -7297,16 +7287,8 @@ function bindSuppliers() {
     void fetchPurchasesHistory(0, false);
   });
 
-  document.querySelectorAll('#new-opening-debt, #empty-new-opening-debt').forEach((button) => {
-    button.addEventListener('click', () => {
-      showOpeningDebtModal('');
-    });
-  });
-
-  document.querySelectorAll('.opening-debt-for-supplier').forEach((button) => {
-    button.addEventListener('click', () => {
-      showOpeningDebtModal(button.dataset.supplier || '');
-    });
+  document.querySelector('#new-opening-debt')?.addEventListener('click', () => {
+    showOpeningDebtModal();
   });
 
   document.querySelector('#purchases-history-more')?.addEventListener('click', (event) => {
@@ -7317,45 +7299,28 @@ function bindSuppliers() {
   });
 }
 
-function showOpeningDebtModal(preselectedSupplierId = '') {
+function showEditOpeningDebtModal(purchase) {
   const root = getModalRoot();
-  const activeSuppliers = (state.data.suppliers ?? []).filter((s) => s.isActive !== false);
   const currency = state.data.company.currency;
   const decimals = currencyDecimals(currency);
-  const today = localDateIso();
-  const initialMode = preselectedSupplierId || activeSuppliers.length > 0 ? 'EXISTING' : 'NEW';
+  const currentAmountDec = decimalPrice(purchase.totalAmount);
+  const currentDate = String(purchase.purchasedAt ?? '').slice(0, 10) || localDateIso();
+  const paidMinor = BigInt(purchase.paidAmount?.amount ?? 0);
+  const idempotencyKey = crypto.randomUUID();
 
-  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="opening-debt-modal-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">أرصدة التجار الافتتاحية</span><h2 id="opening-debt-modal-title">إضافة مديونية افتتاحية لتاجر</h2><p>سجّل المبلغ المستحق للتاجر من قبل تشغيل النظام بدون الحاجة لإدخال فواتير أو أصناف مخزن.</p></div><button type="button" class="modal-close" data-close-opening-debt aria-label="إغلاق">×</button></div><form id="opening-debt-form" class="form-stack modal-form"><div class="field-group"><label style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;"><span style="display:flex;gap:6px;align-items:center;"><input type="radio" name="supplierMode" value="EXISTING" style="width:auto;height:auto;margin:0;" ${initialMode === 'EXISTING' ? 'checked' : ''} ${activeSuppliers.length === 0 ? 'disabled' : ''}> اختيار تاجر مسجل</span><span style="display:flex;gap:6px;align-items:center;"><input type="radio" name="supplierMode" value="NEW" style="width:auto;height:auto;margin:0;" ${initialMode === 'NEW' ? 'checked' : ''}> إضافة تاجر جديد بالمديونية</span></label></div><div id="opening-debt-existing-wrap" ${initialMode === 'EXISTING' ? '' : 'hidden'}><label>التاجر<select name="supplierId">${activeSuppliers.map((s) => `<option value="${s.id}" ${s.id === preselectedSupplierId ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('')}</select></label></div><div id="opening-debt-new-wrap" class="form-stack" ${initialMode === 'NEW' ? '' : 'hidden'}><label>اسم التاجر الجديد<input name="newSupplierName" maxlength="120" placeholder="مثال: مصنع النور للملابس"></label><label>رقم الهاتف (اختياري)<input name="newSupplierPhone" maxlength="40" type="tel"></label><label>ملاحظات التاجر (اختياري)<input name="newSupplierNotes" maxlength="500"></label></div><label>قيمة المديونية الافتتاحية المستحقة للتاجر (${escapeHtml(currency)})<input name="amount" inputmode="decimal" placeholder="مثال: 15000" required></label><label>تاريخ المديونية<input type="date" name="entryDate" value="${today}" required></label><label>ملاحظات المديونية (اختياري)<input name="notes" maxlength="500" placeholder="مثال: رصيد مرحّل من دفتر الحسابات القديم"></label><div class="modal-actions"><button type="button" class="button button-secondary" data-close-opening-debt>إلغاء</button><button type="submit" class="button button-primary">حفظ المديونية الافتتاحية</button></div></form></section></div>`;
+  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="edit-opening-debt-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">تعديل المديونية الافتتاحية</span><h2 id="edit-opening-debt-title">تعديل المديونية (${escapeHtml(purchase.invoiceNumber || '')})</h2><p>${paidMinor > 0n ? `المسدد بالفعل لهذا السجل: ${money(purchase.paidAmount)} — لا يمكن تقليل القيمة عن المسدد.` : 'عدّل قيمة المديونية أو التاريخ أو المرجع والملاحظات مع تحديث القيد المحاسبي تلقائيًا.'}</p></div><button type="button" class="modal-close" data-close-edit-odebt aria-label="إغلاق">×</button></div><form id="edit-opening-debt-form" class="form-stack modal-form"><label>قيمة المديونية الافتتاحية (${escapeHtml(currency)})<input name="amount" inputmode="decimal" value="${escapeHtml(currentAmountDec)}" required></label><div class="form-grid"><label>تاريخ المديونية<input type="date" name="entryDate" value="${escapeHtml(currentDate)}" required></label><label>رقم المرجع<input name="invoiceNumber" maxlength="80" value="${escapeHtml(purchase.invoiceNumber ?? '')}"></label></div><label>ملاحظات المديونية<input name="notes" maxlength="500" value="${escapeHtml(purchase.notes ?? '')}"></label><div class="modal-actions"><button type="button" class="button button-secondary" data-close-edit-odebt>إلغاء</button><button type="submit" class="button button-primary">حفظ التعديلات</button></div></form></section></div>`;
 
   const closeModal = () => {
     root.innerHTML = '';
   };
-  root.querySelectorAll('[data-close-opening-debt]').forEach((btn) => btn.addEventListener('click', closeModal));
+  root.querySelectorAll('[data-close-edit-odebt]').forEach((btn) => btn.addEventListener('click', closeModal));
 
-  const form = root.querySelector('#opening-debt-form');
-  const existingWrap = root.querySelector('#opening-debt-existing-wrap');
-  const newWrap = root.querySelector('#opening-debt-new-wrap');
-  const existingSelect = form?.querySelector('select[name="supplierId"]');
-  const newNameInput = form?.querySelector('input[name="newSupplierName"]');
-
-  const syncMode = () => {
-    const selectedMode = form?.querySelector('input[name="supplierMode"]:checked')?.value || initialMode;
-    const isExisting = selectedMode === 'EXISTING';
-    if (existingWrap) existingWrap.hidden = !isExisting;
-    if (newWrap) newWrap.hidden = isExisting;
-    if (existingSelect) existingSelect.disabled = !isExisting;
-    if (newNameInput) newNameInput.required = !isExisting;
-  };
-  form?.querySelectorAll('input[name="supplierMode"]').forEach((radio) => radio.addEventListener('change', syncMode));
-  syncMode();
-
-  const idempotencyKey = crypto.randomUUID();
+  const form = root.querySelector('#edit-opening-debt-form');
   let isSubmitting = false;
   form?.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (isSubmitting) return;
     const fd = new FormData(event.currentTarget);
-    const mode = String(fd.get('supplierMode') || initialMode);
     let amountMinor;
     try {
       amountMinor = toMinor(String(fd.get('amount') ?? '').trim(), decimals);
@@ -7368,44 +7333,190 @@ function showOpeningDebtModal(preselectedSupplierId = '') {
       return;
     }
 
-    const payload = {
-      idempotencyKey,
-      storeId: state.data.selectedStoreId,
-      amount: amountMinor,
-      entryDate: String(fd.get('entryDate') || today),
-      notes: String(fd.get('notes') ?? '').trim() || undefined,
-    };
+    isSubmitting = true;
+    const submitBtn = form.querySelector('[type="submit"]');
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      await api(`/api/suppliers/opening-debt/${encodeURIComponent(purchase.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          idempotencyKey,
+          amount: amountMinor,
+          entryDate: String(fd.get('entryDate') || currentDate),
+          invoiceNumber: String(fd.get('invoiceNumber') ?? '').trim() || null,
+          notes: String(fd.get('notes') ?? '').trim() || null,
+        }),
+      });
+      closeModal();
+      invalidateFinancialCaches();
+      await loadData(state.data.selectedStoreId);
+      render();
+      toast('تم تعديل المديونية الافتتاحية بنجاح');
+    } catch (error) {
+      isSubmitting = false;
+      if (submitBtn) submitBtn.disabled = false;
+      toast(error.message, 'error');
+    }
+  });
+}
 
-    if (mode === 'EXISTING') {
-      const supId = String(fd.get('supplierId') ?? '').trim();
-      if (!supId) {
-        toast('اختر التاجر أولًا', 'error');
+function showOpeningDebtModal() {
+  if (state.data.hasOpeningSupplierDebts) {
+    toast('تم تسجيل الديون الافتتاحية لهذا الفرع مسبقًا — يمكنك تعديل أي مديونية من القائمة مباشرة', 'error');
+    return;
+  }
+  const root = getModalRoot();
+  const activeSuppliers = (state.data.suppliers ?? []).filter((s) => s.isActive !== false);
+  const currency = state.data.company.currency;
+  const decimals = currencyDecimals(currency);
+  const today = localDateIso();
+  const defaultMode = activeSuppliers.length > 0 ? 'EXISTING' : 'NEW';
+  let rowSeq = 0;
+
+  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="opening-debt-modal-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">أرصدة التجار الافتتاحية (مرة واحدة)</span><h2 id="opening-debt-modal-title">إضافة الديون الافتتاحية للتجار</h2><p>تسجَّل الديون الافتتاحية للتجار مرة واحدة عند بدء النظام (بدون فواتير)، ويمكنك إضافة جميع التجار في هذه القائمة وتعديل أي مديونية لاحقًا.</p></div><button type="button" class="modal-close" data-close-opening-debt aria-label="إغلاق">×</button></div><form id="opening-debt-form" class="form-stack modal-form"><label>تاريخ الديون الافتتاحية<input type="date" name="entryDate" value="${today}" required></label><div id="opening-debt-rows" class="form-stack"></div><div><button type="button" class="button button-secondary button-sm" id="add-opening-debt-row">${icon('plus', 14)} إضافة تاجر آخر للقائمة</button></div><div class="modal-actions"><button type="button" class="button button-secondary" data-close-opening-debt>إلغاء</button><button type="submit" class="button button-primary">حفظ الديون الافتتاحية</button></div></form></section></div>`;
+
+  const closeModal = () => {
+    root.innerHTML = '';
+  };
+  root.querySelectorAll('[data-close-opening-debt]').forEach((btn) => btn.addEventListener('click', closeModal));
+
+  const rowsWrap = root.querySelector('#opening-debt-rows');
+  const form = root.querySelector('#opening-debt-form');
+
+  const syncRowControls = () => {
+    const allRows = [...(rowsWrap?.querySelectorAll('.opening-debt-row') ?? [])];
+    for (const rowEl of allRows) {
+      const removeBtn = rowEl.querySelector('[data-remove-odebt-row]');
+      if (removeBtn) removeBtn.hidden = allRows.length <= 1;
+    }
+  };
+
+  const appendDebtRow = () => {
+    rowSeq += 1;
+    const rowId = `odebt_row_${rowSeq}`;
+    const card = document.createElement('div');
+    card.className = 'opening-debt-row';
+    card.style.cssText = 'padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface-soft);display:grid;gap:10px;';
+    card.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;">
+          <label style="display:flex;gap:6px;align-items:center;margin:0;"><input type="radio" name="${rowId}_mode" value="EXISTING" style="width:auto;height:auto;margin:0;" ${defaultMode === 'EXISTING' ? 'checked' : ''} ${activeSuppliers.length === 0 ? 'disabled' : ''}> تاجر مسجل</label>
+          <label style="display:flex;gap:6px;align-items:center;margin:0;"><input type="radio" name="${rowId}_mode" value="NEW" style="width:auto;height:auto;margin:0;" ${defaultMode === 'NEW' ? 'checked' : ''}> تاجر جديد</label>
+        </div>
+        <button type="button" class="button button-secondary button-sm" data-remove-odebt-row>حذف</button>
+      </div>
+      <div data-odebt-existing ${defaultMode === 'EXISTING' ? '' : 'hidden'}>
+        <label>التاجر<select data-odebt-supplier>${activeSuppliers.map((s) => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('')}</select></label>
+      </div>
+      <div data-odebt-new class="form-grid" ${defaultMode === 'NEW' ? '' : 'hidden'}>
+        <label>اسم التاجر الجديد<input data-odebt-new-name maxlength="120" placeholder="مثال: مصنع النور للملابس"></label>
+        <label>رقم الهاتف (اختياري)<input data-odebt-new-phone maxlength="40" type="tel"></label>
+      </div>
+      <div class="form-grid">
+        <label>قيمة المديونية (${escapeHtml(currency)})<input data-odebt-amount inputmode="decimal" placeholder="مثال: 15000" required></label>
+        <label>ملاحظات (اختياري)<input data-odebt-notes maxlength="500" placeholder="رصيد مرحّل من الدفتر القديم"></label>
+      </div>
+    `;
+
+    const existingWrap = card.querySelector('[data-odebt-existing]');
+    const newWrap = card.querySelector('[data-odebt-new]');
+    const existingSel = card.querySelector('[data-odebt-supplier]');
+    const newNameInput = card.querySelector('[data-odebt-new-name]');
+    const syncRowMode = () => {
+      const mode = card.querySelector(`input[name="${rowId}_mode"]:checked`)?.value || defaultMode;
+      const isExisting = mode === 'EXISTING';
+      if (existingWrap) existingWrap.hidden = !isExisting;
+      if (newWrap) newWrap.hidden = isExisting;
+      if (existingSel) existingSel.disabled = !isExisting;
+      if (newNameInput) newNameInput.required = !isExisting;
+    };
+    card.querySelectorAll(`input[name="${rowId}_mode"]`).forEach((r) => r.addEventListener('change', syncRowMode));
+    card.querySelector('[data-remove-odebt-row]')?.addEventListener('click', () => {
+      card.remove();
+      syncRowControls();
+    });
+    syncRowMode();
+    rowsWrap?.append(card);
+    syncRowControls();
+  };
+
+  appendDebtRow();
+  root.querySelector('#add-opening-debt-row')?.addEventListener('click', appendDebtRow);
+
+  const idempotencyKey = crypto.randomUUID();
+  let isSubmitting = false;
+  form?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (isSubmitting) return;
+    const fd = new FormData(event.currentTarget);
+    const entryDate = String(fd.get('entryDate') || today);
+    const rowEls = [...(rowsWrap?.querySelectorAll('.opening-debt-row') ?? [])];
+    const items = [];
+    const seenIds = new Set();
+    const seenNames = new Set();
+
+    for (let i = 0; i < rowEls.length; i += 1) {
+      const rowEl = rowEls[i];
+      const mode = rowEl.querySelector('input[type="radio"]:checked')?.value || defaultMode;
+      let amountMinor;
+      try {
+        amountMinor = toMinor(String(rowEl.querySelector('[data-odebt-amount]')?.value ?? '').trim(), decimals);
+      } catch (err) {
+        toast(`صف ${i + 1}: ${err instanceof Error ? err.message : 'قيمة المديونية غير صالحة'}`, 'error');
         return;
       }
-      payload.supplierId = supId;
-    } else {
-      const supName = String(fd.get('newSupplierName') ?? '').trim();
-      if (supName.length < 2) {
-        toast('اسم التاجر الجديد يجب أن يكون حرفين على الأقل', 'error');
+      if (BigInt(amountMinor) <= 0n) {
+        toast(`صف ${i + 1}: قيمة المديونية يجب أن تكون أكبر من صفر`, 'error');
         return;
       }
-      payload.newSupplier = {
-        name: supName,
-        phone: String(fd.get('newSupplierPhone') ?? '').trim() || undefined,
-        notes: String(fd.get('newSupplierNotes') ?? '').trim() || undefined,
-      };
+      const notes = String(rowEl.querySelector('[data-odebt-notes]')?.value ?? '').trim() || undefined;
+      if (mode === 'EXISTING') {
+        const supId = String(rowEl.querySelector('[data-odebt-supplier]')?.value ?? '').trim();
+        if (!supId) {
+          toast(`صف ${i + 1}: اختر التاجر أولًا`, 'error');
+          return;
+        }
+        if (seenIds.has(supId)) {
+          toast(`صف ${i + 1}: لا يمكن تكرار نفس التاجر في أكثر من سطر`, 'error');
+          return;
+        }
+        seenIds.add(supId);
+        items.push({ supplierId: supId, amount: amountMinor, notes });
+      } else {
+        const supName = String(rowEl.querySelector('[data-odebt-new-name]')?.value ?? '').trim();
+        if (supName.length < 2) {
+          toast(`صف ${i + 1}: اسم التاجر الجديد يجب أن يكون حرفين على الأقل`, 'error');
+          return;
+        }
+        const nameKey = supName.toLowerCase();
+        if (seenNames.has(nameKey)) {
+          toast(`صف ${i + 1}: اسم التاجر (${supName}) مكرر في القائمة`, 'error');
+          return;
+        }
+        seenNames.add(nameKey);
+        const supPhone = String(rowEl.querySelector('[data-odebt-new-phone]')?.value ?? '').trim() || undefined;
+        items.push({ newSupplier: { name: supName, phone: supPhone }, amount: amountMinor, notes });
+      }
     }
 
     isSubmitting = true;
     const submitBtn = form.querySelector('[type="submit"]');
     if (submitBtn) submitBtn.disabled = true;
     try {
-      await api('/api/suppliers/opening-debt', { method: 'POST', body: JSON.stringify(payload) });
+      await api('/api/suppliers/opening-debt', {
+        method: 'POST',
+        body: JSON.stringify({
+          idempotencyKey,
+          storeId: state.data.selectedStoreId,
+          entryDate,
+          items,
+        }),
+      });
       closeModal();
       invalidateFinancialCaches();
       await loadData(state.data.selectedStoreId);
       render();
-      toast('تم تسجيل المديونية الافتتاحية للتاجر بنجاح');
+      toast('تم تسجيل الديون الافتتاحية للتجار بنجاح');
     } catch (error) {
       isSubmitting = false;
       if (submitBtn) submitBtn.disabled = false;
@@ -8232,7 +8343,7 @@ function bindMonthlyExpenses() {
   });
 
   // Add obligation (supports setting initialAmount for current month in 1 step)
-  document.querySelector('#new-monthly-obligation, #empty-new-monthly-obligation')?.addEventListener('click', () => {
+  document.querySelector('#new-monthly-obligation')?.addEventListener('click', () => {
     const decimals = currencyDecimals(state.data.company.currency);
     supplierModal(`
       <label style="font-weight:700;">اسم الالتزام
@@ -8265,12 +8376,56 @@ function bindMonthlyExpenses() {
       storeId: data.storeId,
       categoryCode: data.categoryCode,
       name: data.name,
-      dueDay: Number(data.dueDay),
+      dueDay: Number.parseInt(String(data.dueDay), 10),
       initialAmount: data.initialAmount ? toMinor(data.initialAmount, decimals) : undefined,
       idempotencyKey: data.idempotencyKey
     }),
     'تم إضافة الالتزام وتثبيت مبلغه بنجاح');
   });
+
+  document.querySelectorAll('.edit-obligation-btn').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const obligationId = button.dataset.obligation;
+    const item = (state.data.monthlyExpenses?.items ?? []).find((entry) => entry.id === obligationId);
+    if (!item) return;
+    const categoryCodeByName = {
+      'إيجار المحل': 'RENT',
+      'مرافق وفواتير': 'UTILITIES',
+      'نقل ومواصلات': 'TRANSPORT',
+      'صيانة': 'MAINTENANCE',
+      'مستلزمات تشغيل': 'SUPPLIES',
+      'التزامات أخرى': 'OTHER',
+    };
+    const currentCode = categoryCodeByName[item.category] || 'OTHER';
+    const optionsMarkup = [
+      ['RENT', 'إيجار'],
+      ['UTILITIES', 'مرافق وفواتير'],
+      ['TRANSPORT', 'نقل ومواصلات'],
+      ['MAINTENANCE', 'صيانة'],
+      ['SUPPLIES', 'مستلزمات تشغيل'],
+      ['OTHER', 'أخرى'],
+    ].map(([code, label]) => `<option value="${code}" ${code === currentCode ? 'selected' : ''}>${label}</option>`).join('');
+    supplierModal(`
+      <label>اسم الالتزام
+        <input name="name" required minlength="2" maxlength="120" value="${escapeHtml(item.name)}" autofocus>
+      </label>
+      <label>التصنيف
+        <select name="categoryCode">${optionsMarkup}</select>
+      </label>
+      <label>يوم الاستحقاق في الشهر
+        <input name="dueDay" type="number" min="1" max="31" value="${escapeHtml(String(item.dueDay ?? 1))}" required>
+      </label>
+    `,
+    'edit-obligation-form',
+    `/api/recurring-expenses/${encodeURIComponent(obligationId)}`,
+    (data) => ({
+      name: String(data.name ?? '').trim(),
+      categoryCode: data.categoryCode,
+      dueDay: Number.parseInt(String(data.dueDay), 10),
+    }),
+    'تم تعديل بيانات الالتزام الشهري بنجاح',
+    'PATCH');
+  }));
 
   // Confirm monthly amount
   document.querySelectorAll('.confirm-monthly').forEach((button) => button.addEventListener('click', (event) => {
@@ -9762,8 +9917,75 @@ function showBarcodeLabelsModal({ product = null, purchase = null } = {}) {
   renderLabelsPreview();
 }
 
+function showStoresModal() {
+  const root = getModalRoot();
+  const renderStoresList = () => {
+    const stores = state.data.stores ?? [];
+    if (!stores.length) return '';
+    return `<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line);display:grid;gap:10px;"><strong style="font-size:12.5px;">الفروع الحالية (يمكنك تعديل بيانات أي فرع):</strong><div style="display:grid;gap:10px;max-height:260px;overflow-y:auto;">${stores.map((s) => `<div style="padding:10px 12px;border:1px solid var(--line);border-radius:10px;display:grid;gap:8px;" data-edit-store-row="${s.id}"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><span class="sku-code">${escapeHtml(s.code)}</span><button type="button" class="button button-secondary button-sm" data-save-store="${s.id}">حفظ التعديل</button></div><div class="form-grid"><input data-edit-store-name="${s.id}" value="${escapeHtml(s.name)}" placeholder="اسم الفرع" minlength="2" maxlength="100"><input data-edit-store-phone="${s.id}" value="${escapeHtml(s.phone ?? '')}" placeholder="الهاتف" maxlength="40"></div><input data-edit-store-address="${s.id}" value="${escapeHtml(s.address ?? '')}" placeholder="العنوان" maxlength="240"></div>`).join('')}</div></div>`;
+  };
+
+  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="stores-modal-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">الفروع</span><h2 id="stores-modal-title">إضافة وتعديل الفروع</h2></div><button type="button" class="modal-close" data-close-stores>×</button></div><form id="store-create-form" class="form-stack modal-form"><div class="form-grid"><label>اسم الفرع الجديد<input name="name" required minlength="2" maxlength="100" placeholder="مثال: فرع المعادي"></label><label>كود الفرع<input name="code" required minlength="2" maxlength="20" pattern="[A-Za-z0-9_-]+" placeholder="MAADI"></label></div><div class="form-grid"><label>العنوان (اختياري)<input name="address" maxlength="240"></label><label>الهاتف (اختياري)<input name="phone" maxlength="40"></label></div><div class="modal-actions"><button type="button" class="button button-secondary" data-close-stores>إغلاق</button><button type="submit" class="button button-primary">إضافة الفرع</button></div></form><div id="stores-existing-list">${renderStoresList()}</div></section></div>`;
+
+  const closeModal = () => {
+    root.innerHTML = '';
+  };
+  root.querySelectorAll('[data-close-stores]').forEach((btn) => btn.addEventListener('click', closeModal));
+
+  const bindSaveStores = () => {
+    root.querySelectorAll('[data-save-store]').forEach((saveBtn) => {
+      saveBtn.addEventListener('click', async () => {
+        const storeId = saveBtn.dataset.saveStore;
+        const name = String(root.querySelector(`[data-edit-store-name="${storeId}"]`)?.value ?? '').trim();
+        const phone = String(root.querySelector(`[data-edit-store-phone="${storeId}"]`)?.value ?? '').trim() || null;
+        const address = String(root.querySelector(`[data-edit-store-address="${storeId}"]`)?.value ?? '').trim() || null;
+        if (name.length < 2) {
+          toast('اسم الفرع يجب أن يكون حرفين على الأقل', 'error');
+          return;
+        }
+        saveBtn.disabled = true;
+        try {
+          await api(`/api/stores/${encodeURIComponent(storeId)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ name, phone, address }),
+          });
+          await loadData(state.data.selectedStoreId);
+          const listHost = root.querySelector('#stores-existing-list');
+          if (listHost) listHost.innerHTML = renderStoresList();
+          bindSaveStores();
+          render();
+          toast('تم تعديل بيانات الفرع بنجاح');
+        } catch (error) {
+          toast(error.message, 'error');
+        } finally {
+          saveBtn.disabled = false;
+        }
+      });
+    });
+  };
+  bindSaveStores();
+
+  const createForm = root.querySelector('#store-create-form');
+  createForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const submitBtn = createForm.querySelector('[type="submit"]');
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      const payload = Object.fromEntries(new FormData(event.currentTarget));
+      await api('/api/stores', { method: 'POST', body: JSON.stringify(payload) });
+      await loadData(state.data.selectedStoreId);
+      closeModal();
+      render();
+      toast('تم إضافة الفرع الجديد بنجاح');
+    } catch (error) {
+      toast(error.message, 'error');
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  });
+}
+
 function bindStoreStockActions() {
-  document.querySelector('#new-store-btn')?.addEventListener('click', () => supplierModal('<label>اسم الفرع الجديد<input name="name" required minlength="2" maxlength="100" placeholder="مثال: فرع المعادي"></label><label>كود الفرع<input name="code" required minlength="2" maxlength="20" pattern="[A-Za-z0-9_-]+" placeholder="MAADI"></label><label>العنوان (اختياري)<input name="address" maxlength="240"></label><label>الهاتف (اختياري)<input name="phone" maxlength="40"></label>', 'store-form', '/api/stores', (d) => d, 'تم إضافة الفرع الجديد بنجاح'));
+  document.querySelector('#new-store-btn')?.addEventListener('click', () => showStoresModal());
   document.querySelector('#transfer-stock-btn')?.addEventListener('click', () => openModelVariantStockModal({ mode: 'transfer' }));
   document.querySelector('#record-damage-btn')?.addEventListener('click', () => openModelVariantStockModal({ mode: 'damage' }));
   document.querySelector('#adjust-stock-btn')?.addEventListener('click', () => openModelVariantStockModal({ mode: 'adjust' }));

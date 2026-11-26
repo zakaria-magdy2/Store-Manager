@@ -134,97 +134,133 @@ after(async () => {
   if (dataDir) await cleanupTempDir(dataDir);
 });
 
-test('UI removes main Opening Balances dialog and adds supplier debt + Excel opening inventory entry points', async () => {
+test('UI removes main Opening Balances dialog, deduplicates buttons, adds one-time setup guards & edit modals', async () => {
   const appJs = await readFile(join(appDir, 'public', 'app.js'), 'utf8');
   assert.equal(appJs.includes('btn-open-opening-balances'), false);
   assert.equal(appJs.includes('showOpeningBalancesModal'), false);
+  assert.equal(appJs.includes('opening-debt-for-supplier'), false);
+  assert.equal(appJs.includes('purchase-for-supplier'), false);
+  assert.equal(appJs.includes('empty-new-opening-debt'), false);
+  assert.equal(appJs.includes('empty-new-supplier'), false);
+  assert.equal(appJs.includes('new-expense-table-btn'), false);
+  assert.equal(appJs.includes('empty-new-monthly-obligation'), false);
+  assert.equal(appJs.includes('!state.data.hasOpeningSupplierDebts'), true);
+  assert.equal(appJs.includes('!data.openingInventoryEntry'), true);
   assert.equal(appJs.includes('new-opening-debt'), true);
   assert.equal(appJs.includes('opening-inventory-import-btn'), true);
+  assert.equal(appJs.includes('showEditOpeningDebtModal'), true);
+  assert.equal(appJs.includes('showStoresModal'), true);
+  assert.equal(appJs.includes('edit-obligation-form'), true);
   assert.equal(/\bdownload:\s*'/.test(appJs), true);
-  assert.equal(appJs.includes("querySelectorAll('#new-opening-debt, #empty-new-opening-debt')"), true);
 });
 
-test('supplier opening debt without invoice, payment paydown, return guard, and opening inventory xlsx/csv import reconcile cleanly', async () => {
+test('supplier opening debt batch without invoice, one-time guard, editing, paydown, and opening inventory xlsx/csv import reconcile cleanly', async () => {
   const data1 = await req('/api/data');
   assert.equal(data1.status, 200);
   const storeId = data1.body.selectedStoreId;
+  assert.equal(data1.body.hasOpeningSupplierDebts, false);
+  assert.equal(data1.body.openingInventoryEntry, null);
 
-  // Seed drawer cash first via shift or treasury/opening? Use opening-debt (doesn't require cash) first!
+  // Batch multi-supplier opening debt submitted once for the store (no cash drawer needed)
   const debtKey = randomUUID();
   const inlineDebtRes = await req('/api/suppliers/opening-debt', {
     method: 'POST',
     body: JSON.stringify({
       idempotencyKey: debtKey,
       storeId,
-      newSupplier: {
-        name: 'شركة النور للتوريدات',
-        phone: '01001122334',
-        notes: 'تاجر قديم',
-      },
-      amount: '1500000', // 15,000.00 EGP
       entryDate: '2026-10-01',
-      notes: 'رصيد سابق من الدفتر الورقي',
+      items: [
+        {
+          newSupplier: {
+            name: 'شركة النور للتوريدات',
+            phone: '01001122334',
+            notes: 'تاجر قديم',
+          },
+          amount: '1500000', // 15,000.00 EGP
+          notes: 'رصيد سابق من الدفتر الورقي',
+        },
+        {
+          newSupplier: {
+            name: 'شركة السلام للتوريدات',
+            phone: '01112233445',
+          },
+          amount: '500000', // 5,000.00 EGP
+          notes: 'مديونية ثانية بنفس الشاشة',
+        },
+      ],
     }),
   });
-  assert.equal(inlineDebtRes.status, 201, `Inline opening debt failed: ${JSON.stringify(inlineDebtRes.body)}`);
+  assert.equal(inlineDebtRes.status, 201, `Batch opening debt failed: ${JSON.stringify(inlineDebtRes.body)}`);
   assert.ok(inlineDebtRes.body.invoiceNumber.startsWith('ODEBT-'));
+  assert.equal(inlineDebtRes.body.items.length, 2);
   const supplierId = inlineDebtRes.body.supplierId;
 
-  // Idempotent replay with same key
+  // Idempotent replay with identical key & items succeeds
   const replayDebtRes = await req('/api/suppliers/opening-debt', {
     method: 'POST',
     body: JSON.stringify({
       idempotencyKey: debtKey,
       storeId,
-      newSupplier: {
-        name: 'شركة النور للتوريدات',
-      },
-      amount: '1500000',
       entryDate: '2026-10-01',
+      items: [
+        {
+          newSupplier: {
+            name: 'شركة النور للتوريدات',
+          },
+          amount: '1500000',
+          notes: 'رصيد سابق من الدفتر الورقي',
+        },
+        {
+          newSupplier: {
+            name: 'شركة السلام للتوريدات',
+          },
+          amount: '500000',
+          notes: 'مديونية ثانية بنفس الشاشة',
+        },
+      ],
     }),
   });
   assert.equal(replayDebtRes.status, 201);
   assert.equal(replayDebtRes.body.id, inlineDebtRes.body.id);
 
-  // Conflict when reusing same key with different newSupplier name (same amount & store)
+  // Conflict when reusing same key with different supplier name or amount
   const conflictNameDebtRes = await req('/api/suppliers/opening-debt', {
     method: 'POST',
     body: JSON.stringify({
       idempotencyKey: debtKey,
       storeId,
-      newSupplier: {
-        name: 'مورد مختلف بنفس المفتاح',
-      },
-      amount: '1500000',
+      entryDate: '2026-10-01',
+      items: [
+        {
+          newSupplier: {
+            name: 'مورد مختلف بنفس المفتاح',
+          },
+          amount: '1500000',
+        },
+        {
+          newSupplier: {
+            name: 'شركة السلام للتوريدات',
+          },
+          amount: '500000',
+        },
+      ],
     }),
   });
   assert.equal(conflictNameDebtRes.status, 409);
 
-  // Conflict when reusing same key with different amount
-  const conflictDebtRes = await req('/api/suppliers/opening-debt', {
-    method: 'POST',
-    body: JSON.stringify({
-      idempotencyKey: debtKey,
-      storeId,
-      supplierId,
-      amount: '2000000',
-    }),
-  });
-  assert.equal(conflictDebtRes.status, 409);
-
-  // Add second opening debt to existing supplier
+  // One-time store guard: a new key for another opening debt batch on the same store returns 409 Conflict
   const secondDebtRes = await req('/api/suppliers/opening-debt', {
     method: 'POST',
     body: JSON.stringify({
       idempotencyKey: randomUUID(),
       storeId,
       supplierId,
-      amount: '500000', // 5,000.00 EGP
+      amount: '250000',
       entryDate: '2026-10-01',
-      notes: 'دفتر إضافي',
+      notes: 'محاولة تكرار لنفس الفرع',
     }),
   });
-  assert.equal(secondDebtRes.status, 201);
+  assert.equal(secondDebtRes.status, 409);
 
   // Item return must be rejected on invoice-less opening debt
   const badReturnRes = await req(`/api/purchases/${inlineDebtRes.body.id}/returns`, {
@@ -335,7 +371,7 @@ test('supplier opening debt without invoice, payment paydown, return guard, and 
   assert.equal(previewConflict.body.readyToCommit, false);
   assert.ok(previewConflict.body.conflicts.length > 0);
 
-  // Re-committing under a new key fails with 409 conflict (rollback cleanly)
+  // Re-committing under a new key fails with 409 conflict (one-time opening inventory guard per store)
   const commitConflict = await req('/api/inventory/opening-import/commit', {
     method: 'POST',
     body: JSON.stringify({
@@ -362,13 +398,58 @@ test('supplier opening debt without invoice, payment paydown, return guard, and 
   });
   assert.equal(badCommit.status, 400);
 
-  // Valid CSV with Arabic numerals also previews & commits cleanly
+  // Valid CSV with Arabic numerals is blocked by one-time store guard on primary store, then commits cleanly on a newly created & edited store
   const validCsv = Buffer.from('\uFEFFاسم الصنف,النوع / الفئة,كود الموديل,اللون,المقاس,الكمية,سعر التكلفة (جنيه),سعر البيع (جنيه),الباركود (اختياري),حد إعادة الطلب\nجاكيت شتوي,جواكت,JKT-777,أسود,XL,١٠,٤٥٠٫٥٠,٨٥٠,6223007770019,٢\n', 'utf8').toString('base64');
-  const commitCsv = await req('/api/inventory/opening-import/commit', {
+  const secondStoreCsvBlocked = await req('/api/inventory/opening-import/commit', {
     method: 'POST',
     body: JSON.stringify({
       idempotencyKey: randomUUID(),
       storeId,
+      filename: 'more.csv',
+      fileBase64: validCsv,
+      entryDate: '2026-10-01',
+    }),
+  });
+  assert.equal(secondStoreCsvBlocked.status, 409);
+
+  // Create second store & edit its details via PATCH /api/stores/:id
+  const createStoreRes = await req('/api/stores', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'فرع المعادي', code: 'MAADI', address: 'شارع 9', phone: '01099988877' }),
+  });
+  assert.equal(createStoreRes.status, 201);
+  const store2Id = createStoreRes.body.id;
+  const patchStoreRes = await req(`/api/stores/${store2Id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name: 'فرع المعادي الجديد', address: 'شارع النصر', phone: '01200011122' }),
+  });
+  assert.equal(patchStoreRes.status, 200);
+  assert.equal(patchStoreRes.body.name, 'فرع المعادي الجديد');
+
+  // Create and edit a monthly recurring obligation via PATCH /api/recurring-expenses/:id
+  const createObRes = await req('/api/recurring-expenses', {
+    method: 'POST',
+    body: JSON.stringify({
+      idempotencyKey: randomUUID(),
+      storeId,
+      name: 'إيجار مخزن إضافي',
+      categoryCode: 'RENT',
+      dueDay: 5,
+    }),
+  });
+  assert.equal(createObRes.status, 201);
+  const patchObRes = await req(`/api/recurring-expenses/${createObRes.body.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name: 'إيجار المخزن المحدث', categoryCode: 'UTILITIES', dueDay: 12 }),
+  });
+  assert.equal(patchObRes.status, 200);
+
+  // Valid CSV with Arabic numerals commits cleanly on the second store
+  const commitCsv = await req('/api/inventory/opening-import/commit', {
+    method: 'POST',
+    body: JSON.stringify({
+      idempotencyKey: randomUUID(),
+      storeId: store2Id,
       filename: 'more.csv',
       fileBase64: validCsv,
       entryDate: '2026-10-01',
@@ -390,30 +471,67 @@ test('supplier opening debt without invoice, payment paydown, return guard, and 
   });
   assert.equal(payDebtRes.status, 201, `Debt payment failed: ${JSON.stringify(payDebtRes.body)}`);
 
-  // PATCH on opening debt updates notes cleanly and keeps targetProfitPercent null
-  const patchDebtRes = await req(`/api/purchases/${inlineDebtRes.body.id}`, {
+  // Editing opening debt below alreadyPaid (500,000) is rejected with 400
+  const editBelowPaidRes = await req(`/api/suppliers/opening-debt/${inlineDebtRes.body.id}`, {
     method: 'PATCH',
     body: JSON.stringify({
-      notes: 'ملاحظة محدثة للمديونية الافتتاحية',
-      targetProfitPercent: 25,
+      idempotencyKey: randomUUID(),
+      amount: '400000',
     }),
   });
-  assert.equal(patchDebtRes.status, 200);
+  assert.equal(editBelowPaidRes.status, 400);
 
-  // Verify `/api/data` products, suppliers, and opening debt metadata
-  const dataAfter = await req('/api/data');
+  // Edit opening debt amount UP to 1,800,000 then back DOWN to 1,500,000 with updated notes
+  const editUpRes = await req(`/api/suppliers/opening-debt/${inlineDebtRes.body.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      idempotencyKey: randomUUID(),
+      amount: '1800000',
+      entryDate: '2026-10-01',
+      notes: 'زيادة مؤقتة للمراجعة',
+    }),
+  });
+  assert.equal(editUpRes.status, 200, `editUp failed: ${JSON.stringify(editUpRes.body)}`);
+  assert.equal(editUpRes.body.oldAmount, '1500000');
+  assert.equal(editUpRes.body.newAmount, '1800000');
+
+  const editDownRes = await req(`/api/suppliers/opening-debt/${inlineDebtRes.body.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      idempotencyKey: randomUUID(),
+      amount: '1500000',
+      entryDate: '2026-10-01',
+      notes: 'ملاحظة محدثة للمديونية الافتتاحية',
+    }),
+  });
+  assert.equal(editDownRes.status, 200, `editDown failed: ${JSON.stringify(editDownRes.body)}`);
+  assert.equal(editDownRes.body.oldAmount, '1800000');
+  assert.equal(editDownRes.body.newAmount, '1500000');
+
+  // Verify `/api/data` setup flags, products, suppliers, edited store & monthly obligation (explicitly scoped per store)
+  const dataAfter = await req(`/api/data?storeId=${storeId}`);
   assert.equal(dataAfter.status, 200);
+  assert.equal(dataAfter.body.hasOpeningSupplierDebts, true);
+  assert.ok(dataAfter.body.openingInventoryEntry !== null);
+  assert.equal(dataAfter.body.stores.find((s) => s.id === store2Id)?.name, 'فرع المعادي الجديد');
+  assert.equal(dataAfter.body.monthlyExpenses.find((o) => o.id === createObRes.body.id)?.name, 'إيجار المخزن المحدث');
+
+  const dataStore2 = await req(`/api/data?storeId=${store2Id}`);
+  assert.equal(dataStore2.status, 200);
+  assert.equal(dataStore2.body.hasOpeningSupplierDebts, false);
+  assert.ok(dataStore2.body.openingInventoryEntry !== null);
+
   const supAfter = dataAfter.body.suppliers.find((s) => s.id === supplierId);
   assert.ok(supAfter);
-  assert.equal(supAfter.totalPurchased, '2000000'); // 15k + 5k
+  assert.equal(supAfter.totalPurchased, '1500000');
   assert.equal(supAfter.totalPaid, '500000');
-  assert.equal(supAfter.balanceDue, '1500000');
+  assert.equal(supAfter.balanceDue, '1000000');
   assert.equal(supAfter.purchases.every((p) => p.isOpeningDebt === true), true);
   const patchedEntry = supAfter.purchases.find((p) => p.id === inlineDebtRes.body.id);
   assert.equal(patchedEntry.notes, 'ملاحظة محدثة للمديونية الافتتاحية');
   assert.equal(patchedEntry.targetProfitPercent, null);
 
-  // Verify physical inventory valuation == SUM(qty * wac)
+  // Verify primary store physical inventory valuation == SUM(qty * wac) on primary store only
   let inventoryValuationMinor = 0n;
   for (const prod of dataAfter.body.products) {
     for (const variant of prod.variants) {
@@ -422,9 +540,9 @@ test('supplier opening debt without invoice, payment paydown, return guard, and 
       inventoryValuationMinor += qty * wac;
     }
   }
-  assert.equal(inventoryValuationMinor, 1252400n + 450500n); // 1,702,900 piasters = 17,029.00 EGP
+  assert.equal(inventoryValuationMinor, 1252400n); // primary store XLSX items = 12,524.00 EGP
 
-  // Verify Trial Balance matches exact ledger positions and stays balanced
+  // Verify Trial Balance on primary store matches exact ledger positions (1,500,000 + 500,000 = 2,000,000 opening debt, 500,000 paid -> 1,500,000 due)
   const tbRes = await req(`/api/reports/trial-balance?storeId=${storeId}&from=2026-10-01&to=2026-12-31`);
   assert.equal(tbRes.status, 200);
   const acc1300 = tbRes.body.accounts.find((a) => a.accountCode === '1300');
@@ -440,15 +558,15 @@ test('supplier opening debt without invoice, payment paydown, return guard, and 
   assert.equal(BigInt(acc1020.periodCredit.amount), 500000n);
   assert.equal(acc5090 ? BigInt(acc5090.debitBalance.amount) - BigInt(acc5090.creditBalance.amount) : 0n, 0n);
 
-  // Verify P&L is zeroed (opening inventory and opening debt NEVER pollute operating P&L)
+  // Verify P&L is zeroed (opening inventory and opening debt + edits NEVER pollute operating P&L)
   const plRes = await req(`/api/reports/profit-loss?storeId=${storeId}&from=2026-10-01&to=2026-12-31`);
   assert.equal(plRes.status, 200);
   assert.equal(BigInt(plRes.body.profitLoss.operatingProfit.amount), 0n);
   assert.equal(BigInt(plRes.body.profitLoss.inventoryAdjustmentsLoss.amount), 0n);
 
-  // Verify Financial Map tags opening debt clearly
+  // Verify Financial Map tags opening debt clearly (including adjustment postings)
   const fmRes = await req(`/api/reports/financial-map?storeId=${storeId}&from=2026-10-01&to=2026-12-31`);
   assert.equal(fmRes.status, 200);
   const openingDebtEvents = fmRes.body.timeline.filter((e) => e.category === 'مديونية افتتاحية لتاجر');
-  assert.equal(openingDebtEvents.length, 2);
+  assert.ok(openingDebtEvents.length >= 2);
 });

@@ -39,6 +39,7 @@ import * as singleOpenShiftPerStore from './migrations/032_single_open_shift_per
 import * as shiftReconciliationStatus from './migrations/033_shift_reconciliation_status.js';
 import * as clockResetRecovery from './migrations/034_clock_reset_recovery.js';
 import * as supplierOpeningDebt from './migrations/035_supplier_opening_debt.js';
+import * as openingDebtUniqueness from './migrations/036_opening_debt_uniqueness.js';
 
 const MIGRATION_REGISTRY: Record<string, Migration> = {
   '001_initial_foundation': {
@@ -180,6 +181,10 @@ const MIGRATION_REGISTRY: Record<string, Migration> = {
   '035_supplier_opening_debt': {
     up: supplierOpeningDebt.up,
     down: supplierOpeningDebt.down,
+  },
+  '036_opening_debt_uniqueness': {
+    up: openingDebtUniqueness.up,
+    down: openingDebtUniqueness.down,
   },
 };
 

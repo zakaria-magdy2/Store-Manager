@@ -1259,21 +1259,59 @@ const InventoryAdjustSchema = z.object({
   unitCost: z.string().regex(/^\d{1,15}$/).optional(),
   reason: z.string().max(300).trim().optional(),
 });
-const SupplierOpeningDebtSchema = z.object({
-  idempotencyKey: z.string().uuid('معرف العملية غير صالح'),
-  storeId: z.string().uuid('اختر الفرع أولًا'),
+const SupplierOpeningDebtItemSchema = z.object({
   supplierId: z.string().uuid('التاجر المحدد غير صالح').optional(),
   newSupplier: SupplierSchema.optional(),
   amount: PositiveMoneyMinorSchema,
-  entryDate: BusinessDateSchema.optional(),
   notes: z.string().max(500).trim().optional(),
-}).superRefine((body, refinementCtx) => {
-  if (!body.supplierId && !body.newSupplier) {
+}).superRefine((item, refinementCtx) => {
+  if (!item.supplierId && !item.newSupplier) {
     refinementCtx.addIssue({
       code: z.ZodIssueCode.custom,
       message: 'اختر تاجرًا حاليًا أو أدخل بيانات التاجر الجديد',
     });
   }
+});
+const SupplierOpeningDebtSchema = z.union([
+  z.object({
+    idempotencyKey: z.string().uuid('معرف العملية غير صالح'),
+    storeId: z.string().uuid('اختر الفرع أولًا'),
+    entryDate: BusinessDateSchema.optional(),
+    items: z.array(SupplierOpeningDebtItemSchema).min(1, 'أضف تاجرًا واحدًا على الأقل').max(100, 'الحد الأقصى 100 تاجر'),
+  }),
+  z.object({
+    idempotencyKey: z.string().uuid('معرف العملية غير صالح'),
+    storeId: z.string().uuid('اختر الفرع أولًا'),
+    supplierId: z.string().uuid('التاجر المحدد غير صالح').optional(),
+    newSupplier: SupplierSchema.optional(),
+    amount: PositiveMoneyMinorSchema,
+    entryDate: BusinessDateSchema.optional(),
+    notes: z.string().max(500).trim().optional(),
+  }).superRefine((body, refinementCtx) => {
+    if (!body.supplierId && !body.newSupplier) {
+      refinementCtx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'اختر تاجرًا حاليًا أو أدخل بيانات التاجر الجديد',
+      });
+    }
+  }),
+]);
+const UpdateSupplierOpeningDebtSchema = z.object({
+  idempotencyKey: z.string().uuid('معرف العملية غير صالح'),
+  amount: PositiveMoneyMinorSchema,
+  entryDate: BusinessDateSchema.optional(),
+  invoiceNumber: z.string().max(80).trim().nullable().optional(),
+  notes: z.string().max(500).trim().nullable().optional(),
+});
+const UpdateStoreSchema = z.object({
+  name: z.string().min(2, 'اسم الفرع يجب أن يكون حرفين على الأقل').max(100).trim(),
+  address: z.string().max(240).trim().nullable().optional(),
+  phone: z.string().max(40).trim().nullable().optional(),
+});
+const UpdateRecurringObligationSchema = z.object({
+  name: z.string().min(2, 'اسم الالتزام يجب أن يكون حرفين على الأقل').max(120).trim(),
+  categoryCode: z.enum(['RENT', 'UTILITIES', 'TRANSPORT', 'MAINTENANCE', 'SUPPLIES', 'OTHER']),
+  dueDay: z.number().int().min(1).max(31),
 });
 const OpeningInventoryPreviewSchema = z.object({
   storeId: z.string().uuid('اختر الفرع أولًا'),
@@ -4856,6 +4894,24 @@ async function currentData(ctx, url) {
         .where('status', '=', 'POSTED')
         .executeTakeFirst()
     : null;
+  const existingOpeningInventoryEntry = (canViewAccounting || canManageCatalog || ctx.hasPermission(Permissions.INVENTORY_ADJUST))
+    ? await db.selectFrom('journal_entries')
+        .select(['id', 'entry_number as entryNumber', 'entry_date as entryDate'])
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('store_id', '=', storeId)
+        .where('idempotency_key', 'like', 'opening-inventory:%')
+        .where('reversed_by_entry_id', 'is', null)
+        .where('status', '=', 'POSTED')
+        .executeTakeFirst()
+    : null;
+  const existingOpeningDebtRow = canManageCatalog
+    ? await db.selectFrom('supplier_purchases')
+        .select('id')
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('store_id', '=', storeId)
+        .where('entry_kind', '=', 'OPENING_DEBT')
+        .executeTakeFirst()
+    : null;
 
   return {
     tenantId: ctx.tenantId,
@@ -4875,6 +4931,8 @@ async function currentData(ctx, url) {
     userCheckedInToday,
     userCheckInTime,
     openingBalanceEntry: existingOpeningEntry ? { id: existingOpeningEntry.id, entryNumber: existingOpeningEntry.entryNumber, entryDate: existingOpeningEntry.entryDate } : null,
+    openingInventoryEntry: existingOpeningInventoryEntry ? { id: existingOpeningInventoryEntry.id, entryNumber: existingOpeningInventoryEntry.entryNumber, entryDate: existingOpeningInventoryEntry.entryDate } : null,
+    hasOpeningSupplierDebts: Boolean(existingOpeningDebtRow),
     stores: stores.map((store) => ({ id: store.id, name: store.name, code: store.code, address: store.address ?? null, phone: store.phone ?? null })),
     users: managedUsers.map((user) => ({ id: user.id, username: user.username, fullName: user.fullName, phone: user.phone ?? null, employmentStartDate: user.employmentStartDate, shiftStartTime: user.shiftStartTime ?? null, lateGraceMinutes: user.lateGraceMinutes ?? 0, role: user.role, storeId: user.storeId ?? null, isActive: user.isActive, createdAt: user.createdAt.toISOString() })),
     selectedStoreId: storeId,
@@ -7276,6 +7334,48 @@ if (method === 'GET' && path === '/api/shifts/current') {
     return json(res, 201, { id });
   }
 
+  const recurringPatchMatch = method === 'PATCH' ? path.match(/^\/api\/recurring-expenses\/([0-9a-f-]+)$/i) : null;
+  if (recurringPatchMatch) {
+    if (!ctx.hasPermission(Permissions.EXPENSES_MONTHLY_CONFIRM) && ctx.roleId !== 'OWNER' && ctx.roleId !== 'STORE_MANAGER') {
+      throw Object.assign(new Error('غير مصرح بتعديل الالتزامات الشهرية'), { status: 403 });
+    }
+    const obligationId = recurringPatchMatch[1];
+    const body = validate(UpdateRecurringObligationSchema, await readJson(req));
+    const obligation = await db
+      .selectFrom('recurring_expense_obligations')
+      .select(['id', 'store_id', 'name', 'category_id', 'due_day_of_month'])
+      .where('tenant_id', '=', ctx.tenantId)
+      .where('id', '=', obligationId)
+      .where('is_active', '=', 1)
+      .executeTakeFirst();
+    if (!obligation || (ctx.storeId && ctx.storeId !== obligation.store_id)) {
+      throw Object.assign(new Error('الالتزام الشهري غير موجود'), { status: 404 });
+    }
+    const categoryNames = { RENT: 'إيجار المحل', UTILITIES: 'مرافق وفواتير', TRANSPORT: 'نقل ومواصلات', MAINTENANCE: 'صيانة', SUPPLIES: 'مستلزمات تشغيل', OTHER: 'التزامات أخرى' };
+    const categoryCode = `MONTHLY_${body.categoryCode}`;
+    const categoryId = `${ctx.tenantId}:expense-category:${categoryCode}`;
+    await db.transaction().execute(async (trx) => {
+      await trx.insertInto('expense_categories')
+        .values({ id: categoryId, tenant_id: ctx.tenantId, code: categoryCode, name: categoryNames[body.categoryCode], expense_type: 'MONTHLY_RECURRING', account_code: '6090' })
+        .onConflict((oc) => oc.columns(['tenant_id', 'code']).doNothing())
+        .execute();
+      await trx.updateTable('recurring_expense_obligations')
+        .set({ name: body.name, category_id: categoryId, due_day_of_month: body.dueDay })
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('id', '=', obligationId)
+        .execute();
+      await recordAuditInTrx(trx, ctx, {
+        storeId: obligation.store_id,
+        action: 'RECURRING_OBLIGATION_UPDATED',
+        entityType: 'RECURRING_OBLIGATION',
+        entityId: obligationId,
+        summary: `تعديل الالتزام الشهري (${obligation.name} → ${body.name})`,
+        metadata: { oldName: obligation.name, newName: body.name, categoryCode: body.categoryCode, dueDay: body.dueDay },
+      });
+    });
+    return json(res, 200, { id: obligationId, updated: true });
+  }
+
   const monthlyConfirmMatch = method === 'POST' ? path.match(/^\/api\/recurring-expenses\/([0-9a-f-]+)\/actual$/i) : null;
   if (monthlyConfirmMatch) {
     ctx.assertPermission(Permissions.EXPENSES_MONTHLY_CONFIRM);
@@ -7873,6 +7973,41 @@ if (method === 'GET' && path === '/api/shifts/current') {
     }
   }
 
+  const storePatchMatch = method === 'PATCH' ? path.match(/^\/api\/stores\/([0-9a-f-]+)$/i) : null;
+  if (storePatchMatch) {
+    ctx.assertPermission(Permissions.STORES_MANAGE);
+    const storeId = storePatchMatch[1];
+    const body = validate(UpdateStoreSchema, await readJson(req));
+    const existingStore = await db
+      .selectFrom('stores')
+      .select(['id', 'name', 'address', 'phone'])
+      .where('tenant_id', '=', ctx.tenantId)
+      .where('id', '=', storeId)
+      .executeTakeFirst();
+    if (!existingStore) {
+      throw Object.assign(new Error('الفرع غير موجود'), { status: 404 });
+    }
+    const nextAddress = body.address === undefined ? existingStore.address : (body.address || null);
+    const nextPhone = body.phone === undefined ? existingStore.phone : (body.phone || null);
+    await db.transaction().execute(async (trx) => {
+      await trx
+        .updateTable('stores')
+        .set({ name: body.name, address: nextAddress, phone: nextPhone })
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('id', '=', storeId)
+        .execute();
+      await recordAuditInTrx(trx, ctx, {
+        storeId,
+        action: 'STORE_UPDATED',
+        entityType: 'STORE',
+        entityId: storeId,
+        summary: `تعديل بيانات الفرع (${existingStore.name} → ${body.name})`,
+        metadata: { oldName: existingStore.name, newName: body.name, address: nextAddress, phone: nextPhone },
+      });
+    });
+    return json(res, 200, { id: storeId, name: body.name });
+  }
+
   if (method === 'POST' && path === '/api/inventory/transfer') {
     ctx.assertPermission(Permissions.INVENTORY_TRANSFER);
     const body = validate(InventoryTransferSchema, await readJson(req));
@@ -8205,31 +8340,64 @@ if (method === 'GET' && path === '/api/shifts/current') {
     }
     const tenant = await tenantRepo.findById(ctx.tenantId);
     if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
-    const debtId = randomUUID();
     const resolvedEntryDate =
       body.entryDate || businessDateInTimeZone(new Date(), resolveValidTimeZone(tenant.timezone));
-    const result = await purchasing.recordSupplierOpeningDebt(ctx, {
-      id: debtId,
+    const rawItems = 'items' in body
+      ? body.items
+      : [{ supplierId: body.supplierId, newSupplier: body.newSupplier, amount: body.amount, notes: body.notes }];
+    const result = await purchasing.recordSupplierOpeningDebtsBatch(ctx, {
       idempotencyKey: body.idempotencyKey,
-      supplierId: body.supplierId,
-      newSupplier: body.supplierId || !body.newSupplier
-        ? undefined
-        : {
-            id: randomUUID(),
-            name: body.newSupplier.name,
-            phone: body.newSupplier.phone,
-            notes: body.newSupplier.notes,
-          },
       storeId: body.storeId,
-      amount: Money.fromMinor(BigInt(body.amount), tenant.currency),
       debtDate: new Date(`${resolvedEntryDate}T12:00:00.000Z`),
       entryDate: resolvedEntryDate,
-      notes: body.notes,
+      items: rawItems.map((item) => ({
+        id: randomUUID(),
+        supplierId: item.supplierId,
+        newSupplier: item.supplierId || !item.newSupplier
+          ? undefined
+          : {
+              id: randomUUID(),
+              name: item.newSupplier.name,
+              phone: item.newSupplier.phone,
+              notes: item.newSupplier.notes,
+            },
+        amount: Money.fromMinor(BigInt(item.amount), tenant.currency),
+        notes: item.notes,
+      })),
     });
+    const first = result.items[0];
     return json(res, 201, {
-      id: result.id,
-      invoiceNumber: result.invoiceNumber,
-      supplierId: result.supplierId,
+      id: first.id,
+      invoiceNumber: first.invoiceNumber,
+      supplierId: first.supplierId,
+      items: result.items,
+    });
+  }
+
+  const openingDebtPatchMatch = method === 'PATCH' ? path.match(/^\/api\/suppliers\/opening-debt\/([0-9a-f-]+)$/i) : null;
+  if (openingDebtPatchMatch) {
+    ctx.assertPermission(Permissions.CATALOG_MANAGE);
+    if (!['OWNER', 'STORE_MANAGER'].includes(ctx.roleId)) {
+      throw Object.assign(new Error('غير مصرح بتعديل الديون الافتتاحية'), { status: 403 });
+    }
+    const purchaseId = openingDebtPatchMatch[1];
+    const body = validate(UpdateSupplierOpeningDebtSchema, await readJson(req));
+    const tenant = await tenantRepo.findById(ctx.tenantId);
+    if (!tenant) throw Object.assign(new Error('بيانات الشركة غير متاحة'), { status: 404 });
+    const updated = await purchasing.updateSupplierOpeningDebt(ctx, {
+      idempotencyKey: body.idempotencyKey,
+      purchaseId,
+      amount: Money.fromMinor(BigInt(body.amount), tenant.currency),
+      entryDate: body.entryDate,
+      invoiceNumber: body.invoiceNumber,
+      notes: body.notes,
+      updatedAt: new Date(),
+    });
+    return json(res, 200, {
+      id: updated.id,
+      updated: true,
+      oldAmount: updated.oldAmount.toString(),
+      newAmount: updated.newAmount.toString(),
     });
   }
 
@@ -8341,6 +8509,18 @@ if (method === 'GET' && path === '/api/shifts/current') {
       throw Object.assign(new Error(err instanceof Error ? err.message : 'تعذر قراءة ملف المخزن الافتتاحي'), { status: 400 });
     }
     const conflicts = await findOpeningImportConflicts(db, ctx.tenantId, parsed);
+    const existingOpeningInv = await db
+      .selectFrom('journal_entries')
+      .select(['id', 'entry_number'])
+      .where('tenant_id', '=', ctx.tenantId)
+      .where('store_id', '=', body.storeId)
+      .where('idempotency_key', 'like', 'opening-inventory:%')
+      .where('reversed_by_entry_id', 'is', null)
+      .where('status', '=', 'POSTED')
+      .executeTakeFirst();
+    if (existingOpeningInv) {
+      conflicts.unshift('تم تسجيل المخزن الافتتاحي لهذا الفرع مسبقًا — لا يمكن تكرار استيراد المخزن الافتتاحي');
+    }
     return json(res, 200, serializeOpeningImportPreview(parsed, conflicts, tenant.currency));
   }
 
@@ -8405,6 +8585,22 @@ if (method === 'GET' && path === '/api/shifts/current') {
         .where('tenant_id', '=', ctx.tenantId)
         .executeTakeFirst();
       if (!store) throw Object.assign(new Error('الفرع غير موجود'), { status: 404 });
+
+      const existingOpeningInv = await trx
+        .selectFrom('journal_entries')
+        .select(['id', 'entry_number'])
+        .where('tenant_id', '=', ctx.tenantId)
+        .where('store_id', '=', body.storeId)
+        .where('idempotency_key', 'like', 'opening-inventory:%')
+        .where('reversed_by_entry_id', 'is', null)
+        .where('status', '=', 'POSTED')
+        .executeTakeFirst();
+      if (existingOpeningInv) {
+        throw Object.assign(
+          new Error('تم تسجيل المخزن الافتتاحي لهذا الفرع مسبقًا — لا يمكن استيراد المخزن الافتتاحي أكثر من مرة لنفس الفرع'),
+          { status: 409 },
+        );
+      }
 
       const conflicts = await findOpeningImportConflicts(trx, ctx.tenantId, parsed);
       if (conflicts.length > 0) {
