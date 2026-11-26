@@ -3891,7 +3891,7 @@ function suppliersView() {
       <div>
         <p class="page-lead">إدارة حسابات التجار ومتابعة فواتير الشراء والاستلام والدفعات حسب التاريخ.</p>
       </div>
-      <div>
+      <div class="suppliers-heading-actions">
         <button class="button button-secondary" id="new-supplier">إضافة تاجر</button>
         <button class="button button-secondary" id="new-opening-debt">+ إضافة مديونية افتتاحية</button>
         <button class="button button-secondary" id="new-category">إضافة فئة</button>
@@ -10110,7 +10110,7 @@ function showOpeningInventoryModal() {
     const summary = preview.summary;
 
     previewArea.innerHTML = `
-      <div class="inventory-summary" style="margin:8px 0;">
+      <div class="inventory-summary opening-inv-preview-grid" style="margin:8px 0;">
         <div class="inventory-summary-card"><div><small>عدد الموديلات</small><strong>${summary.productCount}</strong></div></div>
         <div class="inventory-summary-card"><div><small>الألوان والمقاسات</small><strong>${summary.variantCount}</strong></div></div>
         <div class="inventory-summary-card"><div><small>إجمالي القطع</small><strong>${summary.totalUnits}</strong></div></div>
