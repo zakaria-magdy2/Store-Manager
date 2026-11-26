@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { inflateRawSync } from 'node:zlib';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -139,6 +140,8 @@ test('UI removes main Opening Balances dialog and adds supplier debt + Excel ope
   assert.equal(appJs.includes('showOpeningBalancesModal'), false);
   assert.equal(appJs.includes('new-opening-debt'), true);
   assert.equal(appJs.includes('opening-inventory-import-btn'), true);
+  assert.equal(/\bdownload:\s*'/.test(appJs), true);
+  assert.equal(appJs.includes("querySelectorAll('#new-opening-debt, #empty-new-opening-debt')"), true);
 });
 
 test('supplier opening debt without invoice, payment paydown, return guard, and opening inventory xlsx/csv import reconcile cleanly', async () => {
@@ -183,6 +186,20 @@ test('supplier opening debt without invoice, payment paydown, return guard, and 
   assert.equal(replayDebtRes.status, 201);
   assert.equal(replayDebtRes.body.id, inlineDebtRes.body.id);
 
+  // Conflict when reusing same key with different newSupplier name (same amount & store)
+  const conflictNameDebtRes = await req('/api/suppliers/opening-debt', {
+    method: 'POST',
+    body: JSON.stringify({
+      idempotencyKey: debtKey,
+      storeId,
+      newSupplier: {
+        name: 'مورد مختلف بنفس المفتاح',
+      },
+      amount: '1500000',
+    }),
+  });
+  assert.equal(conflictNameDebtRes.status, 409);
+
   // Conflict when reusing same key with different amount
   const conflictDebtRes = await req('/api/suppliers/opening-debt', {
     method: 'POST',
@@ -220,12 +237,35 @@ test('supplier opening debt without invoice, payment paydown, return guard, and 
   });
   assert.equal(badReturnRes.status, 400);
 
-  // Download opening inventory xlsx template
+  // Download opening inventory xlsx template & inspect OOXML structure
   const tplRes = await req('/api/inventory/opening-template.xlsx');
   assert.equal(tplRes.status, 200);
   assert.ok((tplRes.headers.get('content-type') ?? '').includes('spreadsheetml.sheet'));
   assert.equal(tplRes.buffer.subarray(0, 2).toString('utf8'), 'PK');
   assert.ok(tplRes.buffer.length > 2000);
+  const eocdOffset = tplRes.buffer.readUInt32LE(tplRes.buffer.length - 6);
+  const cdCount = tplRes.buffer.readUInt16LE(tplRes.buffer.length - 12);
+  let cdCursor = eocdOffset;
+  const tplXmls = {};
+  for (let i = 0; i < cdCount; i += 1) {
+    const method = tplRes.buffer.readUInt16LE(cdCursor + 10);
+    const compSize = tplRes.buffer.readUInt32LE(cdCursor + 20);
+    const nLen = tplRes.buffer.readUInt16LE(cdCursor + 28);
+    const xLen = tplRes.buffer.readUInt16LE(cdCursor + 30);
+    const cLen = tplRes.buffer.readUInt16LE(cdCursor + 32);
+    const loc = tplRes.buffer.readUInt32LE(cdCursor + 42);
+    const entryName = tplRes.buffer.subarray(cdCursor + 46, cdCursor + 46 + nLen).toString('utf8');
+    cdCursor += 46 + nLen + xLen + cLen;
+    const ln = tplRes.buffer.readUInt16LE(loc + 26);
+    const lx = tplRes.buffer.readUInt16LE(loc + 28);
+    const payload = tplRes.buffer.subarray(loc + 30 + ln + lx, loc + 30 + ln + lx + compSize);
+    tplXmls[entryName] = (method === 8 ? inflateRawSync(payload) : payload).toString('utf8');
+  }
+  assert.equal(tplXmls['xl/worksheets/sheet1.xml'].includes('activePane="bottomLeft"'), true);
+  assert.equal(tplXmls['xl/worksheets/sheet1.xml'].includes('activePane="bottomRight"'), false);
+  const sstMatch = /<sst[^>]+count="(\d+)"[^>]+uniqueCount="(\d+)"/.exec(tplXmls['xl/sharedStrings.xml']);
+  assert.ok(sstMatch);
+  assert.ok(BigInt(sstMatch[1]) > BigInt(sstMatch[2]));
 
   // Preview downloaded xlsx template
   const tplBase64 = tplRes.buffer.toString('base64');
@@ -350,6 +390,16 @@ test('supplier opening debt without invoice, payment paydown, return guard, and 
   });
   assert.equal(payDebtRes.status, 201, `Debt payment failed: ${JSON.stringify(payDebtRes.body)}`);
 
+  // PATCH on opening debt updates notes cleanly and keeps targetProfitPercent null
+  const patchDebtRes = await req(`/api/purchases/${inlineDebtRes.body.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      notes: 'ملاحظة محدثة للمديونية الافتتاحية',
+      targetProfitPercent: 25,
+    }),
+  });
+  assert.equal(patchDebtRes.status, 200);
+
   // Verify `/api/data` products, suppliers, and opening debt metadata
   const dataAfter = await req('/api/data');
   assert.equal(dataAfter.status, 200);
@@ -359,6 +409,9 @@ test('supplier opening debt without invoice, payment paydown, return guard, and 
   assert.equal(supAfter.totalPaid, '500000');
   assert.equal(supAfter.balanceDue, '1500000');
   assert.equal(supAfter.purchases.every((p) => p.isOpeningDebt === true), true);
+  const patchedEntry = supAfter.purchases.find((p) => p.id === inlineDebtRes.body.id);
+  assert.equal(patchedEntry.notes, 'ملاحظة محدثة للمديونية الافتتاحية');
+  assert.equal(patchedEntry.targetProfitPercent, null);
 
   // Verify physical inventory valuation == SUM(qty * wac)
   let inventoryValuationMinor = 0n;

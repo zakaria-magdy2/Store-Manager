@@ -7680,16 +7680,17 @@ if (method === 'GET' && path === '/api/shifts/current') {
     ctx.assertPermission(Permissions.CATALOG_MANAGE);
     const purchaseId = purchasePatchMatch[1];
     const body = validate(UpdatePurchaseMetaSchema, await readJson(req));
-    const existing = await db.selectFrom('supplier_purchases').select(['id', 'store_id', 'invoice_number', 'notes', 'target_profit_percent']).where('tenant_id', '=', ctx.tenantId).where('id', '=', purchaseId).executeTakeFirst();
+    const existing = await db.selectFrom('supplier_purchases').select(['id', 'store_id', 'entry_kind', 'invoice_number', 'notes', 'target_profit_percent']).where('tenant_id', '=', ctx.tenantId).where('id', '=', purchaseId).executeTakeFirst();
     if (!existing || (ctx.storeId && ctx.storeId !== existing.store_id)) {
       throw Object.assign(new Error('فاتورة الشراء غير متاحة'), { status: 404 });
     }
+    const isOpeningDebt = existing.entry_kind === 'OPENING_DEBT';
     const nextInvoice = body.invoiceNumber === undefined ? existing.invoice_number : (body.invoiceNumber || null);
     const nextNotes = body.notes === undefined ? existing.notes : (body.notes || null);
-    const nextTarget = body.targetProfitPercent === undefined ? existing.target_profit_percent : body.targetProfitPercent;
+    const nextTarget = isOpeningDebt ? null : (body.targetProfitPercent === undefined ? existing.target_profit_percent : body.targetProfitPercent);
     await db.transaction().execute(async (trx) => {
       await trx.updateTable('supplier_purchases').set({ invoice_number: nextInvoice, notes: nextNotes, target_profit_percent: nextTarget }).where('tenant_id', '=', ctx.tenantId).where('id', '=', purchaseId).execute();
-      await recordAuditInTrx(trx, ctx, { storeId: existing.store_id, action: 'PURCHASE_UPDATED', entityType: 'PURCHASE', entityId: purchaseId, summary: `تعديل بيانات فاتورة الشراء (${nextInvoice ?? purchaseId.slice(0, 8)})`, metadata: { oldInvoiceNumber: existing.invoice_number, newInvoiceNumber: nextInvoice, notes: nextNotes, targetProfitPercent: nextTarget } });
+      await recordAuditInTrx(trx, ctx, { storeId: existing.store_id, action: 'PURCHASE_UPDATED', entityType: 'PURCHASE', entityId: purchaseId, summary: `${isOpeningDebt ? 'تعديل بيانات مديونية افتتاحية' : 'تعديل بيانات فاتورة الشراء'} (${nextInvoice ?? purchaseId.slice(0, 8)})`, metadata: { entryKind: existing.entry_kind, oldInvoiceNumber: existing.invoice_number, newInvoiceNumber: nextInvoice, notes: nextNotes, targetProfitPercent: nextTarget } });
     });
     return json(res, 200, { id: purchaseId, updated: true });
   }

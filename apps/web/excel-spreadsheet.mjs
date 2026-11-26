@@ -348,7 +348,9 @@ function extractZipEntries(zipBuffer) {
 export function generateOpeningInventoryTemplateXlsx() {
   const sharedStrings = [];
   const sharedIndex = new Map();
+  let totalStringRefs = 0;
   const internString = (text) => {
+    totalStringRefs += 1;
     const str = String(text ?? '');
     if (sharedIndex.has(str)) return sharedIndex.get(str);
     const idx = sharedStrings.length;
@@ -399,7 +401,8 @@ export function generateOpeningInventoryTemplateXlsx() {
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <sheetViews>
     <sheetView workbookViewId="0" rightToLeft="1">
-      <pane ySplit="1" topLeftCell="A2" activePane="bottomRight" state="frozen"/>
+      <pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>
+      <selection pane="bottomLeft" activeCell="A2" sqref="A2"/>
     </sheetView>
   </sheetViews>
   <sheetFormatPr defaultRowHeight="21"/>
@@ -445,7 +448,7 @@ export function generateOpeningInventoryTemplateXlsx() {
 </worksheet>`;
 
   const sharedStringsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${sharedStrings.length}" uniqueCount="${sharedStrings.length}">
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${totalStringRefs}" uniqueCount="${sharedStrings.length}">
 ${sharedStrings.map((text) => `<si><t xml:space="preserve">${escapeXml(text)}</t></si>`).join('')}
 </sst>`;
 
@@ -535,7 +538,7 @@ function parseSharedStringsXml(xmlText) {
   const siRegex = /<(?:\w+:)?si\b[^>]*>([\s\S]*?)<\/(?:\w+:)?si>/g;
   let match = siRegex.exec(xmlText);
   while (match) {
-    const inner = match[1];
+    const inner = match[1].replace(/<(?:\w+:)?rPh\b[^>]*>[\s\S]*?<\/(?:\w+:)?rPh>/g, '');
     const parts = [];
     const tRegex = /<(?:\w+:)?t\b[^>]*>([\s\S]*?)<\/(?:\w+:)?t>/g;
     let tMatch = tRegex.exec(inner);
@@ -551,10 +554,10 @@ function parseSharedStringsXml(xmlText) {
 
 function parseAttributes(attrText) {
   const attrs = {};
-  const attrRegex = /([\w:]+)\s*=\s*"([^"]*)"/g;
+  const attrRegex = /([\w:]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
   let m = attrRegex.exec(attrText);
   while (m) {
-    attrs[m[1]] = decodeXmlEntities(m[2]);
+    attrs[m[1]] = decodeXmlEntities(m[2] ?? m[3] ?? '');
     m = attrRegex.exec(attrText);
   }
   return attrs;
@@ -572,7 +575,7 @@ function resolveWorkbookWorksheetPath(entries) {
     while (relMatch) {
       const attrs = parseAttributes(relMatch[1]);
       if (attrs.Id && attrs.Target) {
-        const cleaned = attrs.Target.replace(/^\/+/, '');
+        const cleaned = attrs.Target.replace(/\\/g, '/').replace(/^(?:\.\/|\/)+/, '');
         relTargets.set(attrs.Id, cleaned.startsWith('xl/') ? cleaned : `xl/${cleaned}`);
       }
       relMatch = relRegex.exec(relsXml);

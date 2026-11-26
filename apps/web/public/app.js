@@ -292,6 +292,7 @@ const icons = {
   check: '<polyline points="20 6 9 17 4 12"/>',
   x: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
   clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
   play: '<polygon points="5 3 19 12 5 21 5 3"/>',
   message: '<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5Z"/>',
 };
@@ -5737,7 +5738,9 @@ function showDevelopmentResetModal() {
 }
 
 function bindSuppliers() {
-  document.querySelector('#new-supplier, #empty-new-supplier')?.addEventListener('click', () => supplierModal('<label>اسم التاجر<input name="name" required minlength="2" maxlength="120"></label><label>رقم الهاتف<input name="phone" maxlength="40" type="tel"></label><label>ملاحظات<input name="notes" maxlength="500"></label>', 'supplier-form', '/api/suppliers'));
+  document.querySelectorAll('#new-supplier, #empty-new-supplier').forEach((button) => {
+    button.addEventListener('click', () => supplierModal('<label>اسم التاجر<input name="name" required minlength="2" maxlength="120"></label><label>رقم الهاتف<input name="phone" maxlength="40" type="tel"></label><label>ملاحظات<input name="notes" maxlength="500"></label>', 'supplier-form', '/api/suppliers'));
+  });
   const purchase = (supplierId = '', initialProductId = '', copyFromProductId = '') => {
     const activeSuppliers = state.data.suppliers.filter((supplier) => supplier.isActive !== false);
     if (!activeSuppliers.length) { toast('أضف تاجرًا نشطًا أو أعد تفعيل تاجر من الأرشيف قبل تسجيل الفاتورة', 'error'); return; }
@@ -7116,18 +7119,22 @@ function bindSuppliers() {
   document.querySelectorAll('.edit-purchase-meta').forEach((button) => button.addEventListener('click', () => {
     const { purchase: foundPurchase } = findLoadedPurchase(button.dataset.purchaseId);
     if (!foundPurchase) return;
+    const isOpeningDebt = Boolean(foundPurchase.isOpeningDebt || foundPurchase.entryKind === 'OPENING_DEBT');
     supplierModal(
-      `<label>رقم الفاتورة<input name="invoiceNumber" maxlength="80" value="${escapeHtml(foundPurchase.invoiceNumber ?? '')}" placeholder="رقم فاتورة التاجر"></label>
-       <label>نسبة الربح المستهدفة % (اختياري)<input name="targetProfitPercent" type="number" min="0" max="100000" step="0.5" value="${foundPurchase.targetProfitPercent ?? ''}"></label>
-       <label>ملاحظات الفاتورة<input name="notes" maxlength="500" value="${escapeHtml(foundPurchase.notes ?? '')}"></label>`,
+      isOpeningDebt
+        ? `<label>رقم المرجع<input name="invoiceNumber" maxlength="80" value="${escapeHtml(foundPurchase.invoiceNumber ?? '')}" placeholder="رقم المرجع"></label>
+           <label>ملاحظات المديونية<input name="notes" maxlength="500" value="${escapeHtml(foundPurchase.notes ?? '')}"></label>`
+        : `<label>رقم الفاتورة<input name="invoiceNumber" maxlength="80" value="${escapeHtml(foundPurchase.invoiceNumber ?? '')}" placeholder="رقم فاتورة التاجر"></label>
+           <label>نسبة الربح المستهدفة % (اختياري)<input name="targetProfitPercent" type="number" min="0" max="100000" step="0.5" value="${foundPurchase.targetProfitPercent ?? ''}"></label>
+           <label>ملاحظات الفاتورة<input name="notes" maxlength="500" value="${escapeHtml(foundPurchase.notes ?? '')}"></label>`,
       'edit-purchase-meta-form',
       `/api/purchases/${encodeURIComponent(foundPurchase.id)}`,
       (data) => ({
         invoiceNumber: String(data.invoiceNumber ?? '').trim() || null,
         notes: String(data.notes ?? '').trim() || null,
-        targetProfitPercent: String(data.targetProfitPercent ?? '').trim() === '' ? null : Number(data.targetProfitPercent),
+        ...(isOpeningDebt ? {} : { targetProfitPercent: String(data.targetProfitPercent ?? '').trim() === '' ? null : Number(data.targetProfitPercent) }),
       }),
-      'تم تعديل بيانات فاتورة الشراء بنجاح',
+      isOpeningDebt ? 'تم تعديل بيانات المديونية الافتتاحية بنجاح' : 'تم تعديل بيانات فاتورة الشراء بنجاح',
       'PATCH',
     );
   }));
@@ -7290,8 +7297,10 @@ function bindSuppliers() {
     void fetchPurchasesHistory(0, false);
   });
 
-  document.querySelector('#new-opening-debt, #empty-new-opening-debt')?.addEventListener('click', () => {
-    showOpeningDebtModal('');
+  document.querySelectorAll('#new-opening-debt, #empty-new-opening-debt').forEach((button) => {
+    button.addEventListener('click', () => {
+      showOpeningDebtModal('');
+    });
   });
 
   document.querySelectorAll('.opening-debt-for-supplier').forEach((button) => {
@@ -7316,7 +7325,7 @@ function showOpeningDebtModal(preselectedSupplierId = '') {
   const today = localDateIso();
   const initialMode = preselectedSupplierId || activeSuppliers.length > 0 ? 'EXISTING' : 'NEW';
 
-  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="opening-debt-modal-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">أرصدة التجار الافتتاحية</span><h2 id="opening-debt-modal-title">إضافة مديونية افتتاحية لتاجر</h2><p>سجّل المبلغ المستحق للتاجر من قبل تشغيل النظام بدون الحاجة لإدخال فواتير أو أصناف مخزن.</p></div><button type="button" class="modal-close" data-close-opening-debt aria-label="إغلاق">×</button></div><form id="opening-debt-form" class="form-stack modal-form"><div class="field-group"><label style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;"><span style="display:flex;gap:6px;align-items:center;"><input type="radio" name="supplierMode" value="EXISTING" ${initialMode === 'EXISTING' ? 'checked' : ''} ${activeSuppliers.length === 0 ? 'disabled' : ''}> اختيار تاجر مسجل</span><span style="display:flex;gap:6px;align-items:center;"><input type="radio" name="supplierMode" value="NEW" ${initialMode === 'NEW' ? 'checked' : ''}> إضافة تاجر جديد بالمديونية</span></label></div><div id="opening-debt-existing-wrap" ${initialMode === 'EXISTING' ? '' : 'hidden'}><label>التاجر<select name="supplierId">${activeSuppliers.map((s) => `<option value="${s.id}" ${s.id === preselectedSupplierId ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('')}</select></label></div><div id="opening-debt-new-wrap" class="form-stack" ${initialMode === 'NEW' ? '' : 'hidden'}><label>اسم التاجر الجديد<input name="newSupplierName" maxlength="120" placeholder="مثال: مصنع النور للملابس"></label><label>رقم الهاتف (اختياري)<input name="newSupplierPhone" maxlength="40" type="tel"></label><label>ملاحظات التاجر (اختياري)<input name="newSupplierNotes" maxlength="500"></label></div><label>قيمة المديونية الافتتاحية المستحقة للتاجر (${escapeHtml(currency)})<input name="amount" inputmode="decimal" placeholder="مثال: 15000" required></label><label>تاريخ المديونية<input type="date" name="entryDate" value="${today}" required></label><label>ملاحظات المديونية (اختياري)<input name="notes" maxlength="500" placeholder="مثال: رصيد مرحّل من دفتر الحسابات القديم"></label><div class="modal-actions"><button type="button" class="button button-secondary" data-close-opening-debt>إلغاء</button><button type="submit" class="button button-primary">حفظ المديونية الافتتاحية</button></div></form></section></div>`;
+  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="opening-debt-modal-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">أرصدة التجار الافتتاحية</span><h2 id="opening-debt-modal-title">إضافة مديونية افتتاحية لتاجر</h2><p>سجّل المبلغ المستحق للتاجر من قبل تشغيل النظام بدون الحاجة لإدخال فواتير أو أصناف مخزن.</p></div><button type="button" class="modal-close" data-close-opening-debt aria-label="إغلاق">×</button></div><form id="opening-debt-form" class="form-stack modal-form"><div class="field-group"><label style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;"><span style="display:flex;gap:6px;align-items:center;"><input type="radio" name="supplierMode" value="EXISTING" style="width:auto;height:auto;margin:0;" ${initialMode === 'EXISTING' ? 'checked' : ''} ${activeSuppliers.length === 0 ? 'disabled' : ''}> اختيار تاجر مسجل</span><span style="display:flex;gap:6px;align-items:center;"><input type="radio" name="supplierMode" value="NEW" style="width:auto;height:auto;margin:0;" ${initialMode === 'NEW' ? 'checked' : ''}> إضافة تاجر جديد بالمديونية</span></label></div><div id="opening-debt-existing-wrap" ${initialMode === 'EXISTING' ? '' : 'hidden'}><label>التاجر<select name="supplierId">${activeSuppliers.map((s) => `<option value="${s.id}" ${s.id === preselectedSupplierId ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('')}</select></label></div><div id="opening-debt-new-wrap" class="form-stack" ${initialMode === 'NEW' ? '' : 'hidden'}><label>اسم التاجر الجديد<input name="newSupplierName" maxlength="120" placeholder="مثال: مصنع النور للملابس"></label><label>رقم الهاتف (اختياري)<input name="newSupplierPhone" maxlength="40" type="tel"></label><label>ملاحظات التاجر (اختياري)<input name="newSupplierNotes" maxlength="500"></label></div><label>قيمة المديونية الافتتاحية المستحقة للتاجر (${escapeHtml(currency)})<input name="amount" inputmode="decimal" placeholder="مثال: 15000" required></label><label>تاريخ المديونية<input type="date" name="entryDate" value="${today}" required></label><label>ملاحظات المديونية (اختياري)<input name="notes" maxlength="500" placeholder="مثال: رصيد مرحّل من دفتر الحسابات القديم"></label><div class="modal-actions"><button type="button" class="button button-secondary" data-close-opening-debt>إلغاء</button><button type="submit" class="button button-primary">حفظ المديونية الافتتاحية</button></div></form></section></div>`;
 
   const closeModal = () => {
     root.innerHTML = '';
@@ -10074,7 +10083,7 @@ function showOpeningInventoryModal() {
     return btoa(binary);
   };
 
-  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="opening-inv-modal-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">استيراد بضاعة أول المدة</span><h2 id="opening-inv-modal-title">إضافة المخزن الافتتاحي من شيت إكسيل</h2><p>ارفع ملف إكسيل (.xlsx) أو (.csv) يحتوي على الأصناف والفئات والأكواد والألوان والمقاسات والكميات والأسعار.</p></div><button type="button" class="modal-close" data-close-opening-inv aria-label="إغلاق">×</button></div><form id="opening-inv-form" class="form-stack modal-form"><div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface-alt, #f8fafc);"><div><strong>1. جهّز الشيت على القالب الرسمي</strong><div style="font-size:12.5px;color:var(--muted);">يحتوي القالب على الأعمدة المطلوبة وتعليمات التعبئة وأمثلة جاهزة.</div></div><a class="button button-secondary button-sm" href="/api/inventory/opening-template.xlsx" download="قالب-المخزن-الافتتاحي-رف.xlsx">${icon('download', 14)} تحميل قالب الإكسيل (.xlsx)</a></div><label>2. اختر ملف الإكسيل أو CSV بعد تعبئته<input type="file" name="sheetFile" accept=".xlsx,.csv" required></label><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;"><label>تاريخ المخزن الافتتاحي<input type="date" name="entryDate" value="${today}" required></label><label>ملاحظات (اختياري)<input name="notes" maxlength="300" placeholder="مثال: جرد البضاعة قبل بدء التشغيل"></label></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><button type="button" class="button button-secondary" id="opening-inv-preview-btn">فحص ومعاينة الشيت</button><span id="opening-inv-file-hint" style="font-size:12.5px;color:var(--muted);"></span></div><div id="opening-inv-preview-area"></div><div class="modal-actions"><button type="button" class="button button-secondary" data-close-opening-inv>إلغاء</button><button type="submit" class="button button-primary" id="opening-inv-commit-btn" disabled>تأكيد وإضافة المخزن الافتتاحي</button></div></form></section></div>`;
+  modal.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="opening-inv-modal-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">استيراد بضاعة أول المدة</span><h2 id="opening-inv-modal-title">إضافة المخزن الافتتاحي من شيت إكسيل</h2><p>ارفع ملف إكسيل (.xlsx) أو (.csv) يحتوي على الأصناف والفئات والأكواد والألوان والمقاسات والكميات والأسعار.</p></div><button type="button" class="modal-close" data-close-opening-inv aria-label="إغلاق">×</button></div><form id="opening-inv-form" class="form-stack modal-form"><div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface-soft);"><div><strong>1. جهّز الشيت على القالب الرسمي</strong><div style="font-size:12.5px;color:var(--muted);">يحتوي القالب على الأعمدة المطلوبة وتعليمات التعبئة وأمثلة جاهزة.</div></div><a class="button button-secondary button-sm" href="/api/inventory/opening-template.xlsx" download="قالب-المخزن-الافتتاحي-رف.xlsx">${icon('download', 14)} تحميل قالب الإكسيل (.xlsx)</a></div><label>2. اختر ملف الإكسيل أو CSV بعد تعبئته<input type="file" name="sheetFile" accept=".xlsx,.csv" style="height:auto;padding:8px 10px;" required></label><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;"><label>تاريخ المخزن الافتتاحي<input type="date" name="entryDate" value="${today}" required></label><label>ملاحظات (اختياري)<input name="notes" maxlength="300" placeholder="مثال: جرد البضاعة قبل بدء التشغيل"></label></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><button type="button" class="button button-secondary" id="opening-inv-preview-btn">فحص ومعاينة الشيت</button><span id="opening-inv-file-hint" style="font-size:12.5px;color:var(--muted);"></span></div><div id="opening-inv-preview-area"></div><div class="modal-actions"><button type="button" class="button button-secondary" data-close-opening-inv>إلغاء</button><button type="submit" class="button button-primary" id="opening-inv-commit-btn" disabled>تأكيد وإضافة المخزن الافتتاحي</button></div></form></section></div>`;
 
   const closeModal = () => {
     modal.innerHTML = '';
@@ -10108,14 +10117,14 @@ function showOpeningInventoryModal() {
         <div class="inventory-summary-card"><div><small>إجمالي تكلفة البضاعة</small><strong class="table-total">${money(summary.totalCost)}</strong></div></div>
       </div>
       ${issues.length ? `
-        <div style="padding:12px 14px;border-radius:10px;border:1px solid #fecdd3;background:#fff1f2;color:#9f1239;margin-bottom:10px;">
+        <div style="padding:12px 14px;border-radius:10px;border:1px solid var(--rose);background:var(--rose-soft);color:var(--rose);margin-bottom:10px;">
           <strong>يوجد ملاحظات يجب تصحيحها قبل الاستيراد (${issues.length}):</strong>
           <ul style="margin:6px 0 0;padding-right:18px;">
             ${issues.slice(0, 12).map((msg) => `<li>${escapeHtml(msg)}</li>`).join('')}
           </ul>
           ${issues.length > 12 ? `<div style="margin-top:4px;font-size:12px;">+ ${issues.length - 12} ملاحظة إضافية</div>` : ''}
         </div>
-      ` : '<div style="padding:10px 14px;border-radius:10px;border:1px solid #bbf7d0;background:#f0fdf4;color:#166534;margin-bottom:10px;">✓ الشيت سليم وجاهز لإضافة المخزن الافتتاحي وقيد رأس المال (1300 / 3010).</div>'}
+      ` : '<div style="padding:10px 14px;border-radius:10px;border:1px solid var(--green);background:var(--green-soft);color:var(--green);margin-bottom:10px;">✓ الشيت سليم وجاهز لإضافة المخزن الافتتاحي وقيد رأس المال (1300 / 3010).</div>'}
       <div class="table-scroll" style="max-height:260px;">
         <table>
           <thead>
@@ -10185,7 +10194,7 @@ function showOpeningInventoryModal() {
     } catch (error) {
       lastPreview = null;
       if (previewArea) {
-        previewArea.innerHTML = `<div style="padding:12px;border-radius:10px;border:1px solid #fecdd3;background:#fff1f2;color:#9f1239;">${escapeHtml(error.message)}</div>`;
+        previewArea.innerHTML = `<div style="padding:12px;border-radius:10px;border:1px solid var(--rose);background:var(--rose-soft);color:var(--rose);">${escapeHtml(error.message)}</div>`;
       }
       toast(error.message, 'error');
     } finally {

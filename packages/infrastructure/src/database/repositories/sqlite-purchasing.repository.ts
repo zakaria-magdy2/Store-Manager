@@ -639,9 +639,20 @@ export class SqlitePurchasingRepository {
         .where('idempotency_key', '=', input.idempotencyKey)
         .executeTakeFirst();
       if (replay) {
+        let supplierNameMatches = true;
+        if (!input.supplierId && input.newSupplier) {
+          const replayedSupplier = await trx
+            .selectFrom('suppliers')
+            .select('name')
+            .where('tenant_id', '=', ctx.tenantId)
+            .where('id', '=', replay.supplier_id)
+            .executeTakeFirst();
+          supplierNameMatches = Boolean(replayedSupplier && replayedSupplier.name === input.newSupplier.name.trim());
+        }
         if (
           replay.entry_kind !== 'OPENING_DEBT' ||
           (input.supplierId && replay.supplier_id !== input.supplierId) ||
+          !supplierNameMatches ||
           replay.store_id !== input.storeId ||
           BigInt(replay.total_amount) !== input.amount.amount ||
           replay.currency !== input.amount.currency.code
