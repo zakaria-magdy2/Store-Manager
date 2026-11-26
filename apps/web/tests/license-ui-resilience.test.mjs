@@ -7,6 +7,7 @@ import vm from 'node:vm';
 import {
   CARTON_SIZES,
   CARTON_TYPES,
+  QUICK_COLORS,
   buildCartonDistribution,
   mergeDuplicateSkuNewProducts,
 } from '../public/carton-presets.mjs';
@@ -111,6 +112,7 @@ function loadApp(routes) {
     FormData: class { constructor() { this.entries = []; } get() { return null; } },
     CARTON_SIZES,
     CARTON_TYPES,
+    QUICK_COLORS,
     buildCartonDistribution,
     mergeDuplicateSkuNewProducts,
   };

@@ -431,7 +431,13 @@ test('editing supplier payments, expenses, suppliers, categories & purchase meta
   assert.equal(accMap2.get('2010').creditBalance.amount, '120000');
 
   // 4. Record daily expense 25000 CASH_DRAWER, then edit to 18000 BANK_TRANSFER
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const tzParts = new Intl.DateTimeFormat('en-US', {
+    timeZone: data0.body.company?.businessTimeZone || 'Africa/Cairo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const todayIso = `${tzParts.find((p) => p.type === 'year').value}-${tzParts.find((p) => p.type === 'month').value}-${tzParts.find((p) => p.type === 'day').value}`;
   const expCreate = await req('/api/expenses', {
     method: 'POST',
     body: JSON.stringify({

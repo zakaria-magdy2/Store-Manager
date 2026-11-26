@@ -6804,3 +6804,50 @@ bdi[dir="ltr"] {
     grid-template-columns: 1fr;
   }
 }
+
+.store-select-wrap {
+  padding: 5px 10px;
+  border-radius: 9px;
+  background: var(--surface-soft, #f8fafc);
+  border: 1px solid var(--line, #e9edf2);
+  gap: 7px;
+  min-height: 36px;
+}
+
+.store-select-wrap select {
+  padding: 2px 0 2px 20px;
+  line-height: 1.4;
+}
+
+.store-select-wrap .select-arrow {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted, #8490a2);
+  pointer-events: none;
+}
+
+.store-badge-static {
+  cursor: default;
+}
+
+.store-badge-name {
+  color: var(--ink, #182336);
+  font-weight: 600;
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+:root[data-theme="dark"] .store-select-wrap {
+  background: #171e2b;
+  border-color: #2a3447;
+}
+
+:root[data-theme="dark"] .store-badge-name {
+  color: #e2e8f0;
+}

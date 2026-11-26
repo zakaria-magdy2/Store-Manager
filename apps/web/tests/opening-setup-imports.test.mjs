@@ -154,7 +154,9 @@ test('UI removes main Opening Balances dialog, deduplicates buttons, adds one-ti
   assert.equal(appJs.includes('new-opening-debt'), true);
   assert.equal(appJs.includes('opening-inventory-import-btn'), true);
   assert.equal(appJs.includes('showEditOpeningDebtModal'), true);
-  assert.equal(appJs.includes('showStoresModal'), true);
+  assert.equal(appJs.includes('id="new-store-btn"'), false);
+  assert.equal(appJs.includes('showStoresModal'), false);
+  assert.equal(appJs.includes('⌄'), false);
   assert.equal(appJs.includes('edit-obligation-form'), true);
   assert.equal(/\bdownload:\s*'/.test(appJs), true);
 });

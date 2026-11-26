@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import {
   CARTON_SIZES,
   CARTON_TYPES,
+  QUICK_COLORS,
   buildCartonDistribution,
   buildCartonNewProductPayload,
   mergeDuplicateSkuNewProducts,
@@ -132,6 +133,9 @@ test('CARTON_TYPES define all 6 types with exact ranges and sizes, and distribut
     ],
   );
   assert.deepEqual(CARTON_SIZES, [5, 10, 15]);
+  for (const basic of ['أسود', 'أبيض', 'بيج', 'جملي', 'بني', 'كحلي']) {
+    assert.equal(QUICK_COLORS.includes(basic), true, `Missing quick color ${basic}`);
+  }
 
   // 1) No color (0 colors) for 5, 10, 15
   for (const size of CARTON_SIZES) {
@@ -179,6 +183,13 @@ test('CARTON_TYPES define all 6 types with exact ranges and sizes, and distribut
     assert.equal(d3.evenSplit, false);
   }
 
+  // 4b) 4+ colors supported freely without truncating at 3
+  for (const size of [10, 15]) {
+    const d4 = buildCartonDistribution({ typeId: 'women', cartonSize: size, colors: ['أسود', 'أبيض', 'بيج', 'جملي'] });
+    assert.equal(d4.colors.length, 4);
+    assert.equal(d4.totalPieces, size);
+  }
+
   // 5) Editing quantity from hidden matrix via overrides
   const edited = buildCartonDistribution({
     typeId: 'women',
@@ -189,12 +200,16 @@ test('CARTON_TYPES define all 6 types with exact ranges and sizes, and distribut
   assert.equal(edited.totalPieces, 13); // 2 + 2 + 5 + 2 + 2 = 13
   assert.equal(edited.entries.find((e) => e.size === '39').quantity, 5);
 
-  // 6) Purchase UI includes carton mode, hidden table toggle, and multi-carton add button
+  // 6) Unified New Product purchase UI integrates carton presets + quick colors and hides sizes + matrix until toggled
   const appJs = await readFile(join(appDir, 'public', 'app.js'), 'utf8');
   assert.equal(appJs.includes('./carton-presets.mjs'), true);
-  assert.equal(appJs.includes('data-group-mode="CARTON"'), true);
-  assert.equal(appJs.includes('id="add-purchase-carton"'), true);
+  assert.equal(appJs.includes('data-group-mode="CARTON"'), false);
+  assert.equal(appJs.includes('id="add-purchase-carton"'), false);
+  assert.equal(appJs.includes('id="add-purchase-new-product"'), true);
+  assert.equal(appJs.includes('data-quick-color='), true);
+  assert.equal(appJs.includes('data-color-values='), true);
   assert.equal(appJs.includes('data-carton-toggle-matrix='), true);
+  assert.equal(appJs.includes('!isNew || !gs.cartonMatrixOpen'), true);
   assert.equal(appJs.includes('gridEl.hidden = !gs.cartonMatrixOpen'), true);
 });
 

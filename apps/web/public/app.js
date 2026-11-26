@@ -1,6 +1,7 @@
 import {
   CARTON_SIZES,
   CARTON_TYPES,
+  QUICK_COLORS,
   buildCartonDistribution,
   mergeDuplicateSkuNewProducts,
 } from './carton-presets.mjs';
@@ -1566,7 +1567,11 @@ function shellView() {
     ? `<div id="mirror-recovery-warning-banner" class="license-expiry-banner license-expiry-banner-critical" role="alert"><span>تحذير حماية البيانات: النسخ الاحتياطي الخارجي (خارج هذا الكمبيوتر) غير مُعد بعد. احفظ مسارًا خارجيًا واحتفظ بمفتاح الاستعادة بعيدًا عن الجهاز لتجنب فقدان البيانات عند الفرمتة أو تعطل القرص.</span><button type="button" class="button button-primary button-sm" data-page="backups">إعداد النسخ الخارجي</button></div>`
     : '';
   const searchShortcutLabel = /mac/i.test(navigator.platform || '') ? '⌘ K' : 'Ctrl+K';
-  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span><span class="workspace-chevron">⌄</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'financial-map' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'stocktake' || state.data.capabilities.canAdjustInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item account-menu-whatsapp" role="menuitem" href="${SUPPORT_WHATSAPP_URL}" target="_blank" rel="noopener noreferrer">${icon('message', 17)}<span>تواصل مع الدعم (واتساب)<small class="support-phone-sub">${SUPPORT_WHATSAPP_PHONE}</small></span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${shiftControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>${searchShortcutLabel}</kbd></label><button type="button" class="icon-button notification-button ${totalAlertsCount > 0 ? 'has-alerts' : ''}" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount > 0 ? `<span class="notif-count-badge">${totalAlertsCount > 99 ? '99+' : totalAlertsCount}</span>` : ''}</button><span class="topbar-divider"></span><label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow">⌄</span></label></div></header><section class="page-content">${betaPreviewBanner}${licenseBypassBanner}${licenseExpiryBanner}${mirrorRecoveryBanner}${deniedBanner}${pageView()}</section></main>`;
+  const selectedStore = state.data.stores.find((store) => store.id === state.data.selectedStoreId) ?? state.data.stores[0];
+  const storeControlMarkup = state.data.stores.length > 1
+    ? `<label class="store-select-wrap">${icon('store', 16)}<select id="store-select" ${state.data.user.storeId ? 'disabled' : ''}>${state.data.stores.map((store) => `<option value="${store.id}" ${store.id === state.data.selectedStoreId ? 'selected' : ''}>${escapeHtml(store.name)}</option>`).join('')}</select><span class="select-arrow" aria-hidden="true">${icon('chevron', 14)}</span></label>`
+    : `<div class="store-select-wrap store-badge-static" title="${escapeHtml(selectedStore?.name ?? '')}">${icon('store', 16)}<span class="store-badge-name">${escapeHtml(selectedStore?.name ?? '')}</span></div>`;
+  return `<aside class="sidebar"><div class="sidebar-brand"><span class="brand-mark">ر</span><span>رَفّ</span></div><div class="workspace-pill"><span class="workspace-dot"></span><span>${escapeHtml(state.data.company.name)}</span></div><div class="nav-caption">القائمة الرئيسية</div><nav class="main-nav">${visibleNavItems.filter((item) => item.id !== 'expenses' || state.data.capabilities.canViewExpenses).filter((item) => item.id !== 'monthly-expenses' || state.data.capabilities.canViewMonthlyExpenses).filter((item) => item.id !== 'financial-map' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'reports' || state.data.capabilities.canViewAccounting).filter((item) => item.id !== 'top-products' || state.data.capabilities.canViewSales).filter((item) => item.id !== 'users' || state.data.capabilities.canManageUsers).filter((item) => item.id !== 'inventory' || state.data.capabilities.canViewInventory).filter((item) => item.id !== 'stocktake' || state.data.capabilities.canAdjustInventory).filter((item) => item.id !== 'products' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'suppliers' || state.data.capabilities.canManageCatalog).filter((item) => item.id !== 'sales' || state.data.capabilities.canViewSales).map((item) => `<button class="nav-item ${state.page === item.id ? 'active' : ''}" data-page="${item.id}" aria-label="${item.label}" title="${item.label}">${icon(item.icon, 19)}<span>${item.label}</span>${item.id === 'pos' ? '<kbd>F2</kbd>' : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="account-control"><div class="sidebar-user"><div class="avatar">${escapeHtml((state.data.user.fullName ?? state.user.fullName ?? '\u0645').slice(0, 1))}</div><div class="sidebar-user-copy"><strong>${escapeHtml(state.data.user.fullName ?? state.user.fullName ?? '\u0645\u062f\u064a\u0631 \u0627\u0644\u0646\u0638\u0627\u0645')}</strong><small>${roleLabel(state.data.user.role)}</small></div><button type="button" id="account-menu-toggle" class="user-menu" aria-label="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628" aria-haspopup="menu" aria-expanded="false" title="\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062d\u0633\u0627\u0628">${icon('more', 19)}</button></div><div id="account-menu" class="account-menu" role="menu" hidden>${menuExtraItems}<a class="account-menu-item account-menu-whatsapp" role="menuitem" href="${SUPPORT_WHATSAPP_URL}" target="_blank" rel="noopener noreferrer">${icon('message', 17)}<span>تواصل مع الدعم (واتساب)<small class="support-phone-sub">${SUPPORT_WHATSAPP_PHONE}</small></span></a><button type="button" id="theme-toggle" class="account-menu-item" role="menuitem">${icon(getTheme() === 'dark' ? 'sun' : 'moon', 17)}<span>${getTheme() === 'dark' ? '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062a\u062d' : '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062f\u0627\u0643\u0646'}</span></button><button type="button" id="change-password" class="account-menu-item" role="menuitem">${icon('users', 17)}<span>\u062a\u063a\u064a\u064a\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631</span></button><button type="button" id="logout-button" class="account-menu-item" role="menuitem">${icon('logout', 17)}<span>\u062a\u0633\u062c\u064a\u0644 \u0627\u0644\u062e\u0631\u0648\u062c</span></button></div></div></div></aside><main class="main-area"><header class="topbar"><div class="topbar-title"><div class="breadcrumb">مساحة العمل <span>/</span> ${pageTitle}</div><h1>${pageTitle}</h1></div><div class="topbar-actions">${shiftControl}<label class="global-search">${icon('search', 18)}<input id="global-search" placeholder="ابحث عن منتج أو فاتورة..." value="${escapeHtml(state.query)}"><kbd>${searchShortcutLabel}</kbd></label><button type="button" class="icon-button notification-button ${totalAlertsCount > 0 ? 'has-alerts' : ''}" id="global-notifications-btn" aria-label="التنبيهات" title="${totalAlertsCount > 0 ? `لديك ${totalAlertsCount} تنبيهات عاجلة` : 'التنبيهات'}">${icon('bell', 19)}${totalAlertsCount > 0 ? `<span class="notif-count-badge">${totalAlertsCount > 99 ? '99+' : totalAlertsCount}</span>` : ''}</button><span class="topbar-divider"></span>${storeControlMarkup}</div></header><section class="page-content">${betaPreviewBanner}${licenseBypassBanner}${licenseExpiryBanner}${mirrorRecoveryBanner}${deniedBanner}${pageView()}</section></main>`;
 }
 
 function roleLabel(role) {
@@ -2622,7 +2627,7 @@ function inventoryView() {
       </div>
     </div>`;
 
-  return `<div class="page-heading-row"><div><p class="page-lead">${isCashier ? 'متابعة أرصدة المخزون والمقاسات والأسعار المتاحة للبيع.' : 'متابعة وجرد أرصدة المخزون للموديلات والأصناف الحالية وتقييم رأس المال والأرباح المتوقعة.'}</p></div><div class="products-heading-actions">${data.capabilities.canManageStores ? '<button class="button button-secondary" id="new-store-btn">إدارة الفروع</button>' : ''}${data.capabilities.canTransferInventory && data.stores.length > 1 ? '<button class="button button-secondary" id="transfer-stock-btn">تحويل مخزون بين الفروع</button>' : ''}${data.capabilities.canAdjustInventory ? `${data.user.role === 'OWNER' && !data.openingInventoryEntry ? `<button class="button button-secondary" id="opening-inventory-import-btn">${icon('plus', 15)} إضافة المخزن الافتتاحي (إكسيل)</button>` : ''}<button class="button button-secondary" id="record-damage-btn">تسجيل تالف / هالك</button><button class="button button-secondary" id="adjust-stock-btn">تسوية سريعة لصنف</button>` : ''}<a class="button button-secondary" href="/api/reports/export.csv?type=inventory&storeId=${encodeURIComponent(data.selectedStoreId)}" download>تصدير CSV</a></div></div>
+  return `<div class="page-heading-row"><div><p class="page-lead">${isCashier ? 'متابعة أرصدة المخزون والمقاسات والأسعار المتاحة للبيع.' : 'متابعة وجرد أرصدة المخزون للموديلات والأصناف الحالية وتقييم رأس المال والأرباح المتوقعة.'}</p></div><div class="products-heading-actions">${data.capabilities.canTransferInventory && data.stores.length > 1 ? '<button class="button button-secondary" id="transfer-stock-btn">تحويل مخزون بين الفروع</button>' : ''}${data.capabilities.canAdjustInventory ? `${data.user.role === 'OWNER' && !data.openingInventoryEntry ? `<button class="button button-secondary" id="opening-inventory-import-btn">${icon('plus', 15)} إضافة المخزن الافتتاحي (إكسيل)</button>` : ''}<button class="button button-secondary" id="record-damage-btn">تسجيل تالف / هالك</button><button class="button button-secondary" id="adjust-stock-btn">تسوية سريعة لصنف</button>` : ''}<a class="button button-secondary" href="/api/reports/export.csv?type=inventory&storeId=${encodeURIComponent(data.selectedStoreId)}" download>تصدير CSV</a></div></div>
   <div class="inventory-summary ${isCashier ? '' : 'expense-summary-grid'}">${summaryCardsHtml}
   </div>
   <section class="panel"><div class="panel-heading"><div><h3>أرصدة الموديلات والمقاسات</h3><p>اضغط على الموديل لعرض مصفوفة الألوان والمقاسات</p></div><label class="table-search">${icon('search', 17)}<input class="local-search" placeholder="ابحث عن الموديل أو الكود أو المقاس" value="${escapeHtml(state.query)}"></label></div>${items.length ? `<div class="table-scroll"><table><thead><tr><th>الموديل</th><th>كود الموديل</th><th>الألوان والمقاسات</th><th class="cell-center">إجمالي الرصيد</th>${!isCashier ? '<th>سعر التكلفة (الفعلي)</th><th>سعر البيع</th><th>المكسب المتوقع</th>' : '<th>سعر البيع</th>'}<th>حالة المقاسات</th></tr></thead><tbody>${items.map((product) => `<tr><td><button type="button" class="product-name-action inventory-product-details" data-product-id="${product.id}"><span class="product-avatar ${product.imagePath ? 'has-image' : ''}">${product.imagePath ? renderProductThumb(product) : escapeHtml(product.name.slice(0, 1))}</span><span class="product-name-stack"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.brand || 'اضغط لعرض جدول المقاسات')}</small></span></button></td><td><span class="sku-code">${escapeHtml(product.sku)}</span></td><td>${product.matrix.isMatrix ? `<div class="model-sub-badges">${product.matrix.rawColors.length ? `<span class="model-chip model-chip-color">${escapeHtml(product.matrix.colorSummaryLabel)}</span>` : ''}${product.matrix.rawSizes.length ? `<span class="model-chip model-chip-size">${escapeHtml(product.matrix.sizeRangeLabel)}</span>` : ''}</div>` : `<small>${product.variants.length} نسخة</small>`}</td><td class="cell-center"><strong>${product.quantity}</strong> قطعة</td>${!isCashier ? (() => {
@@ -5792,47 +5797,8 @@ function bindSuppliers() {
     const decimals = currencyDecimals(currency);
     const initialMode = copyFromProductId ? 'NEW' : (initialProductId ? 'EXISTING' : (products.length > 0 ? 'EXISTING' : 'NEW'));
 
-    const defaultNewOptions = () => [
-      { name: 'اللون', valuesText: 'أسود، أبيض' },
-      { name: 'المقاس', valuesText: '41، 42، 43، 44، 45' },
-    ];
-
-    const applyCartonToGroupState = (gs) => {
-      const dist = buildCartonDistribution({
-        typeId: gs.cartonTypeId,
-        cartonSize: gs.cartonSize,
-        colors: gs.cartonColors,
-      });
-      gs.options = dist.options.map((opt) => ({
-        name: opt.name,
-        valuesText: opt.values.join('، '),
-      }));
-      gs.newQuantities = new Map(dist.quantitiesMap);
-      gs.cartonEvenSplit = dist.evenSplit;
-      return dist;
-    };
-
-    const ensureGroupState = (index, preferredMode = null) => {
-      const key = String(index);
-      let gs = groupStates.get(key);
-      if (!gs) {
-        gs = {
-          mode: preferredMode || (products.length > 0 ? 'EXISTING' : 'NEW'),
-          options: defaultNewOptions(),
-          newQuantities: new Map(),
-          cartonTypeId: 'men',
-          cartonSize: 10,
-          cartonColors: ['', '', ''],
-          cartonMatrixOpen: false,
-          cartonEvenSplit: true,
-        };
-        if (gs.mode === 'CARTON') {
-          applyCartonToGroupState(gs);
-        }
-        groupStates.set(key, gs);
-      }
-      return gs;
-    };
+    const isColorOptionName = (name) => ['لون', 'اللون', 'color'].includes(String(name ?? '').trim().toLowerCase());
+    const isSizeOptionName = (name) => ['مقاس', 'المقاس', 'size'].includes(String(name ?? '').trim().toLowerCase());
 
     const parseOptionValues = (rawText) => {
       const seen = new Set();
@@ -5846,6 +5812,61 @@ function bindSuppliers() {
         result.push(clean);
       }
       return result;
+    };
+
+    const syncColorsIntoOptions = (gs) => {
+      const parsedColors = parseOptionValues(gs.colorValuesText);
+      const nonColorOpts = (gs.options ?? []).filter((opt) => !isColorOptionName(opt.name));
+      gs.options = parsedColors.length
+        ? [{ name: 'اللون', valuesText: parsedColors.join('، ') }, ...nonColorOpts]
+        : nonColorOpts;
+    };
+
+    const applyCartonToGroupState = (gs) => {
+      const colors = parseOptionValues(gs.colorValuesText);
+      const dist = buildCartonDistribution({
+        typeId: gs.cartonTypeId,
+        cartonSize: gs.cartonSize,
+        colors,
+      });
+      const customExtraOpts = (gs.options ?? []).filter(
+        (opt) => !isColorOptionName(opt.name) && !isSizeOptionName(opt.name),
+      );
+      gs.options = [
+        ...dist.options.map((opt) => ({
+          name: opt.name,
+          valuesText: opt.values.join('، '),
+        })),
+        ...customExtraOpts,
+      ];
+      gs.newQuantities = new Map(dist.quantitiesMap);
+      gs.cartonEvenSplit = dist.evenSplit;
+      gs.useCartonPreset = true;
+      return dist;
+    };
+
+    const ensureGroupState = (index, preferredMode = null) => {
+      const key = String(index);
+      let gs = groupStates.get(key);
+      if (!gs) {
+        const resolvedMode = preferredMode === 'EXISTING' && products.length > 0
+          ? 'EXISTING'
+          : (preferredMode || (products.length > 0 ? 'EXISTING' : 'NEW'));
+        gs = {
+          mode: resolvedMode === 'NEW' ? 'NEW' : 'EXISTING',
+          options: [],
+          newQuantities: new Map(),
+          cartonTypeId: 'men',
+          cartonSize: 10,
+          colorValuesText: '',
+          cartonMatrixOpen: false,
+          cartonEvenSplit: true,
+          useCartonPreset: true,
+        };
+        applyCartonToGroupState(gs);
+        groupStates.set(key, gs);
+      }
+      return gs;
     };
 
     const buildInlineProductPlan = (section, gs) => {
@@ -5953,27 +5974,22 @@ function bindSuppliers() {
     const groupMarkup = (index, preferredMode = null) => {
       const gs = ensureGroupState(index, preferredMode);
       const isNew = gs.mode === 'NEW';
-      const isCarton = gs.mode === 'CARTON';
-      const isNewLike = isNew || isCarton;
+      const activeColorSet = new Set(parseOptionValues(gs.colorValuesText).map((c) => c.toLowerCase()));
       return `
         <section class="invoice-model-card" data-purchase-group="${index}">
           <div class="invoice-model-head" style="flex-direction:column;align-items:stretch;gap:10px;">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
-              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                <div class="product-kind-toggle" style="margin-bottom:0;max-width:480px;">
-                  <button type="button" class="product-kind-btn ${!isNewLike ? 'active' : ''}" data-group-mode="EXISTING" ${!products.length ? 'disabled title="لا توجد منتجات مسجلة بعد — أضف منتجًا جديدًا داخل الفاتورة"' : ''}>منتج موجود (إعادة طلب)</button>
-                  <button type="button" class="product-kind-btn ${isNew ? 'active' : ''}" data-group-mode="NEW">+ منتج جديد</button>
-                  <button type="button" class="product-kind-btn ${isCarton ? 'active' : ''}" data-group-mode="CARTON">كرتونة</button>
-                </div>
-                <span class="status-pill status-complete carton-number-badge" data-carton-badge="${index}" ${!isCarton ? 'hidden' : ''}>كرتونة 1</span>
+              <div class="product-kind-toggle" style="margin-bottom:0;max-width:420px;">
+                <button type="button" class="product-kind-btn ${!isNew ? 'active' : ''}" data-group-mode="EXISTING" ${!products.length ? 'disabled title="لا توجد منتجات مسجلة بعد — أضف منتجًا جديدًا داخل الفاتورة"' : ''}>منتج موجود (إعادة طلب)</button>
+                <button type="button" class="product-kind-btn ${isNew ? 'active' : ''}" data-group-mode="NEW">+ منتج جديد</button>
               </div>
               <button type="button" class="text-action remove-purchase-group" style="color:var(--rose, #be123c);">× حذف</button>
             </div>
 
-            <div class="purchase-existing-fields" ${isNewLike ? 'hidden' : ''}>
+            <div class="purchase-existing-fields" ${isNew ? 'hidden' : ''}>
               <div class="purchase-group-inputs">
                 <label style="margin:0;"><strong>الموديل:</strong>
-                  <select name="purchaseProduct_${index}" style="margin-top:4px;" ${isNewLike ? 'disabled' : ''}>
+                  <select name="purchaseProduct_${index}" style="margin-top:4px;" ${isNew ? 'disabled' : ''}>
                     ${products.map((product) => `<option value="${product.id}" ${index === 0 && product.id === initialProductId ? 'selected' : ''}>${escapeHtml(product.name)} (${escapeHtml(product.sku)})</option>`).join('')}
                   </select>
                 </label>
@@ -5986,7 +6002,7 @@ function bindSuppliers() {
               </div>
             </div>
 
-            <div class="purchase-new-fields" ${!isNewLike ? 'hidden' : ''}>
+            <div class="purchase-new-fields" ${!isNew ? 'hidden' : ''}>
               ${products.length > 0 ? `
                 <div class="purchase-copy-product-box" ${!isNew ? 'hidden' : ''} style="margin-bottom:10px;padding:8px 10px;border-radius:10px;background:var(--surface-soft, #f8fafc);border:1px dashed var(--line-strong, #cbd5e1);">
                   <label style="margin:0;font-size:12.5px;"><strong>نسخ مواصفات منتج موجود (ينسخ الفئة والألوان والمقاسات والأسعار تلقائيًا):</strong>
@@ -5999,10 +6015,10 @@ function bindSuppliers() {
               ` : ''}
               <div class="form-grid" style="gap:10px;margin-bottom:8px;">
                 <label style="margin:0;"><strong>اسم المنتج الجديد:</strong>
-                  <input name="newProductName_${index}" minlength="2" maxlength="120" placeholder="مثال: كوتشي ميلانو رانينج" ${isNewLike ? 'required' : ''} style="margin-top:4px;">
+                  <input name="newProductName_${index}" minlength="2" maxlength="120" placeholder="مثال: كوتشي ميلانو رانينج" ${isNew ? 'required' : ''} style="margin-top:4px;">
                 </label>
                 <label style="margin:0;"><strong>كود المنتج:</strong>
-                  <input name="newProductSku_${index}" maxlength="64" placeholder="مثال: MIL-205" ${isNewLike ? 'required' : ''} style="margin-top:4px;">
+                  <input name="newProductSku_${index}" maxlength="64" placeholder="مثال: MIL-205" ${isNew ? 'required' : ''} style="margin-top:4px;">
                 </label>
                 <label style="margin:0;"><strong>الفئة:</strong>
                   <div class="category-select-row" style="margin-top:4px;">
@@ -6015,50 +6031,49 @@ function bindSuppliers() {
               </div>
               <div class="form-grid" style="gap:10px;margin-bottom:8px;">
                 <label style="margin:0;"><strong>سعر الشراء / الجملة (${currency}):</strong>
-                  <input name="newPurchaseCost_${index}" inputmode="decimal" ${isNewLike ? 'required' : ''} placeholder="مثال: 300" style="margin-top:4px;">
+                  <input name="newPurchaseCost_${index}" inputmode="decimal" ${isNew ? 'required' : ''} placeholder="مثال: 300" style="margin-top:4px;">
                 </label>
                 <label style="margin:0;"><strong>سعر البيع (${currency}) (اختياري):</strong>
                   <input name="newPurchaseRetailPrice_${index}" inputmode="decimal" placeholder="اختياري — للتسعير لاحقًا" style="margin-top:4px;">
                 </label>
               </div>
-              <div class="inline-options-box" data-inline-options-box="${index}" ${!isNew ? 'hidden' : ''} style="padding:10px;border-radius:10px;background:var(--surface-soft, #f8fafc);border:1px solid var(--line, #e2e8f0);">
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
-                  <strong style="font-size:12px;">خيارات المنتج المرنة (مثل اللون، المقاس، الخامة، السعة...):</strong>
-                  <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                    <button type="button" class="date-preset-chip" data-opt-preset="color-size">لون ومقاس</button>
-                    <button type="button" class="date-preset-chip" data-opt-preset="size-only">مقاس فقط</button>
-                    <button type="button" class="date-preset-chip" data-opt-preset="single">صنف مفرد (بدون خيارات)</button>
-                    <button type="button" class="date-preset-chip" data-opt-add>+ إضافة خيار</button>
-                  </div>
-                </div>
-                <div class="inline-options-list" data-inline-options-list="${index}" style="display:grid;gap:6px;"></div>
-              </div>
-              <div class="carton-builder-box" data-carton-box="${index}" ${!isCarton ? 'hidden' : ''} style="padding:12px;border-radius:10px;background:var(--surface-soft, #f8fafc);border:1px solid var(--line-strong, #cbd5e1);display:grid;gap:10px;">
+              <div class="carton-builder-box" data-carton-box="${index}" ${!isNew ? 'hidden' : ''} style="padding:12px;border-radius:10px;background:var(--surface-soft, #f8fafc);border:1px solid var(--line-strong, #cbd5e1);display:grid;gap:10px;margin-bottom:8px;">
                 <div>
                   <strong style="font-size:12px;display:block;margin-bottom:6px;">نوع الكرتونة (نطاق المقاسات):</strong>
                   <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                    ${CARTON_TYPES.map((ct) => `<button type="button" class="date-preset-chip ${gs.cartonTypeId === ct.id ? 'active' : ''}" data-carton-type="${ct.id}">${escapeHtml(ct.label)} (${escapeHtml(ct.rangeLabel)})</button>`).join('')}
+                    ${CARTON_TYPES.map((ct) => `<button type="button" class="date-preset-chip ${gs.useCartonPreset && gs.cartonTypeId === ct.id ? 'active' : ''}" data-carton-type="${ct.id}">${escapeHtml(ct.label)} (${escapeHtml(ct.rangeLabel)})</button>`).join('')}
                   </div>
                 </div>
                 <div>
                   <strong style="font-size:12px;display:block;margin-bottom:6px;">حجم الكرتونة:</strong>
                   <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                    ${CARTON_SIZES.map((sz) => `<button type="button" class="date-preset-chip ${gs.cartonSize === sz ? 'active' : ''}" data-carton-size="${sz}">${sz} قطع</button>`).join('')}
+                    ${CARTON_SIZES.map((sz) => `<button type="button" class="date-preset-chip ${gs.useCartonPreset && gs.cartonSize === sz ? 'active' : ''}" data-carton-size="${sz}">${sz} قطع</button>`).join('')}
                   </div>
                 </div>
-                <div>
-                  <strong style="font-size:12px;display:block;margin-bottom:6px;">الألوان (اختياري — حتى 3 ألوان):</strong>
-                  <div style="display:grid;grid-template-columns:repeat(3, minmax(0, 1fr));gap:8px;">
-                    <input maxlength="64" data-carton-color="0" value="${escapeHtml(gs.cartonColors[0] ?? '')}" placeholder="لون 1 (اختياري)">
-                    <input maxlength="64" data-carton-color="1" value="${escapeHtml(gs.cartonColors[1] ?? '')}" placeholder="لون 2 (اختياري)">
-                    <input maxlength="64" data-carton-color="2" value="${escapeHtml(gs.cartonColors[2] ?? '')}" placeholder="لون 3 (اختياري)">
+                <div style="display:grid;gap:6px;">
+                  <strong style="font-size:12px;">ألوان سريعة (اضغط للإضافة أو الإزالة):</strong>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    ${QUICK_COLORS.map((c) => `<button type="button" class="date-preset-chip ${activeColorSet.has(c.toLowerCase()) ? 'active' : ''}" data-quick-color="${escapeHtml(c)}">${escapeHtml(c)}</button>`).join('')}
                   </div>
-                  <small style="color:var(--muted);font-size:11px;display:block;margin-top:4px;">اترك الألوان فارغة لكرتونة بدون لون، أو اكتب لونًا أو اثنين أو ثلاثة.</small>
+                  <div style="display:grid;grid-template-columns:minmax(90px,0.5fr) minmax(200px,2.5fr);gap:8px;align-items:center;margin-top:2px;">
+                    <span style="font-size:12.5px;font-weight:700;">الألوان:</span>
+                    <input data-color-values="${index}" value="${escapeHtml(gs.colorValuesText)}" placeholder="اختر من الألوان السريعة بالأعلى أو اكتب ألوان مفصولة بفاصلة (مثال: أسود، أبيض) — اتركه فارغًا لبدون لون">
+                  </div>
                 </div>
                 <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;padding-top:8px;border-top:1px dashed var(--line-strong, #cbd5e1);">
                   <span data-carton-summary="${index}" style="font-size:12px;color:var(--ink);"></span>
-                  <button type="button" class="button button-secondary button-sm" data-carton-toggle-matrix="${index}">تعديل جدول الألوان والمقاسات ▾</button>
+                  <button type="button" class="button button-secondary button-sm" data-carton-toggle-matrix="${index}">تعديل المقاسات وجدول الكميات ▾</button>
                 </div>
+              </div>
+              <div class="inline-options-box" data-inline-options-box="${index}" ${!isNew || !gs.cartonMatrixOpen ? 'hidden' : ''} style="padding:10px;border-radius:10px;background:var(--surface-soft, #f8fafc);border:1px solid var(--line, #e2e8f0);">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+                  <strong style="font-size:12px;">المقاسات والخيارات الإضافية:</strong>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <button type="button" class="date-preset-chip" data-opt-preset="single">صنف مفرد (بدون خيارات)</button>
+                    <button type="button" class="date-preset-chip" data-opt-add>+ إضافة خيار</button>
+                  </div>
+                </div>
+                <div class="inline-options-list" data-inline-options-list="${index}" style="display:grid;gap:6px;"></div>
               </div>
             </div>
           </div>
@@ -6137,9 +6152,6 @@ function bindSuppliers() {
       <div id="purchase-lines">${groupMarkup(groupIndex, initialMode)}</div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
-        <button id="add-purchase-carton" type="button" class="button button-secondary">
-          + إضافة كرتونة
-        </button>
         <button id="add-purchase-new-product" type="button" class="button button-secondary">
           + إضافة منتج جديد للفاتورة
         </button>
@@ -6323,46 +6335,35 @@ function bindSuppliers() {
     let currentPayMode = 'FULL_CASH';
     const fmtMoney = (minor) => money({ amount: minor.toString(), currency, decimals });
 
-    const syncCartonTitles = () => {
-      let cartonSeq = 0;
-      root.querySelectorAll('[data-purchase-group]').forEach((section) => {
-        const index = section.dataset.purchaseGroup;
-        const gs = ensureGroupState(index);
-        const badge = section.querySelector(`[data-carton-badge="${index}"]`);
-        const isCarton = gs.mode === 'CARTON';
-        if (badge) {
-          if (isCarton) {
-            cartonSeq += 1;
-            badge.textContent = `كرتونة ${cartonSeq}`;
-            badge.hidden = false;
-          } else {
-            badge.hidden = true;
-          }
-        }
-      });
-    };
-
     const refreshCartonBoxSummary = (section, gs, plan) => {
-      if (!section || gs.mode !== 'CARTON') return;
+      if (!section || gs.mode !== 'NEW') return;
       const index = section.dataset.purchaseGroup;
       const box = section.querySelector(`[data-carton-box="${index}"]`);
       if (!box) return;
       box.querySelectorAll('[data-carton-type]').forEach((btn) => {
-        btn.classList.toggle('active', btn.dataset.cartonType === gs.cartonTypeId);
+        btn.classList.toggle('active', Boolean(gs.useCartonPreset) && btn.dataset.cartonType === gs.cartonTypeId);
       });
       box.querySelectorAll('[data-carton-size]').forEach((btn) => {
-        btn.classList.toggle('active', Number.parseInt(btn.dataset.cartonSize ?? '0', 10) === gs.cartonSize);
+        btn.classList.toggle('active', Boolean(gs.useCartonPreset) && Number.parseInt(btn.dataset.cartonSize ?? '0', 10) === gs.cartonSize);
+      });
+      const activeColors = parseOptionValues(gs.colorValuesText);
+      const activeColorNorms = new Set(activeColors.map((c) => c.toLowerCase()));
+      box.querySelectorAll('[data-quick-color]').forEach((btn) => {
+        btn.classList.toggle('active', activeColorNorms.has(String(btn.dataset.quickColor ?? '').trim().toLowerCase()));
       });
       const toggleBtn = box.querySelector(`[data-carton-toggle-matrix="${index}"]`);
       if (toggleBtn) {
-        toggleBtn.textContent = gs.cartonMatrixOpen ? 'إخفاء جدول الألوان والمقاسات ▴' : 'تعديل جدول الألوان والمقاسات ▾';
+        toggleBtn.textContent = gs.cartonMatrixOpen ? 'إخفاء المقاسات وجدول الكميات ▴' : 'تعديل المقاسات وجدول الكميات ▾';
       }
       const summaryEl = box.querySelector(`[data-carton-summary="${index}"]`);
       if (summaryEl) {
         const typeObj = CARTON_TYPES.find((ct) => ct.id === gs.cartonTypeId);
+        const sizeOpt = (plan?.options ?? []).find((opt) => isSizeOptionName(opt.name));
+        const sizeSummary = gs.useCartonPreset
+          ? (typeObj?.rangeLabel ?? '')
+          : (sizeOpt?.values?.length ? sizeOpt.values.join('، ') : 'بدون مقاس (صنف مفرد)');
         const totalQty = (plan?.combinations ?? []).reduce((sum, combo) => sum + (Number(combo.qty) || 0), 0);
-        const activeColors = gs.cartonColors.map((c) => String(c ?? '').trim()).filter(Boolean);
-        summaryEl.innerHTML = `المقاسات: <strong>${escapeHtml(typeObj?.rangeLabel ?? '')}</strong> · ${activeColors.length ? `الألوان: <strong>${escapeHtml(activeColors.join('، '))}</strong>` : '<strong>بدون لون</strong>'} · الإجمالي: <strong>${totalQty} قطعة</strong>${!gs.cartonEvenSplit ? ' <span style="color:var(--muted);">(يمكنك ضبط الفروق من الجدول)</span>' : ''}`;
+        summaryEl.innerHTML = `المقاسات: <strong>${escapeHtml(sizeSummary)}</strong> · ${activeColors.length ? `الألوان: <strong>${escapeHtml(activeColors.join('، '))}</strong>` : '<strong>بدون لون</strong>'} · الإجمالي: <strong>${totalQty} قطعة</strong>${gs.useCartonPreset && !gs.cartonEvenSplit ? ' <span style="color:var(--muted);">(يمكنك ضبط الفروق من الجدول)</span>' : ''}`;
       }
     };
 
@@ -6371,18 +6372,16 @@ function bindSuppliers() {
       const index = section.dataset.purchaseGroup;
       const gs = ensureGroupState(index);
       const isNew = gs.mode === 'NEW';
-      const isCarton = gs.mode === 'CARTON';
-      const isNewLike = isNew || isCarton;
       const existingWrap = section.querySelector('.purchase-existing-fields');
       const newWrap = section.querySelector('.purchase-new-fields');
       const copyBox = section.querySelector('.purchase-copy-product-box');
       const inlineOptBox = section.querySelector(`[data-inline-options-box="${index}"]`);
       const cartonBox = section.querySelector(`[data-carton-box="${index}"]`);
-      if (existingWrap) existingWrap.hidden = isNewLike;
-      if (newWrap) newWrap.hidden = !isNewLike;
+      if (existingWrap) existingWrap.hidden = isNew;
+      if (newWrap) newWrap.hidden = !isNew;
       if (copyBox) copyBox.hidden = !isNew;
-      if (inlineOptBox) inlineOptBox.hidden = !isNew;
-      if (cartonBox) cartonBox.hidden = !isCarton;
+      if (cartonBox) cartonBox.hidden = !isNew;
+      if (inlineOptBox) inlineOptBox.hidden = !isNew || !gs.cartonMatrixOpen;
 
       const existingSelect = section.querySelector(`[name="purchaseProduct_${index}"]`);
       const existingCost = section.querySelector(`[name="purchaseCost_${index}"]`);
@@ -6390,16 +6389,15 @@ function bindSuppliers() {
       const newSku = section.querySelector(`[name="newProductSku_${index}"]`);
       const newCost = section.querySelector(`[name="newPurchaseCost_${index}"]`);
 
-      if (existingSelect) existingSelect.disabled = isNewLike;
-      if (existingCost) { existingCost.disabled = isNewLike; existingCost.required = !isNewLike; }
-      if (newName) { newName.disabled = !isNewLike; newName.required = isNewLike; }
-      if (newSku) { newSku.disabled = !isNewLike; newSku.required = isNewLike; }
-      if (newCost) { newCost.disabled = !isNewLike; newCost.required = isNewLike; }
+      if (existingSelect) existingSelect.disabled = isNew;
+      if (existingCost) { existingCost.disabled = isNew; existingCost.required = !isNew; }
+      if (newName) { newName.disabled = !isNew; newName.required = isNew; }
+      if (newSku) { newSku.disabled = !isNew; newSku.required = isNew; }
+      if (newCost) { newCost.disabled = !isNew; newCost.required = isNew; }
 
       section.querySelectorAll('[data-group-mode]').forEach((btn) => {
         btn.classList.toggle('active', btn.dataset.groupMode === gs.mode);
       });
-      syncCartonTitles();
     };
 
     const syncGroupDefaultRetailPrice = (section) => {
@@ -6438,14 +6436,17 @@ function bindSuppliers() {
       const gs = ensureGroupState(index);
       const listEl = section.querySelector(`[data-inline-options-list="${index}"]`);
       if (!listEl) return;
-      if (!gs.options.length) {
-        listEl.innerHTML = '<div style="font-size:12px;color:var(--muted);">بدون خيارات — سيتم إنشاء الصنف كمنتج مفرد (تركيبة واحدة).</div>';
+      const nonColorEntries = gs.options
+        .map((opt, optIdx) => ({ opt, optIdx }))
+        .filter(({ opt }) => !isColorOptionName(opt.name));
+      if (!nonColorEntries.length) {
+        listEl.innerHTML = '<div style="font-size:12px;color:var(--muted);">بدون مقاسات أو خيارات إضافية — يمكنك تعديل الألوان من الأعلى أو الضغط على «+ إضافة خيار».</div>';
         return;
       }
-      listEl.innerHTML = gs.options.map((opt, optIdx) => `
+      listEl.innerHTML = nonColorEntries.map(({ opt, optIdx }) => `
         <div class="inline-option-row" data-opt-index="${optIdx}" style="display:grid;grid-template-columns:minmax(110px,1fr) minmax(180px,2.2fr) auto;gap:6px;align-items:center;">
-          <input data-opt-name="${optIdx}" maxlength="64" value="${escapeHtml(opt.name)}" placeholder="اسم الخيار (مثال: اللون)">
-          <input data-opt-values="${optIdx}" value="${escapeHtml(opt.valuesText)}" placeholder="القيم مفصولة بفاصلة (مثال: أسود، أبيض)">
+          <input data-opt-name="${optIdx}" maxlength="64" value="${escapeHtml(opt.name)}" placeholder="اسم الخيار (مثال: المقاس)">
+          <input data-opt-values="${optIdx}" value="${escapeHtml(opt.valuesText)}" placeholder="القيم مفصولة بفاصلة (مثال: 42، 43، 44)">
           <button type="button" class="text-action" data-opt-remove="${optIdx}" style="color:var(--rose, #be123c);" title="حذف الخيار">×</button>
         </div>
       `).join('');
@@ -6463,12 +6464,12 @@ function bindSuppliers() {
       root.querySelectorAll('[data-purchase-group]').forEach((section) => {
         const index = section.dataset.purchaseGroup;
         const gs = ensureGroupState(index);
-        const isNew = gs.mode === 'NEW' || gs.mode === 'CARTON';
+        const isNew = gs.mode === 'NEW';
         const product = !isNew
           ? products.find((item) => item.id === section.querySelector(`[name="purchaseProduct_${index}"]`)?.value)
           : null;
         const plan = isNew ? buildInlineProductPlan(section, gs) : null;
-        if (gs.mode === 'CARTON') {
+        if (isNew) {
           refreshCartonBoxSummary(section, gs, plan);
         }
 
@@ -6756,14 +6757,12 @@ function bindSuppliers() {
       const gridEl = section.querySelector('.purchase-variant-grid');
       if (!gridEl) return;
 
-      if (gs.mode === 'NEW' || gs.mode === 'CARTON') {
+      if (gs.mode === 'NEW') {
         const plan = buildInlineProductPlan(section, gs);
-        if (gs.mode === 'CARTON') {
-          refreshCartonBoxSummary(section, gs, plan);
-          gridEl.hidden = !gs.cartonMatrixOpen;
-        } else {
-          gridEl.hidden = false;
-        }
+        refreshCartonBoxSummary(section, gs, plan);
+        const inlineOptBox = section.querySelector(`[data-inline-options-box="${index}"]`);
+        if (inlineOptBox) inlineOptBox.hidden = !gs.cartonMatrixOpen;
+        gridEl.hidden = !gs.cartonMatrixOpen;
         if (plan.duplicateOptionName) {
           gridEl.innerHTML = '<div style="padding:10px;border-radius:8px;color:var(--rose,#be123c);font-size:12px;">لا يمكن تكرار نفس اسم الخيار مرتين.</div>';
           return;
@@ -6954,6 +6953,8 @@ function bindSuppliers() {
       const index = section.dataset.purchaseGroup;
       const gs = ensureGroupState(index, 'NEW');
       gs.mode = 'NEW';
+      gs.useCartonPreset = false;
+      gs.cartonMatrixOpen = true;
       gs.newQuantities.clear();
       gs.options = (sourceProduct.options ?? []).length
         ? sourceProduct.options.map((opt) => ({
@@ -6961,6 +6962,10 @@ function bindSuppliers() {
             valuesText: (opt.values ?? []).join('، '),
           }))
         : [];
+      const colorOpt = gs.options.find((opt) => isColorOptionName(opt.name));
+      gs.colorValuesText = colorOpt ? colorOpt.valuesText : '';
+      const colorInput = section.querySelector(`[data-color-values="${index}"]`);
+      if (colorInput) colorInput.value = gs.colorValuesText;
 
       const nameInput = section.querySelector(`[name="newProductName_${index}"]`);
       const skuInput = section.querySelector(`[name="newProductSku_${index}"]`);
@@ -7005,7 +7010,6 @@ function bindSuppliers() {
       renderInlineOptionsEditor(firstGroup);
       renderGroup(firstGroup);
       syncGroupDefaultRetailPrice(firstGroup);
-      syncCartonTitles();
       updatePurchaseTotal();
     }
 
@@ -7029,6 +7033,7 @@ function bindSuppliers() {
         const optIdx = Number(e.target.dataset.optName);
         if (gs.options[optIdx]) {
           gs.options[optIdx].name = e.target.value;
+          gs.useCartonPreset = false;
           renderGroup(section);
           updatePurchaseTotal();
         }
@@ -7038,19 +7043,22 @@ function bindSuppliers() {
         const optIdx = Number(e.target.dataset.optValues);
         if (gs.options[optIdx]) {
           gs.options[optIdx].valuesText = e.target.value;
+          gs.useCartonPreset = false;
           renderGroup(section);
           updatePurchaseTotal();
         }
         return;
       }
-      if (e.target.matches('[data-carton-color]')) {
-        const colorIdx = Number.parseInt(e.target.dataset.cartonColor ?? '0', 10);
-        if (colorIdx >= 0 && colorIdx < 3) {
-          gs.cartonColors[colorIdx] = e.target.value;
+      if (e.target.matches('[data-color-values]')) {
+        gs.colorValuesText = e.target.value;
+        if (gs.useCartonPreset) {
           applyCartonToGroupState(gs);
-          renderGroup(section);
-          updatePurchaseTotal();
+        } else {
+          syncColorsIntoOptions(gs);
         }
+        renderInlineOptionsEditor(section);
+        renderGroup(section);
+        updatePurchaseTotal();
         return;
       }
       const newQtyInput = e.target.closest('[data-new-qty-key]');
@@ -7105,10 +7113,11 @@ function bindSuppliers() {
 
       const modeBtn = e.target.closest('[data-group-mode]');
       if (modeBtn && !modeBtn.disabled) {
-        gs.mode = modeBtn.dataset.groupMode;
-        if (gs.mode === 'NEW') renderInlineOptionsEditor(section);
-        else if (gs.mode === 'CARTON') applyCartonToGroupState(gs);
-        syncCartonTitles();
+        gs.mode = modeBtn.dataset.groupMode === 'EXISTING' ? 'EXISTING' : 'NEW';
+        if (gs.mode === 'NEW') {
+          if (gs.useCartonPreset && !gs.options.length) applyCartonToGroupState(gs);
+          renderInlineOptionsEditor(section);
+        }
         renderGroup(section);
         if (gs.mode === 'EXISTING') syncGroupDefaultRetailPrice(section);
         updatePurchaseTotal();
@@ -7119,6 +7128,7 @@ function bindSuppliers() {
       if (cartonTypeBtn) {
         gs.cartonTypeId = cartonTypeBtn.dataset.cartonType;
         applyCartonToGroupState(gs);
+        renderInlineOptionsEditor(section);
         renderGroup(section);
         updatePurchaseTotal();
         return;
@@ -7128,13 +7138,41 @@ function bindSuppliers() {
       if (cartonSizeBtn) {
         gs.cartonSize = Number.parseInt(cartonSizeBtn.dataset.cartonSize ?? '10', 10);
         applyCartonToGroupState(gs);
+        renderInlineOptionsEditor(section);
         renderGroup(section);
         updatePurchaseTotal();
         return;
       }
 
+      const quickColorBtn = e.target.closest('[data-quick-color]');
+      if (quickColorBtn) {
+        const targetColor = String(quickColorBtn.dataset.quickColor ?? '').trim();
+        if (targetColor) {
+          const currentColors = parseOptionValues(gs.colorValuesText);
+          const normTarget = targetColor.toLowerCase();
+          const exists = currentColors.some((c) => c.toLowerCase() === normTarget);
+          const nextColors = exists
+            ? currentColors.filter((c) => c.toLowerCase() !== normTarget)
+            : [...currentColors, targetColor];
+          gs.colorValuesText = nextColors.join('، ');
+          const colorInput = section.querySelector(`[data-color-values="${idx}"]`);
+          if (colorInput) colorInput.value = gs.colorValuesText;
+          if (gs.useCartonPreset) {
+            applyCartonToGroupState(gs);
+          } else {
+            syncColorsIntoOptions(gs);
+          }
+          renderInlineOptionsEditor(section);
+          renderGroup(section);
+          updatePurchaseTotal();
+        }
+        return;
+      }
+
       if (e.target.closest('[data-carton-toggle-matrix]')) {
         gs.cartonMatrixOpen = !gs.cartonMatrixOpen;
+        syncGroupRequiredFields(section);
+        renderInlineOptionsEditor(section);
         renderGroup(section);
         updatePurchaseTotal();
         return;
@@ -7152,10 +7190,14 @@ function bindSuppliers() {
       const optPresetBtn = e.target.closest('[data-opt-preset]');
       if (optPresetBtn) {
         const preset = optPresetBtn.dataset.optPreset;
-        if (preset === 'color-size') gs.options = defaultNewOptions();
-        else if (preset === 'size-only') gs.options = [{ name: 'المقاس', valuesText: 'S، M، L، XL' }];
-        else if (preset === 'single') gs.options = [];
-        gs.newQuantities.clear();
+        if (preset === 'single') {
+          gs.useCartonPreset = false;
+          gs.colorValuesText = '';
+          const colorInput = section.querySelector(`[data-color-values="${idx}"]`);
+          if (colorInput) colorInput.value = '';
+          gs.options = [];
+          gs.newQuantities = new Map([['__SINGLE__', 1]]);
+        }
         renderInlineOptionsEditor(section);
         renderGroup(section);
         updatePurchaseTotal();
@@ -7167,6 +7209,7 @@ function bindSuppliers() {
           toast('الحد الأقصى للخيارات في النموذج هو 6 خيارات', 'error');
           return;
         }
+        gs.useCartonPreset = false;
         gs.options.push({ name: '', valuesText: '' });
         renderInlineOptionsEditor(section);
         renderGroup(section);
@@ -7177,6 +7220,7 @@ function bindSuppliers() {
       const optRemoveBtn = e.target.closest('[data-opt-remove]');
       if (optRemoveBtn) {
         const optIdx = Number(optRemoveBtn.dataset.optRemove);
+        gs.useCartonPreset = false;
         gs.options.splice(optIdx, 1);
         gs.newQuantities.clear();
         renderInlineOptionsEditor(section);
@@ -7201,7 +7245,6 @@ function bindSuppliers() {
           selections.delete(idx);
           groupStates.delete(String(idx));
           section.remove();
-          syncCartonTitles();
           updatePurchaseTotal();
         } else {
           toast('يجب أن تحتوي الفاتورة على موديل واحد على الأقل', 'error');
@@ -7210,7 +7253,7 @@ function bindSuppliers() {
       }
 
       if (e.target.closest('[data-fill-serie="standard"]')) {
-        if (gs.mode === 'NEW' || gs.mode === 'CARTON') {
+        if (gs.mode === 'NEW') {
           const plan = buildInlineProductPlan(section, gs);
           const axis2Values = plan.options[1]?.values ?? [];
           section.querySelectorAll('[data-new-qty-key]').forEach((inp) => {
@@ -7236,7 +7279,7 @@ function bindSuppliers() {
       }
 
       if (e.target.closest('[data-fill-serie="one"]')) {
-        if (gs.mode === 'NEW' || gs.mode === 'CARTON') {
+        if (gs.mode === 'NEW') {
           section.querySelectorAll('[data-new-qty-key]').forEach((inp) => {
             const next = (Number(inp.value) || 0) + 1;
             inp.value = String(next);
@@ -7256,7 +7299,7 @@ function bindSuppliers() {
       }
 
       if (e.target.closest('[data-clear-all]')) {
-        if (gs.mode === 'NEW' || gs.mode === 'CARTON') {
+        if (gs.mode === 'NEW') {
           gs.newQuantities.clear();
           section.querySelectorAll('[data-new-qty-key]').forEach((inp) => {
             inp.value = '0';
@@ -7278,11 +7321,9 @@ function bindSuppliers() {
       renderInlineOptionsEditor(newSection);
       renderGroup(newSection);
       syncGroupDefaultRetailPrice(newSection);
-      syncCartonTitles();
       updatePurchaseTotal();
     };
 
-    root.querySelector('#add-purchase-carton')?.addEventListener('click', () => addGroup('CARTON'));
     root.querySelector('#add-purchase-new-product')?.addEventListener('click', () => addGroup('NEW'));
     root.querySelector('#add-purchase-product')?.addEventListener('click', () => addGroup('EXISTING'));
   };
@@ -10195,75 +10236,7 @@ function showBarcodeLabelsModal({ product = null, purchase = null } = {}) {
   renderLabelsPreview();
 }
 
-function showStoresModal() {
-  const root = getModalRoot();
-  const renderStoresList = () => {
-    const stores = state.data.stores ?? [];
-    if (!stores.length) return '';
-    return `<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line);display:grid;gap:10px;"><strong style="font-size:12.5px;">الفروع الحالية (يمكنك تعديل بيانات أي فرع):</strong><div style="display:grid;gap:10px;max-height:260px;overflow-y:auto;">${stores.map((s) => `<div style="padding:10px 12px;border:1px solid var(--line);border-radius:10px;display:grid;gap:8px;" data-edit-store-row="${s.id}"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><span class="sku-code">${escapeHtml(s.code)}</span><button type="button" class="button button-secondary button-sm" data-save-store="${s.id}">حفظ التعديل</button></div><div class="form-grid"><input data-edit-store-name="${s.id}" value="${escapeHtml(s.name)}" placeholder="اسم الفرع" minlength="2" maxlength="100"><input data-edit-store-phone="${s.id}" value="${escapeHtml(s.phone ?? '')}" placeholder="الهاتف" maxlength="40"></div><input data-edit-store-address="${s.id}" value="${escapeHtml(s.address ?? '')}" placeholder="العنوان" maxlength="240"></div>`).join('')}</div></div>`;
-  };
-
-  root.innerHTML = `<div class="modal-backdrop"><section class="modal-card product-variants-modal" role="dialog" aria-modal="true" aria-labelledby="stores-modal-title"><div class="modal-heading"><div><span class="eyebrow eyebrow-dark">الفروع</span><h2 id="stores-modal-title">إضافة وتعديل الفروع</h2></div><button type="button" class="modal-close" data-close-stores>×</button></div><form id="store-create-form" class="form-stack modal-form"><div class="form-grid"><label>اسم الفرع الجديد<input name="name" required minlength="2" maxlength="100" placeholder="مثال: فرع المعادي"></label><label>كود الفرع<input name="code" required minlength="2" maxlength="20" pattern="[A-Za-z0-9_-]+" placeholder="MAADI"></label></div><div class="form-grid"><label>العنوان (اختياري)<input name="address" maxlength="240"></label><label>الهاتف (اختياري)<input name="phone" maxlength="40"></label></div><div class="modal-actions"><button type="button" class="button button-secondary" data-close-stores>إغلاق</button><button type="submit" class="button button-primary">إضافة الفرع</button></div></form><div id="stores-existing-list">${renderStoresList()}</div></section></div>`;
-
-  const closeModal = () => {
-    root.innerHTML = '';
-  };
-  root.querySelectorAll('[data-close-stores]').forEach((btn) => btn.addEventListener('click', closeModal));
-
-  const bindSaveStores = () => {
-    root.querySelectorAll('[data-save-store]').forEach((saveBtn) => {
-      saveBtn.addEventListener('click', async () => {
-        const storeId = saveBtn.dataset.saveStore;
-        const name = String(root.querySelector(`[data-edit-store-name="${storeId}"]`)?.value ?? '').trim();
-        const phone = String(root.querySelector(`[data-edit-store-phone="${storeId}"]`)?.value ?? '').trim() || null;
-        const address = String(root.querySelector(`[data-edit-store-address="${storeId}"]`)?.value ?? '').trim() || null;
-        if (name.length < 2) {
-          toast('اسم الفرع يجب أن يكون حرفين على الأقل', 'error');
-          return;
-        }
-        saveBtn.disabled = true;
-        try {
-          await api(`/api/stores/${encodeURIComponent(storeId)}`, {
-            method: 'PATCH',
-            body: JSON.stringify({ name, phone, address }),
-          });
-          await loadData(state.data.selectedStoreId);
-          const listHost = root.querySelector('#stores-existing-list');
-          if (listHost) listHost.innerHTML = renderStoresList();
-          bindSaveStores();
-          render();
-          toast('تم تعديل بيانات الفرع بنجاح');
-        } catch (error) {
-          toast(error.message, 'error');
-        } finally {
-          saveBtn.disabled = false;
-        }
-      });
-    });
-  };
-  bindSaveStores();
-
-  const createForm = root.querySelector('#store-create-form');
-  createForm?.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const submitBtn = createForm.querySelector('[type="submit"]');
-    if (submitBtn) submitBtn.disabled = true;
-    try {
-      const payload = Object.fromEntries(new FormData(event.currentTarget));
-      await api('/api/stores', { method: 'POST', body: JSON.stringify(payload) });
-      await loadData(state.data.selectedStoreId);
-      closeModal();
-      render();
-      toast('تم إضافة الفرع الجديد بنجاح');
-    } catch (error) {
-      toast(error.message, 'error');
-      if (submitBtn) submitBtn.disabled = false;
-    }
-  });
-}
-
 function bindStoreStockActions() {
-  document.querySelector('#new-store-btn')?.addEventListener('click', () => showStoresModal());
   document.querySelector('#transfer-stock-btn')?.addEventListener('click', () => openModelVariantStockModal({ mode: 'transfer' }));
   document.querySelector('#record-damage-btn')?.addEventListener('click', () => openModelVariantStockModal({ mode: 'damage' }));
   document.querySelector('#adjust-stock-btn')?.addEventListener('click', () => openModelVariantStockModal({ mode: 'adjust' }));

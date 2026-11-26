@@ -14,6 +14,23 @@ export const CARTON_TYPES = [
 
 export const CARTON_SIZES = [5, 10, 15];
 
+export const QUICK_COLORS = [
+  'أسود',
+  'أبيض',
+  'بيج',
+  'جملي',
+  'بني',
+  'كحلي',
+  'رمادي',
+  'هافان',
+  'أحمر',
+  'نبيتي',
+  'أخضر',
+  'زيتي',
+  'أزرق',
+  'كشمير',
+];
+
 const ASCII_COLOR_CODES = new Map([
   ['أسود', 'BLK'],
   ['اسود', 'BLK'],
@@ -68,7 +85,7 @@ export function normalizeCartonColors(rawColors) {
     if (seen.has(norm)) continue;
     seen.add(norm);
     colors.push(clean);
-    if (colors.length >= 3) break;
+    if (colors.length >= 50) break;
   }
   return colors;
 }
