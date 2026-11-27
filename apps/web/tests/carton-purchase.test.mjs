@@ -12,6 +12,7 @@ import {
   CARTON_TYPES,
   QUICK_COLORS,
   buildCartonDistribution,
+  buildMultiCartonDistribution,
   buildCartonNewProductPayload,
   mergeDuplicateSkuNewProducts,
 } from '../public/carton-presets.mjs';
@@ -200,12 +201,50 @@ test('CARTON_TYPES define all 6 types with exact ranges and sizes, and distribut
   assert.equal(edited.totalPieces, 13); // 2 + 2 + 5 + 2 + 2 = 13
   assert.equal(edited.entries.find((e) => e.size === '39').quantity, 5);
 
-  // 6) Unified New Product purchase UI integrates carton presets + quick colors and hides sizes + matrix until toggled
+  // 6) Multi-carton counter & mixed carton types inside ONE product
+  const repeatedMen = buildMultiCartonDistribution({
+    cartons: [{ typeId: 'men', cartonSize: 10, count: 3 }],
+    colors: ['أسود', 'أبيض'],
+  });
+  assert.equal(repeatedMen.totalCartons, 3);
+  assert.equal(repeatedMen.totalPieces, 30);
+  assert.equal(repeatedMen.entries.every((e) => e.quantity === 3), true);
+
+  const mixedTypes = buildMultiCartonDistribution({
+    cartons: [
+      { typeId: 'baby', cartonSize: 5, count: 1 },
+      { typeId: 'kids', cartonSize: 5, count: 1 },
+      { typeId: 'women', cartonSize: 10, count: 1 },
+      { typeId: 'men', cartonSize: 10, count: 2 },
+    ],
+    colors: ['أسود'],
+  });
+  assert.equal(mixedTypes.totalCartons, 5);
+  assert.equal(mixedTypes.sizes.length, 20);
+  assert.equal(mixedTypes.totalPieces, 40);
+
+  const overlappingSizes = buildMultiCartonDistribution({
+    cartons: [
+      { typeId: 'pharmacy', cartonSize: 5, count: 1 }, // 18-22
+      { typeId: 'baby', cartonSize: 5, count: 1 },     // 22-26 (overlaps at 22!)
+    ],
+    colors: [],
+  });
+  assert.deepEqual(overlappingSizes.sizes, ['18', '19', '20', '21', '22', '23', '24', '25', '26']);
+  assert.equal(overlappingSizes.totalPieces, 10);
+  assert.equal(overlappingSizes.entries.find((e) => e.size === '22').quantity, 2);
+
+  // 7) Unified New Product purchase UI integrates multi-carton counters + quick colors and hides sizes + matrix until toggled
   const appJs = await readFile(join(appDir, 'public', 'app.js'), 'utf8');
   assert.equal(appJs.includes('./carton-presets.mjs'), true);
+  assert.equal(appJs.includes('buildMultiCartonDistribution'), true);
   assert.equal(appJs.includes('data-group-mode="CARTON"'), false);
   assert.equal(appJs.includes('id="add-purchase-carton"'), false);
   assert.equal(appJs.includes('id="add-purchase-new-product"'), true);
+  assert.equal(appJs.includes('data-carton-count='), true);
+  assert.equal(appJs.includes('data-carton-inc='), true);
+  assert.equal(appJs.includes('data-carton-dec='), true);
+  assert.equal(appJs.includes('data-add-carton-row='), true);
   assert.equal(appJs.includes('data-quick-color='), true);
   assert.equal(appJs.includes('data-color-values='), true);
   assert.equal(appJs.includes('data-carton-toggle-matrix='), true);
@@ -291,8 +330,24 @@ test('multi-carton purchase invoice (5/10/15, 0/1/2/3 colors, and edited table q
     }),
   });
 
-  const mergedProducts = mergeDuplicateSkuNewProducts([c1.product, c2.product, c3.product, c4.product]);
-  assert.equal(mergedProducts.length, 4);
+  // Carton 5: ONE single product combining baby (5pc x 1) + men (10pc x 2) = 25 pcs @ 100 EGP = 250,000
+  const c5 = buildCartonNewProductPayload({
+    name: 'موديل عائلي متعدد الكراتين',
+    sku: 'CRT-FAM-MIX',
+    categoryId,
+    unitCostMinor: '10000',
+    retailPriceMinor: '18000',
+    distribution: buildMultiCartonDistribution({
+      cartons: [
+        { typeId: 'baby', cartonSize: 5, count: 1 },
+        { typeId: 'men', cartonSize: 10, count: 2 },
+      ],
+      colors: ['أسود'],
+    }),
+  });
+
+  const mergedProducts = mergeDuplicateSkuNewProducts([c1.product, c2.product, c3.product, c4.product, c5.product]);
+  assert.equal(mergedProducts.length, 5);
 
   // Also test merge helper when two identical-SKU cartons are submitted in the same invoice
   const sameSkuMerge = mergeDuplicateSkuNewProducts([
@@ -312,10 +367,10 @@ test('multi-carton purchase invoice (5/10/15, 0/1/2/3 colors, and edited table q
   assert.equal(sameSkuMerge.length, 1);
   assert.equal(sameSkuMerge[0].variants.reduce((s, v) => s + Number(v.quantity), 0), 10);
 
-  const invoiceTotalMinor = c1.totalCostMinor + c2.totalCostMinor + c3.totalCostMinor + c4.totalCostMinor;
-  // (10*20,000) + (15*15,000) + (5*10,000) + (13*18,000) = 200,000 + 225,000 + 50,000 + 234,000 = 709,000
-  assert.equal(invoiceTotalMinor, 709000n);
-  const cashPaidMinor = 309000n;
+  const invoiceTotalMinor = c1.totalCostMinor + c2.totalCostMinor + c3.totalCostMinor + c4.totalCostMinor + c5.totalCostMinor;
+  // 709,000 + 250,000 = 959,000
+  assert.equal(invoiceTotalMinor, 959000n);
+  const cashPaidMinor = 559000n;
 
   const purRes = await req('/api/purchases', {
     method: 'POST',
@@ -341,8 +396,9 @@ test('multi-carton purchase invoice (5/10/15, 0/1/2/3 colors, and edited table q
   const prod2 = dataAfter.body.products.find((p) => p.sku === 'CRT-KIDS-15');
   const prod3 = dataAfter.body.products.find((p) => p.sku === 'CRT-BABY-05');
   const prod4 = dataAfter.body.products.find((p) => p.sku === 'CRT-WMN-ED');
+  const prod5 = dataAfter.body.products.find((p) => p.sku === 'CRT-FAM-MIX');
 
-  assert.ok(prod1 && prod2 && prod3 && prod4);
+  assert.ok(prod1 && prod2 && prod3 && prod4 && prod5);
   assert.equal(prod1.variants.reduce((s, v) => s + Number(v.quantity), 0), 10);
   assert.equal(prod2.variants.reduce((s, v) => s + Number(v.quantity), 0), 15);
   assert.equal(prod3.options.length, 1); // no color option!
@@ -350,13 +406,16 @@ test('multi-carton purchase invoice (5/10/15, 0/1/2/3 colors, and edited table q
   assert.equal(prod4.variants.reduce((s, v) => s + Number(v.quantity), 0), 13);
   const size39Variant = prod4.variants.find((v) => Object.values(v.attributes).includes('39'));
   assert.equal(size39Variant.quantity, '5');
+  assert.equal(prod5.variants.reduce((s, v) => s + Number(v.quantity), 0), 25);
+  assert.equal(prod5.variants.find((v) => Object.values(v.attributes).includes('22')).quantity, '1');
+  assert.equal(prod5.variants.find((v) => Object.values(v.attributes).includes('42')).quantity, '4');
 
-  // Verify normal purchase accounting: Inventory 1300 = 709,000; AP 2010 = 400,000; Drawer 1010 = 5,000,000 - 309,000 = 4,691,000
+  // Verify normal purchase accounting: Inventory 1300 = 959,000; AP 2010 = 400,000; Drawer 1010 = 5,000,000 - 559,000 = 4,441,000
   const tb = await req(`/api/reports/trial-balance?storeId=${storeId}`);
   assert.equal(tb.status, 200);
   assert.equal(tb.body.totals.isBalanced, true);
   const acc = (code) => tb.body.accounts.find((a) => a.accountCode === code);
-  assert.equal(BigInt(acc('1300').debitBalance.amount) - BigInt(acc('1300').creditBalance.amount), 709000n);
+  assert.equal(BigInt(acc('1300').debitBalance.amount) - BigInt(acc('1300').creditBalance.amount), 959000n);
   assert.equal(BigInt(acc('2010').creditBalance.amount) - BigInt(acc('2010').debitBalance.amount), 400000n);
-  assert.equal(BigInt(acc('1010').debitBalance.amount) - BigInt(acc('1010').creditBalance.amount), 5000000n - 309000n);
+  assert.equal(BigInt(acc('1010').debitBalance.amount) - BigInt(acc('1010').creditBalance.amount), 5000000n - 559000n);
 });

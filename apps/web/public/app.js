@@ -2,7 +2,7 @@ import {
   CARTON_SIZES,
   CARTON_TYPES,
   QUICK_COLORS,
-  buildCartonDistribution,
+  buildMultiCartonDistribution,
   mergeDuplicateSkuNewProducts,
 } from './carton-presets.mjs';
 
@@ -5823,10 +5823,12 @@ function bindSuppliers() {
     };
 
     const applyCartonToGroupState = (gs) => {
+      if (!Array.isArray(gs.cartons) || !gs.cartons.length) {
+        gs.cartons = [{ typeId: 'men', cartonSize: 10, count: 1 }];
+      }
       const colors = parseOptionValues(gs.colorValuesText);
-      const dist = buildCartonDistribution({
-        typeId: gs.cartonTypeId,
-        cartonSize: gs.cartonSize,
+      const dist = buildMultiCartonDistribution({
+        cartons: gs.cartons,
         colors,
       });
       const customExtraOpts = (gs.options ?? []).filter(
@@ -5856,8 +5858,7 @@ function bindSuppliers() {
           mode: resolvedMode === 'NEW' ? 'NEW' : 'EXISTING',
           options: [],
           newQuantities: new Map(),
-          cartonTypeId: 'men',
-          cartonSize: 10,
+          cartons: [{ typeId: 'men', cartonSize: 10, count: 1 }],
           colorValuesText: '',
           cartonMatrixOpen: false,
           cartonEvenSplit: true,
@@ -6038,17 +6039,9 @@ function bindSuppliers() {
                 </label>
               </div>
               <div class="carton-builder-box" data-carton-box="${index}" ${!isNew ? 'hidden' : ''} style="padding:12px;border-radius:10px;background:var(--surface-soft, #f8fafc);border:1px solid var(--line-strong, #cbd5e1);display:grid;gap:10px;margin-bottom:8px;">
-                <div>
-                  <strong style="font-size:12px;display:block;margin-bottom:6px;">نوع الكرتونة (نطاق المقاسات):</strong>
-                  <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                    ${CARTON_TYPES.map((ct) => `<button type="button" class="date-preset-chip ${gs.useCartonPreset && gs.cartonTypeId === ct.id ? 'active' : ''}" data-carton-type="${ct.id}">${escapeHtml(ct.label)} (${escapeHtml(ct.rangeLabel)})</button>`).join('')}
-                  </div>
-                </div>
-                <div>
-                  <strong style="font-size:12px;display:block;margin-bottom:6px;">حجم الكرتونة:</strong>
-                  <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                    ${CARTON_SIZES.map((sz) => `<button type="button" class="date-preset-chip ${gs.useCartonPreset && gs.cartonSize === sz ? 'active' : ''}" data-carton-size="${sz}">${sz} قطع</button>`).join('')}
-                  </div>
+                <div data-carton-rows="${index}" style="display:grid;gap:8px;"></div>
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                  <button type="button" class="date-preset-chip" data-add-carton-row="${index}">+ إضافة كرتونة أخرى لهذا المنتج (نوع أو مقاس إضافي)</button>
                 </div>
                 <div style="display:grid;gap:6px;">
                   <strong style="font-size:12px;">ألوان سريعة (اضغط للإضافة أو الإزالة):</strong>
@@ -6335,16 +6328,52 @@ function bindSuppliers() {
     let currentPayMode = 'FULL_CASH';
     const fmtMoney = (minor) => money({ amount: minor.toString(), currency, decimals });
 
+    const renderCartonRows = (section) => {
+      if (!section) return;
+      const index = section.dataset.purchaseGroup;
+      const gs = ensureGroupState(index);
+      const host = section.querySelector(`[data-carton-rows="${index}"]`);
+      if (!host) return;
+      host.innerHTML = gs.cartons.map((row, rowIdx) => `
+        <div class="carton-row-card" data-carton-row="${rowIdx}" style="padding:10px;border-radius:8px;background:var(--surface, #fff);border:1px solid var(--line, #e2e8f0);display:grid;gap:8px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <strong style="font-size:12px;">كرتونة ${rowIdx + 1}:</strong>
+              <div style="display:inline-flex;align-items:center;gap:4px;">
+                <button type="button" class="date-preset-chip" data-carton-dec="${rowIdx}" aria-label="تقليل عدد الكراتين">−</button>
+                <input type="number" min="1" step="1" data-carton-count="${rowIdx}" value="${row.count}" style="width:58px;text-align:center;font-weight:700;">
+                <button type="button" class="date-preset-chip" data-carton-inc="${rowIdx}" aria-label="زيادة عدد الكراتين">+</button>
+              </div>
+              <span data-carton-row-pieces="${rowIdx}" style="font-size:11.5px;color:var(--muted);">(${row.count} × ${row.cartonSize} = ${row.count * row.cartonSize} قطعة)</span>
+            </div>
+            ${gs.cartons.length > 1 ? `<button type="button" class="text-action" data-remove-carton-row="${rowIdx}" style="color:var(--rose, #be123c);">× حذف</button>` : ''}
+          </div>
+          <div>
+            <small style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">نوع الكرتونة (نطاق المقاسات):</small>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              ${CARTON_TYPES.map((ct) => `<button type="button" class="date-preset-chip ${gs.useCartonPreset && row.typeId === ct.id ? 'active' : ''}" data-carton-type="${ct.id}" data-carton-row="${rowIdx}">${escapeHtml(ct.label)} (${escapeHtml(ct.rangeLabel)})</button>`).join('')}
+            </div>
+          </div>
+          <div>
+            <small style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">حجم الكرتونة:</small>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              ${CARTON_SIZES.map((sz) => `<button type="button" class="date-preset-chip ${gs.useCartonPreset && row.cartonSize === sz ? 'active' : ''}" data-carton-size="${sz}" data-carton-row="${rowIdx}">${sz} قطع</button>`).join('')}
+            </div>
+          </div>
+        </div>
+      `).join('');
+    };
+
     const refreshCartonBoxSummary = (section, gs, plan) => {
       if (!section || gs.mode !== 'NEW') return;
       const index = section.dataset.purchaseGroup;
       const box = section.querySelector(`[data-carton-box="${index}"]`);
       if (!box) return;
-      box.querySelectorAll('[data-carton-type]').forEach((btn) => {
-        btn.classList.toggle('active', Boolean(gs.useCartonPreset) && btn.dataset.cartonType === gs.cartonTypeId);
-      });
-      box.querySelectorAll('[data-carton-size]').forEach((btn) => {
-        btn.classList.toggle('active', Boolean(gs.useCartonPreset) && Number.parseInt(btn.dataset.cartonSize ?? '0', 10) === gs.cartonSize);
+      gs.cartons.forEach((row, rowIdx) => {
+        const piecesEl = box.querySelector(`[data-carton-row-pieces="${rowIdx}"]`);
+        if (piecesEl) {
+          piecesEl.textContent = `(${row.count} × ${row.cartonSize} = ${row.count * row.cartonSize} قطعة)`;
+        }
       });
       const activeColors = parseOptionValues(gs.colorValuesText);
       const activeColorNorms = new Set(activeColors.map((c) => c.toLowerCase()));
@@ -6357,13 +6386,19 @@ function bindSuppliers() {
       }
       const summaryEl = box.querySelector(`[data-carton-summary="${index}"]`);
       if (summaryEl) {
-        const typeObj = CARTON_TYPES.find((ct) => ct.id === gs.cartonTypeId);
         const sizeOpt = (plan?.options ?? []).find((opt) => isSizeOptionName(opt.name));
-        const sizeSummary = gs.useCartonPreset
-          ? (typeObj?.rangeLabel ?? '')
-          : (sizeOpt?.values?.length ? sizeOpt.values.join('، ') : 'بدون مقاس (صنف مفرد)');
         const totalQty = (plan?.combinations ?? []).reduce((sum, combo) => sum + (Number(combo.qty) || 0), 0);
-        summaryEl.innerHTML = `المقاسات: <strong>${escapeHtml(sizeSummary)}</strong> · ${activeColors.length ? `الألوان: <strong>${escapeHtml(activeColors.join('، '))}</strong>` : '<strong>بدون لون</strong>'} · الإجمالي: <strong>${totalQty} قطعة</strong>${gs.useCartonPreset && !gs.cartonEvenSplit ? ' <span style="color:var(--muted);">(يمكنك ضبط الفروق من الجدول)</span>' : ''}`;
+        const totalCartons = gs.cartons.reduce((sum, r) => sum + Math.max(1, Number(r.count) || 1), 0);
+        const cartonTags = gs.useCartonPreset
+          ? gs.cartons.map((r) => {
+            const typeObj = CARTON_TYPES.find((ct) => ct.id === r.typeId);
+            return `${r.count}× ${escapeHtml(typeObj?.label ?? '')} (${escapeHtml(typeObj?.rangeLabel ?? '')})`;
+          }).join(' + ')
+          : '';
+        const sizeSummary = gs.useCartonPreset
+          ? `<strong>${totalCartons} كرتونة</strong> (${cartonTags})`
+          : `المقاسات: <strong>${escapeHtml(sizeOpt?.values?.length ? sizeOpt.values.join('، ') : 'بدون مقاس (صنف مفرد)')}</strong>`;
+        summaryEl.innerHTML = `${sizeSummary} · ${activeColors.length ? `الألوان: <strong>${escapeHtml(activeColors.join('، '))}</strong>` : '<strong>بدون لون</strong>'} · الإجمالي: <strong>${totalQty} قطعة</strong>${gs.useCartonPreset && !gs.cartonEvenSplit ? ' <span style="color:var(--muted);">(يمكنك ضبط الفروق من الجدول)</span>' : ''}`;
       }
     };
 
@@ -6988,6 +7023,7 @@ function bindSuppliers() {
           : '';
       }
 
+      renderCartonRows(section);
       renderInlineOptionsEditor(section);
       renderGroup(section);
       updatePurchaseTotal();
@@ -7002,11 +7038,13 @@ function bindSuppliers() {
       const sourceProduct = products.find((item) => item.id === copyFromProductId);
       if (sourceProduct) applyCopiedProductTemplate(firstGroup, sourceProduct);
       else {
+        renderCartonRows(firstGroup);
         renderInlineOptionsEditor(firstGroup);
         renderGroup(firstGroup);
         updatePurchaseTotal();
       }
     } else {
+      renderCartonRows(firstGroup);
       renderInlineOptionsEditor(firstGroup);
       renderGroup(firstGroup);
       syncGroupDefaultRetailPrice(firstGroup);
@@ -7034,6 +7072,7 @@ function bindSuppliers() {
         if (gs.options[optIdx]) {
           gs.options[optIdx].name = e.target.value;
           gs.useCartonPreset = false;
+          renderCartonRows(section);
           renderGroup(section);
           updatePurchaseTotal();
         }
@@ -7044,6 +7083,18 @@ function bindSuppliers() {
         if (gs.options[optIdx]) {
           gs.options[optIdx].valuesText = e.target.value;
           gs.useCartonPreset = false;
+          renderCartonRows(section);
+          renderGroup(section);
+          updatePurchaseTotal();
+        }
+        return;
+      }
+      if (e.target.matches('[data-carton-count]')) {
+        const rowIdx = Number(e.target.dataset.cartonCount ?? 0);
+        if (gs.cartons[rowIdx]) {
+          gs.cartons[rowIdx].count = Math.max(1, Math.floor(Number(e.target.value) || 1));
+          applyCartonToGroupState(gs);
+          renderInlineOptionsEditor(section);
           renderGroup(section);
           updatePurchaseTotal();
         }
@@ -7116,6 +7167,7 @@ function bindSuppliers() {
         gs.mode = modeBtn.dataset.groupMode === 'EXISTING' ? 'EXISTING' : 'NEW';
         if (gs.mode === 'NEW') {
           if (gs.useCartonPreset && !gs.options.length) applyCartonToGroupState(gs);
+          renderCartonRows(section);
           renderInlineOptionsEditor(section);
         }
         renderGroup(section);
@@ -7124,23 +7176,86 @@ function bindSuppliers() {
         return;
       }
 
-      const cartonTypeBtn = e.target.closest('[data-carton-type]');
-      if (cartonTypeBtn) {
-        gs.cartonTypeId = cartonTypeBtn.dataset.cartonType;
+      const incBtn = e.target.closest('[data-carton-inc]');
+      if (incBtn) {
+        const rowIdx = Number(incBtn.dataset.cartonInc ?? 0);
+        if (gs.cartons[rowIdx]) {
+          gs.cartons[rowIdx].count = Math.max(1, (Number(gs.cartons[rowIdx].count) || 1) + 1);
+          applyCartonToGroupState(gs);
+          renderCartonRows(section);
+          renderInlineOptionsEditor(section);
+          renderGroup(section);
+          updatePurchaseTotal();
+        }
+        return;
+      }
+
+      const decBtn = e.target.closest('[data-carton-dec]');
+      if (decBtn) {
+        const rowIdx = Number(decBtn.dataset.cartonDec ?? 0);
+        if (gs.cartons[rowIdx]) {
+          gs.cartons[rowIdx].count = Math.max(1, (Number(gs.cartons[rowIdx].count) || 1) - 1);
+          applyCartonToGroupState(gs);
+          renderCartonRows(section);
+          renderInlineOptionsEditor(section);
+          renderGroup(section);
+          updatePurchaseTotal();
+        }
+        return;
+      }
+
+      if (e.target.closest('[data-add-carton-row]')) {
+        const usedTypes = new Set(gs.cartons.map((r) => r.typeId));
+        const preferredOrder = ['women', 'kids', 'boys', 'baby', 'pharmacy', 'men'];
+        const nextTypeId = preferredOrder.find((id) => !usedTypes.has(id)) ?? 'men';
+        gs.cartons.push({ typeId: nextTypeId, cartonSize: 10, count: 1 });
         applyCartonToGroupState(gs);
+        renderCartonRows(section);
         renderInlineOptionsEditor(section);
         renderGroup(section);
         updatePurchaseTotal();
         return;
       }
 
+      const removeCartonRowBtn = e.target.closest('[data-remove-carton-row]');
+      if (removeCartonRowBtn) {
+        const rowIdx = Number(removeCartonRowBtn.dataset.removeCartonRow ?? 0);
+        if (gs.cartons.length > 1) {
+          gs.cartons.splice(rowIdx, 1);
+          applyCartonToGroupState(gs);
+          renderCartonRows(section);
+          renderInlineOptionsEditor(section);
+          renderGroup(section);
+          updatePurchaseTotal();
+        }
+        return;
+      }
+
+      const cartonTypeBtn = e.target.closest('[data-carton-type]');
+      if (cartonTypeBtn) {
+        const rowIdx = Number(cartonTypeBtn.dataset.cartonRow ?? 0);
+        if (gs.cartons[rowIdx]) {
+          gs.cartons[rowIdx].typeId = cartonTypeBtn.dataset.cartonType;
+          applyCartonToGroupState(gs);
+          renderCartonRows(section);
+          renderInlineOptionsEditor(section);
+          renderGroup(section);
+          updatePurchaseTotal();
+        }
+        return;
+      }
+
       const cartonSizeBtn = e.target.closest('[data-carton-size]');
       if (cartonSizeBtn) {
-        gs.cartonSize = Number.parseInt(cartonSizeBtn.dataset.cartonSize ?? '10', 10);
-        applyCartonToGroupState(gs);
-        renderInlineOptionsEditor(section);
-        renderGroup(section);
-        updatePurchaseTotal();
+        const rowIdx = Number(cartonSizeBtn.dataset.cartonRow ?? 0);
+        if (gs.cartons[rowIdx]) {
+          gs.cartons[rowIdx].cartonSize = Number.parseInt(cartonSizeBtn.dataset.cartonSize ?? '10', 10);
+          applyCartonToGroupState(gs);
+          renderCartonRows(section);
+          renderInlineOptionsEditor(section);
+          renderGroup(section);
+          updatePurchaseTotal();
+        }
         return;
       }
 
@@ -7198,6 +7313,7 @@ function bindSuppliers() {
           gs.options = [];
           gs.newQuantities = new Map([['__SINGLE__', 1]]);
         }
+        renderCartonRows(section);
         renderInlineOptionsEditor(section);
         renderGroup(section);
         updatePurchaseTotal();
@@ -7211,6 +7327,7 @@ function bindSuppliers() {
         }
         gs.useCartonPreset = false;
         gs.options.push({ name: '', valuesText: '' });
+        renderCartonRows(section);
         renderInlineOptionsEditor(section);
         renderGroup(section);
         updatePurchaseTotal();
@@ -7223,6 +7340,7 @@ function bindSuppliers() {
         gs.useCartonPreset = false;
         gs.options.splice(optIdx, 1);
         gs.newQuantities.clear();
+        renderCartonRows(section);
         renderInlineOptionsEditor(section);
         renderGroup(section);
         updatePurchaseTotal();
@@ -7318,6 +7436,7 @@ function bindSuppliers() {
       const newIdx = ++groupIndex;
       root.querySelector('#purchase-lines').insertAdjacentHTML('beforeend', groupMarkup(newIdx, mode));
       const newSection = root.querySelector(`[data-purchase-group="${newIdx}"]`);
+      renderCartonRows(newSection);
       renderInlineOptionsEditor(newSection);
       renderGroup(newSection);
       syncGroupDefaultRetailPrice(newSection);

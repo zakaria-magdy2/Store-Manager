@@ -182,6 +182,117 @@ export function buildCartonDistribution({ typeId, cartonSize, colors = [], overr
   };
 }
 
+export function buildMultiCartonDistribution({ cartons, colors = [], overrides = null }) {
+  if (!Array.isArray(cartons) || !cartons.length) {
+    throw new Error('أضف كرتونة واحدة على الأقل');
+  }
+  const normalizedColors = normalizeCartonColors(colors);
+  const allSizesSet = new Set();
+  const sumByComboKey = new Map();
+  let allEvenSplit = true;
+  let totalCartons = 0;
+  const breakdown = [];
+
+  for (const item of cartons) {
+    const cartonCount = Math.max(1, Math.floor(Number.parseInt(String(item?.count ?? 1), 10) || 1));
+    const dist = buildCartonDistribution({
+      typeId: item?.typeId,
+      cartonSize: item?.cartonSize,
+      colors: normalizedColors,
+    });
+    for (const sz of dist.type.sizes) {
+      allSizesSet.add(sz);
+    }
+    for (const entry of dist.entries) {
+      sumByComboKey.set(entry.comboKey, (sumByComboKey.get(entry.comboKey) ?? 0) + (entry.quantity * cartonCount));
+    }
+    if (!dist.evenSplit) allEvenSplit = false;
+    totalCartons += cartonCount;
+    breakdown.push({
+      type: dist.type,
+      cartonSize: dist.cartonSize,
+      count: cartonCount,
+      pieces: dist.totalPieces * cartonCount,
+    });
+  }
+
+  const sizes = [...allSizesSet].sort((a, b) => Number(a) - Number(b));
+  const entries = [];
+  const quantitiesMap = new Map();
+
+  if (normalizedColors.length === 0) {
+    const options = [{ key: 'option_1', name: 'المقاس', values: [...sizes] }];
+    for (const size of sizes) {
+      const comboKey = `المقاس=${size}`;
+      const generatedQty = sumByComboKey.get(comboKey) ?? 0;
+      const overrideVal = overrides instanceof Map
+        ? overrides.get(comboKey)
+        : (overrides && Object.prototype.hasOwnProperty.call(overrides, comboKey) ? overrides[comboKey] : undefined);
+      const qty = overrideVal !== undefined
+        ? Math.max(0, Math.floor(Number.parseInt(String(overrideVal), 10) || 0))
+        : generatedQty;
+      entries.push({
+        comboKey,
+        color: null,
+        size,
+        attributes: { option_1: size },
+        quantity: qty,
+      });
+      if (qty > 0) quantitiesMap.set(comboKey, qty);
+    }
+    const totalPieces = entries.reduce((sum, item) => sum + item.quantity, 0);
+    return {
+      cartons: breakdown,
+      totalCartons,
+      sizes,
+      colors: [],
+      options,
+      entries,
+      quantitiesMap,
+      totalPieces,
+      evenSplit: allEvenSplit,
+    };
+  }
+
+  const options = [
+    { key: 'option_1', name: 'اللون', values: [...normalizedColors] },
+    { key: 'option_2', name: 'المقاس', values: [...sizes] },
+  ];
+  for (const color of normalizedColors) {
+    for (const size of sizes) {
+      const comboKey = `اللون=${color}:::المقاس=${size}`;
+      const generatedQty = sumByComboKey.get(comboKey) ?? 0;
+      const overrideVal = overrides instanceof Map
+        ? overrides.get(comboKey)
+        : (overrides && Object.prototype.hasOwnProperty.call(overrides, comboKey) ? overrides[comboKey] : undefined);
+      const qty = overrideVal !== undefined
+        ? Math.max(0, Math.floor(Number.parseInt(String(overrideVal), 10) || 0))
+        : generatedQty;
+      entries.push({
+        comboKey,
+        color,
+        size,
+        attributes: { option_1: color, option_2: size },
+        quantity: qty,
+      });
+      if (qty > 0) quantitiesMap.set(comboKey, qty);
+    }
+  }
+
+  const totalPieces = entries.reduce((sum, item) => sum + item.quantity, 0);
+  return {
+    cartons: breakdown,
+    totalCartons,
+    sizes,
+    colors: normalizedColors,
+    options,
+    entries,
+    quantitiesMap,
+    totalPieces,
+    evenSplit: allEvenSplit,
+  };
+}
+
 export function buildCartonNewProductPayload({
   name,
   sku,

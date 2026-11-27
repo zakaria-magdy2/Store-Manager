@@ -8,7 +8,7 @@ import {
   CARTON_SIZES,
   CARTON_TYPES,
   QUICK_COLORS,
-  buildCartonDistribution,
+  buildMultiCartonDistribution,
   mergeDuplicateSkuNewProducts,
 } from '../public/carton-presets.mjs';
 
@@ -113,7 +113,7 @@ function loadApp(routes) {
     CARTON_SIZES,
     CARTON_TYPES,
     QUICK_COLORS,
-    buildCartonDistribution,
+    buildMultiCartonDistribution,
     mergeDuplicateSkuNewProducts,
   };
   windowStub.document = documentStub;
